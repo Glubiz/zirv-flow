@@ -208,6 +208,10 @@ impl Config {
         Ok(config)
     }
 
+    pub(crate) fn server_bind(&self) -> SocketAddr {
+        self.server.bind
+    }
+
     pub(crate) fn database_url(&self) -> &str {
         self.database.url.0.as_str()
     }

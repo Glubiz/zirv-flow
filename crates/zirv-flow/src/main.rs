@@ -2,14 +2,23 @@ mod cli;
 mod config;
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use tokio::net::TcpListener;
 use zirv_flow_store::{PgPool, SchemaState};
 
 use crate::cli::{Cli, Command, ConfigCommand};
 use crate::config::Config;
+
+/// Seconds; makes the exporter render request durations as histograms rather than summaries.
+const HTTP_DURATION_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -78,6 +87,29 @@ async fn run(
                 return database_error(stderr, message);
             }
         }
+
+        // `all` also serves HTTP until the worker and scheduler roles exist (#7).
+        if matches!(command, Command::All | Command::Serve) {
+            let handle = match PrometheusBuilder::new()
+                .set_buckets(&HTTP_DURATION_BUCKETS)
+                .and_then(|builder| builder.install_recorder())
+            {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = writeln!(stderr, "error: metrics: {error}");
+                    return 1;
+                }
+            };
+            let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
+            return serve_http(
+                pool,
+                render,
+                config.server_bind(),
+                stderr,
+                shutdown_signal(),
+            )
+            .await;
+        }
     }
 
     let _ = writeln!(
@@ -86,6 +118,86 @@ async fn run(
         command.name()
     );
     1
+}
+
+/// Binds `addr` and serves the API until `shutdown` completes.
+async fn serve_http(
+    pool: PgPool,
+    render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
+    addr: SocketAddr,
+    stderr: &mut impl Write,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> u8 {
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = writeln!(stderr, "error: server: could not bind {addr}: {error}");
+            return 1;
+        }
+    };
+    let bound = listener.local_addr().unwrap_or(addr);
+    let _ = writeln!(stderr, "listening on {bound}");
+
+    let state = zirv_flow_api::AppState::new(pool, render_metrics);
+    let (drain, draining) = tokio::sync::watch::channel(false);
+    let server = zirv_flow_api::serve(listener, state, async move {
+        let mut draining = draining;
+        let _ = draining.wait_for(|draining| *draining).await;
+    });
+    tokio::pin!(server);
+
+    let result = tokio::select! {
+        result = &mut server => result,
+        () = shutdown => {
+            let _ = drain.send(true);
+            // In-flight requests get a grace period; a second Ctrl-C or the
+            // deadline ends the process without waiting for them.
+            tokio::select! {
+                result = tokio::time::timeout(SHUTDOWN_GRACE, &mut server) => match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let _ = writeln!(stderr, "error: server: requests still running after {}s; exiting", SHUTDOWN_GRACE.as_secs());
+                        return 1;
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    let _ = writeln!(stderr, "error: server: interrupted while draining requests");
+                    return 1;
+                }
+            }
+        }
+    };
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            let _ = writeln!(stderr, "error: server: {error}");
+            1
+        }
+    }
+}
+
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Completes on Ctrl-C, or SIGTERM on Unix.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    () = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(_) => ctrl_c.await,
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }
 
 async fn connect(config: &Config) -> Result<PgPool, zirv_flow_store::StoreError> {
@@ -239,6 +351,56 @@ mod tests {
                 "migration 3 was changed after it was applied; restore the original migration file"
                     .into()
             )
+        );
+    }
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_bind_failure_is_reported_with_exit_code_one() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap();
+        let mut stderr = Vec::new();
+
+        let code = serve_http(
+            lazy_pool(),
+            Arc::new(String::new),
+            addr,
+            &mut stderr,
+            std::future::ready(()),
+        )
+        .await;
+
+        assert_eq!(code, 1);
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(
+            message.starts_with(&format!("error: server: could not bind {addr}: ")),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_server_binds_and_exits_cleanly_on_shutdown() {
+        let mut stderr = Vec::new();
+
+        let code = serve_http(
+            lazy_pool(),
+            Arc::new(String::new),
+            "127.0.0.1:0".parse().unwrap(),
+            &mut stderr,
+            std::future::ready(()),
+        )
+        .await;
+
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("listening on 127.0.0.1:")
         );
     }
 }
