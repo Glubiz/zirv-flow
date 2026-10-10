@@ -12,7 +12,7 @@ use std::error::Error;
 use std::fmt;
 
 pub use accounts::{
-    User, count_owners, create_user, find_user, find_user_by_email, list_users,
+    User, count_owners, create_user, find_user, find_user_by_email, is_locked, list_users,
     record_failed_sign_in, record_successful_sign_in, set_password,
 };
 pub use api_keys::{

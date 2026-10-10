@@ -124,6 +124,18 @@ pub async fn find_user_by_email<'e>(
     Ok(row.map(Into::into))
 }
 
+/// Whether the account is locked, decided with the database clock (the one that stamped
+/// `locked_until`). A missing user is not locked.
+pub async fn is_locked<'e>(executor: impl PgExecutor<'e>, id: UserId) -> Result<bool, StoreError> {
+    let locked: Option<bool> =
+        sqlx::query_scalar("SELECT coalesce(locked_until > now(), false) FROM users WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(locked.unwrap_or(false))
+}
+
 pub async fn list_users<'e>(executor: impl PgExecutor<'e>) -> Result<Vec<User>, StoreError> {
     let rows: Vec<UserRow> = sqlx::query_as(concat!(
         "SELECT ",
@@ -332,6 +344,30 @@ mod tests {
         assert!(first <= 1.0, "{first}");
         assert!((7.0..=8.0).contains(&eighth), "{eighth}");
         assert!((895.0..=900.0).contains(&many), "{many}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_account_is_locked_only_while_the_database_clock_is_before_locked_until(
+        pool: PgPool,
+    ) {
+        let user = create_user(&pool, &email("a@example.com"), "hash", false)
+            .await
+            .unwrap();
+        assert!(!is_locked(&pool, user.id).await.unwrap());
+
+        for _ in 0..5 {
+            record_failed_sign_in(&pool, user.id).await.unwrap();
+        }
+        assert!(is_locked(&pool, user.id).await.unwrap());
+
+        sqlx::query("UPDATE users SET locked_until = now() - interval '1 second' WHERE id = $1")
+            .bind(user.id.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!is_locked(&pool, user.id).await.unwrap());
+        assert!(!is_locked(&pool, UserId::new()).await.unwrap());
     }
 
     #[sqlx::test]

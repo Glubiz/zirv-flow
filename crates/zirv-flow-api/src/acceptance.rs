@@ -1132,6 +1132,19 @@ mod tests {
             .find(|row| row.action == "session.sign_in_failed" && row.actor_kind == "anonymous")
             .expect("a failed sign-in for an unknown email is recorded as anonymous");
         assert!(ghost.actor_id.is_none());
+        // Nobody has proved who they are, so no failed sign-in names a user as the actor;
+        // a known account is only the object.
+        let failures: Vec<_> = rows
+            .iter()
+            .filter(|row| row.action == "session.sign_in_failed")
+            .collect();
+        assert!(failures.iter().all(|row| row.actor_kind == "anonymous"));
+        assert!(failures.iter().all(|row| row.actor_id.is_none()));
+        assert!(
+            failures
+                .iter()
+                .any(|row| row.object_kind.as_deref() == Some("user") && row.object_id.is_some())
+        );
         let created = rows
             .iter()
             .find(|row| row.action == "workspace.created")

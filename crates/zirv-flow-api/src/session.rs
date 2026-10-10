@@ -6,7 +6,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::token::{random_token, sha256};
@@ -85,24 +84,33 @@ pub(crate) async fn sign_in(
         record_failure(&state, &anonymous, None, "invalid_credentials").await?;
         return Err(invalid());
     };
-    let context = admin::Context::user(user.id).with_request_id(request_id::current());
 
-    let locked = user
-        .locked_until
-        .is_some_and(|until| until > OffsetDateTime::now_utc());
-    if locked {
+    // The database clock stamped `locked_until`, so it decides whether the lock still holds.
+    if zirv_flow_store::is_locked(&state.pool, user.id).await? {
         // No verification, but the same time spent, so a lock is not detectable by timing.
         passwords::dummy_verify().await;
-        record_failure(&state, &context, None, "locked").await?;
+        record_failure(&state, &anonymous, Some((user.id, false)), "locked").await?;
         return Err(invalid());
     }
 
-    let verified = body.password.chars().count() <= MAX_PASSWORD_CHARS
-        && passwords::verify(body.password, user.password_hash.clone()).await;
+    // An over-long password cannot be valid, but it spends the same time as any other.
+    let verified = if body.password.chars().count() <= MAX_PASSWORD_CHARS {
+        passwords::verify(body.password, user.password_hash.clone()).await
+    } else {
+        passwords::dummy_verify().await;
+        false
+    };
     if !verified {
-        record_failure(&state, &context, Some(user.id), "invalid_credentials").await?;
+        record_failure(
+            &state,
+            &anonymous,
+            Some((user.id, true)),
+            "invalid_credentials",
+        )
+        .await?;
         return Err(invalid());
     }
+    let context = admin::Context::user(user.id).with_request_id(request_id::current());
 
     let token = random_token(32);
     let csrf = credentials::csrf_token(&token);
@@ -147,15 +155,17 @@ pub(crate) async fn sign_in(
         .into_response())
 }
 
-/// Counts a failed sign-in (when the account exists) and audits it, atomically.
+/// Audits a failed sign-in, and counts it against the account when `account` is
+/// `(id, true)`, atomically. The actor is the anonymous `context`: nobody has proved who
+/// they are, so a known account is recorded only as the object.
 async fn record_failure(
     state: &AppState,
     context: &admin::Context,
-    count_against: Option<UserId>,
+    account: Option<(UserId, bool)>,
     reason: &'static str,
 ) -> Result<(), ApiError> {
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    if let Some(user) = count_against {
+    if let Some((user, true)) = account {
         zirv_flow_store::record_failed_sign_in(&mut *tx, user).await?;
     }
     admin::audit(
@@ -163,7 +173,7 @@ async fn record_failure(
         context,
         None,
         "session.sign_in_failed",
-        None,
+        account.map(|(user, _)| ("user", user.as_uuid())),
         json!({ "reason": reason }),
     )
     .await?;
@@ -232,6 +242,7 @@ pub(crate) async fn sign_out(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::OffsetDateTime;
 
     #[test]
     fn the_user_body_has_no_password_hash() {
