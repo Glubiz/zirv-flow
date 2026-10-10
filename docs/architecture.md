@@ -1,9 +1,9 @@
 # Zirv Flow architecture
 
 Living document: the intended system and the decisions behind it. Change it
-through pull requests. Decisions (section 18) are never rewritten in place; a
+through pull requests. Decisions (section 20) are never rewritten in place; a
 changed decision gets a new superseding entry, linked both ways. Anything not
-yet decided is an open question (section 19). Delivery order: [roadmap.md](roadmap.md).
+yet decided is an open question (section 21). Delivery order: [roadmap.md](roadmap.md).
 
 ## 1. Purpose and scope
 
@@ -26,6 +26,8 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 | G5 | Compliant delivery: email and webhooks first; consent, suppression, frequency caps, quiet hours and rate limits enforced in core; delivery and engagement fed back as events. |
 | G6 | Operable by a small team: binary + Postgres, compose quickstart, metrics, health checks, documented backup/restore/upgrade. |
 | G7 | Message content without code: a channel-aware template builder (email blocks rendered to responsive HTML and text, a webhook payload editor) with brand theme, snippets, merge tags from the field registry and per-block conditions; previews come from the same renderer as sends. |
+| G8 | Govern and investigate events: versioned schemas, visible validation and rejects, redaction, live debugging, exploration and a unified person timeline. Every derived action is traceable to its typed cause, including skips and failures. |
+| G9 | Optional, safe authoring assistance: configured LLMs draft and explain Zirv Flow's typed artifacts through the same validators and RBAC as the API; a person always reviews and accepts a draft. |
 
 ### 1.2 Non-goals for v1
 
@@ -34,7 +36,8 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 - Running a mail transfer agent or managing IP reputation (mail goes to SMTP relays and provider APIs).
 - SMS, push, in-app and ad-audience channels and their builders (their content types are reserved in the template model, section 11.1); probabilistic identity matching; predictive scoring.
 - Analytics, attribution and campaign reporting beyond delivery and per-node flow counters.
-- AMP email; hosted landing pages or forms; machine-generated content (copy or images).
+- AMP email; hosted landing pages or forms.
+- Autonomous assistant actions; model hosting, training or fine-tuning by Zirv Flow.
 - Third-party code plugins (ADR-004); sub-second membership for time-window segment conditions (scheduled recompute, section 8.4).
 
 ## 2. Principles
@@ -48,6 +51,8 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 7. **The workspace is the isolation unit.** Every row carries `workspace_id`; every query and job is scoped by it.
 8. **API first.** The UI uses the public `/api/v1`; every milestone ships API and UI for its feature together.
 9. **Fail visibly.** Rejected records, failed steps and skipped sends are stored with a reason and shown in the UI.
+10. **Causality is data.** Every derived action carries a trace and typed cause across queues and external effects; operational logs are not the system of record for product decisions.
+11. **Assistance proposes, people decide.** LLM output is untrusted, workspace-scoped and draft-only; deterministic validators and explicit acceptance remain authoritative.
 
 ## 3. System context
 
@@ -55,7 +60,7 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 flowchart LR
   subgraph deploy["Zirv Flow deployment"]
     bin["zirv-flow binary: API + embedded UI, workers, scheduler"]
-    pg[("PostgreSQL: profiles, events, jobs, config")]
+    pg[("PostgreSQL: profiles, events, decisions, jobs, config")]
   end
   marketer["Marketers (browser)"] -->|"HTTPS: UI and /api/v1"| bin
   operator["Operator (config, CLI, backups)"] -->|"config, env, CLI"| bin
@@ -63,6 +68,7 @@ flowchart LR
   bin -->|"pull: incremental sync"| sources["Data sources: internal databases, HTTP APIs, CSV"]
   bin <-->|SQL| pg
   bin -->|"deliver, sync"| dest["Destinations: email (SMTP, provider APIs), webhooks, CRMs"]
+  bin -->|"optional, allowlisted HTTPS"| llm["Configured LLM providers or local model servers"]
   dest -->|"delivery webhooks"| bin
   dest --> recipients["Recipients (inbox, links, unsubscribe)"]
   recipients -->|"opens, clicks, unsubscribes, image fetches"| bin
@@ -88,7 +94,7 @@ one process and is the default (bare `zirv-flow` and the container image).
 
 - Roles never call each other; all coordination is rows in Postgres.
 - **Transactional enqueue:** a state change and the jobs it causes commit in one transaction, so a committed change always has its follow-up job and a rolled-back one never does. No dual write, no outbox relay.
-- Jobs are claimed in a short transaction and executed outside it (section 12).
+- Jobs are claimed in a short transaction and executed outside it (section 14).
 - `LISTEN/NOTIFY` wakes workers as a latency hint; fixed-interval polling is the correctness path.
 - The scheduler leader holds a session-level `pg_try_advisory_lock`; if its connection drops another scheduler takes over. Schedule slots carry unique keys, so a brief two-leader overlap cannot fire a slot twice.
 - Due-time comparisons use the database's `now()`, so host clock skew cannot fire timers early.
@@ -118,13 +124,13 @@ sequenceDiagram
 On `SIGTERM`, `serve` drains requests, workers stop claiming and finish
 in-flight jobs within a grace period, and the scheduler releases its lock. Jobs
 left unfinished, by shutdown or crash, are retried when their lease expires;
-idempotency keys make that safe (section 12). If Postgres is down, `/readyz`
+idempotency keys make that safe (section 14). If Postgres is down, `/readyz`
 fails, loops back off and ingestion returns `503`; v1 does not buffer locally.
 
 ## 5. Module and crate layout
 
 M0 is a single crate. The Cargo workspace arrives in M1: `crates/<name>` for
-each crate below (`zirv-flow-templates` joins in M6), plus `web/` (TypeScript +
+each crate below (`zirv-flow-ai` joins in M3 and `zirv-flow-templates` in M6), plus `web/` (TypeScript +
 React SPA, Vite, React Flow canvas).
 
 | Crate | Contents | Independent reason to exist |
@@ -135,6 +141,7 @@ React SPA, Vite, React Flow canvas).
 | `zirv-flow-segments` | AST to parameterized SQL compiler, dependency analysis, reference evaluator | Most correctness-critical code, own golden corpus. Pure: emits SQL + params that `store` executes. Used by `api` (preview, explain) and `jobs` (recompute). |
 | `zirv-flow-engine` | Deterministic flow interpreter, simulation harness | Pure, so simulation needs no I/O. Used by `api` (test mode) and `jobs`. |
 | `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email transport | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
+| `zirv-flow-ai` | Provider trait and OpenAI-compatible and Anthropic adapters; structured tool-call orchestration, bounded repair, budgets, audit inputs and deterministic fake provider | Optional outbound protocols and HTTP dependencies change independently from the deterministic domain crates. The crate coordinates existing typed tools and validators but neither defines nor bypasses them. |
 | `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
 | `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving | HTTP surface; neither `api` nor `jobs` depends on the other |
 | `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `templates`, `connectors`, which no other crate needs together |
@@ -142,13 +149,15 @@ React SPA, Vite, React Flow canvas).
 ```mermaid
 flowchart LR
   bin[zirv-flow] --> api & jobs
-  api --> segments & engine & templates & connectors & store
-  jobs --> segments & engine & templates & connectors & store
-  segments & engine & templates & connectors & store --> core
+  api --> segments & engine & templates & connectors & ai & store
+  jobs --> segments & engine & templates & connectors & ai & store
+  segments & engine & templates & connectors & ai & store --> core
 ```
 
-Rules: a CI check on `cargo tree` keeps sqlx, HTTP clients and tokio networking
-out of `core`, `segments`, `engine` and `templates`. The engine evaluates branch
+Rules: a CI dependency check keeps sqlx as a direct dependency of `store` only;
+the `cargo tree` purity check keeps HTTP clients and tokio networking out of
+`core`, `segments`, `engine` and `templates`. `connectors` and `ai` are the
+explicit outbound-I/O crates. The engine evaluates branch
 conditions through an injected `ConditionEvaluator` (production: `segments` +
 `store`; simulation: the reference evaluator). The renderer never evaluates
 conditions itself: it lists a template's block conditions, the handler evaluates
@@ -176,6 +185,11 @@ erDiagram
   PERSON ||--o{ IDENTITY : "identified by"
   WORKSPACE ||--o{ TRAIT_DEFINITION : registers
   PERSON ||--o{ EVENT : performed
+  WORKSPACE ||--o{ EVENT_SCHEMA : governs
+  EVENT_SCHEMA ||--o{ EVENT_SCHEMA_VERSION : versions
+  EVENT_SCHEMA_VERSION ||--o{ EVENT : validates
+  WORKSPACE ||--o{ INGEST_REJECT : records
+  WORKSPACE ||--o{ DECISION_LOG : traces
   PERSON ||--o{ CONSENT : holds
   WORKSPACE ||--o{ SUPPRESSION : maintains
   LIST ||--o{ LIST_MEMBER : contains
@@ -199,6 +213,8 @@ erDiagram
   BRAND_THEME_VERSION ||--o{ MESSAGE : styles
   BRAND_THEME_VERSION }o--o| ASSET : "logo"
   SNIPPET_VERSION }o--o{ ASSET : embeds
+  WORKSPACE ||--o| AI_SETTINGS : configures
+  WORKSPACE ||--o{ AI_CALL_LOG : audits
 ```
 
 | Entity | Purpose and key rules |
@@ -207,7 +223,10 @@ erDiagram
 | Identity | `(kind, normalized value)` per person: email, phone, anonymous_id, external id namespaced per source. Unique on `(workspace_id, kind, value)`. |
 | Trait definition | Field registry: key, type (string, number, boolean, timestamp, date, string list), precedence policy, PII flag, channel-address flag. Values are validated on write, so compiled reads cast safely. |
 | Source record | Ledger row per `(source, stream, record key)`: mapped payload, content hash, person, last seen run, deletion mark. These are the per-source contributions traits are computed from. |
-| Event | Append-only `(name, occurred_at, properties, source)`. Range-partitioned by month on `occurred_at`. Dedupe on `(workspace_id, source_id, dedupe_key, occurred_at)`, since Postgres requires the partition key in unique constraints. |
+| Event schema, version | Registry entry per event name with immutable versions: typed properties, required fields, enums, descriptions and a PII flag per property; validation mode `allow`, `warn` or `block`. The workspace policy creates a draft schema for an unplanned name or rejects it. |
+| Event | Append-only `(name, schema_version, occurred_at, received_at, properties, source, event_id, message_id, trace_id, validation_state)`. Range-partitioned by month on `occurred_at`; ingest redaction runs before storage. A client `messageId` deduplicates retries for effectively-once storage. |
+| Ingest reject | Rejected customer event or sync record with reason, masked sample, source and trace. It is visible, retained separately and replayable after its schema or mapping is fixed. |
+| Decision log | Append-only, time-partitioned typed records for derived actions and their causes. It stores durable ids and reasons but no personal-data values; `trace_id` links the tree across jobs, events, messages and forwarding. |
 | Consent | State per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
 | List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). |
@@ -216,6 +235,8 @@ erDiagram
 | Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
 | Brand theme, theme version | One per workspace: colours, fonts, logo asset, default footer snippet. Published versions are immutable; rendering uses the current one. |
 | Asset | Uploaded raster image (bytes, sniffed type, dimensions, content hash), served publicly from `server.public_url`. Retained while any published template, snippet or theme version references it. |
+| AI settings | Per-workspace enablement, provider/model choice, budget, transcript retention and PII opt-in. Deployment configuration declares the permitted providers and models. |
+| AI call log | Audit record for each assistant call: workspace, user, feature, provider, model, tokens, estimated cost, latency, outcome and resulting draft id; transcript content follows the workspace retention setting. |
 
 ## 7. Data sources and ingestion
 
@@ -224,7 +245,7 @@ erDiagram
 | Path | Mechanism | Idempotency | Freshness signal |
 |------|-----------|-------------|------------------|
 | Sync (pull) | `sync.run` job per stream, resuming from a checkpoint | Ledger content hash; checkpoint committed with the data | Last successful run, cursor high-water mark |
-| Identify / track (push) | `serve` appends to `ingest_inbox`; workers drain it in batches | Client `messageId`, else server-assigned | Oldest unprocessed inbox row |
+| Identify / track (push) | `serve` durably appends to `ingest_inbox` before returning `202`; workers drain it in batches | Client `messageId`, else server-assigned | Oldest unprocessed inbox row |
 | CSV import | Upload, map, dry run, then run like a sync | Key column, else file hash + row number | Import completion |
 | Inbound webhook | `/hooks/{id}`, signature check, mapping | Configured dedupe field | Last received |
 
@@ -233,7 +254,9 @@ records): normalize identifiers; resolve or create the person (merging if
 needed); upsert ledger contributions and recompute affected traits; insert
 events with dedupe; write coalesced dirty marks (`person_changes`); enqueue
 follow-ups (segment re-evaluation, event triggers, event-wait wakeups); commit
-the stream checkpoint.
+the stream checkpoint. Customer-event schema validation, redaction, reject
+handling, lateness and trace propagation are defined once in section 12 and
+used by every ingestion path.
 
 ### 7.2 Sources, streams and sync runs
 
@@ -297,7 +320,7 @@ recomputes traits from what remains. If nothing remains (no contributions,
 first-party events or consent), the workspace orphan policy applies (`keep`
 default, or `delete`). The person is marked dirty, so memberships exit, flows
 react as configured and destination syncs remove the person downstream (10.2).
-Deletion removes one source's contribution; **erasure** (14.3) removes the
+Deletion removes one source's contribution; **erasure** (16.3) removes the
 person and every derived row.
 
 ### 7.5 Freshness and connector concerns
@@ -314,7 +337,7 @@ sends on stale inputs is OQ-14). The connector runtime, not each connector,
 owns (ADR-004): auth (API key, basic, bearer, OAuth2 client credentials and
 authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
-(14.1) and delivery capabilities (idempotency keys, batching, erase).
+(16.1) and delivery capabilities (idempotency keys, batching, erase).
 
 ## 8. Segmentation engine
 
@@ -443,7 +466,7 @@ The injected clock and evaluator let one engine run three ways. **Test mode**
 clock: conditions read the profile store, effects are captured not executed,
 events can be injected to satisfy waits, and the UI shows the path.
 **Simulation tests** run thousands of enrollments over virtual months with the
-reference evaluator and injected crashes (section 16). **Production** uses wall
+reference evaluator and injected crashes (section 18). **Production** uses wall
 time, with due-time comparisons in SQL.
 
 ## 10. Channels, destinations and delivery tracking
@@ -523,7 +546,7 @@ text); M7 adds the block builder on the same renderer.
 | `image` | Asset, alt text, optional link, width | From the asset library (11.3) |
 | `button` | Label, URL, alignment | Theme colours |
 | `divider`, `spacer` | Style; height | |
-| `raw_html` | The marketer's own HTML | Passed through as `mj-raw`; never rendered unsandboxed in the app (14.1) |
+| `raw_html` | The marketer's own HTML | Passed through as `mj-raw`; never rendered unsandboxed in the app (16.1) |
 | `snippet` | Reference to a snippet | Resolved at render time to the snippet's current published version |
 
 Any block may carry a visibility condition (11.4). Styling is limited to theme
@@ -576,14 +599,212 @@ when saved. Each migration ships with golden tests: a schema-`N` fixture
 migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
 
-## 12. Queue and scheduler
+## 12. Event logging and traceability
+
+Customer events describe what people did; the decision log describes what
+Zirv Flow derived and why. Neither replaces security audit records or
+operational logs. The four layers stay separate because they have different
+writers, readers, retention and privacy constraints:
+
+| Layer | Records | Authority and links |
+|-------|---------|---------------------|
+| Customer events | Typed business facts used by segments and flows | Event store; `event_id`, `message_id`, `trace_id`, source id |
+| Audit records | Who changed configuration or accessed sensitive operations | Audit log; actor id, object id, `request_id`, `trace_id` where applicable |
+| Decision log | What the system derived, attempted, skipped or rejected, and why | Append-only decision store; `trace_id`, typed cause and domain ids, never personal-data values |
+| Operational logs and spans | Runtime diagnosis for requests, jobs, dependencies and failures | Structured `tracing` output; `request_id`, `trace_id`, job and domain ids; exportable through OTLP |
+
+Durable ids, not copied payloads, link the layers. A request receives a
+`request_id`; ingestion or a domain operation receives a `trace_id`; a customer
+event receives an `event_id`; a client retry may supply `message_id`; a send
+receives a message id. These ids cross every job payload and span.
+
+### 12.1 Event schemas, validation and redaction
+
+The event catalog is a versioned schema registry keyed by event name. Each
+immutable version defines properties, types, required fields, enums,
+descriptions and a PII flag per property. A registry entry selects one mode:
+
+| Mode | Behaviour |
+|------|-----------|
+| `allow` | Accept and record validation results without flagging the event |
+| `warn` | Accept, set `validation_state = flagged`, and expose every reason |
+| `block` | Do not create the customer event; write an ingest reject with reason and a masked sample |
+
+A workspace policy handles unplanned event names by creating a draft schema
+from the observed shape or rejecting them. Schema inference never publishes a
+schema. Before accepted properties are stored, ingest redaction drops or
+keyed-hashes configured properties and truncates IP addresses; validation uses
+the pre-redaction types but rejects and debugger samples apply the same masking
+rules. Property values flagged as PII are masked without `view_pii`; until M8
+adds that grant, only owners and admins can view them. Per-event-name retention
+may shorten or extend the deployment default within operator-set bounds.
+
+### 12.2 Delivery, time and replay semantics
+
+- The ingestion API returns `202` only after the inbox append is durable. A
+  client `messageId` has a unique dedupe record, so retries give
+  effectively-once customer-event storage; duplicates are counted and linked
+  to the original event rather than applied again.
+- `occurred_at` and `received_at` are distinct. Timestamps beyond the configured
+  future-skew limit are clamped to `received_at` and flagged. Events older than
+  the workspace lateness window are accepted and marked late; affected
+  time-window segments are recomputed for that person before downstream
+  triggers are evaluated.
+- An operator may replay rejects after publishing a schema or fixing a mapping,
+  or re-drive a failed forwarding destination. A replay records its original
+  id and a typed `manual` or `definition_change` cause. It never re-triggers
+  flows unless the operator explicitly selects that separately previewed
+  action; forwarding re-drives cannot trigger flows.
+
+### 12.3 Debugger, explorer and person timeline
+
+- **Live debugger:** an authenticated SSE stream scoped to one workspace and
+  optionally one source. It shows accepted, flagged, rejected and duplicate
+  events with validation results; filters by event name, source and result;
+  samples apply PII masking and ingest redaction. Disconnecting a viewer never
+  affects ingestion.
+- **Event explorer:** filters by event name, typed properties, time and person;
+  displays counts over time and property breakdowns; exports the filtered set
+  as CSV. Interactive and export queries have separate statement timeouts and
+  row limits, always use workspace and partition predicates, and report a
+  timeout rather than running without a bound.
+- **Person timeline:** interleaves customer events with relevant decision
+  records, including merges, consent and trait changes, segment changes,
+  enrollments, steps, sends and skips. Each system record links to its trace
+  tree; values remain subject to the caller's PII access.
+
+### 12.4 End-to-end causality
+
+Every derived action appends a typed decision record in the same transaction
+as its domain state change. Covered actions are sync records applied, rejected
+or deleted; identity merges; consent and trait changes; segment entry and exit;
+enrollment and flow step outcomes; sends or skips with the gate reason;
+delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
+action type, outcome, durable domain ids and one typed cause: `event`,
+`trait_change`, `schedule`, `manual`, `api` or `definition_change`, with the
+cause id. It never stores identifier, trait or event-property values.
+
+The `trace_id` and cause cross transactional job enqueue, retries and external
+effects. Retries add attempts under the same logical record rather than hiding
+failures. `GET /api/v1/workspaces/{ws}/traces/{trace_id}` and the trace UI return
+the resulting tree, including skipped work and exhausted retries:
+
+```mermaid
+flowchart LR
+  event[customer event] --> segment[segment entered]
+  segment --> enroll[flow enrolled]
+  enroll --> step[step executed]
+  step --> send[message sent]
+  send --> feedback[delivery feedback]
+  step --> skip[message skipped: gate reason]
+```
+
+Decision records are append-only and time-partitioned by record time. Their
+retention and volume policy is OQ-28; erasure removes records scoped to the
+person while preserving aggregate operational metrics.
+
+### 12.5 Event forwarding
+
+M6 adds event-forwarding destinations after core tracking and causality are in
+place. A destination selects accepted events with typed filters and maps them
+to its payload. Delivery is at-least-once with a stable idempotency key derived
+from event and destination; retries with backoff, attempts and dead letters
+are visible, re-drivable and represented in the decision log. Metrics expose
+per-destination queue depth, oldest-item lag, attempts and outcomes. Erasure
+removes pending and dead forwarding payloads and calls destination erase where
+the destination declares that capability.
+
+## 13. LLM assistance
+
+Assistance is optional and operator-configured. It turns natural language into
+reviewable drafts of Zirv Flow's own typed artifacts; it is not a second
+authoring model and has no privileged path around validation (ADR-008).
+
+### 13.1 Providers and configuration
+
+`zirv-flow-ai` defines a Rust provider trait with OpenAI-compatible and
+Anthropic API adapters. The compatible adapter accepts a base URL, so local
+model servers use the same path. Deployment configuration allowlists providers,
+models and base URLs. Per-workspace settings choose enablement, provider,
+model, monthly budget and whether personal data may be sent. Provider keys use
+M3 envelope encryption. Every call uses the M3 egress policy; a local server on
+a private network still needs an explicit allowlist entry.
+
+Minimum model capabilities are OQ-27. Provider-specific responses are reduced
+to one internal stream of text, usage and structured tool calls, so product
+code does not branch on provider.
+
+### 13.2 Typed tools and the draft loop
+
+Tool JSON schemas are generated from the same Rust types that produce the API
+schema. The registry contains workspace-scoped reads and draft creation only:
+
+| Artifact | Assistant work | Deterministic authority and review |
+|----------|----------------|------------------------------------|
+| Segment AST | Draft or explain a segment | Segment parser/compiler; diff plus preview count and sample |
+| Flow graph | Draft or explain a flow | Flow publish validation; graph diff plus simulation summary |
+| Template document | Draft copy, subject variants, layout or translation | Template validation; rendered diff at desktop/mobile widths |
+| Source field mapping | Draft mappings from schema and samples | Mapping schema and sample dry run; field-by-field diff |
+| HTTP connector manifest | Draft a manifest from pasted API documentation | Manifest schema and mock/test-connection preview |
+| Trace | Explain a trace tree in plain language | Read-only trace API; cited decision-record ids |
+
+Model output is parsed as a tool call and passed to the existing validator.
+Validation errors may be returned to the model for a configured bounded number
+of repair attempts; exhaustion returns the errors to the user. The UI shows
+the validated diff and applicable counts, renders or dry-run results. Accepting
+copies it into an ordinary product draft; publishing remains a separate human
+action under its existing permission.
+
+### 13.3 Authorization and untrusted input
+
+The server authenticates every tool call as the requesting user, rechecks its
+RBAC permission and workspace, and rejects ids from another workspace. No tool
+can publish, send, delete, mutate consent or invoke an arbitrary endpoint; the
+absence of those tools is enforced by a registry test. Structurally valid model
+output remains untrusted and receives semantic validation and normal limits.
+
+System instructions identify event properties, template text, source samples
+and pasted API documentation as data, never instructions. Tool arguments may
+only select registered fields and typed ids; retrieved content cannot add tools
+or loosen policy. Prompt-injection tests cover indirect instructions in each
+context source.
+
+### 13.4 Context, audit and limits
+
+Schema-only context is the default: field and event names, types, descriptions
+and aggregate counts, without identifier or property values. Sending personal
+data requires per-workspace opt-in and may be restricted to configured local
+providers. Without opt-in, request construction rejects identifier values even
+if a caller attempts to supply them.
+
+Every call records workspace, user, feature, provider, model, input/output
+tokens, estimated cost, latency, outcome and resulting draft id. Transcript
+retention is configurable; its default is OQ-26. Per-workspace budgets stop
+new calls before dispatch with a clear error, and per-user rate limits bound
+abuse and accidental loops. Audit records never contain prompt or response
+content.
+
+### 13.5 Evaluation and later MCP exposure
+
+A provider-independent evaluation harness holds golden natural-language prompts
+and expected artifact properties. Operators run it manually or nightly against
+configured providers; scores and model metadata are recorded but do not gate a
+release. CI uses a deterministic fake provider that replays recorded tool calls
+to test validation, repair, privacy, budget and authorization paths. CI never
+calls an LLM.
+
+After 1.0, an MCP server may expose the same read-and-draft tool registry. It
+uses the same workspace scoping, RBAC, audit and draft-only constraints; its
+authentication model is OQ-30.
+
+## 14. Queue and scheduler
 
 `jobs(id, workspace_id, kind, payload, priority, run_at, state, attempts,
 max_attempts, lease_token, lease_expires_at, locked_by, unique_key, last_error)`
 has a partial index `(priority, run_at) WHERE state = 'ready'` and a partial
 unique index on `unique_key WHERE state IN ('ready','running')`. `schedules(kind,
 cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
-`ingest.drain`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
+`ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
 `flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
 `template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
 
@@ -609,7 +830,7 @@ DELETE FROM jobs WHERE id = $id AND lease_token = $token;
 | Hygiene | Completed jobs are deleted at once (history only for failures/dead); aggressive autovacuum on `jobs`; applied inbox rows deleted; dead-tuple counts exported as metrics. |
 | Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is OQ-8. |
 
-## 13. API and UI
+## 15. API and UI
 
 REST under `/api/v1`, JSON, OpenAPI 3.1 (utoipa, committed). Workspace resources
 live under `/api/v1/workspaces/{ws}/...`. Cursor pagination,
@@ -632,16 +853,18 @@ its impact first, such as how many people would enter a flow now.
 | Area | API resources | UI |
 |------|---------------|----|
 | Sources | sources, streams, sync-runs, rejects, imports | Freshness badges, setup wizard (test connection, discover, mapping preview), run history, rejects |
-| People | people, timeline, identity-conflicts, traits (registry), event catalog, lists, consent, topics, suppressions | Search; profile with identities by source, traits with provenance, event timeline, consent, lists, segments with explain, messages with gate outcomes; conflict review |
+| Events and traces | event-schemas, ingest-rejects, reject-replays, debugger stream, event-explorer, event-exports, traces, forwarding-destinations and attempts | Schema registry and validation modes; live debugger; explorer with charts, breakdowns and CSV; reject replay; trace tree; forwarding lag and dead letters |
+| People | people, timeline, identity-conflicts, traits (registry), lists, consent, topics, suppressions | Search; profile with identities by source, traits with provenance, unified event and decision timeline, consent, lists, segments with explain, messages with gate outcomes; conflict review |
 | Segments | segments, versions, preview, members, people/{id}/explain | Builder over registry and event catalog, live count with data age, sample, membership history |
 | Flows | flows, versions, publish, enrollments, simulate, stats | Canvas editor with inline validation, publish with impact preview, test mode, enrollment inspector, per-node stats |
 | Delivery | destinations, messages, sender identities | Destinations, topic consent policy, frequency caps, quiet hours |
 | Templates | templates, versions, publish, where-used, snippets, brand theme, assets, preview, test-sends | Email block builder with code mode, merge-tag picker, visibility conditions, desktop/mobile preview, test sends; webhook payload editor; snippets, theme, asset library; version history and where-used |
+| Assistant | ai/settings, ai/models, ai/drafts, ai/evaluations, ai/usage | Provider/model and privacy settings; authoring panel with validated diff and previews; usage, budget and call audit |
 | Settings | workspaces, members, users, api-keys, audit, privacy/exports, privacy/erasures, jobs, health | Workspaces, members and roles, API keys, audit log, retention, privacy requests, jobs admin |
 
-## 14. Security, privacy and compliance
+## 16. Security, privacy and compliance
 
-### 14.1 Trust boundaries
+### 16.1 Trust boundaries
 
 | Boundary | Threat | Control |
 |----------|--------|---------|
@@ -655,13 +878,15 @@ its impact first, such as how many people would enter a flow now.
 | Asset uploads | Disguised files, SVG script, storage exhaustion | Type sniffed from the bytes, raster allowlist (no SVG), size and quota limits, `nosniff`, served from `/a/` only |
 | Test sends | Use as an open relay | Recipients limited to members' verified addresses or a workspace allowlist; rate-limited |
 | Segment builder | SQL injection | AST only, bind parameters, registry-only identifiers, no raw SQL in v1 |
-| Stored credentials | Database dump exposes secrets | Envelope encryption (14.2) |
+| LLM provider egress | Personal data disclosure, SSRF, unapproved model | Provider/model/base-URL allowlist, common egress policy after DNS resolution, schema-only context by default, workspace PII opt-in |
+| Assistant context and output | Prompt injection in stored or pasted data; structurally valid unsafe output | Treat context as data, fixed read/draft tool registry, per-call RBAC and workspace checks, deterministic semantic validators, bounded repair |
+| Stored credentials | Database dump exposes secrets | Envelope encryption (16.2) |
 | Database sources | Over-privileged credentials | Documented read-only roles; connectors open read-only transactions |
 | Logs | Personal data leakage | Log person ids, not identifier values; secrets redacted |
 
-### 14.2 Secrets, RBAC, audit
+### 16.2 Secrets, RBAC, audit
 
-Connector credentials and OAuth tokens use **envelope encryption**: a random
+Connector credentials, OAuth tokens and AI provider keys use **envelope encryption**: a random
 data key per secret (XChaCha20-Poly1305), wrapped by an operator-held master
 key (`secrets.master_key_file` or env, identified by key id).
 `zirv-flow admin rotate-master-key` re-wraps data keys without touching
@@ -671,65 +896,73 @@ credentials must be re-entered (documented).
 | Role (proposed, confirmed in M8) | Scope | Can |
 |------|-------|-----|
 | Owner | Organization | Everything: workspaces, users, instance settings, key rotation |
-| Admin | Workspace | Sources, destinations, credentials, API keys, members, retention |
+| Admin | Workspace | Sources, destinations, credentials, API keys, members, retention, assistant provider and privacy settings |
 | Publisher | Workspace | Editor rights plus publish/pause flows, publish templates, snippets and the brand theme, run imports |
-| Editor | Workspace | Draft segments, flows, templates, snippets, lists; previews, test mode and test sends |
+| Editor | Workspace | Draft segments, flows, templates, snippets, lists; assistant drafts when enabled; previews, test mode and test sends |
 | Viewer | Workspace | Read only; personal data masked unless granted `view_pii` |
 
 M1 ships owner, admin and member; the full matrix lands in M8. The **audit
 log** is append-only (actor, action, object, time, request id, change summary
 without personal data values) and covers sign-ins, membership and key changes,
 credential access, publishes, imports, exports, erasures and configuration.
+Assistant calls also write the dedicated call log in section 13.4 whether they
+succeed, fail validation or are stopped by policy or budget.
 
-### 14.3 Export, erasure and retention
+### 16.3 Export, erasure and retention
 
 **Export** (`privacy.export`) produces JSON of everything held on a person
 (profile, identities, traits with sources, events, consent history, membership
 history, enrollments, messages) behind an expiring link. **Erasure**
 (`privacy.erase`): (1) record the request in the erasure ledger (person id,
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
-contributions, events in all partitions, list members, consent, segment
-memberships, enrollments, step executions, messages, test-send log entries,
-rejects and pending exports, and clear saved preview-person references; (4)
-call `erase` on destinations that declare it and record results; (5) delete
-the person; (6) write an audit entry without personal data. Templates,
+contributions, events in all partitions, ingest rejects, list members, consent,
+segment memberships, enrollments, step executions, messages, test-send log entries,
+sync rejects, person-scoped decision records, assistant transcripts, pending
+and dead forwarding payloads and pending exports, and clear saved preview-person
+references; (4) call `erase` on forwarding and delivery destinations that
+declare it and record results; (5) delete the person; (6) write an audit entry
+without personal data. Templates,
 snippets, themes and assets hold no personal data by design. Each milestone
 that adds a table extends erasure, and a test asserts no row for an erased
 person survives anywhere. Backups keep erased data until they age out;
 after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
-defaults, enforced by scheduler jobs): events 25 months deployment-wide (drop
-monthly partitions; batched deletes where a workspace sets less), messages 13
-months, sync rejects 30 days, job failure history 14 days, audit log 2 years.
+defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
+per-name workspace overrides (drop monthly partitions; batched deletes where
+an override is shorter), messages 13 months, ingest and sync rejects 30 days,
+job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28
+and assistant transcript retention is OQ-26.
 
-## 15. Observability and operations
+## 17. Observability and operations
 
 | Area | Design |
 |------|--------|
-| Logs and traces | `tracing`, JSON logs, spans per request and job (request id, job id, kind, workspace, attempt); optional OTLP export later |
-| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status; queue depth by kind/state, claim lag (`now - run_at`), handler duration, retries, dead jobs; ingestion rate, inbox age, rejects; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; template render duration and failures; DB pool, jobs-table dead tuples |
+| Logs and traces | Structured JSON through `tracing`; spans per request and job carry request id, trace id, job id, kind, workspace and attempt. OTLP export is optional. Operational spans link to, but never replace, the customer-event, audit or decision stores in section 12. |
+| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status; queue depth by kind/state, claim lag (`now - run_at`), handler duration, retries, dead jobs; ingestion rate, inbox age, validation outcomes, duplicates and late events; debugger delivery latency and clients; explorer duration/timeouts/exports; decision-log append duration; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; forwarding lag/retries/dead letters; template render duration and failures; assistant calls/tokens/estimated cost/latency/outcomes/budget denials; DB pool, jobs-table dead tuples |
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
-| Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `secrets` (`master_key_file`). `config check` prints the result with secrets redacted. |
+| Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `secrets` (`master_key_file`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
 | Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Minimum PostgreSQL version is OQ-15. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
 | Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
 
-## 16. Testing strategy
+## 18. Testing strategy
 
 | Layer | Tests |
 |-------|-------|
 | `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; property tests comparing compiled SQL on Postgres with the reference evaluator |
 | `engine` | Inline unit tests; deterministic simulation: virtual clock, crash after every effect, randomized event arrival. Invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
-| Ingestion | Idempotent replay, identity scenario suite, deletion propagation, erasure table scan |
+| Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |
 | `templates` | Golden render corpus per block and per channel; representative email layouts validated through `mrml`; preview-equals-send byte test (tracking tokens excluded); golden tests per document schema migration; sanitizer allowlist tests |
+| Causality | Trace-completeness integration fixtures for every derived action and cause; job retry and failure trees; assertions that decision records contain ids and reasons but no personal-data values |
+| Assistant | Deterministic fake provider and recorded tool calls in CI; tool-registry allowlist, RBAC/workspace isolation, no-PII context, budget/rate-limit, bounded repair, prompt-injection and draft-only tests. Golden-prompt evaluations against real configured providers run manually or nightly, never as a CI gate. |
 | API and web | Handler tests on real Postgres, RBAC matrix, OpenAPI drift check; SPA type check and unit tests, browser end-to-end tests from M5 |
 | Performance | Load generator and benchmarks per milestone slice; full validation in M8 |
 | Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR |
 
-## 17. Scalability envelope
+## 19. Scalability envelope
 
 Every figure is a **TARGET to validate, not a measurement**; nothing has been
 measured yet. Each milestone measures its slice and M8 validates all of them on
@@ -746,6 +979,9 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 | Sustained / burst ingestion | 2,000 events/s / 10,000 events/s for 10 min, backlog drained within 15 min |
 | Ingestion API latency | p99 < 100 ms at sustained rate |
 | Inbox to applied profile | p95 < 5 s at sustained rate |
+| Live debugger delivery from durable inbox append | p95 < 2 s at sustained ingestion rate |
+| Event explorer interactive query | p95 < 5 s for a 90-day filtered count or property breakdown; hard timeout 15 s |
+| Decision-log append overhead | p95 < 5 ms added transaction time and < 10% ingestion-throughput loss against the same workload with decision writes disabled |
 | Segment preview, 10 M people | p95 < 3 s trait-only; < 15 s with a 90-day event aggregate |
 | Full segment refresh, 10 M people | < 2 min trait-only; < 10 min with event aggregates |
 | Event to segment entry to enrollment | p95 < 60 s |
@@ -754,10 +990,10 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 | Send throughput | 300 messages/s per deployment, provider limits permitting |
 | Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message |
 
-## 18. Key decisions
+## 20. Key decisions
 
-ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 is **Accepted**; it was
-ruled when the template builder was added to the plan.
+ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 to ADR-008 are **Accepted**;
+they were ruled as their capabilities were added to the plan.
 
 ### ADR-001: Sync-first data model
 
@@ -781,7 +1017,7 @@ ruled when the template builder was added to the plan.
 - **Options.** (1) Postgres + external message broker: more queue throughput, but a second system and dual writes or an outbox relay. (2) Postgres + in-memory store for queues and rate limits: durability gaps, one more service. (3) Postgres only.
 - **Decision.** (3). Postgres is system of record, profile/event store, durable job queue (`FOR UPDATE SKIP LOCKED`, short claim transactions, leases, retries, idempotent handlers, indexed due times) and scheduler; jobs execute outside the claim transaction. External broker only when measured throughput or fan-out justifies it; an analytical event store (e.g. ClickHouse) is an optional later add-on.
 - **Consequences.** One component to operate; transactional enqueue. Queue throughput shares Postgres write capacity; vacuum and bloat need active management; Postgres is the single point of failure (HA = operator's replication).
-- **Reverse if.** At the section 17 targets, queue tables become the dominant write load or claim lag p99 exceeds the timer-lateness target on an otherwise healthy database; campaign fan-out cannot reach the send target because of claim contention; event queries miss preview targets (analytical add-on).
+- **Reverse if.** At the section 19 targets, queue tables become the dominant write load or claim lag p99 exceeds the timer-lateness target on an otherwise healthy database; campaign fan-out cannot reach the send target because of claim contention; event queries miss preview targets (analytical add-on).
 
 ### ADR-004: Extension model
 
@@ -807,7 +1043,23 @@ ruled when the template builder was added to the plan.
 - **Consequences.** Zirv Flow owns the editor and the document schema migrations; this cost is accepted. Structured content makes validation, personalization checks and preview-equals-send possible. `mrml` becomes a key dependency, so its MJML gaps become Zirv Flow's. Each block added is a permanent migration commitment (OQ-23). The raw HTML block and code mode escape most structural checks other than parsing, size and the required unsubscribe link.
 - **Reverse if.** Block-set requests consistently outpace delivery, so marketers fall back to code mode for common layouts; `mrml` output fails client compatibility for representative layouts and cannot be fixed or worked around; or maintaining the editor and its migrations measurably crowds out the segmentation, data source and integration work.
 
-## 19. Open questions
+### ADR-007: Governed customer events and a distinct causality log
+
+- **Context.** Customer events drive segments and flows, but an unversioned catalog cannot prevent schema drift, and customer events alone cannot explain retries, skips or system decisions. Audit and operational logs have different privacy and retention purposes and cannot safely become product history.
+- **Options.** (1) Keep an informal catalog and diagnose from operational logs. (2) Put validation and every derived decision into the customer-event stream. (3) Use a versioned event schema registry and keep customer events, audit records, append-only decision records and operational logs distinct, linked by durable ids.
+- **Decision.** (3). Event schemas carry typed properties, required fields, enums, descriptions and PII flags, with per-event `allow`/`warn`/`block` validation and a workspace policy for unplanned names. Redaction precedes storage; rejects, debugger, explorer and replay make ingestion visible. Every derived action carries a propagated `trace_id` and typed cause into a personal-data-free, time-partitioned decision log and trace API. Client `messageId` dedupe gives effectively-once event storage; forwarding is at-least-once with stable keys and visible retries. Section 12 is authoritative.
+- **Consequences.** More writes and partitions buy deterministic investigation and safe replay. Every handler must append its decision record transactionally and extend erasure. The explorer stays on Postgres until measured targets justify an analytical add-on. Replays are explicit and do not silently re-trigger flows.
+- **Reverse if.** On reference hardware, partitioning and indexing cannot meet the section 19 debugger, explorer or decision-write targets without harming core ingestion, after the measured Postgres optimizations are exhausted. Then move the relevant query or append workload behind the same API to the analytical add-on; do not collapse the four record types or weaken trace semantics.
+
+### ADR-008: Draft-only LLM assistance over typed tools
+
+- **Context.** Natural-language assistance can shorten authoring and explanation, but direct model output is nondeterministic, may contain injected instructions, may disclose personal data and must not bypass existing validators or publishing permissions. Operators need a provider choice that includes private local servers.
+- **Options.** (1) No LLM support. (2) Feature-specific prompt endpoints that accept provider text and write product objects directly. (3) An optional provider abstraction whose models can call only shared, typed read-and-draft tools; validate the result, show a diff and require user acceptance into a draft.
+- **Decision.** (3). `zirv-flow-ai` supports OpenAI-compatible and Anthropic APIs, including explicitly allowlisted local base URLs. Deployment and workspace settings constrain providers, models, budgets and PII use; credentials use envelope encryption and calls use the egress policy. Tool schemas come from API Rust types, every call is re-authorized as the user, repair attempts are bounded, and no publish, send, delete or consent-mutating tool exists. Model output and supplied context are untrusted. Real-model evaluations are manual or nightly; CI uses a deterministic fake. The same read-and-draft layer may be exposed through MCP after 1.0.
+- **Consequences.** Provider behaviour can change without changing artifact semantics, and generated drafts remain testable through deterministic validators. The product gains provider HTTP dependencies, cost accounting, prompt-injection surface and transcript policy. Schema-only context is less personalized but is the safe default; PII requires explicit workspace opt-in.
+- **Reverse if.** Golden-prompt and usability evidence shows no sustained authoring benefit over the manual builders at acceptable cost and latency; required model capabilities are unavailable to self-hosters; or security testing shows the fixed tool and context boundary cannot contain prompt injection or personal-data disclosure. Then disable or remove providers while retaining the ordinary typed drafts and validators.
+
+## 21. Open questions
 
 | ID | Question | Decide by |
 |----|----------|-----------|
@@ -836,3 +1088,8 @@ ruled when the template builder was added to the plan.
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
 | OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
 | OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M7, before the block set is frozen |
+| OQ-26 | What is the default assistant transcript retention: none, a short debugging window, or the workspace's audit horizon? | M3, before the first provider ships |
+| OQ-27 | What minimum model capabilities are supported: structured tool calls, JSON Schema subset, streaming, context window and usage reporting? | M3, before provider compatibility is frozen |
+| OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
+| OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
+| OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
