@@ -6,21 +6,26 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
+use zirv_flow_store::{PgPool, SchemaState};
 
 use crate::cli::{Cli, Command, ConfigCommand};
 use crate::config::Config;
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
-    ExitCode::from(run(
-        cli,
-        std::env::vars_os(),
-        &mut io::stdout(),
-        &mut io::stderr(),
-    ))
+    ExitCode::from(
+        run(
+            cli,
+            std::env::vars_os(),
+            &mut io::stdout(),
+            &mut io::stderr(),
+        )
+        .await,
+    )
 }
 
-fn run(
+async fn run(
     cli: Cli,
     env: impl IntoIterator<Item = (OsString, OsString)>,
     stdout: &mut impl Write,
@@ -48,12 +53,93 @@ fn run(
         }
     }
 
+    if matches!(command, Command::Migrate) {
+        return run_migrate(&config, stdout, stderr).await;
+    }
+
+    if matches!(
+        command,
+        Command::All | Command::Serve | Command::Worker | Command::Scheduler
+    ) {
+        let pool = match connect(&config).await {
+            Ok(pool) => pool,
+            Err(error) => return database_error(stderr, error),
+        };
+        if config.database_migrate_on_start() {
+            if let Err(error) = zirv_flow_store::migrate(&pool).await {
+                return database_error(stderr, error);
+            }
+        } else {
+            let state = match zirv_flow_store::schema_state(&pool).await {
+                Ok(state) => state,
+                Err(error) => return database_error(stderr, error),
+            };
+            if let StartupAction::Refuse(message) = startup_action(state) {
+                return database_error(stderr, message);
+            }
+        }
+    }
+
     let _ = writeln!(
         stderr,
         "error: the {} command is not implemented yet",
         command.name()
     );
     1
+}
+
+async fn connect(config: &Config) -> Result<PgPool, zirv_flow_store::StoreError> {
+    zirv_flow_store::connect(config.database_url(), config.database_max_connections()).await
+}
+
+async fn run_migrate(config: &Config, stdout: &mut impl Write, stderr: &mut impl Write) -> u8 {
+    let pool = match connect(config).await {
+        Ok(pool) => pool,
+        Err(error) => return database_error(stderr, error),
+    };
+    match zirv_flow_store::migrate(&pool).await {
+        Ok(versions) if versions.is_empty() => {
+            let _ = writeln!(stdout, "database schema is up to date");
+            0
+        }
+        Ok(versions) => {
+            for version in versions {
+                let _ = writeln!(stdout, "applied migration {version}");
+            }
+            0
+        }
+        Err(error) => database_error(stderr, error),
+    }
+}
+
+fn database_error(stderr: &mut impl Write, error: impl std::fmt::Display) -> u8 {
+    let _ = writeln!(stderr, "error: database: {error}");
+    1
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum StartupAction {
+    Proceed,
+    Refuse(String),
+}
+
+/// Decides startup when migrate-on-start is off and the schema was inspected without a lock.
+fn startup_action(state: SchemaState) -> StartupAction {
+    match state {
+        SchemaState::UpToDate => StartupAction::Proceed,
+        SchemaState::Pending { count } => StartupAction::Refuse(format!(
+            "{count} pending migration(s); run `zirv-flow migrate` or set database.migrate_on_start"
+        )),
+        SchemaState::Newer { version } => StartupAction::Refuse(format!(
+            "database schema version {version} is newer than this binary supports; upgrade zirv-flow"
+        )),
+        SchemaState::Dirty { version } => StartupAction::Refuse(format!(
+            "migration {version} is partially applied; repair the database and rerun `zirv-flow migrate`"
+        )),
+        SchemaState::Modified { version } => StartupAction::Refuse(format!(
+            "migration {version} was changed after it was applied; restore the original migration file"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -64,8 +150,8 @@ mod tests {
         vec![("ZIRV_FLOW_DATABASE__URL".into(), url.into())]
     }
 
-    #[test]
-    fn config_check_redacts_the_database_password() {
+    #[tokio::test]
+    async fn config_check_redacts_the_database_password() {
         let cli = Cli {
             config: None,
             command: Some(Command::Config(ConfigCommand::Check)),
@@ -78,7 +164,8 @@ mod tests {
             database_env("postgres://user:hunter2@localhost/database"),
             &mut stdout,
             &mut stderr,
-        );
+        )
+        .await;
         let output = String::from_utf8(stdout).unwrap();
 
         assert_eq!(code, 0);
@@ -87,32 +174,8 @@ mod tests {
         assert!(output.contains("***"));
     }
 
-    #[test]
-    fn a_bare_invocation_runs_all() {
-        let cli = Cli {
-            config: None,
-            command: None,
-        };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let code = run(
-            cli,
-            database_env("postgres://localhost/database"),
-            &mut stdout,
-            &mut stderr,
-        );
-
-        assert_eq!(code, 1);
-        assert!(stdout.is_empty());
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "error: the all command is not implemented yet\n"
-        );
-    }
-
-    #[test]
-    fn a_configuration_error_exits_with_code_two() {
+    #[tokio::test]
+    async fn a_configuration_error_exits_with_code_two() {
         let cli = Cli {
             config: None,
             command: Some(Command::Serve),
@@ -120,10 +183,62 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let code = run(cli, [], &mut stdout, &mut stderr);
+        let code = run(cli, [], &mut stdout, &mut stderr).await;
 
         assert_eq!(code, 2);
         assert!(stdout.is_empty());
         assert!(String::from_utf8(stderr).unwrap().contains("database.url"));
+    }
+
+    #[test]
+    fn an_up_to_date_schema_proceeds() {
+        assert_eq!(
+            startup_action(SchemaState::UpToDate),
+            StartupAction::Proceed
+        );
+    }
+
+    #[test]
+    fn pending_migrations_are_refused_when_disabled() {
+        assert_eq!(
+            startup_action(SchemaState::Pending { count: 2 }),
+            StartupAction::Refuse(
+                "2 pending migration(s); run `zirv-flow migrate` or set database.migrate_on_start"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused() {
+        assert_eq!(
+            startup_action(SchemaState::Newer { version: 12 }),
+            StartupAction::Refuse(
+                "database schema version 12 is newer than this binary supports; upgrade zirv-flow"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_dirty_migration_is_refused() {
+        assert_eq!(
+            startup_action(SchemaState::Dirty { version: 7 }),
+            StartupAction::Refuse(
+                "migration 7 is partially applied; repair the database and rerun `zirv-flow migrate`"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_modified_migration_is_refused() {
+        assert_eq!(
+            startup_action(SchemaState::Modified { version: 3 }),
+            StartupAction::Refuse(
+                "migration 3 was changed after it was applied; restore the original migration file"
+                    .into()
+            )
+        );
     }
 }
