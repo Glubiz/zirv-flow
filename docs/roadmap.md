@@ -250,7 +250,7 @@ systems, and feed delivery and engagement back as events.
 - **Tracking.** Open pixel, click redirect with recorded-link allowlist, unsubscribe page, RFC 8058 one-click, topic preference center.
 - **Feedback.** Provider webhooks become `email.delivered`/`bounced`/`complained` events; hard bounces and complaints suppress automatically.
 - **Flow nodes.** `action.send`, `action.sync`; the webhook action moves onto the destination runtime.
-- **Deletion and erasure.** Messages erased; destination `erase` called where declared; suppression hashes retained.
+- **Deletion and erasure.** Messages and test-send log entries erased; destination `erase` called where declared; suppression hashes retained.
 - **UI.** Destination setup, code template editor with preview, topics and consent policy, frequency caps and quiet hours, per-person message log ("why was this not sent"), per-node delivery stats.
 - **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope).
 
@@ -283,10 +283,10 @@ that sends (architecture section 11, ADR-006).
 - **Brand theme and snippets.** Theme editor (colours, fonts, logo, default footer); versioned snippets with where-used.
 - **Assets.** Image upload into Postgres with sniffed type, raster allowlist (no SVG), size and quota limits (OQ-21); content-addressed public serving from `/a/`; asset library.
 - **Personalization.** Merge-tag picker fed by the field registry and event catalog; per-block visibility conditions on the segment AST, evaluated through the `ConditionEvaluator`.
-- **Preview and test sends.** Server-side preview as a real or sample person at desktop and mobile widths, shown in a sandboxed iframe; test sends only to verified member addresses or a workspace allowlist.
+- **Preview and test sends.** M6's preview and test sends extended to block documents: desktop and mobile widths, shown in a sandboxed iframe; test sends only to verified member addresses or a workspace allowlist.
 - **Webhook payload editor.** JSON body template and headers with a sample-payload preview.
 - **Versions.** Publish validation (blocking errors and warnings), immutable versions, version history, where-used for templates and snippets, active flows shown on publish; message rows record template, snippet and theme versions.
-- **Erasure.** Test-send log entries and saved preview-person references are covered.
+- **Erasure.** Saved preview-person references are covered.
 - **Decisions.** OQ-21 (asset limits), OQ-22 (dark mode), OQ-23 (block-set growth), OQ-24 (localization), OQ-25 (layout set and client matrix).
 
 **Out of scope.** SMS, push and in-app builders and channels; AMP email; landing
