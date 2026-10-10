@@ -61,3 +61,33 @@ pub(crate) async fn not_found() -> ApiError {
 pub(crate) async fn method_not_allowed() -> ApiError {
     ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_api_error_renders_as_a_problem_document() {
+        let response = ApiError::new(StatusCode::NOT_FOUND, "no such resource").into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            problem,
+            serde_json::json!({
+                "type": "about:blank",
+                "title": "Not Found",
+                "status": 404,
+                "detail": "no such resource",
+                "request_id": null
+            })
+        );
+    }
+}

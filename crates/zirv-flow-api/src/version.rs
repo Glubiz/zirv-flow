@@ -20,3 +20,13 @@ pub(crate) async fn version() -> Json<VersionBody> {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn version_reports_the_crate_version() {
+        assert_eq!(version().await.0.version, env!("CARGO_PKG_VERSION"));
+    }
+}

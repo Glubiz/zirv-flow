@@ -60,3 +60,18 @@ fn method_label(method: &Method) -> &'static str {
         _ => "OTHER",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_methods_keep_their_label_and_others_share_one() {
+        assert_eq!(method_label(&Method::GET), "GET");
+        assert_eq!(method_label(&Method::DELETE), "DELETE");
+        assert_eq!(
+            method_label(&Method::from_bytes(b"FOO1234").unwrap()),
+            "OTHER"
+        );
+    }
+}

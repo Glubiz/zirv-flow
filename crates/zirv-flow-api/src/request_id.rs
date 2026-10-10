@@ -41,3 +41,19 @@ pub(crate) async fn assign(mut request: Request, next: Next) -> Response {
     }
     response
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_short_safe_ids_are_kept() {
+        assert!(is_valid("abc-1._Z"));
+        assert!(is_valid(&"a".repeat(128)));
+        assert!(!is_valid(""));
+        assert!(!is_valid(&"a".repeat(129)));
+        assert!(!is_valid("a b"));
+        assert!(!is_valid("a\r\nx-injected: 1"));
+        assert!(!is_valid("é"));
+    }
+}
