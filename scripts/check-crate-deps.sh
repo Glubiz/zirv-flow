@@ -194,29 +194,20 @@ edition = "2024"
 EOF
     done
 
-    cat >>"$fixture/crates/zirv-flow/Cargo.toml" <<'EOF'
+    add_dependencies() {
+      crate="$1"
+      shift
+      printf '\n[dependencies]\n' >>"$fixture/crates/$crate/Cargo.toml"
+      for dependency in "$@"; do
+        printf '%s = { path = "../%s" }\n' "$dependency" "$dependency" \
+          >>"$fixture/crates/$crate/Cargo.toml"
+      done
+    }
 
-[dependencies]
-zirv-flow-api = { path = "../zirv-flow-api" }
-zirv-flow-jobs = { path = "../zirv-flow-jobs" }
-EOF
-    cat >>"$fixture/crates/zirv-flow-store/Cargo.toml" <<'EOF'
-
-[dependencies]
-zirv-flow-core = { path = "../zirv-flow-core" }
-EOF
-    cat >>"$fixture/crates/zirv-flow-api/Cargo.toml" <<'EOF'
-
-[dependencies]
-zirv-flow-core = { path = "../zirv-flow-core" }
-zirv-flow-store = { path = "../zirv-flow-store" }
-EOF
-    cat >>"$fixture/crates/zirv-flow-jobs/Cargo.toml" <<'EOF'
-
-[dependencies]
-zirv-flow-core = { path = "../zirv-flow-core" }
-zirv-flow-store = { path = "../zirv-flow-store" }
-EOF
+    add_dependencies zirv-flow zirv-flow-api zirv-flow-jobs
+    add_dependencies zirv-flow-store zirv-flow-core
+    add_dependencies zirv-flow-api zirv-flow-core zirv-flow-store
+    add_dependencies zirv-flow-jobs zirv-flow-core zirv-flow-store
 
     if [ "$mode" = "bad-edge" ]; then
       cat >>"$fixture/crates/zirv-flow-api/Cargo.toml" <<'EOF'
