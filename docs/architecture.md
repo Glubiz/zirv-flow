@@ -197,6 +197,8 @@ erDiagram
   WORKSPACE ||--|| BRAND_THEME : styles
   BRAND_THEME ||--o{ BRAND_THEME_VERSION : "published as"
   BRAND_THEME_VERSION ||--o{ MESSAGE : styles
+  BRAND_THEME_VERSION }o--o| ASSET : "logo"
+  SNIPPET_VERSION }o--o{ ASSET : embeds
 ```
 
 | Entity | Purpose and key rules |
@@ -213,7 +215,7 @@ erDiagram
 | Template, template version | Channel (`email`, `webhook`; `sms`, `push`, `in_app` reserved), category, mode (`blocks` or `code`) and a versioned content document (section 11). Versions are immutable once published. |
 | Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
 | Brand theme, theme version | One per workspace: colours, fonts, logo asset, default footer snippet. Published versions are immutable; rendering uses the current one. |
-| Asset | Uploaded raster image (bytes, sniffed type, dimensions, content hash), served publicly from `server.public_url`. Retained while a published version references it. |
+| Asset | Uploaded raster image (bytes, sniffed type, dimensions, content hash), served publicly from `server.public_url`. Retained while any published template, snippet or theme version references it. |
 
 ## 7. Data sources and ingestion
 
