@@ -53,6 +53,7 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 9. **Fail visibly.** Rejected records, failed steps and skipped sends are stored with a reason and shown in the UI.
 10. **Causality is data.** Every derived action carries a trace and typed cause across queues and external effects; operational logs are not the system of record for product decisions.
 11. **Assistance proposes, people decide.** LLM output is untrusted, workspace-scoped and draft-only; deterministic validators and explicit acceptance remain authoritative.
+12. **Module boundaries are executable rules.** Crate dependencies, feature-module APIs and frontend imports follow the allowlists in section 5, and CI rejects violations.
 
 ## 3. System context
 
@@ -143,28 +144,116 @@ React SPA, Vite, React Flow canvas).
 | `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email transport | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
 | `zirv-flow-ai` | Provider trait and OpenAI-compatible and Anthropic adapters; structured tool-call orchestration, bounded repair, budgets, audit inputs and deterministic fake provider | Optional outbound protocols and HTTP dependencies change independently from the deterministic domain crates. The crate coordinates existing typed tools and validators but neither defines nor bypasses them. |
 | `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
-| `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving | HTTP surface; neither `api` nor `jobs` depends on the other |
+| `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving, assistant tools (`AiTool` implementations and their registry) | HTTP surface; neither `api` nor `jobs` depends on the other |
 | `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `templates`, `connectors`, which no other crate needs together |
 
 ```mermaid
 flowchart LR
   bin[zirv-flow] --> api & jobs
-  api --> segments & engine & templates & connectors & ai & store
-  jobs --> segments & engine & templates & connectors & ai & store
+  api --> segments & engine & templates & connectors & ai & store & core
+  jobs --> segments & engine & templates & connectors & ai & store & core
   segments & engine & templates & connectors & ai & store --> core
 ```
 
-Rules: a CI dependency check keeps sqlx as a direct dependency of `store` only;
-the `cargo tree` purity check keeps HTTP clients and tokio networking out of
-`core`, `segments`, `engine` and `templates`. `connectors` and `ai` are the
-explicit outbound-I/O crates. The engine evaluates branch
-conditions through an injected `ConditionEvaluator` (production: `segments` +
-`store`; simulation: the reference evaluator). The renderer never evaluates
-conditions itself: it lists a template's block conditions, the handler evaluates
-them in one `ConditionEvaluator` call, and the results go into the render as
-plain inputs (section 11.4). CI builds `web/` before the release
-build; a placeholder `web/dist` keeps `cargo build` working without Node. The
-OpenAPI document (utoipa) is committed, drift-checked and feeds the SPA client.
+### 5.1 Allowed crate dependencies
+
+The table is an allowlist of direct workspace-crate dependencies. A crate may
+depend on fewer crates than listed; any workspace edge not listed fails CI.
+
+| Crate | May depend directly on |
+|-------|-------------------------|
+| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs` |
+| `zirv-flow-core` | none |
+| `zirv-flow-store` | `zirv-flow-core` |
+| `zirv-flow-segments` | `zirv-flow-core` |
+| `zirv-flow-engine` | `zirv-flow-core` |
+| `zirv-flow-connectors` | `zirv-flow-core` |
+| `zirv-flow-ai` | `zirv-flow-core` |
+| `zirv-flow-templates` | `zirv-flow-core` |
+| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
+| `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
+
+`api` and `jobs` never depend on each other, and no crate depends on the binary.
+The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
+I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
+`connectors` and `ai` are the outbound-I/O crates.
+
+### 5.2 Feature modules inside crates
+
+Each crate is split into vertical feature modules for the domain areas it owns:
+`sources`, `people`, `events`, `segments`, `flows`, `templates`, `delivery` and
+`assistant`. A crate creates only the modules it needs. Shared code stays small
+and earns a domain-neutral name; feature code does not move into a generic
+`utils` module.
+
+```text
+crates/zirv-flow-api/src/
+  lib.rs
+  sources/mod.rs
+  people/mod.rs
+  events/mod.rs
+  segments/mod.rs
+  flows/mod.rs
+  templates/mod.rs
+  delivery/mod.rs
+  assistant/mod.rs
+```
+
+Items are `pub(crate)` by default. A feature's supported surface is the set of
+functions and types re-exported by its `mod.rs`; a crate's external surface is
+re-exported by `lib.rs`. Code never reaches into another feature's internal
+submodules. Cross-feature calls use the owning feature's public functions and
+types. File and module names use domain terms, not transport or implementation
+terms, unless the module owns that transport.
+
+### 5.3 Extension points
+
+These are the only implementation registries. Adding an implementation means
+one module that implements the owning trait and one line in its registry; only
+the registry enumerates implementations.
+
+| Extension | Trait | Owning crate | A new implementation adds |
+|-----------|-------|--------------|---------------------------|
+| Connectors | `Source` | `zirv-flow-connectors` | One source module and one source-registry line |
+| Destinations and channels | `Destination` | `zirv-flow-connectors` | One destination module and one destination-registry line |
+| Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line |
+| Job kinds | `JobHandler` | `zirv-flow-jobs` | One handler module and one job-registry line |
+| AI tools | `AiTool` (defined in `zirv-flow-ai`) | `zirv-flow-api` (`assistant` feature module) | One tool module and one tool-registry line; tools live in `api` because they call validators and store reads that `ai` may not depend on (5.1) |
+
+No other registry is introduced. Domain catalogs such as the field and event
+schema registries store workspace data; they are not implementation registries.
+
+### 5.4 Frontend modules
+
+`web/src/features/` contains feature folders named for the same domain areas.
+Each feature exposes its supported surface through `index.ts`; another feature
+imports only that surface, never an internal file. Shared presentation
+components live in `web/src/ui/`, and the generated OpenAPI client has its own
+top-level folder. Features may use both, but never import from `web/src/app/`;
+the app shell composes features, not the reverse.
+
+### 5.5 Enforcement
+
+- From M1, CI reads `cargo metadata` and fails on every workspace dependency
+  edge absent from section 5.1, naming the disallowed edge.
+- The existing `cargo tree` purity check rejects sqlx, HTTP clients and tokio
+  networking in `core`, `segments`, `engine` and `templates`; sqlx remains a
+  direct dependency of `store` only.
+- Frontend lint rejects deep imports across features and imports by a feature
+  from the app shell.
+- Rust review treats `pub(crate)` as the default and rejects access to another
+  feature's internal modules or an implementation listed outside its registry.
+- Reviews never loosen an allowlist, purity rule or import boundary merely to
+  make a change pass. A boundary change requires an architecture decision.
+
+The engine evaluates branch conditions through an injected
+`ConditionEvaluator` (production: `segments` + `store`; simulation: the
+reference evaluator). The renderer never evaluates conditions itself: it lists
+a template's block conditions, the handler evaluates them in one
+`ConditionEvaluator` call, and the results go into the render as plain inputs
+(section 11.4). CI builds `web/` before the release build; a placeholder
+`web/dist` keeps `cargo build` working without Node. The OpenAPI document
+(utoipa) is committed, drift-checked and feeds the SPA client.
 
 ## 6. Domain model
 
@@ -960,7 +1049,7 @@ and assistant transcript retention is OQ-26.
 | Assistant | Deterministic fake provider and recorded tool calls in CI; tool-registry allowlist, RBAC/workspace isolation, no-PII context, budget/rate-limit, bounded repair, prompt-injection and draft-only tests. Golden-prompt evaluations against real configured providers run manually or nightly, never as a CI gate. |
 | API and web | Handler tests on real Postgres, RBAC matrix, OpenAPI drift check; SPA type check and unit tests, browser end-to-end tests from M5 |
 | Performance | Load generator and benchmarks per milestone slice; full validation in M8 |
-| Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR |
+| Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR; from M1, the crate-dependency allowlist, purity check and frontend import-boundary lint in section 5.5 are also required |
 
 ## 19. Scalability envelope
 
@@ -992,7 +1081,7 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 
 ## 20. Key decisions
 
-ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 to ADR-008 are **Accepted**;
+ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 to ADR-009 are **Accepted**;
 they were ruled as their capabilities were added to the plan.
 
 ### ADR-001: Sync-first data model
@@ -1058,6 +1147,14 @@ they were ruled as their capabilities were added to the plan.
 - **Decision.** (3). `zirv-flow-ai` supports OpenAI-compatible and Anthropic APIs, including explicitly allowlisted local base URLs. Deployment and workspace settings constrain providers, models, budgets and PII use; credentials use envelope encryption and calls use the egress policy. Tool schemas come from API Rust types, every call is re-authorized as the user, repair attempts are bounded, and no publish, send, delete or consent-mutating tool exists. Model output and supplied context are untrusted. Real-model evaluations are manual or nightly; CI uses a deterministic fake. The same read-and-draft layer may be exposed through MCP after 1.0.
 - **Consequences.** Provider behaviour can change without changing artifact semantics, and generated drafts remain testable through deterministic validators. The product gains provider HTTP dependencies, cost accounting, prompt-injection surface and transcript policy. Schema-only context is less personalized but is the safe default; PII requires explicit workspace opt-in.
 - **Reverse if.** Golden-prompt and usability evidence shows no sustained authoring benefit over the manual builders at acceptable cost and latency; required model capabilities are unavailable to self-hosters; or security testing shows the fixed tool and context boundary cannot contain prompt injection or personal-data disclosure. Then disable or remove providers while retaining the ordinary typed drafts and validators.
+
+### ADR-009: Modular monolith with enforced boundaries
+
+- **Context.** Zirv Flow ships as one binary, but sources, people, events, segments, flows, templates, delivery and assistance change for different reasons. Informal layering would let I/O leak into deterministic code, feature internals become shared by accident and every new implementation add another dispatch path.
+- **Options.** (1) Layered crates, vertical feature modules inside each crate and exactly five trait-backed implementation registries, with dependency and import boundaries enforced in CI. (2) Vertical bounded-context crates over a shared kernel: stronger domain ownership, but premature while one team owns the system and the domain boundaries are still being validated. (3) One crate with modules only: fewer manifests, but no machine-checked dependency direction between layers.
+- **Decision.** (1). Keep the layered crates and the direct-dependency allowlist in section 5.1. Inside them, use feature modules with `pub(crate)` by default and explicit `mod.rs`/`lib.rs` re-exports. The only implementation registries are connectors (`Source`), destinations and channels (`Destination`), template content types, job kinds and AI tools. The SPA mirrors the domain features behind `index.ts` boundaries. CI enforces crate edges, pure-crate dependencies and frontend imports from M1.
+- **Consequences.** The deployable remains one binary and features can share transactions through the composition crates, while illegal dependency directions and deep imports fail before review. Adding an implementation is one module plus one registry line. Some cross-feature work needs an explicit public type or function instead of a shortcut, and changes that genuinely alter layering require an architecture decision and allowlist update.
+- **Reverse if.** A domain area demonstrates independent ownership and a stable dependency boundary that justifies a bounded-context crate, or repeated legitimate changes must cross feature surfaces and keep forcing changes to the dependency table. Extract that bounded context over the smallest shared kernel and replace this ADR with a superseding decision; do not dissolve the enforced boundaries.
 
 ## 21. Open questions
 

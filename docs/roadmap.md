@@ -55,6 +55,7 @@ M3's assistant foundation is available for segment drafting and explanation.
 - **Isolation:** every new table carries `workspace_id` and is covered by the workspace isolation test.
 - **Deletion and erasure** reach every table the milestone adds; the erasure table-scan test is extended, never bypassed.
 - **Telemetry and audit:** new job kinds and endpoints get metrics and spans; new mutating admin actions write audit entries.
+- **Modularity:** new code lands in the owning feature module and allowed crate; new connector, destination, template content type, job kind or AI tool goes through its section 5.3 registry. The crate-dependency check, purity check and frontend boundary lint stay green and are never loosened to make a change pass.
 - **Measurement:** the milestone measures its slice of the targets (architecture section 19) and attaches the numbers. A miss becomes an issue; it blocks only where an exit criterion says so.
 - **Docs:** user-facing behaviour is documented in the PR that ships it.
 
@@ -96,7 +97,7 @@ Postgres with a durable job queue and an embedded UI shell. This is the first
 functional milestone; at its end, releases switch to every merge.
 
 **Scope.**
-- **Layout.** The Cargo workspace from architecture section 5, plus `web/` (TypeScript, React, Vite). CI builds the SPA and rust-embed embeds it; a placeholder `web/dist` lets `cargo build` run without Node.
+- **Layout.** The Cargo workspace from architecture section 5, with the direct-dependency allowlist in section 5.1, plus the `web/` feature-folder skeleton (TypeScript, React, Vite) from section 5.4. CI builds the SPA and rust-embed embeds it; a placeholder `web/dist` lets `cargo build` run without Node.
 - **CLI.** `serve`, `worker`, `scheduler`, `all` (default), `migrate`, `admin` (create owner, reset password), `config check`.
 - **Config.** TOML plus `ZIRV_FLOW_` env overrides, readable validation errors, secrets redacted.
 - **Postgres.** sqlx pool, embedded forward-only migrations, `migrate` and guarded `migrate_on_start` under an advisory lock. Startup refuses a newer schema, and pending migrations when migrating is disabled.
@@ -107,7 +108,7 @@ functional milestone; at its end, releases switch to every merge.
 - **Observability.** Structured JSON logs via `tracing`, with request id, trace id, job id, workspace and attempt; optional OTLP export; Prometheus metrics for HTTP, queue and DB pool.
 - **UI.** First-run owner setup, sign-in, workspace switcher, members, API keys, Jobs admin (depth by kind, dead letters, retry), trace-inspector shell, health view.
 - **Packaging.** Multi-stage non-root Dockerfile, GHCR image (amd64, arm64), `docker-compose.yml` quickstart (binary + Postgres, health checks), release binaries.
-- **CI.** Postgres service container for integration tests, SPA type check and tests, image build, `cargo tree` purity check.
+- **CI.** Postgres service container for integration tests, SPA type check and tests, image build, a `cargo metadata` dependency-direction check against section 5.1, the `cargo tree` purity check, and frontend lint for feature import boundaries.
 - **CD switch.** The last change of M1 switches `cd.yaml` to publish on every merge to `main` (ADR-005). OQ-15 (minimum Postgres version) is decided.
 
 **Out of scope.** Profile data, connectors, segments, flows, OIDC, the full RBAC
@@ -121,6 +122,8 @@ matrix, secrets encryption (no credentials are stored yet).
 - [ ] `/metrics` exposes queue depth, claim lag, handler duration and HTTP latency; logs are JSON with request and job ids.
 - [ ] An HTTP request that enqueues and retries a fixture job has the same trace id in its response, structured spans and job payload; its trace endpoint and inspector shell return the same fixture decision and failed attempt without personal-data values.
 - [ ] CI fails on an un-regenerated OpenAPI spec and on a `cargo tree` purity violation.
+- [ ] A test PR adding a disallowed workspace edge (`zirv-flow-api` -> `zirv-flow-jobs`) fails CI with a message naming that edge.
+- [ ] A deep import from one `web/` feature into another, or a feature import from `app/`, fails frontend lint.
 - [ ] The first merge to `main` after the switch publishes a GitHub release and a GHCR image that `docker pull` retrieves.
 
 **Dependencies.** M0.

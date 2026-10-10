@@ -26,6 +26,11 @@ Branch from `main`; never commit directly to `main`. Keep diffs focused and mirr
 existing naming, structure, and style. Tests stay inline in `#[cfg(test)] mod tests`;
 `tests/fixtures/` is data only.
 
+Follow the enforced crate, feature-module, registry and frontend boundaries in
+[architecture section 5](docs/architecture.md#5-module-and-crate-layout). Put new
+code behind the owning module's public surface; never loosen a boundary check to
+make a change pass.
+
 Size verification to the change using [CLAUDE.md](CLAUDE.md#build-and-verify-by-tier):
 
 - Docs or comments: run `cargo fmt -- --check` if Rust was touched; otherwise no checks.

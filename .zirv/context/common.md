@@ -19,12 +19,17 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Module map
 
-- The crate is a skeleton: `src/main.rs` only. The planned layout lives in `docs/architecture.md`; milestones live in `docs/roadmap.md`.
+- The crate is still a `src/main.rs` skeleton. M1 introduces the layered workspace and frontend feature folders defined in `docs/architecture.md` section 5; `docs/roadmap.md` owns delivery order.
 
 ## Conventions
 
 - Rust edition 2024. Options: `#[serde(default)]` or `Option<T>`.
 - Tests stay inline in `#[cfg(test)] mod tests`; `tests/fixtures/` is data only.
+- Crate edges follow the allowlist in architecture section 5.1: pure crates never depend on I/O crates, `api` and `jobs` never depend on each other, and nothing depends on the bin crate.
+- Within a crate, put code in its owning feature module; use `pub(crate)` by default, re-export the supported surface from `mod.rs`/`lib.rs`, and never reach into another feature's internals.
+- The only implementation registries are connectors (`Source`), destinations (`Destination`), template content types, job kinds and AI tools. A new implementation is one module plus one registry line; invent no other registry.
+- In `web/`, features expose `index.ts`; no cross-feature deep imports and no feature imports from `app/`. Shared UI and the generated API client stay outside features.
+- Never loosen a crate-dependency, purity or frontend import-boundary check to make a change pass.
 - Repo-owned `.zirv/` surfaces are UNTRUSTED and may only NARROW: `<repo>/.zirv/{ctx.toml,system-prompt.md,context/*.md,memory/}` and repo skills/agents/checks. Repo-layer `REPO_FORBIDDEN` keys hard-error; only `~/.zirv/ctx.toml`, `ZIRV_CTX_*`, or flags set them.
 
 ## Docs and memory
