@@ -1,0 +1,16 @@
+[package]
+name = "zirv-flow"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A self-hosted marketing automation tool: connect data sources, segment your people, and run automation flows."
+readme = "../../README.md"
+keywords = ["marketing-automation", "segmentation", "self-hosted", "automation", "workflow"]
+categories = ["web-programming"]
+
+[dependencies]
+clap.workspace = true
+zirv-flow-api.workspace = true
+zirv-flow-jobs.workspace = true

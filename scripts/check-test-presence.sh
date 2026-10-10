@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Test-presence gate: every `src/**/*.rs` file that a diff adds or modifies
-# must carry an inline `#[cfg(test)] mod tests` block, per this repo's
-# CLAUDE.md ("Tests stay inline"). Two kinds of file are exempt:
+# Test-presence gate: every `src/**/*.rs` or `crates/*/src/**/*.rs` file that
+# a diff adds or modifies must carry an inline `#[cfg(test)] mod tests` block,
+# per this repo's CLAUDE.md ("Tests stay inline"). Two kinds of file are exempt:
 #
-#   - `mod.rs` (a pure re-export/glue file, nothing of its own to test);
+#   - `mod.rs` and `lib.rs` (crate/module glue, nothing of their own to test);
 #   - a file whose diff hunks touch ONLY comment/doc lines (`//`, `///`,
 #     `//!` after trimming) or blank lines -- a change that could not
 #     possibly need a new test.
@@ -53,7 +53,8 @@ run_presence_gate() {
     return 0
   fi
 
-  candidates="$(printf '%s\n' "$changed_files" | grep -E '^src/.*\.rs$' || true)"
+  candidates="$(printf '%s\n' "$changed_files" \
+    | grep -E '^(src/.*|crates/[^/]+/src/.*)\.rs$' || true)"
   if [ -z "$candidates" ]; then
     return 0
   fi
@@ -67,7 +68,7 @@ run_presence_gate() {
     IFS="$old_ifs"
 
     base_name="$(basename "$file")"
-    if [ "$base_name" = "mod.rs" ]; then
+    if [ "$base_name" = "mod.rs" ] || [ "$base_name" = "lib.rs" ]; then
       continue
     fi
 
@@ -271,6 +272,28 @@ EOF
   } >"$dir/src/widget/logic.rs"
   commit_all "$dir" "add large logic.rs with an early test block"
   check_scenario "large-file-early-marker" "$dir" 0
+
+  # 6. Workspace crate sources are covered by the same gate.
+  dir="$(make_repo workspace-untested-new-file)"
+  mkdir -p "$dir/crates/example/src"
+  echo '//! Crate root.' >"$dir/crates/example/src/lib.rs"
+  commit_all "$dir" "base"
+  cat >"$dir/crates/example/src/logic.rs" <<'EOF'
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+EOF
+  commit_all "$dir" "add workspace logic.rs without tests"
+  check_scenario "workspace-untested-new-file" "$dir" 1
+
+  # 7. lib.rs is exempt as crate-root glue, like mod.rs.
+  dir="$(make_repo librs-exempt)"
+  mkdir -p "$dir/crates/example/src"
+  echo 'pub fn noop() {}' >"$dir/crates/example/src/other.rs"
+  commit_all "$dir" "base"
+  echo 'pub mod other;' >"$dir/crates/example/src/lib.rs"
+  commit_all "$dir" "add lib.rs without tests"
+  check_scenario "librs-exempt" "$dir" 0
 
   if [ "$fails" -gt 0 ]; then
     echo "check-test-presence.sh --self-test: $fails scenario(s) failed" >&2

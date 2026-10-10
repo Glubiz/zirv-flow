@@ -299,6 +299,22 @@ EOF
   commit_all "$dir" "spawn a shell"
   check_scenario "shell-spawn" "$dir" "spawns a shell/interpreter directly" ""
 
+  # 1b. Rust files under workspace crates are scanned too.
+  dir="$(make_repo workspace-shell-spawn)"
+  base_security_md >"$dir/SECURITY.md"
+  mkdir -p "$dir/crates/example/src"
+  echo 'pub fn noop() {}' >"$dir/crates/example/src/thing.rs"
+  commit_all "$dir" "base"
+  cat >"$dir/crates/example/src/thing.rs" <<'EOF'
+pub fn noop() {}
+
+pub fn run_shell() {
+    std::process::Command::new("bash").arg("-c").spawn().unwrap();
+}
+EOF
+  commit_all "$dir" "spawn a shell from a workspace crate"
+  check_scenario "workspace-shell-spawn" "$dir" "spawns a shell/interpreter directly" ""
+
   # 2. .unwrap() above any #[cfg(test)] marker -> flagged.
   dir="$(make_repo unwrap-outside-tests)"
   base_security_md >"$dir/SECURITY.md"

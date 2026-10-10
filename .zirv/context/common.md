@@ -19,7 +19,7 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Module map
 
-- The crate is still a `src/main.rs` skeleton. M1 introduces the layered workspace and frontend feature folders defined in `docs/architecture.md` section 5; `docs/roadmap.md` owns delivery order.
+- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root and currently contains the CLI skeleton and its tests. `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-api`, and `zirv-flow-jobs` are library crate shells with the dependency edges defined in `docs/architecture.md` section 5.1; only the binary has implementation code today. `docs/roadmap.md` owns delivery order.
 
 ## Conventions
 
@@ -38,4 +38,4 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Git
 
-Never commit/push `main`/`master`: branch and open a PR. Bump `Cargo.toml` above base only when `src/`, `Cargo.toml`, `Cargo.lock`, or `build.rs` changed (CD is idempotent, so doc/CI-only PRs need none). No `Co-Authored-By` or `Generated with Claude Code` lines.
+Never commit/push `main`/`master`: branch and open a PR. Bump `Cargo.toml` above base only when `src/`, `crates/`, `Cargo.toml`, `Cargo.lock`, or `build.rs` changed (CD is idempotent, so doc/CI-only PRs need none). No `Co-Authored-By` or `Generated with Claude Code` lines.
