@@ -19,7 +19,7 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Module map
 
-- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root. `zirv-flow-store` owns the PostgreSQL pool and embedded migration stream; `zirv-flow-core`, `zirv-flow-api`, and `zirv-flow-jobs` remain library crate shells. Dependency edges are defined in `docs/architecture.md` section 5.1, and `docs/roadmap.md` owns delivery order.
+- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root. `zirv-flow-store` owns the PostgreSQL pool and embedded migration stream; `zirv-flow-api` owns the axum router (health, readiness, metrics, `/api/v1`), problem+json errors and the committed `openapi.json`, regenerated with `ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi`; `zirv-flow-core` and `zirv-flow-jobs` remain library crate shells. Dependency edges are defined in `docs/architecture.md` section 5.1, and `docs/roadmap.md` owns delivery order.
 
 ## Conventions
 
