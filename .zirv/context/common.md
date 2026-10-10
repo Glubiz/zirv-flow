@@ -19,7 +19,7 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Module map
 
-- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root and currently contains the CLI skeleton and its tests. `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-api`, and `zirv-flow-jobs` are library crate shells with the dependency edges defined in `docs/architecture.md` section 5.1; only the binary has implementation code today. `docs/roadmap.md` owns delivery order.
+- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root. `zirv-flow-store` owns the PostgreSQL pool and embedded migration stream; `zirv-flow-core`, `zirv-flow-api`, and `zirv-flow-jobs` remain library crate shells. Dependency edges are defined in `docs/architecture.md` section 5.1, and `docs/roadmap.md` owns delivery order.
 
 ## Conventions
 

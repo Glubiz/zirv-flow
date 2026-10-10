@@ -207,6 +207,18 @@ impl Config {
 
         Ok(config)
     }
+
+    pub(crate) fn database_url(&self) -> &str {
+        self.database.url.0.as_str()
+    }
+
+    pub(crate) fn database_max_connections(&self) -> u32 {
+        self.database.max_connections
+    }
+
+    pub(crate) fn database_migrate_on_start(&self) -> bool {
+        self.database.migrate_on_start
+    }
 }
 
 fn read_file(path: &Path) -> Result<String, ConfigError> {

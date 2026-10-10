@@ -16,8 +16,8 @@ from that data, and run automation flows for everyone or for a segment.
 
 ## Status
 
-Pre-alpha. The project is at the architecture and roadmap stage and the crate is
-a skeleton: nothing is ready to use yet.
+Pre-alpha. The project is at the architecture and roadmap stage; configuration
+and database bootstrap are implemented, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -40,6 +40,19 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password redacted.
 
+## Requirements and database migrations
+
+Zirv Flow requires PostgreSQL 16 or newer. Apply pending migrations before
+starting a role:
+
+```sh
+zirv-flow migrate
+```
+
+Alternatively, set `database.migrate_on_start = true`. Role startup refuses a
+database with pending migrations when this setting is false, a partially
+applied migration, or a schema newer than the running binary.
+
 ## Development
 
 Install the stable Rust toolchain and [cargo-nextest](https://nexte.st), then:
@@ -55,6 +68,17 @@ cargo build
 cargo nextest run --no-fail-fast
 cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
+```
+
+PostgreSQL-backed tests are ignored by default. To run them against the two CI
+versions locally:
+
+```sh
+docker run --name zf-pg16 -e POSTGRES_PASSWORD=postgres -p 55416:5432 -d postgres:16
+DATABASE_URL=postgres://postgres:postgres@localhost:55416/postgres cargo nextest run --run-ignored only --no-fail-fast
+
+docker run --name zf-pg18 -e POSTGRES_PASSWORD=postgres -p 55418:5432 -d postgres:18
+DATABASE_URL=postgres://postgres:postgres@localhost:55418/postgres cargo nextest run --run-ignored only --no-fail-fast
 ```
 
 ## Contributing, security, and license

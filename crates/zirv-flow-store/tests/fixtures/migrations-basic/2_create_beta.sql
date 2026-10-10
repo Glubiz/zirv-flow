@@ -1,0 +1,1 @@
+CREATE TABLE migration_beta (id BIGINT PRIMARY KEY);

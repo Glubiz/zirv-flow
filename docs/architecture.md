@@ -149,7 +149,7 @@ React SPA, Vite, React Flow canvas).
 
 ```mermaid
 flowchart LR
-  bin[zirv-flow] --> api & jobs
+  bin[zirv-flow] --> api & jobs & store
   api --> segments & engine & templates & connectors & ai & store & core
   jobs --> segments & engine & templates & connectors & ai & store & core
   segments & engine & templates & connectors & ai & store --> core
@@ -162,7 +162,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 
 | Crate | May depend directly on |
 |-------|-------------------------|
-| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs` |
+| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs`, `zirv-flow-store` |
 | `zirv-flow-core` | none |
 | `zirv-flow-store` | `zirv-flow-core` |
 | `zirv-flow-segments` | `zirv-flow-core` |
@@ -1031,7 +1031,7 @@ and assistant transcript retention is OQ-26.
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `secrets` (`master_key_file`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
-| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Minimum PostgreSQL version is OQ-15. |
+| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. PostgreSQL 16 or newer is required. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
 | Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
 
@@ -1174,7 +1174,6 @@ they were ruled as their capabilities were added to the plan.
 | OQ-12 | Bounce handling for SMTP-only setups without provider webhooks (VERP, DSN mailbox polling)? | M6 |
 | OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
 | OQ-14 | Should flows pause sends automatically when an input source is stale? | M5 |
-| OQ-15 | Minimum supported PostgreSQL version | M1 |
 | OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? | M8 |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
@@ -1190,3 +1189,9 @@ they were ruled as their capabilities were added to the plan.
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
+
+### 21.1 Decided questions
+
+- **OQ-15:** PostgreSQL 16 is the minimum supported version. CI covers
+  PostgreSQL 16 and 18. Reassess the minimum before v1.0 against the versions
+  supported at that release date.
