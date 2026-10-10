@@ -1,9 +1,9 @@
 # Zirv Flow architecture
 
 Living document: the intended system and the decisions behind it. Change it
-through pull requests. Decisions (section 17) are never rewritten in place; a
+through pull requests. Decisions (section 18) are never rewritten in place; a
 changed decision gets a new superseding entry, linked both ways. Anything not
-yet decided is an open question (section 18). Delivery order: [roadmap.md](roadmap.md).
+yet decided is an open question (section 19). Delivery order: [roadmap.md](roadmap.md).
 
 ## 1. Purpose and scope
 
@@ -25,15 +25,16 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 | G4 | Durable, versioned, testable flows triggered by segment changes, events, schedules, manual starts or the API. |
 | G5 | Compliant delivery: email and webhooks first; consent, suppression, frequency caps, quiet hours and rate limits enforced in core; delivery and engagement fed back as events. |
 | G6 | Operable by a small team: binary + Postgres, compose quickstart, metrics, health checks, documented backup/restore/upgrade. |
+| G7 | Message content without code: a channel-aware template builder (email blocks rendered to responsive HTML and text, a webhook payload editor) with brand theme, snippets, merge tags from the field registry and per-block conditions; previews come from the same renderer as sends. |
 
 ### 1.2 Non-goals for v1
 
 - More than one organization per deployment; active-active multi-region.
 - Querying sources live without copying them (federated mode is a later milestone, ADR-001).
 - Running a mail transfer agent or managing IP reputation (mail goes to SMTP relays and provider APIs).
-- SMS, push and ad-audience channels; probabilistic identity matching; predictive scoring.
+- SMS, push, in-app and ad-audience channels and their builders (their content types are reserved in the template model, section 11.1); probabilistic identity matching; predictive scoring.
 - Analytics, attribution and campaign reporting beyond delivery and per-node flow counters.
-- A drag-and-drop email designer (templates are HTML/text with MiniJinja and live preview); hosted landing pages or forms.
+- AMP email; hosted landing pages or forms; machine-generated content (copy or images).
 - Third-party code plugins (ADR-004); sub-second membership for time-window segment conditions (scheduled recompute, section 8.4).
 
 ## 2. Principles
@@ -42,7 +43,7 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 2. **Every number is explainable.** Counts, memberships and skipped sends link to the data and rule behind them.
 3. **Freshness is a value.** Every segment result and send decision carries the age of its inputs.
 4. **Compliance is data, enforced at one boundary.** Consent, suppression and erasure live in the profile store and are checked in the send pipeline, not left to flow design.
-5. **Deterministic core, effects at the edge.** Segment compiler and flow interpreter are pure functions of input and an injected clock; I/O lives in job handlers.
+5. **Deterministic core, effects at the edge.** Segment compiler, flow interpreter and template renderer are pure functions of input and an injected clock; I/O lives in job handlers.
 6. **At-least-once execution with idempotency keys.** Exactly-once is never claimed for a system that cannot honour a key.
 7. **The workspace is the isolation unit.** Every row carries `workspace_id`; every query and job is scoped by it.
 8. **API first.** The UI uses the public `/api/v1`; every milestone ships API and UI for its feature together.
@@ -64,7 +65,7 @@ flowchart LR
   bin -->|"deliver, sync"| dest["Destinations: email (SMTP, provider APIs), webhooks, CRMs"]
   dest -->|"delivery webhooks"| bin
   dest --> recipients["Recipients (inbox, links, unsubscribe)"]
-  recipients -->|"opens, clicks, unsubscribes"| bin
+  recipients -->|"opens, clicks, unsubscribes, image fetches"| bin
   obs["Prometheus and log pipeline"] -->|"scrape /metrics"| bin
 ```
 
@@ -77,7 +78,7 @@ one process and is the default (bare `zirv-flow` and the container image).
 
 | Command | Instances | Responsibilities |
 |---------|-----------|------------------|
-| `serve` | any, stateless | `/api/v1`, ingestion, tracking/unsubscribe, inbound webhooks, embedded UI, `/healthz`, `/readyz`, `/metrics` |
+| `serve` | any, stateless | `/api/v1`, ingestion, tracking/unsubscribe, inbound webhooks, template preview, image assets, embedded UI, `/healthz`, `/readyz`, `/metrics` |
 | `worker` | any, stateless | Claim and execute jobs; `--kinds` dedicates a pool (e.g. `delivery`) |
 | `scheduler` | any, one active leader | Due schedules to jobs, lease reaping, partition maintenance, retention, stale-source detection |
 | `all` | one per host | All three roles in one process (default) |
@@ -87,7 +88,7 @@ one process and is the default (bare `zirv-flow` and the container image).
 
 - Roles never call each other; all coordination is rows in Postgres.
 - **Transactional enqueue:** a state change and the jobs it causes commit in one transaction, so a committed change always has its follow-up job and a rolled-back one never does. No dual write, no outbox relay.
-- Jobs are claimed in a short transaction and executed outside it (section 11).
+- Jobs are claimed in a short transaction and executed outside it (section 12).
 - `LISTEN/NOTIFY` wakes workers as a latency hint; fixed-interval polling is the correctness path.
 - The scheduler leader holds a session-level `pg_try_advisory_lock`; if its connection drops another scheduler takes over. Schedule slots carry unique keys, so a brief two-leader overlap cannot fire a slot twice.
 - Due-time comparisons use the database's `now()`, so host clock skew cannot fire timers early.
@@ -117,13 +118,14 @@ sequenceDiagram
 On `SIGTERM`, `serve` drains requests, workers stop claiming and finish
 in-flight jobs within a grace period, and the scheduler releases its lock. Jobs
 left unfinished, by shutdown or crash, are retried when their lease expires;
-idempotency keys make that safe (section 11). If Postgres is down, `/readyz`
+idempotency keys make that safe (section 12). If Postgres is down, `/readyz`
 fails, loops back off and ingestion returns `503`; v1 does not buffer locally.
 
 ## 5. Module and crate layout
 
 M0 is a single crate. The Cargo workspace arrives in M1: `crates/<name>` for
-each crate below, plus `web/` (TypeScript + React SPA, Vite, React Flow canvas).
+each crate below (`zirv-flow-templates` joins in M6), plus `web/` (TypeScript +
+React SPA, Vite, React Flow canvas).
 
 | Crate | Contents | Independent reason to exist |
 |-------|----------|-----------------------------|
@@ -132,22 +134,26 @@ each crate below, plus `web/` (TypeScript + React SPA, Vite, React Flow canvas).
 | `zirv-flow-store` | sqlx pool, migrations, repositories, Postgres job queue primitives | Sole owner of the profile store: one migration stream, one sqlx offline cache. Queue SQL lives here because enqueue must join the caller's transaction. |
 | `zirv-flow-segments` | AST to parameterized SQL compiler, dependency analysis, reference evaluator | Most correctness-critical code, own golden corpus. Pure: emits SQL + params that `store` executes. Used by `api` (preview, explain) and `jobs` (recompute). |
 | `zirv-flow-engine` | Deterministic flow interpreter, simulation harness | Pure, so simulation needs no I/O. Used by `api` (test mode) and `jobs`. |
-| `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email, templates | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
+| `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email transport | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
+| `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
 | `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving | HTTP surface; neither `api` nor `jobs` depends on the other |
-| `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `connectors`, which no other crate needs together |
+| `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `templates`, `connectors`, which no other crate needs together |
 
 ```mermaid
 flowchart LR
   bin[zirv-flow] --> api & jobs
-  api --> segments & engine & connectors & store
-  jobs --> segments & engine & connectors & store
-  segments & engine & connectors & store --> core
+  api --> segments & engine & templates & connectors & store
+  jobs --> segments & engine & templates & connectors & store
+  segments & engine & templates & connectors & store --> core
 ```
 
 Rules: a CI check on `cargo tree` keeps sqlx, HTTP clients and tokio networking
-out of `core`, `segments` and `engine`. The engine evaluates branch conditions
-through an injected `ConditionEvaluator` (production: `segments` + `store`;
-simulation: the reference evaluator). CI builds `web/` before the release
+out of `core`, `segments`, `engine` and `templates`. The engine evaluates branch
+conditions through an injected `ConditionEvaluator` (production: `segments` +
+`store`; simulation: the reference evaluator). The renderer never evaluates
+conditions itself: it lists a template's block conditions, the handler evaluates
+them in one `ConditionEvaluator` call, and the results go into the render as
+plain inputs (section 11.4). CI builds `web/` before the release
 build; a placeholder `web/dist` keeps `cargo build` working without Node. The
 OpenAPI document (utoipa) is committed, drift-checked and feeds the SPA client.
 
@@ -182,7 +188,13 @@ erDiagram
   ENROLLMENT ||--o{ STEP_EXECUTION : records
   STEP_EXECUTION ||--o| MESSAGE : produces
   DESTINATION ||--o{ MESSAGE : delivers
-  TEMPLATE ||--o{ MESSAGE : renders
+  WORKSPACE ||--o{ TEMPLATE : owns
+  TEMPLATE ||--o{ TEMPLATE_VERSION : "published as"
+  TEMPLATE_VERSION ||--o{ MESSAGE : renders
+  TEMPLATE_VERSION }o--o{ SNIPPET : references
+  SNIPPET ||--o{ SNIPPET_VERSION : "published as"
+  TEMPLATE_VERSION }o--o{ ASSET : embeds
+  WORKSPACE ||--|| BRAND_THEME : styles
 ```
 
 | Entity | Purpose and key rules |
@@ -195,7 +207,11 @@ erDiagram
 | Consent | State per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
 | List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). |
-| Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. One message row per send attempt; `messages.idempotency_key` is unique. |
+| Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
+| Template, template version | Channel (`email`, `webhook`; `sms`, `push`, `in_app` reserved), category, mode (`blocks` or `code`) and a versioned content document (section 11). Versions are immutable once published. |
+| Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
+| Brand theme | One per workspace, versioned: colours, fonts, logo asset, default footer snippet. |
+| Asset | Uploaded raster image (bytes, sniffed type, dimensions, content hash), served publicly from `server.public_url`. Retained while a published version references it. |
 
 ## 7. Data sources and ingestion
 
@@ -277,7 +293,7 @@ recomputes traits from what remains. If nothing remains (no contributions,
 first-party events or consent), the workspace orphan policy applies (`keep`
 default, or `delete`). The person is marked dirty, so memberships exit, flows
 react as configured and destination syncs remove the person downstream (10.2).
-Deletion removes one source's contribution; **erasure** (13.3) removes the
+Deletion removes one source's contribution; **erasure** (14.3) removes the
 person and every derived row.
 
 ### 7.5 Freshness and connector concerns
@@ -294,7 +310,7 @@ sends on stale inputs is OQ-14). The connector runtime, not each connector,
 owns (ADR-004): auth (API key, basic, bearer, OAuth2 client credentials and
 authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
-(13.1) and delivery capabilities (idempotency keys, batching, erase).
+(14.1) and delivery capabilities (idempotency keys, batching, erase).
 
 ## 8. Segmentation engine
 
@@ -423,7 +439,7 @@ The injected clock and evaluator let one engine run three ways. **Test mode**
 clock: conditions read the profile store, effects are captured not executed,
 events can be injected to satisfy waits, and the UI shows the path.
 **Simulation tests** run thousands of enrollments over virtual months with the
-reference evaluator and injected crashes (section 15). **Production** uses wall
+reference evaluator and injected crashes (section 16). **Production** uses wall
 time, with due-time comparisons in SQL.
 
 ## 10. Channels, destinations and delivery tracking
@@ -444,7 +460,7 @@ send time** (consent can change while a person waits):
 | 4 | Suppression check on the address hash | `skipped: suppressed` |
 | 5 | Frequency cap per person, channel, window; check-and-record under a per-person transaction advisory lock | `skipped: frequency_cap` or deferred (configurable) |
 | 6 | Quiet hours in the recipient's time zone | deferred to the next allowed time |
-| 7 | Template render (strict undefined, sandboxed) | `failed: render_error` |
+| 7 | Template render (section 11; sandboxed, strict undefined) | `failed: render_error` |
 | 8 | Destination rate limit | deferred until a token is available |
 | 9 | Deliver with idempotency key | `sent`, retried, or `failed` |
 
@@ -455,13 +471,108 @@ the operator configures; it does not decide which legal regime applies.
 
 ### 10.2 Email, tracking and feedback
 
-- **Templates:** MiniJinja in a sandbox (no filesystem or network; fuel, recursion and output limits), HTML + text parts, versions, preview with a real or sample person, test sends. Marketing templates must contain an unsubscribe link (publish fails otherwise); messages carry `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058 one-click).
+- **Templates:** content model, builder, rendering, validation and preview are in section 11. Marketing email must contain an unsubscribe link (publish fails otherwise); messages carry `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058 one-click).
 - **Categories:** `marketing` or `transactional`. Transactional skips the marketing-consent gate, never suppression; a dedicated transactional API is OQ-11. DKIM and signing domains are the relay's or provider's job (documented).
 - **Tracking:** open pixel `/t/o/{token}`, click redirect `/t/c/{token}`, unsubscribe page and one-click endpoint `/u/{token}` on `server.public_url`. Tokens are HMAC-signed (message id, link index, no personal data); redirects only go to links recorded for that message.
 - **Feedback:** provider webhooks map to `email.delivered`, `email.bounced` (`hard`/`soft`), `email.complained`; hard bounce and complaint add a suppression. SMTP-only bounce handling is OQ-12. Engagement events (`email.opened`, `email.clicked`, `email.unsubscribed`) are ordinary person events usable in segments and waits; opens are low-confidence because some clients prefetch images (OQ-10).
 - **Webhooks and sync:** outbound webhooks are HMAC-signed with a timestamp and send `Idempotency-Key`, with timeout and retries. Keeping a segment in an external system is a flow (entry: `action.sync` upsert; exit: remove), not a second mechanism. Deletion and erasure call the destination's remove/erase capability where declared.
 
-## 11. Queue and scheduler
+## 11. Templates and the builder
+
+A template is Zirv Flow's own channel-aware content document, stored as
+versioned JSON, edited in the React builder and rendered server-side in Rust per
+channel (ADR-006). Preview and send call the same renderer
+(`zirv-flow-templates`). v1.0 builds email and webhook content. SMS, push and
+in-app content types are defined in the schema from day one, and their builders
+ship with those channels after 1.0. M6 ships code templates (MiniJinja HTML and
+text); M7 adds the block builder on the same renderer.
+
+### 11.1 Content model
+
+```json
+{ "schema": 1, "channel": "email", "mode": "blocks",
+  "email": { "subject": "{{ person.first_name | default('Hi') }}, your order shipped",
+             "preheader": "Tracking inside", "sender": "snd_0192f4a1", "lang": "en",
+             "body": [ { "type": "section", "columns": [[ { "type": "heading", "level": 1, "text": "On its way" } ]] },
+                       { "type": "snippet", "ref": "snp_0192f4b7" } ] } }
+```
+
+| Channel | Content type | v1.0 editor |
+|---------|--------------|-------------|
+| `email` | Subject, preheader, sender identity, reply-to, `lang`, body as blocks or as code (HTML + text) | Block builder, code mode |
+| `webhook` | Headers and a JSON body template; the destination supplies URL and signing | Payload editor (11.7) |
+| `sms` | Text and sender id, with encoding and segment-length rules | Reserved: validated, not publishable |
+| `push` | Title, body, image, deep link, data | Reserved |
+| `in_app` | Title, body, image, call to action | Reserved |
+
+- Every document carries an integer `schema`. The server reads older schemas through migrations (11.8) and refuses newer ones.
+- `mode` is `blocks` or `code`. Code mode (raw HTML + text with MiniJinja) is the escape hatch. Conversion is one-way: blocks to code produces HTML and text with merge tags kept; code to blocks is never offered.
+- Reserved channel types define typed fields and length rules now, so content and validation keep their shape when those builders ship.
+
+### 11.2 Email block set v1
+
+| Block | Content | Notes |
+|-------|---------|-------|
+| `section` | Row of 1 to 3 columns, each a list of blocks; background, padding | Columns stack on narrow screens; sections do not nest |
+| `heading` | Level 1 to 3, text | Theme font and colour |
+| `text` | Rich text: paragraphs, bold, italic, underline, links, lists, line breaks | Sanitized against an allowlist on save and on render |
+| `image` | Asset, alt text, optional link, width | From the asset library (11.3) |
+| `button` | Label, URL, alignment | Theme colours |
+| `divider`, `spacer` | Style; height | |
+| `raw_html` | The marketer's own HTML | Passed through as `mj-raw`; never rendered unsandboxed in the app (14.1) |
+| `snippet` | Reference to a snippet | Resolved at render time to the snippet's current published version |
+
+Any block may carry a visibility condition (11.4). Styling is limited to theme
+tokens and a small set of spacing and alignment values. The set grows only
+under the block-set growth policy (OQ-23).
+
+### 11.3 Brand theme, snippets, assets
+
+- **Brand theme:** one per workspace, versioned: colours (primary, text, background, link), font stacks (web-safe, optional web font URL), logo asset, default footer snippet (postal address, unsubscribe link). Blocks reference theme tokens, so a theme change restyles templates at their next render without republishing.
+- **Snippets:** versioned block lists (legal footer, signature). Snippets cannot contain snippet references, so there are no cycles. Templates render a snippet's current published version; publishing a snippet lists the templates and active flows that use it.
+- **Assets:** raster images only (PNG, JPEG, GIF, WebP; no SVG), with the type sniffed from the bytes rather than taken from the client, and per-file and per-workspace limits (OQ-21). The baseline (ADR-003) stores them in Postgres and serves them content-addressed from `server.public_url` under `/a/` with immutable cache headers and `nosniff`. An asset referenced by any published version cannot be deleted, because sent emails keep pointing at it. S3-compatible object storage is an optional later add-on; large sends should put a CDN or caching proxy in front of `/a/`.
+
+### 11.4 Personalization and conditions
+
+- **Merge tags:** a picker fed by the field registry (traits by type), the event catalog (trigger event properties), the brand theme and system values (unsubscribe and preference URLs) inserts MiniJinja expressions such as `{{ person.first_name | default("there") }}`. The sandbox is unchanged: no filesystem or network, fuel, recursion and output limits, strict undefined, HTML autoescape in HTML fields.
+- **Visibility conditions:** a block may carry a segment-AST condition ("in segment VIP", "country is DK"). The renderer lists a template's conditions; the send or preview handler evaluates them for the person in one call through the existing `ConditionEvaluator` and passes the results in. Preview shows which blocks are hidden and why, using explain (8.3).
+
+### 11.5 Rendering pipeline
+
+1. Load the template version and the current published theme and snippet versions.
+2. Migrate the document to the current schema in memory (11.8).
+3. Resolve snippets, apply theme tokens, drop blocks whose condition is false.
+4. Render every text field (subject, preheader, text, labels, URLs, alt text) through MiniJinja with the person and trigger context.
+5. Emit MJML and render it to responsive HTML with the `mrml` crate.
+6. Generate the text part from the block tree (headings, paragraphs, links as `label: url`), not by scraping the HTML.
+7. Post-render: rewrite links for click tracking, bind the required `marketing` unsubscribe footer to the message's signed URLs, add the `List-Unsubscribe` headers. Preview runs this step with inert tokens.
+
+Code mode runs steps 4 (on the whole HTML and text) and 7; webhook content
+renders as in 11.7. Output is deterministic: no clock reads, random ids or
+map-order dependence, so equal inputs give equal bytes. Golden tests and the
+preview-equals-send test rely on this.
+
+### 11.6 Validation
+
+- **Blocks publish:** a merge field unknown to the registry or event catalog; MiniJinja syntax errors; a `marketing` email without an unsubscribe link (own or from the theme footer); a missing sender identity; a broken reference (snippet, asset, theme, segment in a condition); a document failing its schema or the sanitizer; raw HTML that `mrml` cannot parse; a webhook body that is not valid JSON after a sample render.
+- **Warns:** images without alt text; HTML size near the clipping threshold of common mail clients (about 100 KB); missing `lang`; subject or preheader beyond typical display length; links not using `https`.
+
+### 11.7 Versions, preview, test sends, webhook payloads
+
+- **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing shows the active flows that use the template. Version history and where-used are available for templates and snippets.
+- **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`) or a sample person built from registry types, at desktop and mobile widths. The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks and validation results.
+- **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
+- **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
+
+### 11.8 Document schema migrations
+
+A migration is a pure function from schema `N` to `N + 1`, and reads chain them.
+Published versions are stored as saved and never rewritten; drafts are upgraded
+when saved. Each migration ships with golden tests: a schema-`N` fixture
+migrates to the expected document and renders byte-identically. The builder
+refuses a document whose schema is newer than the server's.
+
+## 12. Queue and scheduler
 
 `jobs(id, workspace_id, kind, payload, priority, run_at, state, attempts,
 max_attempts, lease_token, lease_expires_at, locked_by, unique_key, last_error)`
@@ -470,7 +581,7 @@ unique index on `unique_key WHERE state IN ('ready','running')`. `schedules(kind
 cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
 `ingest.drain`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
 `flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
-`privacy.export`, `privacy.erase`, `maintenance.*`.
+`template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
 
 ```sql
 -- Claim: short transaction, committed before the handler runs.
@@ -494,7 +605,7 @@ DELETE FROM jobs WHERE id = $id AND lease_token = $token;
 | Hygiene | Completed jobs are deleted at once (history only for failures/dead); aggressive autovacuum on `jobs`; applied inbox rows deleted; dead-tuple counts exported as metrics. |
 | Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is OQ-8. |
 
-## 12. API and UI
+## 13. API and UI
 
 REST under `/api/v1`, JSON, OpenAPI 3.1 (utoipa, committed). Workspace resources
 live under `/api/v1/workspaces/{ws}/...`. Cursor pagination,
@@ -507,7 +618,8 @@ as SHA-256 hashes, workspace-scoped, with scopes `ingest` (write-only), `read`,
 `write`, `admin`. OIDC SSO later (OQ-16). **Public endpoints:**
 `/api/v1/ingest/{identify,track,batch}` (ingestion key implies workspace; size
 and per-key rate limits; schema validation; `202` after durable append),
-`/hooks/{id}` (HMAC signature), `/t/*` and `/u/*` (signed tokens).
+`/hooks/{id}` (HMAC signature), `/t/*` and `/u/*` (signed tokens), `/a/*`
+(content-addressed image assets, read-only).
 
 The SPA (TypeScript, React, Vite, React Flow) is served from `/` (history
 fallback, hashed assets, strict CSP). Every destructive or bulk action previews
@@ -519,12 +631,13 @@ its impact first, such as how many people would enter a flow now.
 | People | people, timeline, identity-conflicts, traits (registry), event catalog, lists, consent, topics, suppressions | Search; profile with identities by source, traits with provenance, event timeline, consent, lists, segments with explain, messages with gate outcomes; conflict review |
 | Segments | segments, versions, preview, members, people/{id}/explain | Builder over registry and event catalog, live count with data age, sample, membership history |
 | Flows | flows, versions, publish, enrollments, simulate, stats | Canvas editor with inline validation, publish with impact preview, test mode, enrollment inspector, per-node stats |
-| Delivery | destinations, templates, messages | Destinations, templates with preview, topic consent policy, frequency caps, quiet hours |
+| Delivery | destinations, messages, sender identities | Destinations, topic consent policy, frequency caps, quiet hours |
+| Templates | templates, versions, publish, where-used, snippets, brand theme, assets, preview, test-sends | Email block builder with code mode, merge-tag picker, visibility conditions, desktop/mobile preview, test sends; webhook payload editor; snippets, theme, asset library; version history and where-used |
 | Settings | workspaces, members, users, api-keys, audit, privacy/exports, privacy/erasures, jobs, health | Workspaces, members and roles, API keys, audit log, retention, privacy requests, jobs admin |
 
-## 13. Security, privacy and compliance
+## 14. Security, privacy and compliance
 
-### 13.1 Trust boundaries
+### 14.1 Trust boundaries
 
 | Boundary | Threat | Control |
 |----------|--------|---------|
@@ -533,12 +646,16 @@ its impact first, such as how many people would enter a flow now.
 | Tracking, unsubscribe | Enumeration, forged unsubscribes, open redirect | HMAC tokens, no personal data in URLs, recorded-link allowlist |
 | Outbound HTTP | SSRF into internal networks or cloud metadata | Egress policy checked after DNS resolution: deny loopback, private, link-local, metadata ranges unless allowlisted |
 | Templates | Injection, resource exhaustion | MiniJinja sandbox, fuel and output limits |
+| Rich text in blocks | Script or markup injection into emails and the builder | Allowlist sanitizer (tags, attributes, URL schemes) on save and on render |
+| Preview of marketer HTML | Raw HTML block or code mode running script in the app | Shown only in a sandboxed iframe without `allow-scripts` or same-origin, with its own CSP; never rendered unsandboxed in the app. It is the marketer's own content, so it is not sanitized for the email itself. |
+| Asset uploads | Disguised files, SVG script, storage exhaustion | Type sniffed from the bytes, raster allowlist (no SVG), size and quota limits, `nosniff`, served from `/a/` only |
+| Test sends | Use as an open relay | Recipients limited to members' verified addresses or a workspace allowlist; rate-limited |
 | Segment builder | SQL injection | AST only, bind parameters, registry-only identifiers, no raw SQL in v1 |
-| Stored credentials | Database dump exposes secrets | Envelope encryption (13.2) |
+| Stored credentials | Database dump exposes secrets | Envelope encryption (14.2) |
 | Database sources | Over-privileged credentials | Documented read-only roles; connectors open read-only transactions |
 | Logs | Personal data leakage | Log person ids, not identifier values; secrets redacted |
 
-### 13.2 Secrets, RBAC, audit
+### 14.2 Secrets, RBAC, audit
 
 Connector credentials and OAuth tokens use **envelope encryption**: a random
 data key per secret (XChaCha20-Poly1305), wrapped by an operator-held master
@@ -547,20 +664,20 @@ key (`secrets.master_key_file` or env, identified by key id).
 ciphertexts. The API never returns plaintext. A lost master key means
 credentials must be re-entered (documented).
 
-| Role (proposed, confirmed in M7) | Scope | Can |
+| Role (proposed, confirmed in M8) | Scope | Can |
 |------|-------|-----|
 | Owner | Organization | Everything: workspaces, users, instance settings, key rotation |
 | Admin | Workspace | Sources, destinations, credentials, API keys, members, retention |
-| Publisher | Workspace | Editor rights plus publish/pause flows and run imports |
-| Editor | Workspace | Draft segments, flows, templates, lists; previews and test mode |
+| Publisher | Workspace | Editor rights plus publish/pause flows, publish templates, snippets and the brand theme, run imports |
+| Editor | Workspace | Draft segments, flows, templates, snippets, lists; previews, test mode and test sends |
 | Viewer | Workspace | Read only; personal data masked unless granted `view_pii` |
 
-M1 ships owner, admin and member; the full matrix lands in M7. The **audit
+M1 ships owner, admin and member; the full matrix lands in M8. The **audit
 log** is append-only (actor, action, object, time, request id, change summary
 without personal data values) and covers sign-ins, membership and key changes,
 credential access, publishes, imports, exports, erasures and configuration.
 
-### 13.3 Export, erasure and retention
+### 14.3 Export, erasure and retention
 
 **Export** (`privacy.export`) produces JSON of everything held on a person
 (profile, identities, traits with sources, events, consent history, membership
@@ -568,31 +685,33 @@ history, enrollments, messages) behind an expiring link. **Erasure**
 (`privacy.erase`): (1) record the request in the erasure ledger (person id,
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, list members, consent, segment
-memberships, enrollments, step executions, messages, rejects and pending
-exports; (4) call `erase` on destinations that declare it and record results;
-(5) delete the person; (6) write an audit entry without personal data. Each
-milestone that adds a table extends erasure, and a test asserts no row for an
-erased person survives anywhere. Backups keep erased data until they age out;
+memberships, enrollments, step executions, messages, test-send log entries,
+rejects and pending exports, and clear saved preview-person references; (4)
+call `erase` on destinations that declare it and record results; (5) delete
+the person; (6) write an audit entry without personal data. Templates,
+snippets, themes and assets hold no personal data by design. Each milestone
+that adds a table extends erasure, and a test asserts no row for an erased
+person survives anywhere. Backups keep erased data until they age out;
 after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
 defaults, enforced by scheduler jobs): events 25 months deployment-wide (drop
 monthly partitions; batched deletes where a workspace sets less), messages 13
 months, sync rejects 30 days, job failure history 14 days, audit log 2 years.
 
-## 14. Observability and operations
+## 15. Observability and operations
 
 | Area | Design |
 |------|--------|
 | Logs and traces | `tracing`, JSON logs, spans per request and job (request id, job id, kind, workspace, attempt); optional OTLP export later |
-| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status; queue depth by kind/state, claim lag (`now - run_at`), handler duration, retries, dead jobs; ingestion rate, inbox age, rejects; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; DB pool, jobs-table dead tuples |
+| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status; queue depth by kind/state, claim lag (`now - run_at`), handler duration, retries, dead jobs; ingestion rate, inbox age, rejects; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; template render duration and failures; DB pool, jobs-table dead tuples |
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `secrets` (`master_key_file`). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
-| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers. Minimum PostgreSQL version is OQ-15. |
-| Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M7. |
+| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Minimum PostgreSQL version is OQ-15. |
+| Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
 | Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
 
-## 15. Testing strategy
+## 16. Testing strategy
 
 | Layer | Tests |
 |-------|-------|
@@ -601,14 +720,15 @@ months, sync rejects 30 days, job failure history 14 days, audit log 2 years.
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion | Idempotent replay, identity scenario suite, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |
+| `templates` | Golden render corpus per block and per channel; representative email layouts validated through `mrml`; preview-equals-send byte test (tracking tokens excluded); golden tests per document schema migration; sanitizer allowlist tests |
 | API and web | Handler tests on real Postgres, RBAC matrix, OpenAPI drift check; SPA type check and unit tests, browser end-to-end tests from M5 |
-| Performance | Load generator and benchmarks per milestone slice; full validation in M7 |
+| Performance | Load generator and benchmarks per milestone slice; full validation in M8 |
 | Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR |
 
-## 16. Scalability envelope
+## 17. Scalability envelope
 
 Every figure is a **TARGET to validate, not a measurement**; nothing has been
-measured yet. Each milestone measures its slice and M7 validates all of them on
+measured yet. Each milestone measures its slice and M8 validates all of them on
 reference hardware (assumed: PostgreSQL 8 vCPU / 32 GB RAM / NVMe; two
 `zirv-flow` hosts of 4 vCPU). A missed target is fixed or revised in a recorded
 decision, never dropped silently. Beyond the envelope: more workers, a read
@@ -628,10 +748,12 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 | Waiting enrollments; timer lateness | 10 million; p99 < 60 s at that volume |
 | Job throughput | 1,000 jobs/s claimed and completed |
 | Send throughput | 300 messages/s per deployment, provider limits permitting |
+| Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message |
 
-## 17. Key decisions
+## 18. Key decisions
 
-All five are **Accepted (M0)**.
+ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 is **Accepted**; it was
+ruled when the template builder was added to the plan.
 
 ### ADR-001: Sync-first data model
 
@@ -655,7 +777,7 @@ All five are **Accepted (M0)**.
 - **Options.** (1) Postgres + external message broker: more queue throughput, but a second system and dual writes or an outbox relay. (2) Postgres + in-memory store for queues and rate limits: durability gaps, one more service. (3) Postgres only.
 - **Decision.** (3). Postgres is system of record, profile/event store, durable job queue (`FOR UPDATE SKIP LOCKED`, short claim transactions, leases, retries, idempotent handlers, indexed due times) and scheduler; jobs execute outside the claim transaction. External broker only when measured throughput or fan-out justifies it; an analytical event store (e.g. ClickHouse) is an optional later add-on.
 - **Consequences.** One component to operate; transactional enqueue. Queue throughput shares Postgres write capacity; vacuum and bloat need active management; Postgres is the single point of failure (HA = operator's replication).
-- **Reverse if.** At the section 16 targets, queue tables become the dominant write load or claim lag p99 exceeds the timer-lateness target on an otherwise healthy database; campaign fan-out cannot reach the send target because of claim contention; event queries miss preview targets (analytical add-on).
+- **Reverse if.** At the section 17 targets, queue tables become the dominant write load or claim lag p99 exceeds the timer-lateness target on an otherwise healthy database; campaign fan-out cannot reach the send target because of claim contention; event queries miss preview targets (analytical add-on).
 
 ### ADR-004: Extension model
 
@@ -673,7 +795,15 @@ All five are **Accepted (M0)**.
 - **Consequences.** From M1 every merge is a release: migrations, config and API changes must be release-safe in every PR, and versioning must be automated. Before M1 a maintainer must remember to dispatch.
 - **Reverse if.** Per-merge releases cause measurable user harm (a broken release reaches users, or operators report upgrade churn); then batched or tagged releases.
 
-## 18. Open questions
+### ADR-006: Template builder
+
+- **Context.** Marketers must build content for every channel without writing HTML. Email HTML has to render across clients with very uneven CSS support. Merge fields, unsubscribe links and sender identities must be checked against Zirv Flow's own registry and consent model at publish, and preview must show exactly what will be sent. Rendering runs in Rust on the server for both preview and send, and must be deterministic for golden tests.
+- **Options.** (1) Zirv Flow's own channel-aware block document (versioned JSON) with a server-side Rust renderer. (2) Embed an open-source JavaScript email editor and store the HTML it produces, with form editors for other channels: fast to start, but the stored HTML is opaque to merge-field and compliance checks, every channel gets a different model, and the embedded editor's format and output changes become dependencies Zirv Flow does not control. (3) Code-only templates (status quo): nothing to maintain, but marketers write responsive email HTML by hand, which is the problem being solved.
+- **Decision.** (1). The React builder edits the block document. Rust renders it per channel: email blocks become MJML and then responsive HTML via the `mrml` crate, plus a generated text part; webhook content (later SMS, push and in-app) renders from typed content schemas. Code mode (raw HTML + text with MiniJinja) stays as an escape hatch, one-way only: blocks to code is allowed, code to blocks never. Preview uses the same renderer as send. The first release is narrow: a small email block set, typed forms for other channels, explicit document schema versions. Representative email layouts are validated through `mrml` before the initial block set is committed (an M7 exit criterion). v1.0 covers email and webhook payloads; SMS, push and in-app content types are reserved in the schema, and their builders ship with those channels after 1.0.
+- **Consequences.** Zirv Flow owns the editor and the document schema migrations; this cost is accepted. Structured content makes validation, personalization checks and preview-equals-send possible. `mrml` becomes a key dependency, so its MJML gaps become Zirv Flow's. Each block added is a permanent migration commitment (OQ-23). The raw HTML block and code mode escape most structural checks other than parsing, size and the required unsubscribe link.
+- **Reverse if.** Block-set requests consistently outpace delivery, so marketers fall back to code mode for common layouts; or `mrml` output fails client compatibility for representative layouts and cannot be fixed or worked around.
+
+## 19. Open questions
 
 | ID | Question | Decide by |
 |----|----------|-----------|
@@ -684,16 +814,21 @@ All five are **Accepted (M0)**.
 | OQ-5 | Is the bounded transform set enough, or is a small expression language needed for mapping? | M3 |
 | OQ-6 | Do membership changes from a definition edit trigger flows? (Proposed: no.) | M4 |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
-| OQ-8 | Cross-workspace fairness in the shared queue: per-workspace concurrency limits or weighted claiming? | M1 design, M7 validation |
+| OQ-8 | Cross-workspace fairness in the shared queue: per-workspace concurrency limits or weighted claiming? | M1 design, M8 validation |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
 | OQ-11 | Scope and timing of a dedicated transactional messaging API | M6 |
 | OQ-12 | Bounce handling for SMTP-only setups without provider webhooks (VERP, DSN mailbox polling)? | M6 |
-| OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M7 |
+| OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
 | OQ-14 | Should flows pause sends automatically when an input source is stale? | M5 |
 | OQ-15 | Minimum supported PostgreSQL version | M1 |
-| OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? | M7 |
+| OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? | M8 |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
-| OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M8 |
+| OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
 | OQ-19 | Suppression scope: per workspace only, or also organization-wide across brands? | M6 |
 | OQ-20 | Browser and mobile SDKs for identify/track, or HTTP API only in v1? | M2 |
+| OQ-21 | Asset limits: per-file size, per-workspace quota, and when object storage becomes required rather than optional | M7 |
+| OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
+| OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
+| OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
+| OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M7, before the block set is frozen |

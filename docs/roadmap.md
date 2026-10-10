@@ -2,7 +2,7 @@
 
 This plan takes Zirv Flow from an empty repository to v1.0 and lists the themes
 after it. The design is in [architecture.md](architecture.md); the binding
-decisions are in [architecture.md section 17](architecture.md#17-key-decisions). Every milestone ships the API and the UI
+decisions are in [architecture.md section 18](architecture.md#18-key-decisions). Every milestone ships the API and the UI
 for its own feature, so there is no separate UI milestone.
 
 No dates or effort estimates: there is no throughput data yet.
@@ -26,8 +26,9 @@ No dates or effort estimates: there is no throughput data yet.
 | M4 — Segmentation v1 | Segments marketers can build, explain and trust; membership changes become events | M2 |
 | M5 — Flow engine v1 | Durable, versioned, testable flows | M4 |
 | M6 — Channels and destinations v1 | Compliant email and webhooks, profile sync, delivery feedback as events | M3, M5 |
-| M7 — Beta hardening and v1.0 | Production readiness validated against the targets; v1.0 | M3, M4, M5, M6 |
-| M8 — Post-1.0 themes | Hold post-1.0 themes until each is promoted to its own milestone | M7 |
+| M7 — Template builder | Email and webhook content built without code; preview rendered by the same code that sends | M6 |
+| M8 — Beta hardening and v1.0 | Production readiness validated against the targets; v1.0 | M3, M4, M5, M6, M7 |
+| M9 — Post-1.0 themes | Hold post-1.0 themes until each is promoted to its own milestone | M8 |
 
 ```mermaid
 flowchart LR
@@ -38,8 +39,9 @@ flowchart LR
   M4 --> M5[M5 Flow engine v1]
   M3 --> M6[M6 Channels and destinations v1]
   M5 --> M6
-  M6 --> M7[M7 Beta hardening and v1.0]
-  M7 --> M8[M8 Post-1.0 themes]
+  M6 --> M7[M7 Template builder]
+  M7 --> M8[M8 Beta hardening and v1.0]
+  M8 --> M9[M9 Post-1.0 themes]
 ```
 
 M3 and M4 can run in parallel after M2: segmentation can be built and tested
@@ -51,7 +53,7 @@ on data from the identify/track API and CSV import.
 - **Isolation:** every new table carries `workspace_id` and is covered by the workspace isolation test.
 - **Deletion and erasure** reach every table the milestone adds; the erasure table-scan test is extended, never bypassed.
 - **Telemetry and audit:** new job kinds and endpoints get metrics and spans; new mutating admin actions write audit entries.
-- **Measurement:** the milestone measures its slice of the targets (architecture section 16) and attaches the numbers. A miss becomes an issue; it blocks only where an exit criterion says so.
+- **Measurement:** the milestone measures its slice of the targets (architecture section 17) and attaches the numbers. A miss becomes an issue; it blocks only where an exit criterion says so.
 - **Docs:** user-facing behaviour is documented in the PR that ships it.
 
 ## M0 — Foundations
@@ -69,7 +71,7 @@ plan before any product code exists.
 - `scripts/`: test-presence gate, advisory security scan, changelog generator, each with `--self-test`.
 - A minimal Rust 2024 crate `zirv-flow` (one binary) so every gate runs real code.
 - GitHub settings: description, topics, discussions, "Protected Main" and "Protected Tags" rulesets, labels `security` and `severity:{blocker,major,minor}`, read-only default Actions token.
-- `docs/architecture.md`, `docs/roadmap.md`, and GitHub milestones M0 to M8.
+- `docs/architecture.md`, `docs/roadmap.md`, and GitHub milestones M0 to M9.
 
 **Out of scope.** Product functionality, the Cargo workspace split, the frontend
 toolchain, the container image.
@@ -80,7 +82,7 @@ toolchain, the container image.
 - [ ] The four cargo gates and every script `--self-test` pass locally and in CI.
 - [ ] `cd.yaml` has no push trigger, so the skeleton is never published.
 - [ ] `gh api` shows the rulesets, labels, description, topics, discussions and token permissions as specified.
-- [ ] GitHub milestones `M0 — Foundations` to `M8 — Post-1.0 themes` exist with titles identical to this file's headings.
+- [ ] GitHub milestones `M0 — Foundations` to `M9 — Post-1.0 themes` exist with titles identical to this file's headings.
 - [ ] A case-insensitive search of tree, commits and PR body for other marketing or workflow automation product names finds nothing.
 
 **Dependencies.** None.
@@ -203,7 +205,7 @@ segments, federated sources.
 - [ ] A time-window segment ("no order in 30 days") gains members as the injected clock advances, with no new data.
 - [ ] A segment reference cycle is rejected at save, with an error that names the cycle.
 - [ ] Explain shows, for one person, which conditions matched and the observed values.
-- [ ] Preview and full-refresh benchmarks at 10 million people are attached, measured against the section 16 targets.
+- [ ] Preview and full-refresh benchmarks at 10 million people are attached, measured against the section 17 targets.
 
 **Dependencies.** M2 (M3 not required).
 
@@ -231,7 +233,7 @@ enrollments, A/B test statistics.
 - [ ] When an awaited event races its timeout, exactly one path is taken (test).
 - [ ] A segment-entry trigger for 100,000 people enrolls each exactly once under re-entry rule `once`.
 - [ ] Test mode in the UI walks a person through a flow and shows the path and captured effects, with no side effects.
-- [ ] Timer lateness at 1 million waiting enrollments is measured and attached against the section 16 target.
+- [ ] Timer lateness at 1 million waiting enrollments is measured and attached against the section 17 target.
 
 **Dependencies.** M4 (and through it M2 and M1).
 
@@ -243,17 +245,18 @@ systems, and feed delivery and engagement back as events.
 **Scope.**
 - **Destinations.** `Destination` trait on the M3 connector runtime, with capability flags (idempotency, batching, rate limits, erase).
 - **Email.** SMTP destination; email-provider HTTP API destinations (built in or manifest); sender identities; a guide to DKIM and domain setup at the relay or provider.
-- **Templates.** MiniJinja sandbox, versions, HTML and text parts, preview with a real or sample person, test sends, required unsubscribe link for the marketing category.
+- **Templates (code mode).** The pure `zirv-flow-templates` renderer with MiniJinja HTML and text parts: sandbox, versions, preview with a real or sample person through the send renderer, test sends, required unsubscribe link for the marketing category. M7 builds the block builder on it.
 - **Send pipeline.** Consent under the topic policy, suppression, frequency caps, quiet hours, render, rate limit, deliver; a `messages` log with skip reasons.
 - **Tracking.** Open pixel, click redirect with recorded-link allowlist, unsubscribe page, RFC 8058 one-click, topic preference center.
 - **Feedback.** Provider webhooks become `email.delivered`/`bounced`/`complained` events; hard bounces and complaints suppress automatically.
 - **Flow nodes.** `action.send`, `action.sync`; the webhook action moves onto the destination runtime.
 - **Deletion and erasure.** Messages erased; destination `erase` called where declared; suppression hashes retained.
-- **UI.** Destination setup, template editor with preview, topics and consent policy, frequency caps and quiet hours, per-person message log ("why was this not sent"), per-node delivery stats.
+- **UI.** Destination setup, code template editor with preview, topics and consent policy, frequency caps and quiet hours, per-person message log ("why was this not sent"), per-node delivery stats.
 - **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope).
 
 **Out of scope.** SMS, push, ad audiences, running an MTA, deliverability tools
-(seed tests, warm-up), a transactional API unless OQ-11 decides otherwise.
+(seed tests, warm-up), a transactional API unless OQ-11 decides otherwise, the
+block builder (M7).
 
 **Exit criteria.**
 - [ ] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
@@ -262,11 +265,45 @@ systems, and feed delivery and engagement back as events.
 - [ ] Quiet hours defer a send to the next allowed local time, including across a DST change (injected clock test).
 - [ ] N workers together stay within the configured destination rate, within a stated tolerance.
 - [ ] A retried delivery job reuses its idempotency key; providers that honour keys show zero duplicates in fixture tests.
-- [ ] Send throughput benchmark attached against the section 16 target.
+- [ ] Send throughput benchmark attached against the section 17 target.
 
 **Dependencies.** M5 (flow actions) and M3 (connector runtime, manifests, secrets).
 
-## M7 — Beta hardening and v1.0
+## M7 — Template builder
+
+**Goal.** Marketers build email and webhook content without code in a
+channel-aware block builder whose preview is rendered by the same Rust code
+that sends (architecture section 11, ADR-006).
+
+**Scope.**
+- **Validate `mrml` first.** Render the representative layout set through `mrml` and check it against the client matrix (OQ-25) before the v1 block set is frozen.
+- **Content model.** Versioned JSON document with explicit `schema` numbers; email and webhook content types; SMS, push and in-app types reserved in the schema; document migrations as pure functions with golden tests.
+- **Renderer.** Block documents in `zirv-flow-templates`: theme tokens, snippet resolution, MiniJinja per text field, MJML via `mrml`, generated text part, post-render tracking and unsubscribe binding, deterministic output. Code mode stays; blocks-to-code conversion is one-way.
+- **Block editor UI.** Email block set v1 (sections with 1 to 3 columns, heading, sanitized rich text, image, button, divider, spacer, raw HTML, snippet), reordering, per-block settings, inline validation.
+- **Brand theme and snippets.** Theme editor (colours, fonts, logo, default footer); versioned snippets with where-used.
+- **Assets.** Image upload into Postgres with sniffed type, raster allowlist (no SVG), size and quota limits (OQ-21); content-addressed public serving from `/a/`; asset library.
+- **Personalization.** Merge-tag picker fed by the field registry and event catalog; per-block visibility conditions on the segment AST, evaluated through the `ConditionEvaluator`.
+- **Preview and test sends.** Server-side preview as a real or sample person at desktop and mobile widths, shown in a sandboxed iframe; test sends only to verified member addresses or a workspace allowlist.
+- **Webhook payload editor.** JSON body template and headers with a sample-payload preview.
+- **Versions.** Publish validation (blocking errors and warnings), immutable versions, version history, where-used for templates and snippets, active flows shown on publish; message rows record template, snippet and theme versions.
+- **Erasure.** Test-send log entries and saved preview-person references are covered.
+- **Decisions.** OQ-21 (asset limits), OQ-22 (dark mode), OQ-23 (block-set growth), OQ-24 (localization), OQ-25 (layout set and client matrix).
+
+**Out of scope.** SMS, push and in-app builders and channels; AMP email; landing
+pages and forms; machine-generated content; blocks beyond the v1 set.
+
+**Exit criteria.**
+- [ ] The representative layout set renders through `mrml` and passes the client-matrix check before the block set is frozen; results attached.
+- [ ] A browser end-to-end test builds the reference newsletter layout without code and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
+- [ ] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected.
+- [ ] After a snippet update is published, later sends use it, and the message log records the template, snippet and theme versions each message used.
+- [ ] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
+- [ ] A raw HTML block containing a script runs no script in the app preview, and an SVG or type-mismatched upload is rejected (tests).
+- [ ] Render benchmark attached against the section 17 target (p95 < 50 ms for a typical block email).
+
+**Dependencies.** M6 (renderer, send pipeline, destinations), and through it M5.
+
+## M8 — Beta hardening and v1.0
 
 **Goal.** Make Zirv Flow safe for a small team to run in production, validate it
 against the scalability targets, and release v1.0.
@@ -276,30 +313,30 @@ against the scalability targets, and release v1.0.
 - **Audit.** Complete coverage, a UI with filters, export.
 - **Secrets.** Master key rotation (re-wrap); documentation of what losing the key means.
 - **Privacy.** End-to-end export and erasure across all tables including derived data; erasure ledger replay after restore (OQ-13 decided); retention policies with enforcement jobs and a UI.
-- **Performance.** Full benchmark suite against every section 16 target on the reference hardware, with fixes. An unmeetable target is revised through a recorded decision.
+- **Performance.** Full benchmark suite against every section 17 target on the reference hardware, with fixes. An unmeetable target is revised through a recorded decision.
 - **Operations.** Backup/restore guide with a rehearsed restore drill; upgrade guide with a tested upgrade of a populated database from the previous release; sizing and Postgres tuning; runbooks for the main alerts.
-- **Security.** Threat model review, dependency audit, fuzzing of the AST and manifest parsers, SSRF and template sandbox tests.
-- **User docs.** Getting started, sources, segments, flows, channels, and a compliance guide stating what Zirv Flow enforces and what stays the operator's responsibility.
+- **Security.** Threat model review, dependency audit, fuzzing of the AST, manifest and template document parsers, SSRF, template sandbox, sanitizer and preview-isolation tests.
+- **User docs.** Getting started, sources, segments, flows, templates, channels, and a compliance guide stating what Zirv Flow enforces and what stays the operator's responsibility.
 - **API stability.** `/api/v1` frozen: additive changes only after 1.0. A beta period with release candidates.
 - **Decisions.** OQ-8 validated under load; OQ-16 (OIDC for 1.0) decided.
 
-**Out of scope.** New features; M8 themes unless OQ-16 pulls OIDC in.
+**Out of scope.** New features; M9 themes unless OQ-16 pulls OIDC in.
 
 **Exit criteria.**
 - [ ] The RBAC matrix test covers every endpoint and role; a viewer without `view_pii` sees personal data masked.
 - [ ] After erasure, a scan of every table finds only the suppression hash and the ledger entry; default-level logs hold no identifier values; destinations that declare erase received requests.
 - [ ] Restore drill: restore a backup, replay the erasure ledger, confirm erased people stay erased.
 - [ ] Upgrade drill: a populated database from the previous release upgrades to v1.0 and passes data-integrity checks.
-- [ ] A benchmark report covering every section 16 target is published in the docs, with no unexplained miss.
+- [ ] A benchmark report covering every section 17 target is published in the docs, with no unexplained miss.
 - [ ] Zero open `severity:blocker` or `severity:major` issues in this milestone.
 - [ ] v1.0.0 is published as a GitHub release and a GHCR image, with complete user and operator docs.
 
-**Dependencies.** M3, M4, M5, M6.
+**Dependencies.** M3, M4, M5, M6, M7.
 
-## M8 — Post-1.0 themes
+## M9 — Post-1.0 themes
 
 **Goal.** Hold the prioritized post-1.0 themes until each is promoted to its own
-milestone (M9, M10, ...) with full scope and exit criteria, before work starts.
+milestone (M10, M11, ...) with full scope and exit criteria, before work starts.
 
 **Scope (themes).**
 
@@ -307,12 +344,13 @@ milestone (M9, M10, ...) with full scope and exit criteria, before work starts.
 |-------|---------|---------------------------|
 | Warehouse sources | Incremental sync from analytical warehouses and lakehouse tables | Operators whose people data lives in a warehouse |
 | Federated live sources | ADR-001's later mode for data that cannot or must not be copied (OQ-18) | Deployments blocked by copy restrictions |
-| More channels | SMS, mobile push, in-app messages | Demand once email is stable |
+| More channels | SMS, mobile push and in-app messages, each arriving with its builder on the content types already reserved in the template model | Demand once email is stable |
+| Template builder growth | More email blocks under the growth policy (OQ-23), localized variants (OQ-24) if not in v1.0, object storage for assets | Block requests, code-mode fallback for common layouts |
 | Ad-audience sync | Hashed identifiers to advertising platforms, with deletion propagation | Demand, plus a consent model for that purpose |
 | WASM component plugins | Sandboxed third-party connectors (ADR-004) | ADR-004's reversal evidence |
 | Analytical event store | Optional add-on for event-heavy segments and reporting (ADR-003) | Event queries missing preview targets |
 | Reporting and attribution | Flow and campaign performance, conversion attribution | v1.0 users needing more than per-node counters |
-| Identity and access | OIDC SSO (unless done in M7), SCIM provisioning | Team deployments asking for it |
+| Identity and access | OIDC SSO (unless done in M8), SCIM provisioning | Team deployments asking for it |
 | Platform | Custom objects (OQ-4), rolling upgrades (OQ-17), flow version migration (OQ-7), transactional API (OQ-11) | Each open question's decision |
 
 **Out of scope.** Starting work on a theme before it has its own milestone.
@@ -320,4 +358,4 @@ milestone (M9, M10, ...) with full scope and exit criteria, before work starts.
 **Exit criteria.**
 - [ ] Every theme is either promoted to its own milestone (goal, scope, out of scope, exit criteria, dependencies) or dropped with a recorded reason.
 
-**Dependencies.** M7.
+**Dependencies.** M8.
