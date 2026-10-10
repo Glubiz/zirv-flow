@@ -22,6 +22,7 @@ enum StoreErrorKind {
     ApplyMigrations,
     NewerSchema(i64),
     DirtyMigration(i64),
+    ModifiedMigration(i64),
 }
 
 impl StoreError {
@@ -41,6 +42,9 @@ impl StoreError {
                 Self::new(StoreErrorKind::NewerSchema(version))
             }
             MigrateError::Dirty(version) => Self::new(StoreErrorKind::DirtyMigration(version)),
+            MigrateError::VersionMismatch(version) => {
+                Self::new(StoreErrorKind::ModifiedMigration(version))
+            }
             source => Self::with_source(StoreErrorKind::ApplyMigrations, source),
         }
     }
@@ -57,6 +61,10 @@ impl StoreError {
         Self::new(StoreErrorKind::DirtyMigration(version))
     }
 
+    fn modified_migration(version: i64) -> Self {
+        Self::new(StoreErrorKind::ModifiedMigration(version))
+    }
+
     fn new(kind: StoreErrorKind) -> Self {
         Self { kind, source: None }
     }
@@ -69,15 +77,29 @@ impl StoreError {
     }
 }
 
+impl StoreError {
+    fn write_source(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.source {
+            Some(source) => write!(formatter, ": {source}"),
+            None => Ok(()),
+        }
+    }
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
-            StoreErrorKind::Connect => formatter.write_str("could not connect to PostgreSQL"),
+            StoreErrorKind::Connect => {
+                formatter.write_str("could not connect to PostgreSQL")?;
+                self.write_source(formatter)
+            }
             StoreErrorKind::InspectSchema => {
-                formatter.write_str("could not inspect the database schema")
+                formatter.write_str("could not inspect the database schema")?;
+                self.write_source(formatter)
             }
             StoreErrorKind::ApplyMigrations => {
-                formatter.write_str("could not apply database migrations")
+                formatter.write_str("could not apply database migrations")?;
+                self.write_source(formatter)
             }
             StoreErrorKind::NewerSchema(version) => write!(
                 formatter,
@@ -86,6 +108,10 @@ impl fmt::Display for StoreError {
             StoreErrorKind::DirtyMigration(version) => {
                 write!(formatter, "migration {version} is partially applied")
             }
+            StoreErrorKind::ModifiedMigration(version) => write!(
+                formatter,
+                "migration {version} was changed after it was applied; restore the original migration file"
+            ),
         }
     }
 }

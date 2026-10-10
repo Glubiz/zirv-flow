@@ -13,6 +13,7 @@ pub enum SchemaState {
     Pending { count: usize },
     Newer { version: i64 },
     Dirty { version: i64 },
+    Modified { version: i64 },
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
@@ -28,6 +29,8 @@ pub(crate) async fn migrate_with(
     migrator: &Migrator,
 ) -> Result<Vec<i64>, StoreError> {
     let mut connection = pool.acquire().await.map_err(StoreError::apply_migrations)?;
+    // The session may hold the advisory lock, so this connection must never return to the pool.
+    connection.close_on_drop();
     connection.lock().await.map_err(StoreError::migration)?;
 
     let state = match load_schema_state(&mut connection, migrator).await {
@@ -40,6 +43,7 @@ pub(crate) async fn migrate_with(
     let schema_error = match state.state {
         SchemaState::Newer { version } => Some(StoreError::newer_schema(version)),
         SchemaState::Dirty { version } => Some(StoreError::dirty_migration(version)),
+        SchemaState::Modified { version } => Some(StoreError::modified_migration(version)),
         SchemaState::UpToDate | SchemaState::Pending { .. } => None,
     };
     if let Some(error) = schema_error {
@@ -60,6 +64,7 @@ pub(crate) async fn migrate_with(
             Ok(pending)
         }
         Err(error) => {
+            // `run_direct` re-locks the reentrant lock and returns early on error, so unlock twice.
             let _ = connection.unlock().await;
             let _ = connection.unlock().await;
             Err(StoreError::migration(error))
@@ -90,8 +95,8 @@ async fn load_schema_state(
             .await
             .map_err(StoreError::inspect_schema)?;
 
-    let rows: Vec<(i64, bool)> = if table_exists {
-        sqlx::query_as("SELECT version, success FROM _sqlx_migrations ORDER BY version")
+    let rows: Vec<(i64, bool, Vec<u8>)> = if table_exists {
+        sqlx::query_as("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&mut *connection)
             .await
             .map_err(StoreError::inspect_schema)?
@@ -99,16 +104,16 @@ async fn load_schema_state(
         Vec::new()
     };
 
-    if let Some((version, _)) = rows.iter().find(|(_, success)| !success) {
+    if let Some((version, _, _)) = rows.iter().find(|(_, success, _)| !success) {
         return Ok(LoadedSchemaState {
             state: SchemaState::Dirty { version: *version },
             applied: HashSet::new(),
         });
     }
 
-    if let Some((version, _)) = rows
+    if let Some((version, _, _)) = rows
         .iter()
-        .find(|(version, _)| !migrator.version_exists(*version))
+        .find(|(version, _, _)| !migrator.version_exists(*version))
     {
         return Ok(LoadedSchemaState {
             state: SchemaState::Newer { version: *version },
@@ -116,9 +121,22 @@ async fn load_schema_state(
         });
     }
 
+    if let Some((version, _, _)) = rows.iter().find(|(version, _, checksum)| {
+        migrator.iter().any(|migration| {
+            migration.migration_type.is_up_migration()
+                && migration.version == *version
+                && migration.checksum.as_ref() != checksum.as_slice()
+        })
+    }) {
+        return Ok(LoadedSchemaState {
+            state: SchemaState::Modified { version: *version },
+            applied: HashSet::new(),
+        });
+    }
+
     let applied = rows
         .into_iter()
-        .map(|(version, _)| version)
+        .map(|(version, _, _)| version)
         .collect::<HashSet<_>>();
     let pending = migrator
         .iter()
@@ -191,7 +209,11 @@ mod tests {
             schema_state_with(&pool, &migrator).await.unwrap(),
             SchemaState::Newer { version: 999 }
         );
-        assert!(migrate_with(&pool, &migrator).await.is_err());
+        let error = migrate_with(&pool, &migrator).await.unwrap_err();
+        assert!(
+            error.to_string().contains("version 999 is newer"),
+            "{error}"
+        );
     }
 
     #[sqlx::test]
@@ -224,6 +246,43 @@ mod tests {
         assert_eq!(
             schema_state_with(&pool, &migrator).await.unwrap(),
             SchemaState::Dirty { version: 2 }
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn migrating_a_dirty_schema_is_refused(pool: PgPool) {
+        let migrator = fixture("migrations-first").await;
+        migrate_with(&pool, &migrator).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (2, 'partial', false, '\\x00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = migrate_with(&pool, &migrator).await.unwrap_err();
+
+        assert!(error.to_string().contains("partially applied"), "{error}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_modified_migration_is_detected_and_migration_is_refused(pool: PgPool) {
+        let original = fixture("migrations-first").await;
+        let modified = fixture("migrations-modified").await;
+        migrate_with(&pool, &original).await.unwrap();
+
+        assert_eq!(
+            schema_state_with(&pool, &modified).await.unwrap(),
+            SchemaState::Modified { version: 1 }
+        );
+        let error = migrate_with(&pool, &modified).await.unwrap_err();
+        assert!(
+            error.to_string().contains("migration 1 was changed"),
+            "{error}"
         );
     }
 

@@ -27,9 +27,19 @@ mod tests {
         let password = "wrong-password-token";
         let bad_url = format!("{scheme}://{username}:{password}@{address}");
 
-        let error = connect(&bad_url, 1).await.unwrap_err().to_string();
+        let error = connect(&bad_url, 1).await.unwrap_err();
 
-        assert!(!error.contains(password));
-        assert!(!error.contains(&bad_url));
+        let display = error.to_string();
+        assert!(
+            display.contains("password authentication failed"),
+            "{display}"
+        );
+        let mut current: Option<&dyn std::error::Error> = Some(&error);
+        while let Some(link) = current {
+            let text = link.to_string();
+            assert!(!text.contains(password), "{text}");
+            assert!(!text.contains(&bad_url), "{text}");
+            current = link.source();
+        }
     }
 }

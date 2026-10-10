@@ -65,19 +65,18 @@ async fn run(
             Ok(pool) => pool,
             Err(error) => return database_error(stderr, error),
         };
-        let state = match zirv_flow_store::schema_state(&pool).await {
-            Ok(state) => state,
-            Err(error) => return database_error(stderr, error),
-        };
-
-        match startup_action(state, config.database_migrate_on_start()) {
-            StartupAction::Proceed => {}
-            StartupAction::Migrate => {
-                if let Err(error) = zirv_flow_store::migrate(&pool).await {
-                    return database_error(stderr, error);
-                }
+        if config.database_migrate_on_start() {
+            if let Err(error) = zirv_flow_store::migrate(&pool).await {
+                return database_error(stderr, error);
             }
-            StartupAction::Refuse(message) => return database_error(stderr, message),
+        } else {
+            let state = match zirv_flow_store::schema_state(&pool).await {
+                Ok(state) => state,
+                Err(error) => return database_error(stderr, error),
+            };
+            if let StartupAction::Refuse(message) = startup_action(state) {
+                return database_error(stderr, message);
+            }
         }
     }
 
@@ -98,14 +97,6 @@ async fn run_migrate(config: &Config, stdout: &mut impl Write, stderr: &mut impl
         Ok(pool) => pool,
         Err(error) => return database_error(stderr, error),
     };
-    let state = match zirv_flow_store::schema_state(&pool).await {
-        Ok(state) => state,
-        Err(error) => return database_error(stderr, error),
-    };
-    if let StartupAction::Refuse(message) = startup_action(state, true) {
-        return database_error(stderr, message);
-    }
-
     match zirv_flow_store::migrate(&pool).await {
         Ok(versions) if versions.is_empty() => {
             let _ = writeln!(stdout, "database schema is up to date");
@@ -129,14 +120,13 @@ fn database_error(stderr: &mut impl Write, error: impl std::fmt::Display) -> u8 
 #[derive(Debug, Eq, PartialEq)]
 enum StartupAction {
     Proceed,
-    Migrate,
     Refuse(String),
 }
 
-fn startup_action(state: SchemaState, migrate_on_start: bool) -> StartupAction {
+/// Decides startup when migrate-on-start is off and the schema was inspected without a lock.
+fn startup_action(state: SchemaState) -> StartupAction {
     match state {
         SchemaState::UpToDate => StartupAction::Proceed,
-        SchemaState::Pending { .. } if migrate_on_start => StartupAction::Migrate,
         SchemaState::Pending { count } => StartupAction::Refuse(format!(
             "{count} pending migration(s); run `zirv-flow migrate` or set database.migrate_on_start"
         )),
@@ -145,6 +135,9 @@ fn startup_action(state: SchemaState, migrate_on_start: bool) -> StartupAction {
         )),
         SchemaState::Dirty { version } => StartupAction::Refuse(format!(
             "migration {version} is partially applied; repair the database and rerun `zirv-flow migrate`"
+        )),
+        SchemaState::Modified { version } => StartupAction::Refuse(format!(
+            "migration {version} was changed after it was applied; restore the original migration file"
         )),
     }
 }
@@ -200,23 +193,15 @@ mod tests {
     #[test]
     fn an_up_to_date_schema_proceeds() {
         assert_eq!(
-            startup_action(SchemaState::UpToDate, false),
+            startup_action(SchemaState::UpToDate),
             StartupAction::Proceed
-        );
-    }
-
-    #[test]
-    fn pending_migrations_are_run_when_enabled() {
-        assert_eq!(
-            startup_action(SchemaState::Pending { count: 2 }, true),
-            StartupAction::Migrate
         );
     }
 
     #[test]
     fn pending_migrations_are_refused_when_disabled() {
         assert_eq!(
-            startup_action(SchemaState::Pending { count: 2 }, false),
+            startup_action(SchemaState::Pending { count: 2 }),
             StartupAction::Refuse(
                 "2 pending migration(s); run `zirv-flow migrate` or set database.migrate_on_start"
                     .into()
@@ -227,7 +212,7 @@ mod tests {
     #[test]
     fn a_newer_schema_is_refused() {
         assert_eq!(
-            startup_action(SchemaState::Newer { version: 12 }, true),
+            startup_action(SchemaState::Newer { version: 12 }),
             StartupAction::Refuse(
                 "database schema version 12 is newer than this binary supports; upgrade zirv-flow"
                     .into()
@@ -238,9 +223,20 @@ mod tests {
     #[test]
     fn a_dirty_migration_is_refused() {
         assert_eq!(
-            startup_action(SchemaState::Dirty { version: 7 }, true),
+            startup_action(SchemaState::Dirty { version: 7 }),
             StartupAction::Refuse(
                 "migration 7 is partially applied; repair the database and rerun `zirv-flow migrate`"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_modified_migration_is_refused() {
+        assert_eq!(
+            startup_action(SchemaState::Modified { version: 3 }),
+            StartupAction::Refuse(
+                "migration 3 was changed after it was applied; restore the original migration file"
                     .into()
             )
         );
