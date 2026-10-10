@@ -47,7 +47,9 @@ pub(crate) async fn migrate_with(
         SchemaState::UpToDate | SchemaState::Pending { .. } => None,
     };
     if let Some(error) = schema_error {
-        connection.unlock().await.map_err(StoreError::migration)?;
+        // The refusal is the error worth reporting; close_on_drop releases
+        // the lock even if this unlock fails.
+        let _ = connection.unlock().await;
         return Err(error);
     }
 
