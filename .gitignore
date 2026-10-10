@@ -1,0 +1,8 @@
+/target
+
+# Session scratch from agent harnesses
+.superpowers/
+
+# `zirv ctx agent --worktree` linked worktrees: left in place when dirty for the
+# operator to inspect, so they must never be committed.
+.zirv/worktrees/

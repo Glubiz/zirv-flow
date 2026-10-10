@@ -1,0 +1,258 @@
+name: CI Pipeline
+
+# CI is a merge gate only: it runs on PRs targeting main or a release/**
+# integration branch (and on demand). It deliberately does NOT run on pushes
+# to main — a commit can only reach main through a PR that already passed
+# these exact checks, and the CD pipeline publishes from main directly
+# instead of chaining off a post-merge CI run.
+on:
+  pull_request:
+    branches: [ main, 'release/**' ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test, Lint, and Format Check
+    runs-on: ubuntu-latest
+    # A wedged apt mirror or a hung test must fail the run, not hold it for
+    # the 6-hour default.
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0 (full history, not the default shallow depth-1 clone):
+      # the test-presence gate below and the version-bump job need a common
+      # ancestor with main actually present in history, which a depth-1
+      # checkout of just the PR ref would not have.
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      # `fetch-depth: 0` above fetches full history for every branch and tag,
+      # so `origin/${{ github.base_ref }}` already resolves here without a
+      # separate fetch. Runs before the build: a missing test is cheaper to
+      # report before spending the rest of this job's time on it.
+      - name: Test-presence gate
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="HEAD~1"
+          fi
+          bash scripts/check-test-presence.sh --base "$base"
+
+      # The gate proves itself on every run, not just when someone remembers
+      # to re-run --self-test locally.
+      - name: Test-presence gate self-test
+        run: bash scripts/check-test-presence.sh --self-test
+
+      - name: Set Up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo Build
+        uses: actions/cache@v4.3.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      # Builds the binary up front so tests that spawn it as a subprocess find
+      # target/debug/zirv-flow.
+      - name: Build Binary
+        run: cargo build
+
+      # Catches canonical context drift before it ships: a CLAUDE.md/AGENTS.md
+      # regenerated from an older `.zirv/context/` than what is on this branch
+      # silently injects the canonical layer twice every session. `--check`
+      # fails the PR the moment a managed native file no longer byte-matches a
+      # fresh render of the current canonical sources.
+      #
+      # zirv itself is not built in this repo, so the gate runs a pinned
+      # release of it. The download is verified against the release's own
+      # .sha256 file (sha256sum text format) before anything is extracted.
+      # Bump ZIRV_VERSION deliberately when the context format changes.
+      - name: Context sync drift gate
+        env:
+          ZIRV_VERSION: 4.59.0
+        run: |
+          set -euo pipefail
+          base="https://github.com/Glubiz/zirv-cli/releases/download/v${ZIRV_VERSION}"
+          asset="zirv-${ZIRV_VERSION}-linux.tar.gz"
+          dir="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "$dir/$asset" "$base/$asset"
+          curl -fsSL --retry 3 -o "$dir/$asset.sha256" "$base/$asset.sha256"
+          (cd "$dir" && sha256sum -c "$asset.sha256")
+          tar -xzf "$dir/$asset" -C "$dir"
+          "$dir/zirv" context sync --check
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.20
+        with:
+          tool: cargo-nextest@0.9.143
+
+      # nextest runs each test in its own process, so process-wide
+      # `env::set_var` races cannot happen -- see .config/nextest.toml.
+      # `--no-fail-fast` runs every test and reports a complete list of
+      # failures; nextest's own default is fail-fast, which would otherwise
+      # stop at the first failure and hide the rest.
+      - name: Run Tests
+        run: cargo nextest run --no-fail-fast
+
+      - name: Check Code Formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      # CD releases a Windows binary, so platform-specific code has to keep
+      # compiling cleanly for it, tests included.
+      - name: Add Windows Target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      # Crates such as `rustls` -> `ring` compile C sources through a build
+      # script, so the cross-target clippy pass needs a Windows-targeting C
+      # compiler on the Linux runner. Nothing pulls `ring` in yet; the step is
+      # here so the first dependency that does (sqlx with rustls) does not
+      # break CI.
+      # The runner's azure apt mirror wedges regularly (every index fetch
+      # stalling or Ign'd), so this swaps sources to the canonical archive
+      # up front, forces IPv4, and bounds every fetch; the step timeout is
+      # the backstop that turns any remaining stall into a fast, retryable
+      # failure instead of a six-hour hang.
+      - name: Install mingw-w64 (ring's build script needs a cross C compiler)
+        timeout-minutes: 8
+        run: |
+          if command -v x86_64-w64-mingw32-gcc >/dev/null; then exit 0; fi
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends gcc-mingw-w64-x86-64
+
+      - name: Run Clippy Lint (Windows target)
+        run: cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  dependency-audit:
+    name: Dependency Advisory Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Audit Dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # PRs into `release/**` integration branches share one pinned release
+  # version, so they are exempt. This check still guards every PR into main,
+  # where CD is idempotent on an already-published version and a bump is what
+  # makes a code change actually ship. It only requires a version bump when
+  # the diff since the base branch touches a path that changes the shipped
+  # binary (src/, Cargo.toml, Cargo.lock, build.rs); a README/docs/CI-only PR
+  # passes unbumped.
+  version-bump:
+    name: Version Bump Check
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so `origin/${{ github.base_ref }}...HEAD` has a real
+      # merge base to diff from -- mirrors the security-scan job below,
+      # which needs the same thing for the same reason. A depth-1 checkout
+      # plus a depth-1 fetch of just the base ref gives two disconnected
+      # single commits with no common ancestor, so the three-dot form can't
+      # resolve a merge base at all.
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Require a version above the base branch when shipped code changed
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          extract() { grep '^version' "$1" | head -1 | sed -E 's/version *= *"([^"]+)".*/\1/'; }
+          # The very first PR (the one that introduces Cargo.toml) has no
+          # base version to compare against; there is nothing to enforce yet.
+          if ! git show "$BASE:Cargo.toml" > /tmp/base-Cargo.toml; then
+            echo "::notice::${{ github.base_ref }} has no Cargo.toml yet -- version bump check skipped"
+            exit 0
+          fi
+          BASE_VERSION=$(extract /tmp/base-Cargo.toml)
+          HEAD=$(extract Cargo.toml)
+          echo "base branch version: $BASE_VERSION — PR version: $HEAD"
+
+          # A LOWER version always fails, unconditionally, before the path
+          # filter below even runs -- origin/<base_ref> is the branch's
+          # current tip, not the merge-base, so main can have bumped past
+          # what this PR branched from with no local Cargo.toml edit at all;
+          # skipping this check on a docs-only diff would let that
+          # regressed, inherited version slip through unnoticed.
+          if [ "$(printf '%s\n%s\n' "$BASE_VERSION" "$HEAD" | sort -V | tail -1)" != "$HEAD" ]; then
+            echo "::error file=Cargo.toml::Version ($HEAD) is lower than ${{ github.base_ref }}'s ($BASE_VERSION)."
+            exit 1
+          fi
+
+          # --no-renames: a file renamed OUT of src/ (or Cargo.toml/.lock/
+          # build.rs) would otherwise show only under its destination path,
+          # hiding the shipped-code change from this filter.
+          CHANGED=$(git diff --name-only --no-renames "$BASE...HEAD")
+          if ! echo "$CHANGED" | grep -qE '^src/|^Cargo\.toml$|^Cargo\.lock$|^build\.rs$'; then
+            echo "::notice::no shipped-code paths changed since ${{ github.base_ref }} (src/, Cargo.toml, Cargo.lock, build.rs) -- version bump not required"
+            exit 0
+          fi
+          if [ "$BASE_VERSION" = "$HEAD" ]; then
+            echo "::error file=Cargo.toml::Version ($HEAD) is unchanged from ${{ github.base_ref }} but shipped code changed. Bump it -- a version bump is what makes CD actually publish the change."
+            exit 1
+          fi
+
+      # An ADVISORY hint only, from the same conventional-commit reading
+      # `scripts/generate-changelog.sh` uses for CHANGELOG.md itself -- it
+      # never decides the actual bump size (the gate above still requires
+      # SOME increase whenever shipped code changed) or fails the PR.
+      # `if: always()` so the hint prints even when the gate above already
+      # failed. `continue-on-error: true` so a bug in the script can never
+      # turn an advisory step into a gate.
+      - name: Suggest bump size from conventional commits (advisory)
+        if: always()
+        continue-on-error: true
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          SUGGESTION=$(bash scripts/generate-changelog.sh --suggest-bump --from "$BASE" --to HEAD)
+          echo "::notice::conventional-commit suggested bump size: $SUGGESTION"
+
+  # An ADVISORY nudge, never a gate -- `continue-on-error: true` on top of the
+  # script's own always-0 exit means this job can never fail the PR no matter
+  # what it finds. PR-only (a push has no base commit to diff against in this
+  # repo's rebase-merge workflow) and needs full history the same way the
+  # `test` job's checkout gets it: a depth-1 checkout plus a SEPARATE depth-1
+  # fetch of the base ref leaves the two shallow histories with no common
+  # ancestor object, so `git diff base...HEAD` in security-scan.sh could not
+  # find a merge base and would fail -- silently, if that failure were
+  # swallowed into an empty diff, making the scan a permanent silent no-op.
+  security-scan:
+    name: Advisory Security Scan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Run advisory scan
+        run: bash scripts/security-scan.sh --base "origin/${{ github.base_ref }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # The scan proves itself on every run too.
+      - name: Advisory scan self-test
+        run: bash scripts/security-scan.sh --self-test

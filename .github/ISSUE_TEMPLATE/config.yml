@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Glubiz/zirv-flow/security/advisories/new
+    about: Report vulnerabilities privately.
+  - name: Documentation
+    url: https://github.com/Glubiz/zirv-flow/tree/main/docs
+    about: Read the Zirv Flow architecture and roadmap.

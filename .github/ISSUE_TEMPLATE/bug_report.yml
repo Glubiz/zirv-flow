@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem with Zirv Flow.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour or output
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: zirv-flow version
+      placeholder: Paste the output of zirv-flow --version
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - Docker
+        - Binary
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
