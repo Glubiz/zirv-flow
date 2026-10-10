@@ -1,0 +1,356 @@
+# Repo-layer zirv configuration (untrusted layer: operator config and env win).
+#
+# This file is an exhaustive reference of every configurable key of
+# zirv's `CtxConfig`, each shown COMMENTED OUT at
+# its built-in default -- sample-config style. Uncomment a key to override it
+# for this repo.
+#
+# A commented key sets nothing, so an operator's own ~/.zirv/ctx.toml
+# customization of that same key keeps working. This matters because the
+# repo layer merges ON TOP of the operator's global config (see
+# `CtxConfig::load`): an ACTIVE default-valued key here would silently
+# clobber any global override of the same key for anyone who checks out this
+# repo. Only uncomment a key you actually mean to pin for this repo.
+#
+# Keys marked REPO-FORBIDDEN may not be set from a repo checkout at all (see
+# zirv's REPO_FORBIDDEN list) -- uncommenting one has no effect here; set it
+# in ~/.zirv/ctx.toml, via ZIRV_CTX_* env vars, or flags instead. The value
+# shown is still the real default, for reference.
+
+# agent = "claude"             # REPO-FORBIDDEN (ZIRV_CTX_AGENT): which adapter zirv drives. Default: unset (auto-detect).
+# agent_bin = "/path/to/bin"   # REPO-FORBIDDEN (ZIRV_CTX_AGENT_BIN): explicit path to the agent binary. Default: unset.
+
+[chat]
+# Model for the interactive orchestrator session (displayed in the banner/header).
+# User decision 2026-09-27: the orchestrator runs Opus 5.5 (claude-opus-5-5),
+# replacing the 2026-08-13 Fable pin.
+# Not REPO-FORBIDDEN: this only shapes a session the operator deliberately
+# launched, and the choice is disclosed on the `zirv \u{25b8}` announcement
+# channel rather than spent silently in the background (see ChatConfig's doc
+# comment in zirv's source). Commenting this out reverts to the built-in default
+# (unset: leaves the agent's own default model in place). This is the ONLY
+# active key in this file -- every other key below is commented out.
+model = "claude-opus-5-5"
+
+# claude_permission_mode = "default"  # REPO-FORBIDDEN (ZIRV_CTX_CHAT_CLAUDE_PERMISSION_MODE): overrides the INTERACTIVE launch's Claude Code --permission-mode ("default" | "acceptEdits" | "bypassPermissions"). Default: unset (behaves as "default"). Headless launches always stay "dontAsk" regardless of this key.
+
+# [review]                          # every key below is REPO-FORBIDDEN (ZIRV_CTX_REVIEW_MODEL_CLAUDE / ZIRV_CTX_REVIEW_MODEL_CODEX)
+# claude = "opus"                   # code-review model for a claude harness. Default: unset (one tier below the orchestrator seat's model on claude's ladder -- see AgentAdapter::review_model_below).
+# codex = "gpt-5.6-terra"           # code-review model for a codex harness. Default: unset (one tier below the seat on codex's own ladder).
+
+# [worker]                          # claude/codex/default_depth/default_read_only below are REPO-FORBIDDEN; max_depth/deny_network may only be NARROWED by a repo layer (zirv-cli issue #262)
+# claude = "opus"                   # model for a delegated claude worker (`zirv ctx agent`, and the dashboard's own spawn-request pane). Default: unset (claude's own hard default "sonnet" -- see AgentAdapter::default_worker_model).
+# codex = "gpt-5.6-terra"           # model for a delegated codex worker. Default: unset (codex has no adapter-owned default, so its own CLI/config default applies).
+# default_depth = 1                 # REPO-FORBIDDEN (ZIRV_CTX_WORKER_DEFAULT_DEPTH): hops of further `zirv agent` delegation a ROOT session's envelope starts with. Default: 1.
+# default_read_only = false         # REPO-FORBIDDEN (ZIRV_CTX_WORKER_DEFAULT_READ_ONLY): whether a ROOT session's envelope starts read-only when `--mode` is unstated. Default: false.
+# max_depth = 255                   # narrow-only (a repo layer may only LOWER this): operator ceiling on any envelope's delegation_depth. Default: 255 (no extra cap beyond default_depth).
+# deny_network = false              # narrow-only (a repo layer may only turn this ON): denies network tools for every envelope computed in this repo. Default: false.
+
+# [worktree]                        # the warm-worktree pool `zirv ctx agent --worktree --worktree-reuse` draws from (zirv-cli issue #718); both keys below are narrow-only (a repo layer may only shrink the pool or shorten the TTL)
+# idle_pool_max = 4                 # how many `Idle` trees this repo may keep on disk at once. Default: 4.
+# idle_ttl_secs = 3600              # how long an `Idle` tree may sit unclaimed before startup GC/`zirv ctx reconcile` retire it. Default: 3600 (1 hour).
+
+# [objective]                        # completion-judge policy for an objective-driven `zirv ctx loop` run (zirv-cli issue #314); every key below is narrow-only
+# gates = ["zirv test changed", "zirv verify"]  # narrow-only (a repo layer may only DROP entries, never add or reorder one): deterministic gates run, in order, before the judge every cycle.
+# max_cycles_without_progress = 5   # narrow-only (a repo layer may only LOWER this): consecutive no-progress cycles before the loop gives up.
+# judge = true                      # narrow-only (a repo layer may only turn this OFF): whether a cheap-model verdict is consulted once every gate is green.
+
+# [screen]                           # screen.rs round 2 (zirv-cli issue #272) repetition-dominated thresholds; every key below is narrow-only (a repo layer may only make detection STRICTER, never looser)
+# repetition_min_fragment = 400      # narrow-only (a repo layer may only LOWER this): a fragment shorter than this many bytes is never flagged, no matter how repetitive.
+# repetition_window = 60             # narrow-only (a repo layer may only LOWER this): the exact-match sliding-window size, in bytes, used by the window-level check.
+# repetition_min_repeats = 5         # narrow-only (a repo layer may only LOWER this): how many times one window (or line) must repeat before it is even a candidate.
+# repetition_dominance_pct = 0.5     # narrow-only (a repo layer may only LOWER this): the fraction of the fragment's own length the repeats must cover to count as dominated.
+
+# [handover.claude]                 # every key below is REPO-FORBIDDEN (ZIRV_CTX_HANDOVER_CLAUDE_CHEAP / _STANDARD / _DEEP) -- model-id override for `zirv ctx handover`'s generic tiers on a claude target.
+# cheap = "haiku"                   # Default: unset (built-in ladder default "haiku").
+# standard = "sonnet"               # Default: unset (built-in ladder default "sonnet").
+# deep = "opus"                     # Default: unset (built-in ladder default "opus").
+
+# [handover.codex]                  # every key below is REPO-FORBIDDEN (ZIRV_CTX_HANDOVER_CODEX_CHEAP / _STANDARD / _DEEP) -- same, for a codex target.
+# cheap = "gpt-5.6-luna"            # Default: unset (built-in ladder default "gpt-5.6-luna").
+# standard = "gpt-5.6-terra"        # Default: unset (built-in ladder default "gpt-5.6-terra").
+# deep = "gpt-5.6-sol"              # Default: unset (built-in ladder default "gpt-5.6-sol").
+
+# [model_tiers.claude]              # every key below is REPO-FORBIDDEN (ZIRV_CTX_MODEL_TIERS_CLAUDE_FAST / _STANDARD / _DEEP) -- zirv-cli issue #699 cost-routing lever: resolves a workflow seat's declared ModelTier to a real model id on a claude harness.
+# fast = "haiku"                    # Default: unset (no model is passed; the adapter's own default applies -- zirv never guesses one).
+# standard = "sonnet"               # Default: unset, same reasoning.
+# deep = "opus"                     # Default: unset, same reasoning. Zirv never downgrades a Deep seat on its own; this only ever reflects the operator's own explicit choice.
+
+# [model_tiers.codex]               # every key below is REPO-FORBIDDEN (ZIRV_CTX_MODEL_TIERS_CODEX_FAST / _STANDARD / _DEEP) -- same, for a codex harness.
+# fast = "gpt-5.6-luna"             # Default: unset (no model is passed).
+# standard = "gpt-5.6-terra"        # Default: unset, same reasoning.
+# deep = "gpt-5.6-sol"              # Default: unset, same reasoning.
+
+# [score]
+# window = 10                        # trailing turns the rolling rot score looks over
+# min_turns = 10                     # turns required before the score is trusted at all
+# token_floor = 100_000              # REPO-FORBIDDEN (ZIRV_CTX_TOKEN_FLOOR): explicit absolute floor override, wins over token_floor_ratio below. Default: unset.
+# token_ceiling = 160_000            # REPO-FORBIDDEN (ZIRV_CTX_TOKEN_CEILING): explicit absolute ceiling override, wins over token_ceiling_ratio below. Default: unset.
+# token_floor_ratio = 0.5            # REPO-FORBIDDEN (ZIRV_CTX_SCORE_TOKEN_FLOOR_RATIO): fraction of the resolved context-window capacity below which token pressure contributes nothing (zirv-cli issue #155).
+# token_ceiling_ratio = 0.8          # REPO-FORBIDDEN (ZIRV_CTX_SCORE_TOKEN_CEILING_RATIO): fraction of the resolved context-window capacity at which token pressure is maxed out.
+# model_context_tokens = 200_000     # REPO-FORBIDDEN (ZIRV_CTX_SCORE_MODEL_CONTEXT_TOKENS): operator-pinned capacity, overriding the adapter's own reported context window. Default: unset (adapter-reported; falls back to the 100_000/160_000 absolutes above when no capacity is known at all).
+# weight_tool_failure = 40.0         # score weight for repeated tool failures (weights sum to 100)
+# weight_repetition = 30.0           # score weight for repeated actions
+# weight_marker = 30.0               # score weight for the rot marker appearing in output
+# same_error_weight = 0.0            # score weight for a stuck same-error loop (longest run of identical normalized tool-error text). Default 0: inert until an operator opts in.
+# repetition_threshold = 3           # repeat count before the repetition signal trips
+# same_error_threshold = 3           # repeat count of the SAME normalized error before the same-error signal trips
+# advise_at = 40                     # score at which zirv advises the operator
+# compact_at = 60                    # score at which zirv recommends a compact/handoff
+# restart_at = 80                    # score at which zirv recommends a restart
+# marker = "[zirv]"                  # literal string the rot engine treats as an explicit marker signal
+
+# [wrap]
+# debounce_ms = 3000                 # quiet time after output before wrap considers a turn settled
+# inject_timeout_ms = 20_000         # deprecated and ignored; compaction verification uses supervise.compact_timeout_ms
+
+# [supervise]
+# max_restarts = 2                   # timeout/capacity/stall restarts a supervised run allows before giving up (never used for rot: zirv only suggests a restart then)
+# poll_ms = 2000                     # polling interval for supervised process state
+# interval_secs = 900                # interval between supervised health checks
+# max_cycle_secs = 3600              # max wall time for one supervised cycle
+# max_failures = 5                   # consecutive failures before supervise gives up entirely
+# backoff_base_secs = 60             # base backoff between restart attempts
+# on_failure = "notify-send done"    # REPO-FORBIDDEN (ZIRV_CTX_ON_FAILURE): shell command run on failure. Default: unset.
+# max_nudges = 3                     # consecutive nudge-driven restarts tolerated before nudges are ignored
+# max_heavy_operations = 1           # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_MAX_HEAVY_OPERATIONS): machine-wide cap on concurrent heavy commands (zirv-cli issue #155, replacing zirv-cli #133's max_heavy_workers)
+# max_heavy_workers = 1              # DEPRECATED alias for max_heavy_operations. REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_MAX_HEAVY_WORKERS)
+# max_writers = 1                    # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_MAX_WRITERS): machine-wide cap on concurrent writing-mode delegated workers, one per checkout (zirv-cli issue #267)
+# idle_no_tool_secs = 450            # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_IDLE_NO_TOOL_SECS): no PTY output/transcript growth/mail activity for this long while idle latches `stalled` (zirv-cli issue #310)
+# in_tool_secs = 1200                # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_IN_TOOL_SECS): same progress clock, applied while inside a tool call (zirv-cli issue #310)
+# stall_grace_secs = 120             # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_STALL_GRACE_SECS): time a steering nudge gets before a stalled session is terminated (zirv-cli issue #310)
+# compact_stall_secs = 600           # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_COMPACT_STALL_SECS): time a session may sit in a started-but-never-finished compaction before it reads as stalled after compaction (zirv-cli issue #379)
+# compact_timeout_ms = 600_000       # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_COMPACT_TIMEOUT_MS): hard bound `exec`/`loop` headless in-place compaction waits for the compact child and its verification marker; a slow-but-progressing compaction is never killed before this (round 4 bug 2)
+# chain_max_restarts = 3             # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_CHAIN_MAX_RESTARTS): unplanned same-class respawns across process boundaries before the restart-chain breaker trips (zirv-cli issue #310)
+# chain_max_gap_secs = 300           # REPO-FORBIDDEN (ZIRV_CTX_SUPERVISE_CHAIN_MAX_GAP_SECS): max gap between chained respawns still counted toward the breaker (zirv-cli issue #310)
+# orchestrator_writes = "advise"     # narrow-only (ZIRV_CTX_SUPERVISE_ORCHESTRATOR_WRITES): this seat's own repository-write guard posture -- "allow", "advise", or "deny". A repo may only tighten (allow -> advise -> deny), never loosen. Default: advise (zirv-cli issue #358 T8).
+# loop_backoff_ceiling_secs = 900    # narrow-only (ZIRV_CTX_SUPERVISE_LOOP_BACKOFF_CEILING_SECS): ceiling `zirv ctx loop` self-pacing may grow the inter-cycle wait toward when no explicit --interval is given and consecutive cycles keep producing the same outcome. A repo may only LOWER it, never raise it. Default: 900 (zirv-cli issue #311).
+
+# [handoff]
+# model = "haiku"                    # REPO-FORBIDDEN (ZIRV_CTX_MODEL): distiller/judgment model override. Default: unset (adapter decides).
+# tail_items = 5                     # trailing user/assistant/tool-error items kept in structural context
+# timeout_secs = 30                  # time the distiller gets before falling back to structural context
+
+# [pace]
+# enabled = true                     # whether pace-to-reset throttling runs at all
+# max_percent = 99.0                 # a supervised window is kept at or below this usage percentage
+# collector_max_age_secs = 900       # NARROW-ONLY from a repo layer (ZIRV_CTX_PACE_COLLECTOR_MAX_AGE_SECS): collector readings older than this are treated as stale; a checkout may only LOWER it. Default: 900.
+# estimator = true                   # REPO-FORBIDDEN (ZIRV_CTX_PACE_ESTIMATOR): whether the token estimator fallback runs when the collector is stale. Default: true.
+# five_hour_budget_tokens = 0        # REPO-FORBIDDEN (ZIRV_CTX_FIVE_HOUR_BUDGET): 0 disables the estimator for the 5h window (no honest default).
+# seven_day_budget_tokens = 0        # REPO-FORBIDDEN (ZIRV_CTX_SEVEN_DAY_BUDGET): 0 disables the estimator for the 7d window (no honest default).
+# count_cache_reads = false          # REPO-FORBIDDEN (ZIRV_CTX_PACE_COUNT_CACHE_READS): whether cache-read tokens count toward the estimator budget. Default: false.
+# jitter_secs = 30                   # random jitter added to delays to avoid thundering-herd resumes
+# fallback_delay_secs = 900          # delay used when a window's resets_at is unknown
+# wait_slack_secs = 3600             # head-room added to the window length to form the default safety cap
+# max_wait_secs = 7200               # absolute override for the safety cap. Default: unset (scales to the tripped window).
+# soft_percent = 80.0                # start of the soft-throttle band (delays scale linearly up to max_percent)
+# poll_enabled = true                # REPO-FORBIDDEN (ZIRV_CTX_PACE_POLL): active API-poll fallback when the collector is stale. Default: true.
+# poll_min_interval_secs = 60        # REPO-FORBIDDEN (ZIRV_CTX_PACE_POLL_MIN_INTERVAL_SECS): floor between poll attempts. Default: 60.
+# blind_delay_secs = 60              # REPO-FORBIDDEN (ZIRV_CTX_PACE_BLIND_DELAY_SECS): fail-SAFE per-cycle delay applied when the gate has no usable data at all (no binding collector reading, no configured estimator) instead of proceeding unthrottled. Default: 60.
+# spawn_soft_pct = 80.0               # REPO-FORBIDDEN (ZIRV_CTX_PACE_SPAWN_SOFT_PCT): usage percentage at or above which a NEW delegated spawn (zirv ctx agent, a dashboard pane) warns but still proceeds. Never gates rotation of an already-running session. Default: 80.0.
+# spawn_hard_pct = 95.0               # REPO-FORBIDDEN (ZIRV_CTX_PACE_SPAWN_HARD_PCT): usage percentage at or above which a NEW delegated spawn is refused unless overridden with --force. Never gates rotation of an already-running session. Default: 95.0.
+# run_budget_tokens = 500000           # REPO-FORBIDDEN (ZIRV_CTX_PACE_RUN_BUDGET_TOKENS): default soft token budget `zirv ctx objective set` applies when --budget-tokens is omitted. Default: unset.
+
+# [pace.use_credits]                 # REPO-FORBIDDEN (ZIRV_CTX_PACE_USE_CREDITS_CLAUDE / _CODEX): skip pace gating for a harness whose vendor plan covers overage.
+# claude = false                     # Default: false.
+# codex = false                      # Default: false.
+
+# [price]                             # every key below is REPO-FORBIDDEN
+# stale_after_days = 90              # REPO-FORBIDDEN (ZIRV_CTX_PRICE_STALE_AFTER_DAYS): a price table older than this renders every cost line as "~$x (prices as of ...)" rather than a plain figure. Default: 90.
+# table_path = "~/.zirv/prices.toml" # REPO-FORBIDDEN (ZIRV_CTX_PRICE_TABLE_PATH): operator override path for the price table. Default: unset (built-in table, merged with ~/.zirv/prices.toml when present).
+
+# [models]                           # whole table is REPO-FORBIDDEN
+# discovery = true                  # ZIRV_CTX_MODELS_DISCOVERY: read account-local Codex model cache and Claude transcript observations. Default: true.
+# price_fetch = true                # ZIRV_CTX_MODELS_PRICE_FETCH: allow `zirv ctx models refresh` to fetch models.dev and LiteLLM prices. Default: true.
+# pin = { "anthropic.opus" = "claude-opus-5", "openai.sol" = "gpt-6-sol" } # ZIRV_CTX_MODELS_PIN uses comma-separated vendor.family=model pairs. Default: empty.
+# avoid = []                        # ZIRV_CTX_MODELS_AVOID (comma-separated): model ids never resolved from a tier or rung; an explicit pin still wins. Default: empty.
+# auto_avoid = false                # ZIRV_CTX_MODELS_AUTO_AVOID: also avoid models whose recorded task success is significantly worse than a same-tier peer's. Default: false.
+
+# [compact_advisory]
+# min_reclaim_tokens = 4096           # stale tool-result tokens must exceed this before the reclaim-gated /compact advisory even considers firing (ZIRV_CTX_COMPACT_ADVISORY_MIN_RECLAIM_TOKENS). Default: 4096.
+# window_fraction = 0.6               # AND the window must exceed this fraction of the model's context window (ZIRV_CTX_COMPACT_ADVISORY_WINDOW_FRACTION). Default: 0.6.
+
+# [optimize]
+# enabled = true                     # whether the Stop hook may queue an "optimize recommended" entry
+# sessions_sampled = 10              # sessions sampled per optimize run
+# max_surface_bytes = 200_000        # cap on the total analysed surface
+# model = ""                         # REPO-FORBIDDEN (ZIRV_CTX_OPTIMIZE_MODEL): distiller model for optimize. Default: "" (reuses handoff.model's own resolution).
+# recommend_tool_failure_rate = 0.25 # tool-failure rate that triggers a recommendation
+# recommend_corrections = 3          # correction count that triggers a recommendation
+# recommend_cooldown_secs = 86_400   # minimum time between optimize recommendations
+
+# [prompt]                           # every key below is REPO-FORBIDDEN except skill_index and intake_discipline -- repo may only narrow them to false.
+# enabled = true                     # REPO-FORBIDDEN (ZIRV_CTX_PROMPT): whether the composed system prompt is injected at all. Default: true.
+# repo_layer = true                  # REPO-FORBIDDEN (ZIRV_CTX_PROMPT_REPO): whether <repo>/.zirv/system-prompt.md is read. Default: true.
+# max_repo_bytes = 4096              # REPO-FORBIDDEN (ZIRV_CTX_PROMPT_MAX_REPO_BYTES): cap on the untrusted repo layer. Default: 4096.
+# harnesses = true                   # REPO-FORBIDDEN (ZIRV_CTX_PROMPT_HARNESSES): whether the derived harness roster is injected. Default: true.
+# skill_index = true                 # not REPO-FORBIDDEN (repo may only narrow to false, like context.dedupe_native): whether the standing skill index layer is composed. Default: true.
+# intake_discipline = true           # not REPO-FORBIDDEN (repo may only narrow to false; ZIRV_CTX_PROMPT_INTAKE_DISCIPLINE): classify a session's first prompt (text only, no network) and add a one-turn plan/test discipline note when it is substantial. Default: true.
+# codex_orchestrator = true          # REPO-FORBIDDEN (ZIRV_CTX_PROMPT_CODEX_ORCHESTRATOR): whether a codex Orchestrator session gets codex's own orchestrator-conventions layer. Default: true.
+# verbosity = "verbose"              # REPO-FORBIDDEN (ZIRV_CTX_PROMPT_VERBOSITY): tier for the Orchestrator-only meta-harness orientation layer -- "minimal" | "standard" | "verbose". Default: "verbose".
+
+# [context]                          # every key below is REPO-FORBIDDEN except dedupe_native -- the canonical .zirv/context/ layer the context compiler (zirv-cli issue #44) injects.
+# max_common_bytes = 4096            # REPO-FORBIDDEN (ZIRV_CTX_CONTEXT_MAX_COMMON_BYTES): cap on .zirv/context/common.md. Default: 4096.
+# max_harness_bytes = 4096           # REPO-FORBIDDEN (ZIRV_CTX_CONTEXT_MAX_HARNESS_BYTES): cap on .zirv/context/claude.md or codex.md. Default: 4096.
+# max_harness_roster_bytes = 4096    # REPO-FORBIDDEN (ZIRV_CTX_CONTEXT_MAX_HARNESS_ROSTER_BYTES): budget `zirv context status` measures the derived harness roster against. Default: 4096.
+# dedupe_native = true                # not REPO-FORBIDDEN (repo may only narrow to false, like pace.enabled but inverted): skip re-injecting the canonical layer when CLAUDE.md/AGENTS.md's embedded hash already matches it. Default: true.
+# lint_max_pairs = 20000              # REPO-FORBIDDEN (ZIRV_CTX_CONTEXT_LINT_MAX_PAIRS): cap on sentence pairs `zirv context lint`'s CTX002/CTX003 checks compare. Default: 20000.
+# instructions_max_bytes = 32768      # REPO-FORBIDDEN (ZIRV_CTX_CONTEXT_INSTRUCTIONS_MAX_BYTES): aggregate cap on the native compiler's whole ZIRV.md/AGENTS.md/CLAUDE.md/AGENT.md instruction layer. Default: 32768.
+
+# [mail]
+# enabled = true                     # REPO-FORBIDDEN (ZIRV_CTX_MAIL): whether the mailbox is on at all. Default: true.
+# max_message_bytes = 4096           # cap on a single stored message body
+# max_delivered_bytes = 4096         # REPO-FORBIDDEN (ZIRV_CTX_MAIL_MAX_DELIVERED_BYTES): cap on mail surfaced to a session at once. Default: 4096.
+# keep = 50                          # unread messages kept before the oldest are pruned
+# mid_turn = false                   # REPO-FORBIDDEN (ZIRV_CTX_MAIL_MID_TURN): deliver session-addressed mail from the Claude PostToolUse hook, 4 KiB per call. Default: false.
+
+# [supervisor]                       # every key below is REPO-FORBIDDEN (ZIRV_CTX_SUPERVISOR_*): the supervisor, a strong model whose binding rulings only narrow, at plan, done, retry and design choices (#835)
+# enabled = false                    # master switch; off means no spawns, no state files, unchanged hook output. Default: false.
+# harness = "codex"                  # claude or codex. Default: codex.
+# model = ""                         # explicit consult model, required while enabled (a config error otherwise).
+# max_calls = 3                      # deprecated and ignored (consults are uncapped); still parsed so old configs load. Default: 3.
+# max_advice_bytes = 2048            # cap on a ruling's reason. Default: 2048.
+
+# [memory]                           # every key below is REPO-FORBIDDEN
+# enabled = true                     # REPO-FORBIDDEN (ZIRV_CTX_MEMORY): MASTER switch -- false disables both the private and shared bank, regardless of shared_enabled. Default: true.
+# harvest = false                    # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_HARVEST): whether facts are auto-harvested from distilled handoffs. Default: false.
+# max_entries = 50                   # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_MAX_ENTRIES): entries kept before the oldest (by Written) are pruned. Default: 50.
+# max_entry_bytes = 512              # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_MAX_ENTRY_BYTES): cap on a single entry's body. Default: 512.
+# max_injected_bytes = 2048          # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_MAX_INJECTED_BYTES): superseded by core_max_bytes; kept only so an old config does not hard-error. Default: 2048.
+# shared_enabled = true              # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_SHARED): whether the repo-owned shared bank (<repo>/.zirv/memory/) is read at all, underneath the enabled master switch above. Default: true.
+# core_max_bytes = 2048              # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_CORE_MAX_BYTES): cap on the merged private+shared core layer surfaced to every session. Default: 2048.
+# retrieval_max_bytes = 2048         # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_RETRIEVAL_MAX_BYTES): cap on context-ranked retrieved entries, on top of core. Default: 2048.
+# retrieval_max_entries = 6          # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_RETRIEVAL_MAX_ENTRIES): max number of retrieved entries, independent of bytes. Default: 6.
+# harvest_max_entries = 5            # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_HARVEST_MAX_ENTRIES): most durable entries one session's own automatic harvest may store. Default: 5.
+# harvest_max_bytes = 2048           # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_HARVEST_MAX_BYTES): cumulative byte budget for one session's own automatic harvest. Default: 2048.
+# session_enabled = true             # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_SESSION): whether the per-session ephemeral tier is read at all, underneath the enabled master switch above. Default: true.
+# journal_max_entries = 500          # REPO-FORBIDDEN (ZIRV_CTX_MEMORY_JOURNAL_MAX_ENTRIES): lines each memory bank's own journal.jsonl keeps before the oldest are pruned. Default: 500.
+
+# [task]                             # every key below is REPO-FORBIDDEN
+# max_parent_outcome_bytes = 4096    # REPO-FORBIDDEN (ZIRV_CTX_TASK_MAX_PARENT_OUTCOME_BYTES): byte budget on the `## PARENT OUTCOMES` block a `--task` delegation appends to a worker's own prompt; most recently updated parents are kept first and in full, the rest dropped with a `[truncated N bytes]` note. Default: 4096.
+
+# [setup]                            # not REPO-FORBIDDEN: bookkeeping for the guided `zirv setup` flow, written only to ~/.zirv/ctx.toml.
+# backup_retention_runs = 20         # count cap on .zirv/backups/ai-reset runs, applied on the next write; the oldest run is always pinned outside this cap. Default: 20.
+# memory_harvest_offered = false     # set once the guided flow has asked about automatic memory harvest, so a decline is not re-asked. Default: false.
+# statusline_wrap_offered = false    # set once the guided flow has asked about wrapping an existing custom Claude statusLine. Default: false.
+
+# [chrome]
+# banner = true                      # the launch banner naming the resolved harness, the rule that chose it, and the session id
+# bar = true                         # the reserved bottom status bar
+# events = true                      # REPO-FORBIDDEN (ZIRV_CTX_QUIET, inverted): the `zirv \u{25b8}` announcement channel on stderr. Default: true.
+
+# [dash]                             # every key below is REPO-FORBIDDEN except idle_quiet_ms and motion
+# enabled = true                     # REPO-FORBIDDEN (ZIRV_CTX_DASH): whether `zirv chat` opens the dashboard multiplexer. Default: true.
+# sidebar_cols = 44                  # REPO-FORBIDDEN (ZIRV_CTX_DASH_SIDEBAR_COLS): width, in columns, of the persistent session sidebar. Default: 44.
+# roster_max_age_secs = 604_800      # REPO-FORBIDDEN (ZIRV_CTX_DASH_ROSTER_MAX_AGE_SECS): how long a quit-time roster stays offered for restore. Default: 604800 (7 days).
+# max_panes = 9                      # REPO-FORBIDDEN (ZIRV_CTX_DASH_MAX_PANES): most panes one dashboard may hold at once, counting the orchestrator. Default: 9.
+# mouse = true                       # REPO-FORBIDDEN (ZIRV_CTX_DASH_MOUSE): whether the dashboard captures the mouse for wheel-scroll. Default: true.
+# workdir_roots = []                 # REPO-FORBIDDEN (ZIRV_CTX_DASH_WORKDIR_ROOTS): additional roots a pane `--workdir` request may canonicalise inside, beyond the dashboard's own repo root and that root's parent (always allowed). Default: [] (empty).
+# idle_quiet_ms = 10000              # not REPO-FORBIDDEN (a tuning knob, like pace.soft_percent): how long a signal-less pane's pty output must be quiet before it counts as Idle. Default: 10000 (10s).
+# motion = "full"                    # not REPO-FORBIDDEN (a tuning knob, like idle_quiet_ms): "full" | "reduced" -- spinner/shimmer/gauge-easing/breathing/flash/fade motion, vs. state changes only. Default: "full".
+
+# [workflow]                         # operator-controlled except workflow.deploy.minimum_tier, the one repo narrowing-only carve-out.
+# repo_checks_enabled = true         # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REPO_CHECKS): whether the commands in .zirv/verify.toml and the npm scripts in package.json may actually execute. Off = listed in the report with a skip line, never run, and never passing evidence. Default: true.
+# repo_skills_enabled = true         # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REPO_SKILLS): whether .zirv/skills/ manifests are loaded at all. A repo manifest may only ever ADD an id regardless. Default: true.
+# repo_agents_enabled = false        # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REPO_AGENTS): whether untrusted .zirv/agents manifests are loaded. Repository ids are additive-only even when enabled. Default: false.
+# repo_workflows_enabled = false     # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REPO_WORKFLOWS): whether untrusted .zirv/workflows/ definition packs are loaded. Repository packs are additive-only and cannot widen authority even when enabled. Default: false.
+# telemetry_enabled = true           # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_TELEMETRY): local workflow telemetry (`zirv workflow stats`). Default: true.
+# telemetry_max_events = 1000        # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_TELEMETRY_MAX_EVENTS): how many events one repository keeps before the oldest are pruned. Default: 1000.
+# telemetry_retention_days = 30      # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_TELEMETRY_RETENTION_DAYS): how long an event is kept. Default: 30.
+# auto_start = "detect"              # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_AUTO_START): "off" | "detect" | "always" -- starts a zirv workflow on a session's first prompt: "detect" for programming or investigation work, "always" for every first prompt. "no workflow" in the prompt opts out. Default: "detect".
+# adoption = "nudge"                 # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_ADOPTION): "off" | "advise" | "nudge" | "enforce" -- detects substantial edit work (>=5 edit calls, or >=1 over 12 turns) with no active zirv workflow. Default: "nudge".
+# check_env_passthrough = []         # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_CHECK_ENV_PASSTHROUGH): extra environment variable names ADDED to the built-in verification-check allowlist (SSH_AUTH_SOCK, SSH_AGENT_PID, SSH_ASKPASS, GPG_TTY, GNUPGHOME), read from zirv's own environment and set on each check child. Default: [].
+# review_worker_budget_tokens = 0    # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REVIEW_WORKER_BUDGET_TOKENS): token ceiling appended to a workflow reviewer worker's launch as `--budget-tokens`, only when set. Default: unset (no flag appended).
+# review_worker_max_tool_calls = 0   # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_REVIEW_WORKER_MAX_TOOL_CALLS): tool-call ceiling appended to a workflow reviewer worker's launch as `--max-tool-calls`, only when set. Default: unset (no flag appended).
+# auto_spawn_on_gate = false         # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_AUTO_SPAWN_ON_GATE): auto-spawns a bounded review run/test changed/verify worker when a gate transition lands the workflow on that phase. Default: false.
+# allow_empty_verify = false         # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_ALLOW_EMPTY_VERIFY): lets zirv verify/zirv test report Passed instead of Inconclusive when zero verification checks are configured or discoverable. Default: false.
+# builtin_checks_exclude = []        # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_BUILTIN_CHECKS_EXCLUDE): dotted ids `zirv verify`'s built-in self-check registry (zirv-cli issue #276) will not run, e.g. ["ZCHK-EOL-PINS"]. Default: [].
+# max_context_bytes = 8192           # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_MAX_CONTEXT_BYTES): byte cap on the active workflow step's resolved skill instructions, injected into the session prompt and printed by `zirv workflow context` alike. A cut ends with a truncation note, never silence. Default: 8192.
+
+# [workflow.deploy]
+# tier = "development"               # REPO-FORBIDDEN (ZIRV_CTX_WORKFLOW_DEPLOY_TIER): development < staging < production. Operator env overrides all layers. Default: "development".
+# minimum_tier = "development"       # repo MAY set this key because it folds with max(home, repo): it can only make deploy gates stricter, never looser. Omit by default.
+
+# [workflow.maintain]                # REPO-FORBIDDEN as a whole: detector commands execute with operator authority and must live only in ~/.zirv/ctx.toml.
+# timeout_secs = 60                  # timeout applied to each deterministic detector. Default: 60, hard-capped by the maintain runner.
+#
+# [workflow.maintain.detectors.example]
+# command = "cargo audit --quiet"     # operator-authored shell command; repository layers may never set it.
+# mode = "exit-nonzero"              # "exit-nonzero" or "line-count".
+# threshold = 1                      # line-count breaches at >= threshold; exit-nonzero ignores this value.
+
+# [report]
+# repository = "owner/repository"    # REPO-FORBIDDEN (ZIRV_CTX_REPORT_REPOSITORY): destination for workflow-maintain incidents only. The ordinary report command keeps its fixed Zirv repository default.
+
+# [search]
+# max_output_bytes = 2048            # REPO-FORBIDDEN (ZIRV_CTX_SEARCH_MAX_OUTPUT_BYTES): cap on one rendered `zirv ctx search`/`--session --around` window. Default: 2048. Also caps one `zirv ctx output show` window.
+
+# [output]
+# compact = true                     # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_COMPACT): whether claude's PostToolUse hook replaces a large Bash tool result with a compact summary. Forbidden in BOTH directions. Default: true.
+# compact_min_bytes = 4096           # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_COMPACT_MIN_BYTES): bytes a KNOWN build/test/log family's result needs before it is compacted. Forbidden in BOTH directions. Default: 4096.
+# compact_generic_min_bytes = 16384  # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_COMPACT_GENERIC_MIN_BYTES): the same threshold for a command whose output shape zirv does not recognise. Default: 16384.
+# verbatim = []                      # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_VERBATIM): extra program names NEVER compacted, added to the built-in reader set (cat, sed, grep, git diff, ...). Additive only. Default: [].
+# max_summary_bytes = 4096           # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_MAX_SUMMARY_BYTES): hard cap on one compact summary. The `zirv ctx output show <id>` retrieval line always survives it. Default: 4096.
+# diff_max_bytes = 65536             # narrow-only (ZIRV_CTX_OUTPUT_DIFF_MAX_BYTES): bytes a `git diff`/`show`/`log -p`/`format-patch` result may reach before it is replaced by a bounded per-file listing, never a partial hunk. A repo may only LOWER it, never raise it. Default: 65536 (zirv-cli issue #412).
+# compact_search = true              # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_COMPACT_SEARCH): whether rg/grep/find/fd/ls/dir/tree get a shape-aware pass instead of staying verbatim at any size. Forbidden in BOTH directions. Default: true (zirv-cli issue #414).
+# filter_defaults = true             # REPO-FORBIDDEN (ZIRV_CTX_OUTPUT_FILTER_DEFAULTS): whether zirv's own bundled [[output.filter]] rules join the operator's own `filter` list. Forbidden in BOTH directions. Default: true.
+
+# [policy]                           # zirv's own canonical permissions policy.
+# Not REPO-FORBIDDEN, and the ONE table here that does NOT deep-merge:
+# `[policy]` is lifted out of every layer and folded by `policy::resolve` as
+# `env(cap)` if set, else `max(home(cap), repo(cap))`, over the ordered stance
+# `allow < ask < deny`. So a repo checkout may only ever ratchet a stance
+# STRICTER, never looser -- which is why forbidding these keys outright would
+# also forbid the narrowing they exist for. `ZIRV_CTX_POLICY_<CAPABILITY>`
+# sits above the fold and wins in both directions (the operator's escape
+# hatch, mirroring ZIRV_AGENT_<NAME>_ENABLED). Every stance defaults to
+# "allow", meaning "zirv declares no restriction of its own"; what each
+# harness can actually enforce for a stricter one is reported per adapter,
+# honestly, rather than assumed -- see AgentAdapter::policy_support.
+# repo_fs_write = "allow"            # writes inside this checkout. Default: "allow".
+# outside_repo_fs_write = "allow"    # writes anywhere else on the machine. Default: "allow".
+# shell_exec = "allow"               # running shell commands at all. Default: "allow".
+# network = "allow"                  # outbound network access from the session. Default: "allow".
+# network_allowlist = []             # host/port destinations `network` is further scoped to when non-empty (zirv-cli issue #727); a repo checkout may only remove entries, never name one beyond the operator's own list. Default: [] (no scoping beyond `network` itself).
+# approval = "allow"                 # "allow" = approvals may be bypassed, "ask" = must be requested, "deny" = attempt nothing needing approval (a read-only session). Default: "allow".
+# git_push_destructive = "allow"     # `git push`, and history-rewriting/destructive git. Default: "allow".
+# tool_access = "allow"              # which of the harness's own tools (including MCP servers) may run. Default: "allow".
+
+# [safety]                           # zirv's harness-neutral command safety policy.
+# `deny`/`ask` are NOT REPO-FORBIDDEN and do NOT deep-merge: a repo checkout
+# may ADD entries to either (narrowing is always safe -- deny and ask are
+# both checked before allow), unioned with the operator's own home-layer
+# entries and the built-in set derived from adapters::SHIPPED_POSTURE_ALLOW/
+# _DENY (always present regardless of configuration). `allow`, `escape_allow`
+# and `default` ARE REPO-FORBIDDEN (ZIRV_CTX_SAFETY_ALLOW /
+# ZIRV_CTX_SAFETY_ESCAPE_ALLOW / ZIRV_CTX_SAFETY_DEFAULT): adding an allow or
+# escape_allow entry or changing the unmatched-command default can only ever
+# widen the effective policy, never narrow it.
+# deny = ["terraform destroy*"]      # additional deny patterns, unioned with the built-in set. Default: [] (built-in set only).
+# ask = ["kubectl delete*"]          # additional ask patterns, unioned with the built-in set. Default: [] (built-in set only).
+# allow = ["just test*"]             # REPO-FORBIDDEN (ZIRV_CTX_SAFETY_ALLOW): additional allow patterns, operator-only. Default: [] (built-in set only).
+# escape_allow = ["just test*"]      # REPO-FORBIDDEN (ZIRV_CTX_SAFETY_ESCAPE_ALLOW): patterns pre-cleared for a --dangerously-disable-sandbox retry specifically, operator-only. Every executable segment of the retry must match. Default: [] (built-in read-only-utility seed only -- see docs).
+# default = "ask"                    # REPO-FORBIDDEN (ZIRV_CTX_SAFETY_DEFAULT): verdict for a command matching no rule. Default: "ask".
+# interactive_default = "allow"      # REPO-FORBIDDEN (ZIRV_CTX_SAFETY_INTERACTIVE_DEFAULT): verdict for a command matching no rule on an INTERACTIVE launch. Default: "allow" -- a command zirv has never seen must not prompt. `default` above still governs headless launches.
+# sql = "on"                         # REPO-FORBIDDEN (ZIRV_CTX_SAFETY_SQL): "on" classifies psql/mysql/mariadb/sqlite3/duckdb/sqlcmd statements (a single provably read-only SELECT/EXPLAIN/SHOW is allowed, everything else asks); "off" disables it. Default: "on".
+# zirv-cli Issue #313's two loop breakers: NOT REPO-FORBIDDEN, unlike every other key
+# in this table above -- a repo may LOWER (narrow) any of the three, but
+# never raise one above the operator's own home-layer ceiling, and never
+# turn a `0` (disabled) breaker back on. See `narrow_threshold` in safety.rs.
+# denial_breaker_threshold = 3        # trailing consecutive Ask/Deny verdicts in one session, this decision included, before the hook's reason text stops explaining the policy and tells the agent to stop retrying. 0 disables. Default: 3.
+# identical_command_warn_after = 2    # trailing consecutive failures of the exact same Bash command (from the session transcript) before an Allow verdict also carries a warning in additionalContext. 0 disables. Default: 2.
+# identical_command_refuse_after = 5  # the same identical-failing-command count at which a HEADLESS launch (only) turns the verdict into Deny instead of merely warning; interactive launches never auto-refuse. 0 disables. Default: 5.
+
+# [fallback]
+# reactive_force_after_secs = 120     # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_REACTIVE_FORCE_AFTER_SECS): wait for idle after a confirmed block before forcing a structural seat handover.
+
+# [fallback.health]
+# zirv-cli Issue #455: health-aware routing. `enabled` may be narrowed here (a repo may switch the
+# route-health breaker off, never on); the three timing knobs are operator-only.
+# enabled = true                      # whether the per-route circuit breaker runs at all. Default: true.
+# open_after_failures = 3             # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_OPEN_AFTER_FAILURES): transport/server failures inside the window that exclude a route. Default: 3.
+# window_secs = 600                   # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_WINDOW_SECS): the sliding window those failures are counted over. Default: 600.
+# cooldown_secs = 300                 # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_COOLDOWN_SECS): how long an excluded route stays excluded before one trial. Default: 300.
+# degrade_error_rate_pct = 25          # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_DEGRADE_ERROR_RATE_PCT): rolling transport/server error rate that ranks a reachable route last. Default: 25.
+# degrade_min_samples = 8              # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_DEGRADE_MIN_SAMPLES): dated turn outcomes the window needs before either degrade signal fires. Default: 8.
+# degrade_ttft_ms = 20000              # REPO-FORBIDDEN (ZIRV_CTX_FALLBACK_HEALTH_DEGRADE_TTFT_MS): opt-in first-token p50 that marks a route degraded. Unset by default.

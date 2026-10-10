@@ -1,0 +1,30 @@
+name: "Commit Changes"
+description: "Commits changes with a provided commit message"
+params:
+  - "commit_message"
+commands:
+  - command: cargo fmt
+  - command: zirv t
+    description: "Run tests, check code formatting, and run clippy lint"
+    options:
+      proceed_on_failure: false
+  - command: "git add ."
+    description: "Stage all changes"
+    options:
+      proceed_on_failure: false
+      interactive: false
+  - command: "git commit -m \"${commit_message}\""
+    description: "Commit changes with a message"
+    options:
+      proceed_on_failure: false
+      interactive: false
+  - command: "branch=\"$(git branch --show-current)\"; test -n \"$branch\" && test \"$branch\" != main && test \"$branch\" != master"
+    description: "Refuse to push a protected or detached branch"
+    options:
+      proceed_on_failure: false
+      interactive: false
+  - command: "git push --set-upstream origin HEAD"
+    description: "Push the commit to the remote repository"
+    options:
+      proceed_on_failure: false
+      interactive: false

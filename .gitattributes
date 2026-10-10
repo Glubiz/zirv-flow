@@ -1,0 +1,15 @@
+# The generated native context files (CLAUDE.md / AGENTS.md) must byte-match a
+# fresh render of `.zirv/context/*.md`, so both sides have to be byte-stable
+# across platforms:
+#
+# - `/.zirv/context/*.md text eol=lf` pins the render inputs to LF on every
+#   checkout, regardless of core.autocrlf.
+# - `/CLAUDE.md -text` / `/AGENTS.md -text` freeze the committed render output
+#   exactly as generated (no normalization on either add or checkout).
+#
+# Patterns are anchored to the repo root: an unanchored `CLAUDE.md` matches at
+# any depth, and on case-insensitive filesystems it even captures
+# `.zirv/context/claude.md`.
+/CLAUDE.md -text
+/AGENTS.md -text
+/.zirv/context/*.md text eol=lf

@@ -1,0 +1,3 @@
+shortcuts:
+  t: test.yaml
+  gc: commit.yaml

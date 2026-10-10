@@ -1,0 +1,33 @@
+# Repo-layer zirv agent settings (untrusted layer): a repository checkout may
+# only DISABLE an agent here, never enable one.
+#
+# Unlike ctx.toml (whose repo layer table-merges on top of the operator's own
+# global config -- see zirv's CtxConfig::load), this file's layers are NOT deep
+# merged: each file is parsed on its own and the three answers are folded per
+# agent as
+#
+#   final(name) = env(name) if set
+#               else home(name).unwrap_or(true) && repo(name).unwrap_or(true)
+#
+# so an active `enabled = true` line here is already a harmless no-op --
+# there is nothing for a repo layer to enable. It is still shown commented
+# below, sample-config style, for the same reason as ctx.toml: uncomment a
+# block and set `enabled = false` to disable that agent from this checkout; a
+# commented line sets nothing.
+#
+# `capacity = "small"` marks an agent capacity-limited ("small tasks only" in
+# the harness roster) and has the same narrow-only trust shape as `enabled`:
+# a repo checkout may set it, but a commented (or absent) line here can never
+# clear a `capacity = "small"` set by the operator's own home file back to
+# full -- only ZIRV_AGENT_<NAME>_CAPACITY can do that, in either direction.
+#
+# Every agent known to zirv's adapter registry is listed below at its default
+# enablement.
+
+# [agents.claude]
+# enabled = true
+# capacity = "small"
+
+# [agents.codex]
+# enabled = true
+# capacity = "small"
