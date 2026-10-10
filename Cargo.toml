@@ -1,17 +1,20 @@
-[package]
-name = "zirv-flow"
-version = "0.1.0"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
-description = "A self-hosted marketing automation tool: connect data sources, segment your people, and run automation flows."
-repository = "https://github.com/Glubiz/zirv-flow"
 license = "MIT"
-readme = "README.md"
-keywords = ["marketing-automation", "segmentation", "self-hosted", "automation", "workflow"]
-categories = ["web-programming"]
+repository = "https://github.com/Glubiz/zirv-flow"
 
-[dependencies]
+[workspace.dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
+zirv-flow-api = { path = "crates/zirv-flow-api" }
+zirv-flow-core = { path = "crates/zirv-flow-core" }
+zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
+zirv-flow-store = { path = "crates/zirv-flow-store" }
 
 # No `panic = "abort"`: this will be a long-running server, where a panic in
 # one task must not take the whole process down.

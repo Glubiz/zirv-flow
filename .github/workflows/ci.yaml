@@ -48,6 +48,12 @@ jobs:
       - name: Set Up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Crate dependency gate
+        run: bash scripts/check-crate-deps.sh
+
+      - name: Crate dependency gate self-test
+        run: bash scripts/check-crate-deps.sh --self-test
+
       - name: Cache Cargo Registry
         uses: actions/cache@v4.3.0
         with:
@@ -159,7 +165,7 @@ jobs:
   # where CD is idempotent on an already-published version and a bump is what
   # makes a code change actually ship. It only requires a version bump when
   # the diff since the base branch touches a path that changes the shipped
-  # binary (src/, Cargo.toml, Cargo.lock, build.rs); a README/docs/CI-only PR
+  # binary (src/, crates/, Cargo.toml, Cargo.lock, build.rs); a README/docs/CI-only PR
   # passes unbumped.
   version-bump:
     name: Version Bump Check
@@ -202,12 +208,12 @@ jobs:
             exit 1
           fi
 
-          # --no-renames: a file renamed OUT of src/ (or Cargo.toml/.lock/
+          # --no-renames: a file renamed OUT of src/ or crates/ (or Cargo.toml/.lock/
           # build.rs) would otherwise show only under its destination path,
           # hiding the shipped-code change from this filter.
           CHANGED=$(git diff --name-only --no-renames "$BASE...HEAD")
-          if ! echo "$CHANGED" | grep -qE '^src/|^Cargo\.toml$|^Cargo\.lock$|^build\.rs$'; then
-            echo "::notice::no shipped-code paths changed since ${{ github.base_ref }} (src/, Cargo.toml, Cargo.lock, build.rs) -- version bump not required"
+          if ! echo "$CHANGED" | grep -qE '^src/|^crates/|^Cargo\.toml$|^Cargo\.lock$|^build\.rs$'; then
+            echo "::notice::no shipped-code paths changed since ${{ github.base_ref }} (src/, crates/, Cargo.toml, Cargo.lock, build.rs) -- version bump not required"
             exit 0
           fi
           if [ "$BASE_VERSION" = "$HEAD" ]; then

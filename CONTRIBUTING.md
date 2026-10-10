@@ -48,7 +48,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Bump the version in `Cargo.toml` above its base version on `main` whenever the
-diff touches `src/`, `Cargo.toml`, `Cargo.lock`, or `build.rs` -- CD's release
+diff touches `src/`, `crates/`, `Cargo.toml`, `Cargo.lock`, or `build.rs` -- CD's release
 step is idempotent on an already-published version, so a docs/CI-only PR needs
 no bump. Run `cargo build` to update `Cargo.lock` and include it.
 
