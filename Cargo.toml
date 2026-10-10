@@ -3,14 +3,18 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
 repository = "https://github.com/Glubiz/zirv-flow"
 
 [workspace.dependencies]
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive", "env"] }
+figment = { version = "0.10.19", features = ["toml", "env"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+url = "2.5.8"
 zirv-flow-api = { path = "crates/zirv-flow-api" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }

@@ -22,6 +22,24 @@ a skeleton: nothing is ready to use yet.
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
 
+## Configuration
+
+Pass an optional TOML file with `zirv-flow --config <path>`, or set
+`ZIRV_FLOW_CONFIG`. Environment overrides use the case-insensitive form
+`ZIRV_FLOW_<SECTION>__<KEY>` and take precedence over the file, for example
+`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=20`.
+
+| Key | Type | Default | Rule |
+|-----|------|---------|------|
+| `server.bind` | socket address | `127.0.0.1:8080` | must parse |
+| `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
+| `database.max_connections` | u32 | 10 | at least 1 |
+| `database.migrate_on_start` | bool | false | none |
+| `worker.concurrency` | u32 | 4 | at least 1 |
+
+Run `zirv-flow config check` to validate the effective configuration and print
+it as TOML with the database password redacted.
+
 ## Development
 
 Install the stable Rust toolchain and [cargo-nextest](https://nexte.st), then:
