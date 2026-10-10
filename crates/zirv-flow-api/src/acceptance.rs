@@ -850,6 +850,16 @@ mod tests {
         for _ in 0..4 {
             sign_in(&router, OWNER_EMAIL, "not the right password").await;
         }
+        let locked: bool = sqlx::query_scalar("SELECT locked_until IS NOT NULL FROM users")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(locked, "the fifth failure locks the account");
+        // The first lock lasts one second, shorter than a sign-in on a slow runner.
+        sqlx::query("UPDATE users SET locked_until = now() + interval '1 hour'")
+            .execute(&pool)
+            .await
+            .unwrap();
         let locked_out = sign_in(&router, OWNER_EMAIL, PASSWORD).await;
 
         assert_eq!(
@@ -858,12 +868,6 @@ mod tests {
             "the correct password is refused while locked"
         );
         assert_eq!(locked_out.body, wrong.body);
-        let until: Option<time::OffsetDateTime> =
-            sqlx::query_scalar("SELECT locked_until FROM users")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(until.unwrap() > time::OffsetDateTime::now_utc());
 
         sqlx::query("UPDATE users SET locked_until = now() - interval '1 second'")
             .execute(&pool)
