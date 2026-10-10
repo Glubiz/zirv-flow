@@ -12,7 +12,7 @@ use zirv_flow_store::Member;
 
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, workspace_id};
+use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -71,7 +71,7 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<MemberBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::ReadMembers).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::ReadMembers).await?;
     let members = zirv_flow_store::list_members(&state.pool, workspace.id).await?;
     Ok(Json(members.iter().map(MemberBody::from).collect()))
 }
@@ -101,8 +101,8 @@ pub(crate) async fn set(
     Path((ws, user)): Path<(String, String)>,
     ApiJson(body): ApiJson<SetRoleRequest>,
 ) -> Result<Json<RoleBody>, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Admin).await?;
-    let user: UserId = user.parse().map_err(|_| ApiError::not_found())?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let user: UserId = path_id(&user)?;
     let role: Role = body.role.parse()?;
     let membership =
         admin::set_member(&state.pool, &principal.context(), workspace.id, user, role).await?;
@@ -134,8 +134,8 @@ pub(crate) async fn remove(
     principal: Principal,
     Path((ws, user)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Admin).await?;
-    let user: UserId = user.parse().map_err(|_| ApiError::not_found())?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let user: UserId = path_id(&user)?;
     admin::remove_member(&state.pool, &principal.context(), workspace.id, user).await?;
     Ok(StatusCode::NO_CONTENT)
 }

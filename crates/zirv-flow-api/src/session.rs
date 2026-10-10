@@ -183,7 +183,7 @@ async fn record_failure(
     ),
     security(("session" = []))
 )]
-pub(crate) async fn current(principal: Principal) -> Result<Response, ApiError> {
+pub(crate) async fn current(principal: Principal) -> Result<impl IntoResponse, ApiError> {
     let session = principal.require_user()?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
@@ -191,8 +191,7 @@ pub(crate) async fn current(principal: Principal) -> Result<Response, ApiError> 
             user: UserBody::from(&session.user),
             csrf_token: session.csrf_token.clone(),
         }),
-    )
-        .into_response())
+    ))
 }
 
 /// Signs out: ends the session and clears the cookie. Needs the CSRF token.
@@ -210,7 +209,7 @@ pub(crate) async fn current(principal: Principal) -> Result<Response, ApiError> 
 pub(crate) async fn sign_out(
     State(state): State<AppState>,
     principal: Principal,
-) -> Result<Response, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let session = principal.require_user()?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     zirv_flow_store::delete_session(&mut *tx, &session.token_hash).await?;
@@ -227,8 +226,7 @@ pub(crate) async fn sign_out(
     Ok((
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, cookies::clear(state.cookie_secure))],
-    )
-        .into_response())
+    ))
 }
 
 #[cfg(test)]

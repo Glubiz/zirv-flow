@@ -11,6 +11,8 @@
 //! 3. [`authorize`] guards a workspace's resources: 404 for a caller with no access (so
 //!    existence does not leak), 403 for a caller who may see the workspace but not do this.
 
+use std::str::FromStr;
+
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -223,8 +225,8 @@ pub(crate) async fn authorize(
         .ok_or_else(ApiError::not_found)
 }
 
-/// Parses a workspace id from a path segment; a malformed id is a plain 404.
-pub(crate) fn workspace_id(segment: &str) -> Result<WorkspaceId, ApiError> {
+/// Parses an id from a path segment; a malformed id is a plain 404.
+pub(crate) fn path_id<T: FromStr>(segment: &str) -> Result<T, ApiError> {
     segment.parse().map_err(|_| ApiError::not_found())
 }
 
@@ -348,9 +350,9 @@ mod tests {
 
     #[test]
     fn a_malformed_workspace_id_is_a_404() {
-        let error = workspace_id("not-a-uuid").err().unwrap();
+        let error = path_id::<WorkspaceId>("not-a-uuid").err().unwrap();
 
         assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
-        assert!(workspace_id(&WorkspaceId::new().to_string()).is_ok());
+        assert!(path_id::<WorkspaceId>(&WorkspaceId::new().to_string()).is_ok());
     }
 }

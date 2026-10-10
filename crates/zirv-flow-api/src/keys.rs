@@ -3,7 +3,7 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -13,7 +13,7 @@ use zirv_flow_store::ApiKey;
 
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, workspace_id};
+use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -89,7 +89,7 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<ApiKeyBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let keys = zirv_flow_store::list_api_keys(&state.pool, workspace.id).await?;
     Ok(Json(keys.iter().map(ApiKeyBody::from).collect()))
 }
@@ -115,8 +115,8 @@ pub(crate) async fn create(
     principal: Principal,
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateApiKeyRequest>,
-) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Admin).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let scopes = body
         .scopes
         .iter()
@@ -137,8 +137,7 @@ pub(crate) async fn create(
             metadata: ApiKeyBody::from(&created.key),
             key: created.plaintext,
         }),
-    )
-        .into_response())
+    ))
 }
 
 /// Revokes a key. Revoked keys are refused with 401 from then on.
@@ -163,8 +162,8 @@ pub(crate) async fn revoke(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Admin).await?;
-    let id: ApiKeyId = id.parse().map_err(|_| ApiError::not_found())?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let id: ApiKeyId = path_id(&id)?;
     admin::revoke_api_key(&state.pool, &principal.context(), workspace.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

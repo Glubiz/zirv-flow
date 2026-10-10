@@ -11,7 +11,7 @@ use zirv_flow_store::Workspace;
 
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, workspace_id};
+use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -122,7 +122,7 @@ pub(crate) async fn get(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<WorkspaceBody>, ApiError> {
-    let workspace = authorize(&state, &principal, workspace_id(&ws)?, Need::Read).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     Ok(Json(WorkspaceBody::from(&workspace)))
 }
 
