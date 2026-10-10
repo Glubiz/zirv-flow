@@ -13,8 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 5] = [
+const CONFIG_KEYS: [&str; 6] = [
     "server.bind",
+    "server.cookie_secure",
     "database.url",
     "database.max_connections",
     "database.migrate_on_start",
@@ -33,6 +34,7 @@ pub(crate) struct Config {
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     bind: SocketAddr,
+    cookie_secure: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +159,7 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         let mut figment = Figment::new()
             .merge(Serialized::default("server.bind", "127.0.0.1:8080"))
+            .merge(Serialized::default("server.cookie_secure", true))
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32));
@@ -210,6 +213,11 @@ impl Config {
 
     pub(crate) fn server_bind(&self) -> SocketAddr {
         self.server.bind
+    }
+
+    /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
+    pub(crate) fn server_cookie_secure(&self) -> bool {
+        self.server.cookie_secure
     }
 
     pub(crate) fn database_url(&self) -> &str {
@@ -435,6 +443,42 @@ mod tests {
 
         assert!(error.contains("server.bind"));
         assert!(error.contains("ZIRV_FLOW_SERVER__BIND"));
+    }
+
+    #[test]
+    fn session_cookies_are_secure_by_default() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert!(config.server_cookie_secure());
+    }
+
+    #[test]
+    fn cookie_secure_can_be_turned_off_by_environment_or_file() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SERVER__COOKIE_SECURE".into(), "false".into()));
+        let from_env = Config::load(None, env).unwrap();
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[server]
+cookie_secure = false
+",
+        );
+        let from_file = Config::load(Some(&file.0), []).unwrap();
+
+        assert!(!from_env.server_cookie_secure());
+        assert!(!from_file.server_cookie_secure());
+    }
+
+    #[test]
+    fn a_non_boolean_cookie_secure_names_its_key() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SERVER__COOKIE_SECURE".into(), "maybe".into()));
+
+        let error = Config::load(None, env).unwrap_err().to_string();
+
+        assert!(error.contains("server.cookie_secure"));
+        assert!(error.contains("ZIRV_FLOW_SERVER__COOKIE_SECURE"));
     }
 
     #[test]

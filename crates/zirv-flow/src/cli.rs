@@ -25,8 +25,9 @@ pub(crate) enum Command {
     Scheduler,
     /// Apply database migrations.
     Migrate,
-    /// Create an owner, rotate the master key, or replay erasures.
-    Admin,
+    /// Administer accounts: create the owner or reset a password.
+    #[command(subcommand)]
+    Admin(AdminCommand),
     /// Validate configuration and print it with secrets redacted.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -40,10 +41,27 @@ impl Command {
             Self::Worker => "worker",
             Self::Scheduler => "scheduler",
             Self::Migrate => "migrate",
-            Self::Admin => "admin",
+            Self::Admin(_) => "admin",
             Self::Config(_) => "config",
         }
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum AdminCommand {
+    /// Create the instance owner. Reads the password from one line of standard input.
+    CreateOwner {
+        /// The owner's e-mail address.
+        #[arg(long)]
+        email: String,
+    },
+    /// Set a new password for a user and end their sessions. Reads the password from one
+    /// line of standard input.
+    ResetPassword {
+        /// The user's e-mail address.
+        #[arg(long)]
+        email: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -66,6 +84,38 @@ mod tests {
     fn version_flag_is_recognised() {
         let error = Cli::try_parse_from(["zirv-flow", "--version"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn the_admin_subcommands_take_an_email_and_never_a_password_argument() {
+        let create =
+            Cli::try_parse_from(["zirv-flow", "admin", "create-owner", "--email", "a@b.c"])
+                .unwrap();
+        let reset =
+            Cli::try_parse_from(["zirv-flow", "admin", "reset-password", "--email", "a@b.c"])
+                .unwrap();
+
+        assert!(matches!(
+            create.command,
+            Some(Command::Admin(AdminCommand::CreateOwner { .. }))
+        ));
+        assert!(matches!(
+            reset.command,
+            Some(Command::Admin(AdminCommand::ResetPassword { .. }))
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "zirv-flow",
+                "admin",
+                "create-owner",
+                "--email",
+                "a@b.c",
+                "--password",
+                "secret"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["zirv-flow", "admin", "create-owner"]).is_err());
     }
 
     #[test]

@@ -3,7 +3,7 @@ mod config;
 
 use std::ffi::OsString;
 use std::future::Future;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::net::TcpListener;
 use zirv_flow_store::{PgPool, SchemaState};
 
-use crate::cli::{Cli, Command, ConfigCommand};
+use crate::cli::{AdminCommand, Cli, Command, ConfigCommand};
 use crate::config::Config;
 
 /// Seconds; makes the exporter render request durations as histograms rather than summaries.
@@ -27,6 +27,7 @@ async fn main() -> ExitCode {
         run(
             cli,
             std::env::vars_os(),
+            &mut io::stdin().lock(),
             &mut io::stdout(),
             &mut io::stderr(),
         )
@@ -37,6 +38,7 @@ async fn main() -> ExitCode {
 async fn run(
     cli: Cli,
     env: impl IntoIterator<Item = (OsString, OsString)>,
+    stdin: &mut impl BufRead,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> u8 {
@@ -66,27 +68,30 @@ async fn run(
         return run_migrate(&config, stdout, stderr).await;
     }
 
+    if let Command::Admin(admin_command) = &command {
+        // The password is read first so a missing one fails without touching the database.
+        let password = match read_password(stdin) {
+            Ok(password) => password,
+            Err(message) => {
+                let _ = writeln!(stderr, "error: admin: {message}");
+                return 1;
+            }
+        };
+        let pool = match open_database(&config).await {
+            Ok(pool) => pool,
+            Err(message) => return database_error(stderr, message),
+        };
+        return run_admin(admin_command, &pool, &password, stdout, stderr).await;
+    }
+
     if matches!(
         command,
         Command::All | Command::Serve | Command::Worker | Command::Scheduler
     ) {
-        let pool = match connect(&config).await {
+        let pool = match open_database(&config).await {
             Ok(pool) => pool,
-            Err(error) => return database_error(stderr, error),
+            Err(message) => return database_error(stderr, message),
         };
-        if config.database_migrate_on_start() {
-            if let Err(error) = zirv_flow_store::migrate(&pool).await {
-                return database_error(stderr, error);
-            }
-        } else {
-            let state = match zirv_flow_store::schema_state(&pool).await {
-                Ok(state) => state,
-                Err(error) => return database_error(stderr, error),
-            };
-            if let StartupAction::Refuse(message) = startup_action(state) {
-                return database_error(stderr, message);
-            }
-        }
 
         // `all` also serves HTTP until the worker and scheduler roles exist (#7).
         if matches!(command, Command::All | Command::Serve) {
@@ -105,6 +110,7 @@ async fn run(
                 pool,
                 render,
                 config.server_bind(),
+                config.server_cookie_secure(),
                 stderr,
                 shutdown_signal(),
             )
@@ -125,6 +131,7 @@ async fn serve_http(
     pool: PgPool,
     render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
     addr: SocketAddr,
+    cookie_secure: bool,
     stderr: &mut impl Write,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
@@ -138,7 +145,8 @@ async fn serve_http(
     let bound = listener.local_addr().unwrap_or(addr);
     let _ = writeln!(stderr, "listening on {bound}");
 
-    let state = zirv_flow_api::AppState::new(pool, render_metrics);
+    let state =
+        zirv_flow_api::AppState::new(pool, render_metrics).with_cookie_secure(cookie_secure);
     let (drain, draining) = tokio::sync::watch::channel(false);
     let server = zirv_flow_api::serve(listener, state, async move {
         let mut draining = draining;
@@ -198,6 +206,75 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+/// Connects, then migrates when `database.migrate_on_start` is set or refuses to go on
+/// when the schema is not ready. Errors are the message to report.
+async fn open_database(config: &Config) -> Result<PgPool, String> {
+    let pool = connect(config).await.map_err(|error| error.to_string())?;
+    if config.database_migrate_on_start() {
+        zirv_flow_store::migrate(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        let state = zirv_flow_store::schema_state(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let StartupAction::Refuse(message) = startup_action(state) {
+            return Err(message);
+        }
+    }
+    Ok(pool)
+}
+
+/// One line from standard input, without its line ending. Nothing else is trimmed, since
+/// a password may begin or end with spaces.
+fn read_password(stdin: &mut impl BufRead) -> Result<String, &'static str> {
+    let mut line = String::new();
+    match stdin.read_line(&mut line) {
+        Ok(0) => return Err("no password on standard input"),
+        Ok(_) => {}
+        Err(_) => return Err("could not read the password from standard input"),
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(line)
+}
+
+async fn run_admin(
+    command: &AdminCommand,
+    pool: &PgPool,
+    password: &str,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let context = zirv_flow_api::admin::Context::system();
+    let result = match command {
+        AdminCommand::CreateOwner { email } => {
+            zirv_flow_api::admin::create_owner(pool, &context, email, password)
+                .await
+                .map(|_| "owner created")
+        }
+        AdminCommand::ResetPassword { email } => {
+            zirv_flow_api::admin::reset_password(pool, &context, email, password)
+                .await
+                .map(|()| "password reset; the user's sessions were ended")
+        }
+    };
+    match result {
+        Ok(message) => {
+            let _ = writeln!(stdout, "{message}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "error: admin: {error}");
+            1
+        }
+    }
 }
 
 async fn connect(config: &Config) -> Result<PgPool, zirv_flow_store::StoreError> {
@@ -274,6 +351,7 @@ mod tests {
         let code = run(
             cli,
             database_env("postgres://user:hunter2@localhost/database"),
+            &mut io::empty(),
             &mut stdout,
             &mut stderr,
         )
@@ -295,11 +373,179 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let code = run(cli, [], &mut stdout, &mut stderr).await;
+        let code = run(cli, [], &mut io::empty(), &mut stdout, &mut stderr).await;
 
         assert_eq!(code, 2);
         assert!(stdout.is_empty());
         assert!(String::from_utf8(stderr).unwrap().contains("database.url"));
+    }
+
+    #[test]
+    fn the_password_is_one_line_without_its_line_ending() {
+        let read = |input: &str| read_password(&mut input.as_bytes());
+
+        assert_eq!(read("secret phrase\n").unwrap(), "secret phrase");
+        assert_eq!(read("secret phrase\r\n").unwrap(), "secret phrase");
+        assert_eq!(read("secret phrase").unwrap(), "secret phrase");
+        assert_eq!(read(" padded \nnext line\n").unwrap(), " padded ");
+        assert_eq!(read("\n").unwrap(), "");
+    }
+
+    #[test]
+    fn a_missing_password_is_an_error() {
+        assert_eq!(
+            read_password(&mut io::empty()),
+            Err("no password on standard input")
+        );
+        assert_eq!(
+            read_password(&mut &[0xff, 0xfe, b'\n'][..]),
+            Err("could not read the password from standard input")
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_commands_fail_without_a_password_before_touching_the_database() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Admin(AdminCommand::CreateOwner {
+                email: "owner@example.com".into(),
+            })),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(
+            cli,
+            database_env("postgres://postgres@127.0.0.1:1/zirv_flow"),
+            &mut io::empty(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "error: admin: no password on standard input\n"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn create_owner_reads_the_password_and_a_second_owner_is_refused(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let create = |email: &str| AdminCommand::CreateOwner {
+            email: email.to_owned(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let first = run_admin(
+            &create("Owner@Example.com"),
+            &pool,
+            "correct horse battery",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let second = run_admin(
+            &create("other@example.com"),
+            &pool,
+            "correct horse battery",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(first, 0);
+        assert_eq!(String::from_utf8(stdout).unwrap(), "owner created\n");
+        assert_eq!(second, 1);
+        let error = String::from_utf8(stderr).unwrap();
+        assert_eq!(error, "error: admin: an owner already exists\n");
+        assert!(!error.contains("correct horse battery"));
+        let users = zirv_flow_store::list_users(&pool).await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].is_owner);
+        assert_eq!(users[0].email, "owner@example.com");
+        assert!(!users[0].password_hash.contains("correct horse battery"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn create_owner_rejects_a_short_password_and_reset_needs_an_existing_user(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let short = run_admin(
+            &AdminCommand::CreateOwner {
+                email: "owner@example.com".into(),
+            },
+            &pool,
+            "short",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let reset = run_admin(
+            &AdminCommand::ResetPassword {
+                email: "nobody@example.com".into(),
+            },
+            &pool,
+            "correct horse battery",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!((short, reset), (1, 1));
+        let error = String::from_utf8(stderr).unwrap();
+        assert!(error.contains("password: must be 12 to 1024 characters"));
+        assert!(error.contains("no such user"));
+        assert!(!error.contains("short\n"));
+        assert!(zirv_flow_store::list_users(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reset_password_changes_the_password_of_an_existing_user(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        run_admin(
+            &AdminCommand::CreateOwner {
+                email: "owner@example.com".into(),
+            },
+            &pool,
+            "correct horse battery",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        let before = zirv_flow_store::list_users(&pool).await.unwrap()[0]
+            .password_hash
+            .clone();
+
+        let code = run_admin(
+            &AdminCommand::ResetPassword {
+                email: "owner@example.com".into(),
+            },
+            &pool,
+            "another long password",
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let after = zirv_flow_store::list_users(&pool).await.unwrap()[0]
+            .password_hash
+            .clone();
+        assert_ne!(before, after);
+        assert!(after.starts_with("$argon2id$"));
+        assert!(!after.contains("another long password"));
     }
 
     #[test]
@@ -370,6 +616,7 @@ mod tests {
             lazy_pool(),
             Arc::new(String::new),
             addr,
+            true,
             &mut stderr,
             std::future::ready(()),
         )
@@ -391,6 +638,7 @@ mod tests {
             lazy_pool(),
             Arc::new(String::new),
             "127.0.0.1:0".parse().unwrap(),
+            true,
             &mut stderr,
             std::future::ready(()),
         )

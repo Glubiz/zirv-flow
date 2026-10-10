@@ -3,6 +3,19 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::StoreError;
 
+/// An open database transaction; dropping it without committing rolls back.
+pub type Tx = sqlx::Transaction<'static, sqlx::Postgres>;
+
+/// Starts a transaction.
+pub async fn begin(pool: &PgPool) -> Result<Tx, StoreError> {
+    pool.begin().await.map_err(StoreError::query)
+}
+
+/// Commits a transaction.
+pub async fn commit(tx: Tx) -> Result<(), StoreError> {
+    tx.commit().await.map_err(StoreError::query)
+}
+
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, StoreError> {
     PgPoolOptions::new()
         .max_connections(max_connections)

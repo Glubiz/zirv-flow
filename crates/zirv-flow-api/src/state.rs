@@ -16,6 +16,7 @@ pub struct AppState {
     pub(crate) pool: PgPool,
     pub(crate) render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
     pub(crate) schema_check: SchemaCheck,
+    pub(crate) cookie_secure: bool,
 }
 
 impl AppState {
@@ -28,7 +29,15 @@ impl AppState {
             schema_check: Arc::new(|pool| {
                 Box::pin(async move { zirv_flow_store::schema_state(&pool).await })
             }),
+            cookie_secure: true,
         }
+    }
+
+    /// Whether the session cookie carries the `Secure` attribute. On by default; turn it
+    /// off only for plain-HTTP development.
+    pub fn with_cookie_secure(mut self, secure: bool) -> Self {
+        self.cookie_secure = secure;
+        self
     }
 
     /// Replaces the readiness schema check; lets tests report states the embedded migrator cannot.
@@ -36,5 +45,23 @@ impl AppState {
     pub(crate) fn with_schema_check(mut self, check: SchemaCheck) -> Self {
         self.schema_check = check;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        AppState::new(pool, Arc::new(String::new))
+    }
+
+    #[tokio::test]
+    async fn cookies_are_secure_unless_turned_off() {
+        assert!(state().cookie_secure);
+        assert!(!state().with_cookie_secure(false).cookie_secure);
     }
 }
