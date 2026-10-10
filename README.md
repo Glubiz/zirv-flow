@@ -17,7 +17,8 @@ from that data, and run automation flows for everyone or for a segment.
 ## Status
 
 Pre-alpha. The project is at the architecture and roadmap stage; configuration,
-database bootstrap and the HTTP server skeleton are implemented, but nothing is ready to use yet.
+database bootstrap, the HTTP server skeleton and local accounts with workspaces,
+sessions and API keys are implemented, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -32,6 +33,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | Key | Type | Default | Rule |
 |-----|------|---------|------|
 | `server.bind` | socket address | `127.0.0.1:8080` | must parse |
+| `server.cookie_secure` | bool | true | none; set false only for plain-HTTP development |
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
@@ -77,6 +79,60 @@ annotation, regenerate it with:
 ```sh
 ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi
 ```
+
+## Accounts, workspaces and authentication
+
+People sign in with a local account (e-mail and password, hashed with argon2id).
+One account is the instance **owner**; the owner administers every workspace.
+Other accounts are members or admins of individual workspaces. Create the owner
+once, from the command line (the first-run UI setup arrives with the UI shell):
+
+```sh
+printf '%s
+' "$OWNER_PASSWORD" | zirv-flow admin create-owner --email owner@example.com
+printf '%s
+' "$NEW_PASSWORD"   | zirv-flow admin reset-password --email someone@example.com
+```
+
+Both commands read the password from one line of standard input (never from an
+argument), connect, run the same startup schema check as `serve`, and exit 1 on
+any error. `reset-password` also clears a lockout and ends the user's sessions.
+Passwords are 12 to 1024 characters.
+
+- **Sessions.** `POST /api/v1/session` with `{email, password}` returns the user
+  and a `csrf_token` and sets the `zf_session` cookie (HttpOnly, SameSite=Lax,
+  Secure unless `server.cookie_secure` is false). Sessions expire after 12 hours
+  idle or 7 days in total. `GET /api/v1/session` shows the current user and CSRF
+  token; `DELETE /api/v1/session` signs out.
+- **CSRF.** A request authenticated by the cookie that uses POST, PUT, PATCH or
+  DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
+  needs none.
+- **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
+  `write`, `admin`); the response shows the `zfk_...` key once, and only a hash
+  is stored. Send it as `Authorization: Bearer <key>`. A key works only in its
+  own workspace and never on instance-level endpoints (`/users`, creating
+  workspaces, `/session`). `read` allows GETs, `admin` allows members and keys;
+  scopes do not imply one another.
+- **Sign-in throttling.** Five failures in a row lock the account for
+  `min(2^(failures-5) seconds, 15 minutes)`. An unknown e-mail, a wrong password
+  and a locked account give the same 401.
+- **Isolation.** A caller with no access to a workspace gets 404 for it, never
+  403. Workspace members can read the workspace and its member list; admins and
+  the owner also manage members and keys.
+- **Audit log.** Sign-ins (including failures), sign-outs, user, workspace,
+  membership and key events and password resets are appended to `audit_log`.
+  Rows hold ids, the request id and a small summary, never e-mails, passwords,
+  tokens or key secrets. The log is append-only: the code offers no update or
+  delete.
+
+| Endpoint | Who |
+|----------|-----|
+| `POST/GET/DELETE /api/v1/session` | anyone / signed in / signed in |
+| `GET/POST /api/v1/users` | owner |
+| `GET /api/v1/workspaces`, `POST /api/v1/workspaces` | signed in / owner |
+| `GET /api/v1/workspaces/{ws}`, `.../members` | members, admins, owner, `read` keys |
+| `PUT/DELETE /api/v1/workspaces/{ws}/members/{user_id}` | workspace admins, owner, `admin` keys |
+| `GET/POST /api/v1/workspaces/{ws}/api-keys`, `DELETE .../api-keys/{id}` | workspace admins, owner, `admin` keys |
 
 ## Development
 

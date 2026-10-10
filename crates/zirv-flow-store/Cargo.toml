@@ -7,7 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 sqlx.workspace = true
+time.workspace = true
+uuid.workspace = true
 zirv-flow-core.workspace = true
 
 [dev-dependencies]

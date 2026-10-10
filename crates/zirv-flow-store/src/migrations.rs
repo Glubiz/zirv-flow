@@ -171,7 +171,7 @@ mod tests {
         Migrator::new(path).await.unwrap()
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_an_empty_database_brings_it_up_to_date(pool: PgPool) {
         let migrator = fixture("migrations-basic").await;
@@ -183,7 +183,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_twice_is_a_no_op(pool: PgPool) {
         let migrator = fixture("migrations-basic").await;
@@ -193,7 +193,7 @@ mod tests {
         assert!(migrate_with(&pool, &migrator).await.unwrap().is_empty());
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_newer_schema_is_detected_and_migration_is_refused(pool: PgPool) {
         let migrator = fixture("migrations-basic").await;
@@ -218,7 +218,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn pending_migrations_are_counted(pool: PgPool) {
         let first = fixture("migrations-first").await;
@@ -231,7 +231,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dirty_migration_is_detected(pool: PgPool) {
         let migrator = fixture("migrations-first").await;
@@ -251,7 +251,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_a_dirty_schema_is_refused(pool: PgPool) {
         let migrator = fixture("migrations-first").await;
@@ -270,7 +270,7 @@ mod tests {
         assert!(error.to_string().contains("partially applied"), "{error}");
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_modified_migration_is_detected_and_migration_is_refused(pool: PgPool) {
         let original = fixture("migrations-first").await;
@@ -288,7 +288,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_migrators_apply_each_version_once(pool: PgPool) {
         let migrator = Arc::new(fixture("migrations-basic").await);

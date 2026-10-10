@@ -1,19 +1,33 @@
 //! HTTP API for zirv-flow.
 
+pub mod admin;
+mod auth;
+mod cookies;
+mod credentials;
 mod health;
+mod json;
+mod keys;
+mod members;
 mod metrics;
 mod openapi;
+mod passwords;
 mod problem;
 mod request_id;
+mod session;
 mod state;
+mod users;
 mod version;
+mod workspaces;
+
+#[cfg(test)]
+mod acceptance;
 
 use std::future::Future;
 use std::io;
 
 use axum::Router;
 use axum::middleware::from_fn;
-use axum::routing::get;
+use axum::routing::{get, put};
 use tokio::net::TcpListener;
 
 pub use openapi::openapi;
@@ -27,6 +41,31 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(metrics::render))
         .route("/api/v1/version", get(version::version))
+        .route(
+            "/api/v1/session",
+            get(session::current)
+                .post(session::sign_in)
+                .delete(session::sign_out),
+        )
+        .route("/api/v1/users", get(users::list).post(users::create))
+        .route(
+            "/api/v1/workspaces",
+            get(workspaces::list).post(workspaces::create),
+        )
+        .route("/api/v1/workspaces/{ws}", get(workspaces::get))
+        .route("/api/v1/workspaces/{ws}/members", get(members::list))
+        .route(
+            "/api/v1/workspaces/{ws}/members/{user_id}",
+            put(members::set).delete(members::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/api-keys",
+            get(keys::list).post(keys::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/api-keys/{id}",
+            axum::routing::delete(keys::revoke),
+        )
         .fallback(problem::not_found)
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(from_fn(metrics::record))
