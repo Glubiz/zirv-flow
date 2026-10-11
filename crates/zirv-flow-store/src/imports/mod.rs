@@ -3,6 +3,7 @@
 //! and their retention.
 
 mod batch;
+mod job;
 mod model;
 mod rejects;
 mod retention;
@@ -12,6 +13,7 @@ pub use batch::{
     BatchOutcome, BatchProgress, DryRunBatch, ImportBatch, REJECT_CHECK_MIN_ROWS, RowDetail,
     commit_dry_run_batch, commit_import_batch,
 };
+pub use job::{DRY_RUN_JOB_KIND, RUN_JOB_KIND, enqueue_import_job};
 pub use model::{
     Import, ImportStatus, TransitionError, cancel_import, fail_import, find_import,
     finish_import_dry_run, finish_import_run, list_imports, set_import_mapping,

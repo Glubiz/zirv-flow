@@ -79,6 +79,12 @@ impl<'a> JobContext<'a> {
         self.ingest.as_ref()
     }
 
+    /// A pool of the worker's own, for handlers that commit transactions beside the job's
+    /// own, such as the imports; none when the worker was given no pool for them.
+    pub(crate) fn pool(&self) -> Option<&PgPool> {
+        self.ingest.as_ref().map(|settings| &settings.pool)
+    }
+
     /// The handler's transaction.
     pub fn conn(&mut self) -> &mut PgConnection {
         self.connection
