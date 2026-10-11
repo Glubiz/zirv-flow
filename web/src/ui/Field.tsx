@@ -1,4 +1,4 @@
-import { useId, type InputHTMLAttributes, type SelectHTMLAttributes } from "react";
+import { useId, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "id"> {
   label: string;
@@ -46,6 +46,31 @@ export function SelectField({ label, hint, className, children, ...rest }: Selec
       >
         {children}
       </select>
+      {hint ? (
+        <span className="field-hint" id={hintId}>
+          {hint}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+interface TextAreaFieldProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "id"> {
+  label: string;
+  hint?: string;
+  mono?: boolean;
+}
+
+export function TextAreaField({ label, hint, mono = false, className, ...rest }: TextAreaFieldProps) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  const classes = ["input", "textarea", mono ? "input-mono" : "", className ?? ""].filter(Boolean).join(" ");
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor={id}>
+        {label}
+      </label>
+      <textarea id={id} className={classes} aria-describedby={hint ? hintId : undefined} {...rest} />
       {hint ? (
         <span className="field-hint" id={hintId}>
           {hint}

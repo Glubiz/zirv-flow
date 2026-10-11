@@ -6,6 +6,7 @@ import { HealthPage } from "../features/health";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
 import { MembersPage } from "../features/members";
+import { SuppressionsPage, TopicsPage } from "../features/consent";
 import { ConflictsPage, TraitsPage } from "../features/people";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
@@ -117,6 +118,8 @@ export function AppRoutes() {
           <Route path="w/:ws/events/rejects" element={<RejectsPage />} />
           <Route path="w/:ws/events/settings" element={<EventSettingsPage />} />
           <Route path="w/:ws/events/schemas/:name" element={<EventSchemaPage />} />
+          <Route path="w/:ws/topics" element={<TopicsPage />} />
+          <Route path="w/:ws/suppressions" element={<SuppressionsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />
