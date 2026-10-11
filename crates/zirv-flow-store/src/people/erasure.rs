@@ -10,11 +10,16 @@ use uuid::Uuid;
 /// `people.merged_into`, and the subjects of `decision_records`. A partition is counted
 /// through its parent table. Places with no row are left
 /// out, so an empty result means the person is gone.
+///
+/// `erasure_requests` is skipped by name: the erasure ledger is the one table that
+/// intentionally keeps the person id of an erased person, so that a restore can be erased
+/// again (architecture section 16.3).
 pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<(String, i64)> {
     let mut places: Vec<(String, String)> = sqlx::query_as(
         "SELECT table_name::text, column_name::text FROM information_schema.columns \
          WHERE table_schema = current_schema() AND data_type = 'uuid' \
            AND (column_name = 'person_id' OR column_name LIKE '%\\_person\\_id') \
+           AND table_name <> 'erasure_requests' \
            AND NOT EXISTS (SELECT 1 FROM pg_class c \
                            JOIN pg_namespace n ON n.oid = c.relnamespace \
                            WHERE n.nspname = table_schema::text \

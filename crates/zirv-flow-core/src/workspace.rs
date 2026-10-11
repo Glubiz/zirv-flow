@@ -97,9 +97,56 @@ impl<'de> Deserialize<'de> for Slug {
     }
 }
 
+/// What happens to a person left with no source record, event or explicit consent after a
+/// source retracts a record (architecture section 7.4).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OrphanPolicy {
+    /// The person stays, with their traits recomputed. The default.
+    #[default]
+    Keep,
+    /// The person is deleted.
+    Delete,
+}
+
+impl OrphanPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+impl std::str::FromStr for OrphanPolicy {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "keep" => Ok(Self::Keep),
+            "delete" => Ok(Self::Delete),
+            _ => Err(ValidationError::new(
+                "orphan_policy",
+                "must be keep or delete",
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_orphan_policy_round_trips_and_defaults_to_keep() {
+        for policy in [OrphanPolicy::Keep, OrphanPolicy::Delete] {
+            assert_eq!(policy.as_str().parse::<OrphanPolicy>().unwrap(), policy);
+        }
+        assert_eq!(OrphanPolicy::default(), OrphanPolicy::Keep);
+        assert_eq!(
+            "purge".parse::<OrphanPolicy>().unwrap_err().field(),
+            "orphan_policy"
+        );
+    }
 
     #[test]
     fn a_name_is_trimmed_and_bounded() {

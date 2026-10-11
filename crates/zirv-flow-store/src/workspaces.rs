@@ -4,7 +4,7 @@ use sqlx::PgExecutor;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::{Role, Slug, UserId, WorkspaceId, WorkspaceName};
+use zirv_flow_core::{OrphanPolicy, Role, Slug, UserId, WorkspaceId, WorkspaceName};
 
 use crate::StoreError;
 
@@ -202,6 +202,52 @@ pub async fn list_members<'e>(
         .collect())
 }
 
+/// The workspace with this slug.
+pub async fn find_workspace_by_slug<'e>(
+    executor: impl PgExecutor<'e>,
+    slug: &Slug,
+) -> Result<Option<Workspace>, StoreError> {
+    let row: Option<WorkspaceRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        workspace_columns!(),
+        " FROM workspaces WHERE slug = $1"
+    ))
+    .bind(slug.as_str())
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.map(Into::into))
+}
+
+/// The workspace's orphan policy; `None` when there is no such workspace.
+pub async fn orphan_policy<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+) -> Result<Option<OrphanPolicy>, StoreError> {
+    let policy: Option<String> =
+        sqlx::query_scalar("SELECT orphan_policy FROM workspaces WHERE id = $1")
+            .bind(workspace.as_uuid())
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(policy.map(|policy| policy.parse().unwrap_or_default()))
+}
+
+/// Sets the orphan policy. Returns whether the workspace exists.
+pub async fn set_orphan_policy<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    policy: OrphanPolicy,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query("UPDATE workspaces SET orphan_policy = $2 WHERE id = $1")
+        .bind(workspace.as_uuid())
+        .bind(policy.as_str())
+        .execute(executor)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -330,5 +376,45 @@ mod tests {
         let result = set_membership(&pool, ws.id, UserId::new(), Role::Member).await;
 
         assert!(result.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_orphan_policy_defaults_to_keep_and_can_be_set(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+
+        let before = orphan_policy(&pool, ws.id).await.unwrap();
+        let set = set_orphan_policy(&pool, ws.id, OrphanPolicy::Delete)
+            .await
+            .unwrap();
+        let after = orphan_policy(&pool, ws.id).await.unwrap();
+        let unknown = set_orphan_policy(&pool, WorkspaceId::new(), OrphanPolicy::Delete)
+            .await
+            .unwrap();
+
+        assert_eq!(before, Some(OrphanPolicy::Keep));
+        assert!(set);
+        assert_eq!(after, Some(OrphanPolicy::Delete));
+        assert!(!unknown);
+        assert_eq!(
+            orphan_policy(&pool, WorkspaceId::new()).await.unwrap(),
+            None
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_is_found_by_its_slug(pool: PgPool) {
+        let ws = workspace(&pool, "Acme Corp").await;
+
+        let found = find_workspace_by_slug(&pool, &Slug::parse("acme-corp").unwrap())
+            .await
+            .unwrap();
+        let missing = find_workspace_by_slug(&pool, &Slug::parse("nope").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(found.unwrap().id, ws.id);
+        assert!(missing.is_none());
     }
 }
