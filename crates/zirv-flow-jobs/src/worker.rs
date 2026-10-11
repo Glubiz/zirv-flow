@@ -696,7 +696,6 @@ mod tests {
             ws,
             uuid::Uuid::now_v7(),
             &TraceContext::root(Cause::api("req")),
-            time::OffsetDateTime::now_utc(),
             &items,
         )
         .await

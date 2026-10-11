@@ -581,7 +581,6 @@ mod tests {
                 ws,
                 Uuid::now_v7(),
                 &trace,
-                datetime!(2026-01-01 00:00 UTC),
                 std::slice::from_ref(&item),
             )
             .await

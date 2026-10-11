@@ -121,12 +121,13 @@ impl StoredItem {
 
 /// Appends `items` as one multi-row insert in one transaction and enqueues the workspace's
 /// drain in it, so the wake-up commits with the rows. Returns once the rows are durable.
+/// The rows are stamped `received_at` with the database's clock, the one the scheduler's safety
+/// net and the inbox-age gauge compare it with.
 pub async fn append_inbox(
     pool: &PgPool,
     workspace: WorkspaceId,
     api_key_id: Uuid,
     trace: &TraceContext,
-    received_at: OffsetDateTime,
     items: &[IngestItem],
 ) -> Result<usize, StoreError> {
     let kinds: Vec<&str> = items.iter().map(|item| item.payload.kind()).collect();
@@ -144,14 +145,13 @@ pub async fn append_inbox(
     let inserted = sqlx::query(
         "INSERT INTO ingest_inbox \
             (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id) \
-         SELECT $1, $2, i.kind, i.item, i.message_id, $3, $4 \
-         FROM unnest($5::text[], $6::jsonb[], $7::text[]) WITH ORDINALITY \
+         SELECT $1, $2, i.kind, i.item, i.message_id, now(), $3 \
+         FROM unnest($4::text[], $5::jsonb[], $6::text[]) WITH ORDINALITY \
             AS i(kind, item, message_id, n) \
          ORDER BY i.n",
     )
     .bind(workspace.as_uuid())
     .bind(api_key_id)
-    .bind(received_at)
     .bind(trace.trace_id.as_uuid())
     .bind(&kinds)
     .bind(&stored)
@@ -567,16 +567,9 @@ mod tests {
     }
 
     async fn append(pool: &PgPool, ws: WorkspaceId, trace: &TraceContext, items: &[IngestItem]) {
-        let appended = append_inbox(
-            pool,
-            ws,
-            Uuid::now_v7(),
-            trace,
-            OffsetDateTime::now_utc(),
-            items,
-        )
-        .await
-        .unwrap();
+        let appended = append_inbox(pool, ws, Uuid::now_v7(), trace, items)
+            .await
+            .unwrap();
         assert_eq!(appended, items.len());
     }
 
@@ -1057,17 +1050,11 @@ mod tests {
         let slug = Slug::parse("two").unwrap();
         let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
         let trace = TraceContext::root(Cause::api("req"));
-        let received = OffsetDateTime::now_utc() - time::Duration::seconds(30);
-        append_inbox(
-            &pool,
-            one,
-            Uuid::now_v7(),
-            &trace,
-            received,
-            &[track("u1", "m-1", "seen", json!({}))],
-        )
-        .await
-        .unwrap();
+        append(&pool, one, &trace, &[track("u1", "m-1", "seen", json!({}))]).await;
+        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '30 seconds'")
+            .execute(&pool)
+            .await
+            .unwrap();
         append(&pool, one, &trace, &[track("u1", "m-2", "seen", json!({}))]).await;
 
         let heads = inbox_heads(&pool).await.unwrap();

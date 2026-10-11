@@ -115,7 +115,6 @@ mod tests {
 
     use serde_json::json;
     use sqlx::PgPool;
-    use time::OffsetDateTime;
     use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
     use zirv_flow_store::{IngestItem, IngestPayload, NewJob, append_inbox};
 
@@ -150,16 +149,9 @@ mod tests {
                 },
             })
             .collect();
-        append_inbox(
-            pool,
-            ws,
-            Uuid::now_v7(),
-            &trace,
-            OffsetDateTime::now_utc(),
-            &items,
-        )
-        .await
-        .unwrap();
+        append_inbox(pool, ws, Uuid::now_v7(), &trace, &items)
+            .await
+            .unwrap();
         trace
     }
 

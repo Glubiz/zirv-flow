@@ -18,7 +18,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::Value;
-use time::OffsetDateTime;
 use utoipa::ToSchema;
 use zirv_flow_core::{Cause, TraceContext};
 
@@ -384,7 +383,6 @@ async fn accept(
         key.key.workspace_id,
         key.key.id.as_uuid(),
         &trace,
-        OffsetDateTime::now_utc(),
         &items,
     )
     .await
