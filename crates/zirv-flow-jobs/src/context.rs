@@ -32,6 +32,7 @@ pub struct JobContext<'a> {
     job: &'a ClaimedJob,
     event_retention: EventRetention,
     ingest: Option<IngestSettings>,
+    identifier_key: Option<Arc<HmacKey>>,
 }
 
 impl<'a> JobContext<'a> {
@@ -41,6 +42,7 @@ impl<'a> JobContext<'a> {
             job,
             event_retention: EventRetention::default(),
             ingest: None,
+            identifier_key: None,
         }
     }
 
@@ -59,6 +61,17 @@ impl<'a> JobContext<'a> {
     pub(crate) fn with_ingest(mut self, settings: IngestSettings) -> Self {
         self.ingest = Some(settings);
         self
+    }
+
+    /// Gives the handler the key that hashes identifiers.
+    pub(crate) fn with_identifier_key(mut self, key: Option<Arc<HmacKey>>) -> Self {
+        self.identifier_key = key;
+        self
+    }
+
+    /// The key that hashes identifiers; none when the worker has no master key.
+    pub(crate) fn identifier_key(&self) -> Option<Arc<HmacKey>> {
+        self.identifier_key.clone()
     }
 
     /// The ingest drain's settings; none when the worker was given no pool for them.

@@ -19,6 +19,9 @@ CREATE TABLE erasure_requests (
     -- the kind of each, in the same order.
     identifier_hashes bytea[] NOT NULL DEFAULT '{}',
     identifier_kinds  text[] NOT NULL DEFAULT '{}',
+    -- The ids of the person and of the people merged into them when the erasure ran, so a
+    -- restore from before a merge can erase each of them.
+    person_ids        uuid[] NOT NULL DEFAULT '{}',
     status            text NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'completed', 'failed')),
     requested_by      uuid,

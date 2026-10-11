@@ -5993,7 +5993,7 @@ email,b@example.com,
     async fn an_erasure_request_by_identifier_creates_a_ledger_row_and_a_job_and_the_job_erases(
         pool: PgPool,
     ) {
-        let router = app(&pool).await;
+        let router = keyed_app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
@@ -6049,6 +6049,9 @@ email,b@example.com,
             &mut tx,
             ws.parse().unwrap(),
             request.parse().unwrap(),
+            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY)
+                .unwrap()
+                .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
             &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
         )
         .await

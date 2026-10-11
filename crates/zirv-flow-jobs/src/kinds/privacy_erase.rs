@@ -2,7 +2,7 @@
 //!
 //! The payload is `{workspace_id, request_id}`. The whole erasure runs in the job's own
 //! transaction, so a failure leaves nothing done and the request pending for the retry; once
-//! the attempts run out the request reads as failed. Nothing here touches an identifier.
+//! the attempts run out the request reads as failed. It needs the identifier key of the worker's master key and fails without one.
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,8 +23,11 @@ impl JobKind for PrivacyErase {
                 "the payload names another workspace than the job",
             ));
         }
+        let key = ctx
+            .identifier_key()
+            .ok_or(JobError::new("the worker has no master key"))?;
         let trace = ctx.trace().clone();
-        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &trace).await? {
+        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &trace).await? {
             EraseOutcome::Completed { .. } | EraseOutcome::AlreadyCompleted => Ok(()),
             EraseOutcome::NoSuchRequest => Err(JobError::new("the erasure request does not exist")),
         }
@@ -41,12 +44,15 @@ fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacKey, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
     use zirv_flow_store::{ErasureStatus, ProfileOutcome, ProfileRecord, apply_profile_batch};
 
     use super::*;
@@ -69,7 +75,7 @@ mod tests {
         assert!(parse(&json!({"workspace_id": ws, "request_id": 5})).is_err());
     }
 
-    async fn run_claimed(pool: &PgPool) -> Result<(), JobError> {
+    async fn run_claimed(pool: &PgPool, key: Option<Arc<HmacKey>>) -> Result<(), JobError> {
         let claimed = zirv_flow_store::claim_job(
             pool,
             "w",
@@ -81,7 +87,7 @@ mod tests {
         .unwrap()
         .expect("the request enqueued the job");
         let mut tx = zirv_flow_store::begin(pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed);
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_identifier_key(key);
         let result = PrivacyErase.run(&mut ctx, claimed.payload.clone()).await;
         if result.is_ok() {
             zirv_flow_store::commit(tx).await.unwrap();
@@ -119,7 +125,7 @@ mod tests {
         let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
             panic!("not applied");
         };
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Identifier);
+        let key = Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Identifier));
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
         let request = zirv_flow_store::request_erasure(&mut tx, ws, person_id, &key, None, &trace)
             .await
@@ -127,7 +133,7 @@ mod tests {
             .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
 
-        run_claimed(&pool).await.unwrap();
+        run_claimed(&pool, Some(key.clone())).await.unwrap();
 
         assert!(
             zirv_flow_store::find_person(&pool, ws, person_id)
@@ -166,8 +172,29 @@ mod tests {
         job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
         zirv_flow_store::enqueue(&pool, &job).await.unwrap();
 
-        let error = run_claimed(&pool).await.unwrap_err();
+        let key = Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Identifier));
+        let error = run_claimed(&pool, Some(key.clone())).await.unwrap_err();
 
         assert_eq!(error.message(), "the erasure request does not exist");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_the_identifier_key_the_job_fails_and_erases_nothing(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+            .await
+            .unwrap()
+            .id;
+        let mut job =
+            zirv_flow_store::NewJob::new(PrivacyErase::KIND, TraceContext::root(Cause::api("t")));
+        job.workspace_id = Some(ws);
+        job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
+        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+
+        let error = run_claimed(&pool, None).await.unwrap_err();
+
+        assert_eq!(error.message(), "the worker has no master key");
     }
 }

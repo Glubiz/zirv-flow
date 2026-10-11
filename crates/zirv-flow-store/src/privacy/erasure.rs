@@ -134,8 +134,8 @@ pub async fn request_erasure(
     let row: RequestRow = sqlx::query_as(
         "INSERT INTO erasure_requests \
             (id, workspace_id, person_id, identifier_hashes, identifier_kinds, requested_by, \
-             trace_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             trace_id, person_ids) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          RETURNING id, person_id, status, requested_by, requested_at, completed_at, trace_id",
     )
     .bind(id)
@@ -145,6 +145,7 @@ pub async fn request_erasure(
     .bind(&kinds)
     .bind(requested_by)
     .bind(trace.trace_id.as_uuid())
+    .bind(group_ids(connection, workspace, current).await?)
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -204,8 +205,8 @@ pub async fn list_erasure_requests(
 }
 
 /// A ledger row as the erasure reads it: the person, the identifier hashes and their kinds,
-/// and the status.
-type LedgerRow = (Uuid, Vec<Vec<u8>>, Vec<String>, String);
+/// the ids of the group and the status.
+type LedgerRow = (Uuid, Vec<Vec<u8>>, Vec<String>, Vec<Uuid>, String);
 
 /// What [`erase_person`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,47 +221,81 @@ pub enum EraseOutcome {
 
 /// Carries an erasure request out, in the caller's transaction:
 ///
-/// 1. deletes the workspace's pending inbox rows that name one of the person's identities,
-///    locked `FOR UPDATE` so a concurrent drain has either applied them already (and the
-///    deletion below covers what it wrote) or never sees them;
+/// 1. collects the person's group (the survivor and every person merged into them) and its
+///    identities as they are now, and adds their hashes, with their kinds, to the ledger row
+///    and the group's ids to its `person_ids`, so identities gained since the request count;
 /// 2. adds an `erased` suppression for every email and phone hash of the ledger row;
-/// 3. deletes the person and the people merged into them;
-/// 4. completes the ledger row;
-/// 5. audits `privacy.erased` with the request id only.
+/// 3. deletes the workspace's pending inbox rows with an identifier that hashes to any hash
+///    of the ledger row, locked `FOR UPDATE` so a concurrent drain has either applied them
+///    already (and the deletion below covers what it wrote) or never sees them;
+/// 4. deletes the group, and any other id the ledger names that still exists;
+/// 5. completes the ledger row and audits `privacy.erased` with the request id only.
 ///
-/// Pending inbox rows are matched by the person's identity values, not by hash: the values
-/// are read here, in the same transaction, and need no key. A failure rolls everything back,
-/// so the request stays pending for the job's retry.
+/// When the person is already gone, steps 2 and 3 still run from the ledger's hashes. Inbox
+/// rows are matched by hash, so the identifiers are parsed and hashed exactly as the
+/// suppressions are. A failure rolls everything back, so the request stays pending for the
+/// job's retry.
 pub async fn erase_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     request: Uuid,
+    key: &HmacKey,
     trace: &TraceContext,
 ) -> Result<EraseOutcome, StoreError> {
     let row: Option<LedgerRow> = sqlx::query_as(
-        "SELECT person_id, identifier_hashes, identifier_kinds, status FROM erasure_requests \
-         WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        "SELECT person_id, identifier_hashes, identifier_kinds, person_ids, status \
+         FROM erasure_requests WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(request)
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let Some((person, hashes, kinds, status)) = row else {
+    let Some((person, mut hashes, mut kinds, mut people, status)) = row else {
         return Ok(EraseOutcome::NoSuchRequest);
     };
     if status == ErasureStatus::Completed.as_str() {
         return Ok(EraseOutcome::AlreadyCompleted);
     }
 
-    let identities = match crate::current_person(&mut *connection, workspace, person).await? {
-        Some(current) => group_identities(connection, workspace, current).await?,
-        None => Vec::new(),
-    };
-    let inbox_rows = delete_pending_inbox(connection, workspace, &identities).await?;
+    if let Some(current) = crate::current_person(&mut *connection, workspace, person).await? {
+        for id in group_ids(connection, workspace, current).await? {
+            if !people.contains(&id) {
+                people.push(id);
+            }
+        }
+        for (kind, value) in group_identities(connection, workspace, current).await? {
+            // Stored identities are normalized already; one that no longer parses has no hash.
+            if let Ok(identifier) = Identifier::parse(&kind, &value) {
+                let hash = identifier_hash(key, &identifier).to_vec();
+                if !hashes.contains(&hash) {
+                    hashes.push(hash);
+                    kinds.push(kind);
+                }
+            }
+        }
+        sqlx::query(
+            "UPDATE erasure_requests SET identifier_hashes = $3, identifier_kinds = $4, \
+                person_ids = $5 WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(request)
+        .bind(&hashes)
+        .bind(&kinds)
+        .bind(&people)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
+
     suppress(connection, workspace, &hashes, &kinds).await?;
-    let person_found =
-        delete_person(connection, workspace, person, DeleteReason::Erasure, trace).await?;
+    let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
+    let inbox_rows = delete_inbox_by_hash(connection, workspace, key, &wanted).await?;
+    let mut person_found = false;
+    for id in std::iter::once(person).chain(people) {
+        person_found |=
+            delete_person(connection, workspace, id, DeleteReason::Erasure, trace).await?;
+    }
     sqlx::query(
         "UPDATE erasure_requests SET status = 'completed', completed_at = now() \
          WHERE workspace_id = $1 AND id = $2",
@@ -325,8 +360,8 @@ pub async fn replay_erasures(
     for id in workspaces {
         let ws = WorkspaceId::from_uuid(id);
         let mut tx = begin(pool).await?;
-        let entries: Vec<(Uuid, Vec<Vec<u8>>, Vec<String>)> = sqlx::query_as(
-            "SELECT person_id, identifier_hashes, identifier_kinds FROM erasure_requests \
+        let entries: Vec<(Uuid, Vec<Vec<u8>>, Vec<String>, Vec<Uuid>)> = sqlx::query_as(
+            "SELECT person_id, identifier_hashes, identifier_kinds, person_ids FROM erasure_requests \
              WHERE workspace_id = $1 AND status = 'completed' ORDER BY requested_at, id",
         )
         .bind(id)
@@ -334,7 +369,7 @@ pub async fn replay_erasures(
         .await
         .map_err(StoreError::query)?;
         let mut all_hashes: HashSet<Vec<u8>> = HashSet::new();
-        for (person, hashes, kinds) in entries {
+        for (person, hashes, kinds, _people) in entries {
             report.requests += 1;
             report.suppressions += suppress(&mut tx, ws, &hashes, &kinds).await?;
             if delete_person(&mut tx, ws, person, DeleteReason::Erasure, trace).await? {
@@ -386,6 +421,23 @@ async fn suppress(
     Ok(changed)
 }
 
+/// The ids of the person and of the people merged into them.
+async fn group_ids(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "SELECT id FROM people WHERE workspace_id = $1 AND (id = $2 OR merged_into = $2) \
+         ORDER BY id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The `(kind, value)` of every identity of the person and of the people merged into them.
 async fn group_identities(
     connection: &mut PgConnection,
@@ -402,64 +454,6 @@ async fn group_identities(
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)
-}
-
-/// How the SQL prefilter and the exact check both flatten an identifier value: lower case,
-/// without the separators a phone number may carry.
-const FLATTEN: &str = "lower(regexp_replace(btrim({}), '[ ().-]', '', 'g'))";
-
-/// Locks the workspace's pending inbox rows that may name one of `identities`, then deletes
-/// the ones that do. The prefilter in SQL is a superset (it flattens case and phone
-/// separators); the exact check normalizes each pair like the drain does. Returns how many
-/// rows were deleted.
-async fn delete_pending_inbox(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    identities: &[(String, String)],
-) -> Result<u64, StoreError> {
-    if identities.is_empty() {
-        return Ok(0);
-    }
-    // A phone number may arrive with a `00` prefix instead of the `+` it is stored with.
-    let values: Vec<String> = identities
-        .iter()
-        .flat_map(|(_, value)| {
-            let international = value.strip_prefix('+').map(|rest| format!("00{rest}"));
-            [Some(value.clone()), international]
-        })
-        .flatten()
-        .collect();
-    let rows: Vec<(i64, Value)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, item FROM ingest_inbox WHERE workspace_id = $1 \
-           AND CASE WHEN jsonb_typeof(item -> 'identifiers') = 'array' THEN EXISTS ( \
-                SELECT 1 FROM jsonb_array_elements(item -> 'identifiers') p \
-                WHERE {candidate} IN (SELECT {wanted} FROM unnest($2::text[]) v)) \
-              ELSE false END \
-         ORDER BY id FOR UPDATE",
-        candidate = FLATTEN.replace("{}", "p ->> 1"),
-        wanted = FLATTEN.replace("{}", "v"),
-    )))
-    .bind(workspace.as_uuid())
-    .bind(&values)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let wanted: HashSet<(&str, &str)> = identities
-        .iter()
-        .map(|(kind, value)| (kind.as_str(), value.as_str()))
-        .collect();
-    let doomed: Vec<i64> = rows
-        .iter()
-        .filter(|(_, item)| {
-            item_identifiers(item).into_iter().any(|(kind, value)| {
-                Identifier::parse(&kind, &value).is_ok_and(|identifier| {
-                    wanted.contains(&(identifier.kind().as_text().as_str(), identifier.value()))
-                })
-            })
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    delete_inbox_rows(connection, workspace, &doomed).await
 }
 
 /// Locks and scans the workspace's pending inbox in batches and deletes the rows with an
@@ -568,7 +562,9 @@ mod tests {
 
     async fn erase(pool: &PgPool, ws: WorkspaceId, request: Uuid) -> EraseOutcome {
         let mut tx = begin(pool).await.unwrap();
-        let outcome = erase_person(&mut tx, ws, request, &trace()).await.unwrap();
+        let outcome = erase_person(&mut tx, ws, request, &identifier_key(), &trace())
+            .await
+            .unwrap();
         commit(tx).await.unwrap();
         outcome
     }
@@ -790,7 +786,7 @@ mod tests {
         .unwrap();
 
         let mut tx = begin(&pool).await.unwrap();
-        let result = erase_person(&mut tx, ws, request.id, &trace()).await;
+        let result = erase_person(&mut tx, ws, request.id, &identifier_key(), &trace()).await;
         drop(tx);
 
         assert!(result.is_err());
@@ -928,5 +924,126 @@ mod tests {
         assert_eq!(report, ReplayReport::default());
         assert_eq!(all, ReplayReport::default());
         assert!(!rows_referencing_person(&pool, person).await.is_empty());
+    }
+
+    async fn append(pool: &PgPool, ws: WorkspaceId, kind: &str, value: &str, message_id: &str) {
+        crate::append_inbox(
+            pool,
+            ws,
+            Uuid::now_v7(),
+            &trace(),
+            &[crate::IngestItem {
+                identifiers: vec![(kind.into(), value.into())],
+                timestamp: None,
+                message_id: Some(message_id.into()),
+                payload: crate::IngestPayload::Identify {
+                    traits: serde_json::Map::new(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn pending_rows_are_matched_by_hash_so_padding_and_non_ascii_case_do_not_hide_them(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let outcomes = crate::apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                profile("crm", "1", &[("email", EMAIL)], json!({})),
+                profile("crm", "2", &[("email", "élodie@example.com")], json!({})),
+            ],
+        )
+        .await
+        .unwrap();
+        let person = person_of(&outcomes[0]);
+        let other = person_of(&outcomes[1]);
+        for (email, id) in [
+            ("\tAda@Example.com\n", "tab"),
+            ("\u{a0}ada@example.com\u{a0}", "nbsp"),
+            ("ÉLODIE@example.com", "case"),
+            (BYSTANDER_EMAIL, "keep"),
+        ] {
+            append(&pool, ws, "email", email, id).await;
+        }
+        let first = request(&pool, ws, person).await;
+        let second = request(&pool, ws, other).await;
+
+        erase(&pool, ws, first.id).await;
+        erase(&pool, ws, second.id).await;
+
+        assert_eq!(inbox_messages(&pool).await, ["keep"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_identity_gained_after_the_request_is_suppressed_and_its_pending_rows_deleted(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let outcomes = crate::apply_profile_batch(
+            &pool,
+            ws,
+            &[profile("crm", "1", &[("email", EMAIL)], json!({}))],
+        )
+        .await
+        .unwrap();
+        let person = person_of(&outcomes[0]);
+        let request = request(&pool, ws, person).await;
+        // After the request the person gains an address, and a row names it.
+        crate::apply_profile_batch(
+            &pool,
+            ws,
+            &[profile(
+                "crm",
+                "1",
+                &[("email", EMAIL), ("phone", "+45 1234 5678")],
+                json!({}),
+            )],
+        )
+        .await
+        .unwrap();
+        append(&pool, ws, "phone", "0045 1234 5678", "gained").await;
+        append(&pool, ws, "email", BYSTANDER_EMAIL, "keep").await;
+
+        erase(&pool, ws, request.id).await;
+
+        assert_eq!(inbox_messages(&pool).await, ["keep"]);
+        let phone = identifier_hash(
+            &identifier_key(),
+            &Identifier::parse("phone", "+4512345678").unwrap(),
+        );
+        assert!(is_suppressed(&pool, ws, &phone).await.unwrap());
+        assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_deleted_before_the_job_still_clears_their_pending_rows(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let request = request(&pool, ws, person).await;
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Requested, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        append(&pool, ws, "email", EMAIL, "late").await;
+
+        let outcome = erase(&pool, ws, request.id).await;
+
+        assert_eq!(
+            outcome,
+            EraseOutcome::Completed {
+                person_found: false,
+                inbox_rows: 2
+            }
+        );
+        assert_eq!(inbox_messages(&pool).await, ["i-2"]);
+        assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
     }
 }

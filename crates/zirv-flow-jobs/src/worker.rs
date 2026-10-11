@@ -42,6 +42,8 @@ pub struct WorkerConfig {
     pub event_retention: EventRetention,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
+    /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
+    pub identifier_key: Option<Arc<HmacKey>>,
     /// Inbox rows `ingest.drain` applies per transaction.
     pub ingest_drain_batch_size: u32,
 }
@@ -57,6 +59,7 @@ impl WorkerConfig {
             backoff_cap: Duration::from_secs(3600),
             event_retention: EventRetention::default(),
             redaction_key: None,
+            identifier_key: None,
             ingest_drain_batch_size: 500,
         }
     }
@@ -332,6 +335,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let result = {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
+            .with_identifier_key(shared.config.identifier_key.clone())
             .with_ingest(IngestSettings {
                 pool: shared.pool.clone(),
                 redaction_key: shared.config.redaction_key.clone(),
@@ -540,6 +544,7 @@ mod tests {
             backoff_cap: Duration::from_millis(5),
             event_retention: EventRetention::default(),
             redaction_key: None,
+            identifier_key: None,
             ingest_drain_batch_size: 500,
         }
     }
