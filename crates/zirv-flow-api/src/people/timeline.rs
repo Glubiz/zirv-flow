@@ -11,7 +11,6 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::TraceId;
-use zirv_flow_core::events::mask;
 use zirv_flow_store::{
     TimelineCursor, TimelineDecision, TimelineEntry, TimelineEvent, TimelineFilter, TimelineKind,
 };
@@ -95,22 +94,36 @@ fn event_body(event: TimelineEvent, reveal: bool) -> EventEntryBody {
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    let (properties, masked) = match (&event.schema, reveal) {
-        (_, true) => (stored, Vec::new()),
-        (Some(schema), false) => {
-            let masked = mask(&stored, schema, false);
-            (masked.properties, masked.masked)
-        }
-        // Without a published schema nothing says which values are personal.
-        (None, false) => {
-            let mut names: Vec<String> = stored.keys().cloned().collect();
-            names.sort();
-            let nulled = stored
-                .keys()
-                .map(|name| (name.clone(), Value::Null))
-                .collect();
-            (nulled, names)
-        }
+    // Without access, only a property the published schema declares non-PII is shown; one it
+    // does not declare (stored though flagged) or does not have a schema for may be personal.
+    let (properties, masked) = if reveal {
+        (stored, Vec::new())
+    } else {
+        let declared_plain = |name: &str| {
+            event.schema.as_ref().is_some_and(|schema| {
+                schema
+                    .iter()
+                    .any(|declared| declared.name == name && !declared.pii)
+            })
+        };
+        let mut masked: Vec<String> = stored
+            .keys()
+            .filter(|name| !declared_plain(name))
+            .cloned()
+            .collect();
+        masked.sort();
+        let shown = stored
+            .into_iter()
+            .map(|(name, value)| {
+                let value = if masked.contains(&name) {
+                    Value::Null
+                } else {
+                    value
+                };
+                (name, value)
+            })
+            .collect();
+        (shown, masked)
     };
     EventEntryBody {
         id: event.id,
@@ -363,6 +376,20 @@ mod tests {
         assert!(shown.masked.is_empty());
         assert_eq!(hidden.flags, ["late"]);
         assert_eq!(hidden.trace_id.len(), 32);
+    }
+
+    #[test]
+    fn a_property_the_schema_does_not_declare_is_masked_for_those_without_access() {
+        let mut stray = event(Some(vec![declared("email", true), declared("plan", false)]));
+        stray.properties = json!({"email": "a@example.com", "plan": "pro", "ssn": "123-45-6789"});
+
+        let hidden = event_body(stray.clone(), false);
+        let shown = event_body(stray, true);
+
+        assert_eq!(hidden.properties["ssn"], Value::Null);
+        assert_eq!(hidden.properties["plan"], "pro");
+        assert_eq!(hidden.masked, ["email", "ssn"]);
+        assert_eq!(shown.properties["ssn"], "123-45-6789");
     }
 
     #[test]
