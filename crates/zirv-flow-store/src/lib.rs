@@ -7,6 +7,7 @@ mod decisions;
 mod identities;
 mod jobs;
 mod migrations;
+mod people;
 mod pool;
 mod sessions;
 mod workspaces;
@@ -39,6 +40,13 @@ pub use jobs::{
     retry_dead_job, try_lead,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
+pub use people::{
+    DroppedTrait, IdentityConflict, NewTraitDefinition, Person, ProfileOutcome, ProfileRecord,
+    StoredIdentity, TraitDefinition, TraitDefinitionUpdate, apply_profile_batch,
+    create_trait_definition, find_person, find_person_by_identifier, find_trait_definition,
+    list_identities, list_identity_conflicts, list_trait_definitions, remove_contribution,
+    update_trait_definition,
+};
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
