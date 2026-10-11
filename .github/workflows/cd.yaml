@@ -3,20 +3,21 @@ name: CD Pipeline
 permissions:
   contents: write
 
-# CD is meant to run directly on the merge push to main. CI is not re-run
-# after the merge: it already gated the PR, so the merge commit's push goes
-# straight to release.
-#
-# For now the trigger is manual only (workflow_dispatch), so the empty
-# skeleton is never auto-published. At the first functional milestone (M1,
-# see docs/roadmap.md) this switches to
-#
-#   on:
-#     push:
-#       branches: [ main ]
-#     workflow_dispatch:
+# CD runs directly on the merge push to main (ADR-005, from M1 on). CI is not
+# re-run after the merge: it already gated the PR, so the merge commit's push
+# goes straight to release. A merge that does not bump the version re-runs
+# the pipeline idempotently: the release step skips a published version.
+# workflow_dispatch stays for re-running a failed release by hand.
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
+
+# One release at a time: a second merge waits for the first run's tag and
+# changelog push instead of racing it.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -187,10 +188,9 @@ jobs:
       # failed changelog push is caught and logged as a warning instead,
       # since the release is already correct by that point and the next
       # release's nearest_tag lookup folds in whatever section got missed.
-      # This still adds no concurrency guard against a second concurrent
-      # push to main racing the changelog push -- accepted for a light
-      # script, and it can no longer strand a tagless commit on main the
-      # way the old order could.
+      # The workflow-level concurrency group keeps a second merge's run from
+      # racing this changelog push, and this order can no longer strand a
+      # tagless commit on main the way the old order could.
       - name: Update CHANGELOG.md And Create Tag
         id: tag
         shell: bash
