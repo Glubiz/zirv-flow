@@ -91,6 +91,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
+| `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
 
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password and the OIDC client secret redacted.
@@ -117,6 +118,20 @@ follow, carry the same trace id. Failed attempts and lease expiries of workspace
 jobs are recorded in the decision log, which
 `GET /api/v1/workspaces/{ws}/traces/{trace_id}` returns for a member or a `read`
 API key (400 for a malformed id, 404 when the workspace has no records for it).
+
+### Tracing export
+
+Set `log.otlp.endpoint` (`ZIRV_FLOW_LOG__OTLP__ENDPOINT`) to send the
+`http.request` and `job` spans, and the spans inside them, to an OTLP collector
+over HTTP/protobuf (spans go to `<endpoint>/v1/traces`). Exported spans use the
+zirv trace id as their trace id, so a trace in the collector matches
+`x-trace-id`, the logged `trace_id` and the decision log, and a request and the
+jobs it enqueued share one trace. A valid W3C `traceparent` on a request is
+attached to its span as a link and never becomes its parent or changes the
+trace id. Without the setting nothing is created or sent. Export failures never
+fail a request or job; spans are batched, a full queue drops spans, and the
+process flushes what is queued (up to 5 seconds) when it shuts down. The log
+output is the same with or without export.
 
 ## Requirements and database migrations
 

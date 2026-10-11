@@ -7,7 +7,9 @@ use axum::extract::{MatchedPath, Request};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
+use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
 use tracing::{Instrument, debug, info, info_span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use zirv_flow_core::{Cause, TraceContext};
 
 use crate::{metrics, request_id};
@@ -36,8 +38,43 @@ fn is_chatty(route: &str) -> bool {
     matches!(route, "/healthz" | "/readyz" | "/metrics")
 }
 
-/// Starts a trace for the request. An incoming trace header is deliberately ignored: a
-/// client must not be able to graft its requests onto another trace.
+/// The caller's span in a W3C `traceparent` header (`00-<trace>-<span>-<flags>`, lowercase
+/// hex, ids not all zero), or none if the header is absent or not exactly that.
+fn parse_traceparent(value: &str) -> Option<SpanContext> {
+    let mut parts = value.split('-');
+    let (version, trace, span, flags) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let lowercase_hex = |text: &str, len: usize| {
+        text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    if parts.next().is_some()
+        || version != "00"
+        || !lowercase_hex(trace, 32)
+        || !lowercase_hex(span, 16)
+        || !lowercase_hex(flags, 2)
+    {
+        return None;
+    }
+    let trace = TraceId::from_hex(trace)
+        .ok()
+        .filter(|id| *id != TraceId::INVALID)?;
+    let span = SpanId::from_hex(span)
+        .ok()
+        .filter(|id| *id != SpanId::INVALID)?;
+    let flags = TraceFlags::new(u8::from_str_radix(flags, 16).ok()?);
+    Some(SpanContext::new(
+        trace,
+        span,
+        flags,
+        true,
+        TraceState::default(),
+    ))
+}
+
+/// Starts a trace for the request. An incoming trace header never sets the trace id and
+/// never becomes a parent: a client must not be able to graft its requests onto another
+/// trace. A valid `traceparent` is only recorded as a span link, which exported traces
+/// show as a cross-reference.
 pub(crate) async fn assign(request: Request, next: Next) -> Response {
     let started = Instant::now();
     let request_id = request_id::current().unwrap_or_default();
@@ -54,6 +91,14 @@ pub(crate) async fn assign(request: Request, next: Next) -> Response {
         method,
         route = %route,
     );
+    if let Some(caller) = request
+        .headers()
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_traceparent)
+    {
+        span.add_link(caller);
+    }
     let header = HeaderValue::from_str(&trace.trace_id.to_string()).ok();
 
     async move {
@@ -202,5 +247,90 @@ mod tests {
             headers[&HEADER].to_str().unwrap()
         );
         assert!(!output.contains("secret-1234"));
+    }
+
+    const CALLER_TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const CALLER_SPAN: &str = "00f067aa0ba902b7";
+
+    #[test]
+    fn a_traceparent_must_be_exactly_version_zero_with_lowercase_hex_and_non_zero_ids() {
+        let valid = format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01");
+        let caller = parse_traceparent(&valid).unwrap();
+        assert_eq!(caller.trace_id().to_string(), CALLER_TRACE);
+        assert_eq!(caller.span_id().to_string(), CALLER_SPAN);
+        assert!(caller.is_remote() && caller.is_sampled());
+
+        let zero_trace = format!("00-{}-{CALLER_SPAN}-01", "0".repeat(32));
+        let zero_span = format!("00-{CALLER_TRACE}-{}-01", "0".repeat(16));
+        for invalid in [
+            format!("01-{CALLER_TRACE}-{CALLER_SPAN}-01"),
+            format!("00-{}-{CALLER_SPAN}-01", CALLER_TRACE.to_uppercase()),
+            format!("00-{CALLER_TRACE}-{CALLER_SPAN}"),
+            format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01-extra"),
+            format!("00-{}-{CALLER_SPAN}-01", &CALLER_TRACE[1..]),
+            zero_trace,
+            zero_span,
+            String::new(),
+        ] {
+            assert!(parse_traceparent(&invalid).is_none(), "{invalid}");
+        }
+    }
+
+    async fn exported_request_spans(
+        traceparent: Option<&str>,
+    ) -> Vec<opentelemetry_sdk::trace::SpanData> {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut request = Request::get("/things/1");
+        if let Some(value) = traceparent {
+            request = request.header("traceparent", value);
+        }
+
+        call(&app(), request.body(Body::empty()).unwrap()).await;
+
+        exporter.get_finished_spans().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_valid_traceparent_becomes_one_link_on_the_request_span_and_never_its_parent() {
+        let valid = format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01");
+
+        let spans = exported_request_spans(Some(&valid)).await;
+
+        let request = spans
+            .iter()
+            .find(|span| span.name == "http.request")
+            .unwrap();
+        assert_eq!(request.links.links.len(), 1);
+        let link = &request.links.links[0].span_context;
+        assert_eq!(link.trace_id().to_string(), CALLER_TRACE);
+        assert_eq!(link.span_id().to_string(), CALLER_SPAN);
+        assert_ne!(request.span_context.trace_id().to_string(), CALLER_TRACE);
+        assert_eq!(
+            request.parent_span_id,
+            opentelemetry::trace::SpanId::INVALID
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_or_missing_traceparent_adds_no_link() {
+        for header in [None, Some("garbage"), Some("00-short-00f067aa0ba902b7-01")] {
+            let spans = exported_request_spans(header).await;
+
+            let request = spans
+                .iter()
+                .find(|span| span.name == "http.request")
+                .unwrap();
+            assert!(request.links.links.is_empty(), "{header:?}");
+        }
     }
 }
