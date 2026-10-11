@@ -97,6 +97,8 @@ pub struct PhaseReport {
     pub late_dispatch: u64,
     /// Requests given up on because the phase hit its wall-time limit.
     pub abandoned_requests: u64,
+    /// Requests still answered 429 after the last allowed send. They have a latency sample.
+    pub gave_up_after_retries: u64,
 }
 
 pub fn achieved_rate(items_accepted: u64, elapsed_s: f64) -> f64 {

@@ -25,7 +25,7 @@ struct Samples {
     lag_us: Vec<u64>,
 }
 
-const LATENCY_NOTE: &str = "latency_from_schedule runs from each request's scheduled due time to its final \nresponse, retry waits and dispatch lag included: judge API latency targets on it. service_latency \nis the send-to-response time of the last attempt only. Both cover 202 responses.";
+const LATENCY_NOTE: &str = "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.";
 
 /// The largest batch the server accepts by default (`ingest.max_batch_items`).
 const MAX_BATCH: u32 = 500;
@@ -119,6 +119,7 @@ fn merge(phases: &[PhaseReport], samples: Samples) -> PhaseReport {
         total.retries_after_429 += phase.retries_after_429;
         total.late_dispatch += phase.late_dispatch;
         total.abandoned_requests += phase.abandoned_requests;
+        total.gave_up_after_retries += phase.gave_up_after_retries;
         status.add(&phase.status);
     }
     total.target_rate = phases

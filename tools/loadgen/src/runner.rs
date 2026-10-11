@@ -135,6 +135,7 @@ struct Collector {
     retries: u64,
     late_dispatch: u64,
     abandoned: u64,
+    gave_up: u64,
 }
 
 struct Shared {
@@ -205,13 +206,23 @@ async fn send_once(
         }
         if status == Some(202) {
             collector.items_accepted += job.count;
+        }
+        if retry {
+            collector.retries += 1;
+        } else {
+            // One sample per request at its final outcome, whatever it was: an overloaded
+            // server's timeouts, 5xx and exhausted retries must move the percentiles too.
+            // schedule = dispatch lag + service time.
             collector
                 .schedule_us
                 .push(micros(done.saturating_duration_since(job.scheduled_at)));
             collector.service_us.push(micros(done - started));
-        }
-        if retry {
-            collector.retries += 1;
+            collector
+                .lag_us
+                .push(micros(started.saturating_duration_since(job.scheduled_at)));
+            if status == Some(429) {
+                collector.gave_up += 1;
+            }
         }
     }
     if retry {
@@ -257,15 +268,6 @@ pub async fn run_phase(
                     cap.acquire_owned().await.expect("the cap is never closed")
                 }
             };
-            if job.attempts == 0 {
-                let lag = Instant::now().saturating_duration_since(job.scheduled_at);
-                shared
-                    .collector
-                    .lock()
-                    .expect("collector lock")
-                    .lag_us
-                    .push(micros(lag));
-            }
             shared.in_flight.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 send_once(client, config, shared, job).await;
@@ -348,6 +350,7 @@ pub async fn run_phase(
         dispatch_lag: Latency::from_micros(collector.lag_us.clone()),
         late_dispatch: collector.late_dispatch,
         abandoned_requests: collector.abandoned,
+        gave_up_after_retries: collector.gave_up,
     };
     PhaseOutcome {
         report,
@@ -373,6 +376,8 @@ mod tests {
         refuse: usize,
         /// Delay before every other response.
         delay: Duration,
+        /// Status of every other response; 0 means 202.
+        status: u16,
     }
 
     struct Mock {
@@ -438,6 +443,9 @@ mod tests {
                     let response = if refused {
                         "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\n\
                          content-length: 0\r\nconnection: close\r\n\r\n"
+                    } else if behavior.status == 503 {
+                        "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\
+                         connection: close\r\n\r\n"
                     } else {
                         "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                     };
@@ -511,6 +519,7 @@ mod tests {
         let mock = serve(Behavior {
             refuse: 0,
             delay: Duration::from_millis(200),
+            ..Behavior::default()
         })
         .await;
         let outcome = run_phase(
@@ -540,6 +549,7 @@ mod tests {
         let mock = serve(Behavior {
             refuse: 0,
             delay: Duration::from_millis(200),
+            ..Behavior::default()
         })
         .await;
         let outcome = run_phase(
@@ -570,7 +580,7 @@ mod tests {
     async fn a_429_pauses_the_schedule_and_the_retry_keeps_the_original_clock() {
         let mock = serve(Behavior {
             refuse: 1,
-            delay: Duration::ZERO,
+            ..Behavior::default()
         })
         .await;
         let outcome = run_phase(
@@ -597,6 +607,42 @@ mod tests {
             report.latency_from_schedule
         );
         assert!(report.service_latency.max_ms < 500.0);
+        // The final send came about one Retry-After after the schedule: that is the lag.
+        assert_eq!(report.dispatch_lag.count, report.requests);
+        assert!(
+            (900.0..3000.0).contains(&report.dispatch_lag.max_ms),
+            "{:?}",
+            report.dispatch_lag
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_failures_move_the_latency_percentiles() {
+        // Every response is a 503 after 300 ms. Counting only 202s would leave all three latency
+        // blocks empty and hide the overload.
+        let mock = serve(Behavior {
+            delay: Duration::from_millis(300),
+            status: 503,
+            ..Behavior::default()
+        })
+        .await;
+        let outcome = run_phase(
+            &client(),
+            &config(mock.url.clone(), Mode::Identify, 10_000),
+            &phase(20, 0.5),
+            0,
+        )
+        .await;
+        let report = outcome.report;
+
+        assert!(report.requests >= 8, "{}", report.requests);
+        assert_eq!(report.status.server_5xx, report.requests);
+        assert_eq!(report.items_accepted, 0);
+        assert_eq!(report.latency_from_schedule.count, report.requests);
+        assert_eq!(report.service_latency.count, report.requests);
+        assert_eq!(report.dispatch_lag.count, report.requests);
+        assert!(report.latency_from_schedule.p99_ms >= 300.0);
+        assert!(report.service_latency.p50_ms >= 300.0);
     }
 
     #[tokio::test]
@@ -606,7 +652,7 @@ mod tests {
         // later; handed back to the dispatcher they arrive at the 600/s target rate.
         let mock = serve(Behavior {
             refuse: 60,
-            delay: Duration::ZERO,
+            ..Behavior::default()
         })
         .await;
         let outcome = run_phase(

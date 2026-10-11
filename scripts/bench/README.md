@@ -78,7 +78,9 @@ loadgen --url http://localhost:8080 --key-file bench.key --mode identify|track|b
   to its final response, so dispatch lag and `Retry-After` waits are included and a stalled server
   cannot under-report. The API target (p99 under 100 ms at the sustained rate) is judged on this
   figure. `service_latency` is the send-to-response time of the last attempt only, and `dispatch_lag`
-  is how late requests were sent; report them beside it, never instead of it. All cover 202s.
+  is the final send minus the scheduled time, so schedule is about dispatch lag plus service time; report
+  them beside it, never instead of it. Each holds one sample per request at its final outcome of any
+  status (202, 4xx, 5xx, timeout, 429 retries exhausted), so overload moves the percentiles.
 - A 429 sets one shared pause (the largest `Retry-After` seen, 1 to 60 s). The refused requests go
   back to the dispatcher, which resends them after the pause, ahead of new ones and paced at the
   target rate (up to 8 sends each); the pause is not made up afterwards, so there is no stampede.
@@ -88,7 +90,8 @@ loadgen --url http://localhost:8080 --key-file bench.key --mode identify|track|b
   which `applied-latency.sql` relies on for identify.
 - The report has `total` and one entry per phase with `achieved_rate`, `status`
   (`accepted_202`, `rate_limited_429`, `server_5xx`, `other`, `transport_errors`), `retries_after_429`,
-  `late_dispatch` and the three latency blocks above (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
+  `late_dispatch`, `gave_up_after_retries` (still 429 after the last send; these have latency samples),
+  `abandoned_requests` (queued retries dropped at the wall-time limit; no sample) and the three latency blocks above (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
 
 ## 4. Applied latency and backlog drain
 
