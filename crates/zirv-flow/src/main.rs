@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod healthcheck;
 mod log;
 
 use std::ffi::OsString;
@@ -69,6 +70,10 @@ async fn run(
                 return 2;
             }
         }
+    }
+
+    if matches!(command, Command::Healthcheck) {
+        return healthcheck::run(config.server_bind(), stderr).await;
     }
 
     if matches!(command, Command::Migrate) {
@@ -566,6 +571,30 @@ mod tests {
         assert!(!output.contains("oidc-secret-value"));
         assert!(output.contains("client_secret = \"***\""));
         assert!(output.contains("public_url = \"https://flow.example.com\""));
+    }
+
+    #[tokio::test]
+    async fn healthcheck_probes_the_configured_bind_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let _ =
+                tokio::io::AsyncWriteExt::write_all(&mut stream, b"HTTP/1.1 200 OK\r\n\r\n").await;
+        });
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SERVER__BIND".into(), addr.to_string().into()));
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Healthcheck),
+        };
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
     }
 
     #[tokio::test]

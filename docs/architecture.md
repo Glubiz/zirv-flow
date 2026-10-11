@@ -339,6 +339,8 @@ erDiagram
 | Identify / track (push) | `serve` durably appends to `ingest_inbox` before returning `202`; workers drain it in batches | Client `messageId`, else server-assigned | Oldest unprocessed inbox row |
 | CSV import | Upload, map, dry run, then run like a sync | Key column, else file hash + row number | Import completion |
 | Inbound webhook | `/hooks/{id}`, signature check, mapping | Configured dedupe field | Last received |
+| Contacts API (push) | Create, update and delete contacts by key, singly or in bulk, through the inbox like identify (7.6) | Idempotency key, else contact key plus payload hash | Oldest unprocessed inbox row |
+| Kafka stream | A long-running consumer per stream; the partition offsets are the stream checkpoint, committed in the apply-batch transaction (7.6) | Topic, partition and offset | Consumer lag per partition |
 
 Every path ends in **apply-batch**, one transaction per batch (default 500
 records): normalize identifiers; resolve or create the person (merging if
@@ -361,6 +363,7 @@ properties) or `list_membership`.
 | Incremental (cursor field) | Default where an `updated_at`-like field exists | Delete signal in the mapping (soft-delete field, deleted-records endpoint), or a periodic key-only reconciliation run |
 | Full refresh | Small data, no cursor | Mark and sweep: not seen in a successful complete run means tombstoned |
 | Push | API, webhooks | Explicit delete calls |
+| Stream | Kafka topics | A tombstone (null value) for the record key, or a mapped delete field |
 
 ```mermaid
 stateDiagram-v2
@@ -429,6 +432,35 @@ owns (ADR-004): auth (API key, basic, bearer, OAuth2 client credentials and
 authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
 (16.1) and delivery capabilities (idempotency keys, batching, erase).
+
+### 7.6 Native contacts and streaming updates
+
+Some companies have no external customer store. For them Zirv Flow is the
+system of record for its **contacts** (customers), not only a copy of someone
+else's data.
+
+- **Contact definition.** Each workspace defines its contact shape on top of
+  the field registry: typed fields, which fields are required, and which are
+  identifiers (contact key, email, phone, external ids). Validation uses the
+  same rules as event schemas (section 12.1). A contact is a person whose
+  contributions come from the built-in `native` source, so identity resolution,
+  precedence, consent, suppression, segments and erasure work unchanged.
+- **Writes over HTTPS.** `/api/v1/workspaces/{ws}/contacts` offers create,
+  read, list and search, full replace, partial update and delete by contact
+  key, plus a bulk upsert. Writes are idempotent (an idempotency key, else the
+  key plus a payload hash) and go through the inbox and apply-batch like
+  `identify`. The UI edits contacts through the same API. A delete removes the
+  `native` contributions under the orphan policy (7.4); erasure stays separate.
+- **Writes over Kafka.** A Kafka source consumes one or more topics with a
+  consumer group. Each message is mapped like any other stream to contact
+  upserts, events or list membership; a tombstone deletes the contact. Offsets
+  are stored as the stream checkpoint in the apply-batch transaction, so a
+  crash replays from the last committed batch with no double application. A
+  message that fails mapping or validation becomes an ingest reject and the
+  partition moves on. Freshness is consumer lag. Broker credentials (SASL, TLS
+  client certificates) use secrets encryption (16.1), and connections pass the
+  egress policy. JSON values come first; Avro and Protobuf with a schema
+  registry follow (OQ-31).
 
 ## 8. Segmentation engine
 
@@ -1272,6 +1304,7 @@ they were ruled as their capabilities were added to the plan.
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
+| OQ-31 | Which Kafka client fits the static, multi-arch release build (a librdkafka binding or a pure-Rust client with consumer groups), and when do Avro and Protobuf values with a schema registry join JSON? | M3, before the Kafka source ships |
 
 ### 21.1 Decided questions
 

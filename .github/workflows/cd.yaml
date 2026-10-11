@@ -280,3 +280,55 @@ jobs:
             --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+  image:
+    name: Publish Container Image
+    runs-on: ubuntu-latest
+    needs: release
+    # Runs on every successful release job, including a re-run of an
+    # already-published version: pushing the same tags again is idempotent and
+    # lets a failed image push be retried.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.4.0
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile cross-compiles on the runner's own architecture, so
+      # QEMU is only needed to let buildx assemble the arm64 variant.
+      - name: Set Up QEMU
+        uses: docker/setup-qemu-action@v3.6.0
+
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
+
+      - name: Log In To GHCR
+        uses: docker/login-action@v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build And Push
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ needs.release.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
