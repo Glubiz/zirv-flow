@@ -1021,7 +1021,7 @@ As built (people search, profile and person timeline):
 
 As built (debugger, explorer):
 
-- **Feed.** Migration `0015_investigation.sql` adds `debugger_watch` and an UNLOGGED
+- **Feed.** Migration `0016_investigation.sql` adds `debugger_watch` and an UNLOGGED
   `debugger_feed`. A `serve` process with a viewer for a workspace upserts
   `debugger_watch.until = now() + 30 s` every 10 s and on connect. While `until` is in the
   future, `apply_event_record` writes one feed row per outcome (`accepted`, `flagged`,
