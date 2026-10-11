@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-/// A bucket that has not been touched for this long is full again and is forgotten.
+/// The least a bucket stays tracked after its last touch. A bucket is forgotten only once it
+/// has been idle long enough to be full again: this, or `burst / rate` when that is longer.
 const IDLE: Duration = Duration::from_secs(600);
 
 /// How often a request sweeps the idle buckets.
@@ -24,19 +25,23 @@ struct Buckets {
 }
 
 /// Token buckets keyed by API key. Only authenticated keys reach it, so the map is bounded
-/// by the keys that sent anything in the last ten minutes.
+/// by the keys that sent anything within the idle threshold (ten minutes, or the time to
+/// refill a full burst when that is longer).
 pub(crate) struct RateLimiter {
     rate: f64,
     burst: f64,
+    idle: Duration,
     buckets: Mutex<Buckets>,
 }
 
 impl RateLimiter {
     /// `rate` items refill per second up to `burst` items.
     pub(crate) fn new(rate: u32, burst: u32, now: Instant) -> Self {
+        let (rate, burst) = (f64::from(rate.max(1)), f64::from(burst.max(1)));
         Self {
-            rate: f64::from(rate.max(1)),
-            burst: f64::from(burst.max(1)),
+            rate,
+            burst,
+            idle: IDLE.max(Duration::from_secs_f64(burst / rate)),
             buckets: Mutex::new(Buckets {
                 by_key: HashMap::new(),
                 swept: now,
@@ -54,9 +59,10 @@ impl RateLimiter {
             .lock()
             .expect("the limiter lock is never held across a panic");
         if now.saturating_duration_since(buckets.swept) >= SWEEP_EVERY {
+            let idle = self.idle;
             buckets
                 .by_key
-                .retain(|_, bucket| now.saturating_duration_since(bucket.updated) < IDLE);
+                .retain(|_, bucket| now.saturating_duration_since(bucket.updated) < idle);
             buckets.swept = now;
         }
         let bucket = buckets.by_key.entry(key).or_insert(Bucket {
@@ -188,5 +194,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(limiter.tracked(), 1);
+    }
+
+    #[test]
+    fn a_bucket_is_kept_until_it_would_be_full_again() {
+        let start = Instant::now();
+        let limiter = RateLimiter::new(1, 1000, start);
+        let key = Uuid::new_v4();
+        limiter.take(key, 1000, start).unwrap();
+
+        let later = start + Duration::from_secs(601);
+
+        assert!(limiter.take(key, 1000, later).is_err());
+        assert_eq!(limiter.take(key, 600, later), Ok(()));
     }
 }
