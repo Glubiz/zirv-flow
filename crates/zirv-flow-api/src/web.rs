@@ -77,6 +77,7 @@ fn respond(method: &Method, path: &str, lookup: impl Fn(&str) -> Option<Asset>) 
     } else {
         asset.mime
     };
+    let length = asset.data.len();
     let body = if method == Method::HEAD {
         Vec::new()
     } else {
@@ -84,6 +85,7 @@ fn respond(method: &Method, path: &str, lookup: impl Fn(&str) -> Option<Asset>) 
     };
     let mut response = body.into_response();
     let headers = response.headers_mut();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     if let Ok(mime) = HeaderValue::from_str(&mime) {
         headers.insert(header::CONTENT_TYPE, mime);
     }
@@ -206,10 +208,15 @@ mod tests {
 
     #[tokio::test]
     async fn head_has_the_headers_and_no_body() {
+        let get_length = body(respond(&Method::GET, "/", fake)).await.len();
         let response = respond(&Method::HEAD, "/", fake);
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(header_of(&response, header::CACHE_CONTROL), "no-cache");
+        assert_eq!(
+            header_of(&response, header::CONTENT_LENGTH),
+            get_length.to_string()
+        );
         assert_eq!(body(response).await, "");
     }
 
