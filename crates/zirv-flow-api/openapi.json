@@ -20,7 +20,7 @@
           "jobs-admin"
         ],
         "summary": "Job counts by kind and state, and how long the oldest runnable job has waited.",
-        "operationId": "depth",
+        "operationId": "get_job_depth",
         "responses": {
           "200": {
             "description": "Queue depth per kind",
@@ -66,7 +66,7 @@
           "jobs-admin"
         ],
         "summary": "Dead jobs, newest first, without their payloads.",
-        "operationId": "dead",
+        "operationId": "list_dead_jobs",
         "parameters": [
           {
             "name": "limit",
@@ -145,7 +145,7 @@
         ],
         "summary": "Puts a dead job back in the queue, to run again now under its original trace.",
         "description": "Resets its attempts and clears its error. Audited as `job.retried`; a workspace job also\ngets a `job.retry` decision record in its trace.",
-        "operationId": "retry",
+        "operationId": "retry_job",
         "parameters": [
           {
             "name": "id",
@@ -223,7 +223,7 @@
           "session"
         ],
         "summary": "The signed-in user and their CSRF token.",
-        "operationId": "current",
+        "operationId": "get_session",
         "responses": {
           "200": {
             "description": "The current session",
@@ -359,7 +359,7 @@
           "session"
         ],
         "summary": "Which sign-in methods this instance accepts, for the sign-in screen.",
-        "operationId": "methods",
+        "operationId": "get_sign_in_methods",
         "responses": {
           "200": {
             "description": "The enabled sign-in methods",
@@ -384,7 +384,7 @@
         ],
         "summary": "Finishes an OIDC sign-in: the identity provider sends the browser here with `code` and\n`state`.",
         "description": "On success redirects to the server's public URL with the `zf_session` cookie set. Any\nfailure is the same 401, and clears the `zf_oidc_state` cookie.",
-        "operationId": "callback",
+        "operationId": "finish_oidc_sign_in",
         "parameters": [
           {
             "name": "code",
@@ -451,7 +451,7 @@
         ],
         "summary": "Starts an OIDC sign-in: redirects the browser to the identity provider.",
         "description": "Sets the `zf_oidc_state` cookie (HttpOnly, SameSite=Lax) that the callback needs.",
-        "operationId": "start",
+        "operationId": "start_oidc_sign_in",
         "responses": {
           "303": {
             "description": "Redirect to the identity provider; sets the zf_oidc_state cookie"
@@ -488,7 +488,7 @@
           "setup"
         ],
         "summary": "Whether the instance still needs its first-run setup.",
-        "operationId": "status",
+        "operationId": "get_setup_status",
         "responses": {
           "200": {
             "description": "Whether setup is required",
@@ -511,7 +511,7 @@
         ],
         "summary": "Creates the instance owner and signs them in.",
         "description": "Needs the setup token that `serve` logs while no owner exists. Answers like sign-in:\nit sets the `zf_session` cookie and returns the user with the CSRF token. An existing\nowner is 409, checked before the token; a missing or wrong token is 403.",
-        "operationId": "complete",
+        "operationId": "complete_setup",
         "requestBody": {
           "content": {
             "application/json": {
@@ -575,7 +575,7 @@
           "users"
         ],
         "summary": "Lists every user. Owner only.",
-        "operationId": "list",
+        "operationId": "list_users",
         "responses": {
           "200": {
             "description": "All users",
@@ -622,7 +622,7 @@
           "users"
         ],
         "summary": "Creates a user. Owner only. Needs the CSRF token.",
-        "operationId": "create",
+        "operationId": "create_user",
         "requestBody": {
           "content": {
             "application/json": {
@@ -698,7 +698,7 @@
           "meta"
         ],
         "summary": "The running zirv-flow version.",
-        "operationId": "version",
+        "operationId": "get_version",
         "responses": {
           "200": {
             "description": "The running version",
@@ -719,7 +719,7 @@
           "workspaces"
         ],
         "summary": "The workspaces the caller can see: all of them for the owner, otherwise their memberships.",
-        "operationId": "list",
+        "operationId": "list_workspaces",
         "responses": {
           "200": {
             "description": "Visible workspaces",
@@ -766,7 +766,7 @@
           "workspaces"
         ],
         "summary": "Creates a workspace. Owner only. Needs the CSRF token.",
-        "operationId": "create",
+        "operationId": "create_workspace",
         "requestBody": {
           "content": {
             "application/json": {
@@ -842,7 +842,7 @@
           "workspaces"
         ],
         "summary": "One workspace. A caller with no access gets 404, never 403.",
-        "operationId": "get",
+        "operationId": "get_workspace",
         "parameters": [
           {
             "name": "ws",
@@ -913,7 +913,7 @@
           "api-keys"
         ],
         "summary": "The keys of a workspace, never including secrets. Workspace admins, the owner and\n`admin` keys only.",
-        "operationId": "list",
+        "operationId": "list_api_keys",
         "parameters": [
           {
             "name": "ws",
@@ -985,7 +985,7 @@
           "api-keys"
         ],
         "summary": "Creates a key and returns its secret, once.",
-        "operationId": "create",
+        "operationId": "create_api_key",
         "parameters": [
           {
             "name": "ws",
@@ -1076,7 +1076,7 @@
           "api-keys"
         ],
         "summary": "Revokes a key. Revoked keys are refused with 401 from then on.",
-        "operationId": "revoke",
+        "operationId": "revoke_api_key",
         "parameters": [
           {
             "name": "ws",
@@ -1150,7 +1150,7 @@
           "members"
         ],
         "summary": "The members of a workspace. Any member can read this.",
-        "operationId": "list",
+        "operationId": "list_members",
         "parameters": [
           {
             "name": "ws",
@@ -1224,7 +1224,7 @@
           "members"
         ],
         "summary": "Adds a user to the workspace or changes their role. Workspace admins and the owner only.",
-        "operationId": "set",
+        "operationId": "set_member_role",
         "parameters": [
           {
             "name": "ws",
@@ -1323,7 +1323,7 @@
           "members"
         ],
         "summary": "Removes a user from the workspace. Workspace admins and the owner only.",
-        "operationId": "remove",
+        "operationId": "remove_member",
         "parameters": [
           {
             "name": "ws",
@@ -1397,7 +1397,7 @@
           "traces"
         ],
         "summary": "What was decided and done under one trace, in the workspace. A trace with no records in\nthis workspace is 404, whether or not it exists elsewhere.",
-        "operationId": "get",
+        "operationId": "get_trace",
         "parameters": [
           {
             "name": "ws",
@@ -1487,7 +1487,7 @@
           "health"
         ],
         "summary": "Liveness: the process is serving requests. Never touches the database.",
-        "operationId": "healthz",
+        "operationId": "get_healthz",
         "responses": {
           "200": {
             "description": "The process is alive",
@@ -1508,7 +1508,7 @@
           "health"
         ],
         "summary": "Readiness: the database is reachable and its schema is up to date.",
-        "operationId": "readyz",
+        "operationId": "get_readyz",
         "responses": {
           "200": {
             "description": "Ready to serve",

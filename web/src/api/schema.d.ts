@@ -12,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** Job counts by kind and state, and how long the oldest runnable job has waited. */
-        get: operations["depth"];
+        get: operations["get_job_depth"];
         put?: never;
         post?: never;
         delete?: never;
@@ -29,7 +29,7 @@ export interface paths {
             cookie?: never;
         };
         /** Dead jobs, newest first, without their payloads. */
-        get: operations["dead"];
+        get: operations["list_dead_jobs"];
         put?: never;
         post?: never;
         delete?: never;
@@ -52,7 +52,7 @@ export interface paths {
          * @description Resets its attempts and clears its error. Audited as `job.retried`; a workspace job also
          *     gets a `job.retry` decision record in its trace.
          */
-        post: operations["retry"];
+        post: operations["retry_job"];
         delete?: never;
         options?: never;
         head?: never;
@@ -67,7 +67,7 @@ export interface paths {
             cookie?: never;
         };
         /** The signed-in user and their CSRF token. */
-        get: operations["current"];
+        get: operations["get_session"];
         put?: never;
         /**
          * Signs in with an e-mail and password and starts a session.
@@ -91,7 +91,7 @@ export interface paths {
             cookie?: never;
         };
         /** Which sign-in methods this instance accepts, for the sign-in screen. */
-        get: operations["methods"];
+        get: operations["get_sign_in_methods"];
         put?: never;
         post?: never;
         delete?: never;
@@ -113,7 +113,7 @@ export interface paths {
          * @description On success redirects to the server's public URL with the `zf_session` cookie set. Any
          *     failure is the same 401, and clears the `zf_oidc_state` cookie.
          */
-        get: operations["callback"];
+        get: operations["finish_oidc_sign_in"];
         put?: never;
         post?: never;
         delete?: never;
@@ -133,7 +133,7 @@ export interface paths {
          * Starts an OIDC sign-in: redirects the browser to the identity provider.
          * @description Sets the `zf_oidc_state` cookie (HttpOnly, SameSite=Lax) that the callback needs.
          */
-        get: operations["start"];
+        get: operations["start_oidc_sign_in"];
         put?: never;
         post?: never;
         delete?: never;
@@ -150,7 +150,7 @@ export interface paths {
             cookie?: never;
         };
         /** Whether the instance still needs its first-run setup. */
-        get: operations["status"];
+        get: operations["get_setup_status"];
         put?: never;
         /**
          * Creates the instance owner and signs them in.
@@ -158,7 +158,7 @@ export interface paths {
          *     it sets the `zf_session` cookie and returns the user with the CSRF token. An existing
          *     owner is 409, checked before the token; a missing or wrong token is 403.
          */
-        post: operations["complete"];
+        post: operations["complete_setup"];
         delete?: never;
         options?: never;
         head?: never;
@@ -173,10 +173,10 @@ export interface paths {
             cookie?: never;
         };
         /** Lists every user. Owner only. */
-        get: operations["users_list"];
+        get: operations["list_users"];
         put?: never;
         /** Creates a user. Owner only. Needs the CSRF token. */
-        post: operations["users_create"];
+        post: operations["create_user"];
         delete?: never;
         options?: never;
         head?: never;
@@ -191,7 +191,7 @@ export interface paths {
             cookie?: never;
         };
         /** The running zirv-flow version. */
-        get: operations["version"];
+        get: operations["get_version"];
         put?: never;
         post?: never;
         delete?: never;
@@ -208,10 +208,10 @@ export interface paths {
             cookie?: never;
         };
         /** The workspaces the caller can see: all of them for the owner, otherwise their memberships. */
-        get: operations["workspaces_list"];
+        get: operations["list_workspaces"];
         put?: never;
         /** Creates a workspace. Owner only. Needs the CSRF token. */
-        post: operations["workspaces_create"];
+        post: operations["create_workspace"];
         delete?: never;
         options?: never;
         head?: never;
@@ -226,7 +226,7 @@ export interface paths {
             cookie?: never;
         };
         /** One workspace. A caller with no access gets 404, never 403. */
-        get: operations["workspaces_get"];
+        get: operations["get_workspace"];
         put?: never;
         post?: never;
         delete?: never;
@@ -246,10 +246,10 @@ export interface paths {
          * The keys of a workspace, never including secrets. Workspace admins, the owner and
          *     `admin` keys only.
          */
-        get: operations["apiKeys_list"];
+        get: operations["list_api_keys"];
         put?: never;
         /** Creates a key and returns its secret, once. */
-        post: operations["apiKeys_create"];
+        post: operations["create_api_key"];
         delete?: never;
         options?: never;
         head?: never;
@@ -267,7 +267,7 @@ export interface paths {
         put?: never;
         post?: never;
         /** Revokes a key. Revoked keys are refused with 401 from then on. */
-        delete: operations["revoke"];
+        delete: operations["revoke_api_key"];
         options?: never;
         head?: never;
         patch?: never;
@@ -281,7 +281,7 @@ export interface paths {
             cookie?: never;
         };
         /** The members of a workspace. Any member can read this. */
-        get: operations["members_list"];
+        get: operations["list_members"];
         put?: never;
         post?: never;
         delete?: never;
@@ -299,10 +299,10 @@ export interface paths {
         };
         get?: never;
         /** Adds a user to the workspace or changes their role. Workspace admins and the owner only. */
-        put: operations["set"];
+        put: operations["set_member_role"];
         post?: never;
         /** Removes a user from the workspace. Workspace admins and the owner only. */
-        delete: operations["remove"];
+        delete: operations["remove_member"];
         options?: never;
         head?: never;
         patch?: never;
@@ -319,7 +319,7 @@ export interface paths {
          * What was decided and done under one trace, in the workspace. A trace with no records in
          *     this workspace is 404, whether or not it exists elsewhere.
          */
-        get: operations["traces_get"];
+        get: operations["get_trace"];
         put?: never;
         post?: never;
         delete?: never;
@@ -336,7 +336,7 @@ export interface paths {
             cookie?: never;
         };
         /** Liveness: the process is serving requests. Never touches the database. */
-        get: operations["healthz"];
+        get: operations["get_healthz"];
         put?: never;
         post?: never;
         delete?: never;
@@ -353,7 +353,7 @@ export interface paths {
             cookie?: never;
         };
         /** Readiness: the database is reachable and its schema is up to date. */
-        get: operations["readyz"];
+        get: operations["get_readyz"];
         put?: never;
         post?: never;
         delete?: never;
@@ -614,7 +614,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    depth: {
+    get_job_depth: {
         parameters: {
             query?: never;
             header?: never;
@@ -652,7 +652,7 @@ export interface operations {
             };
         };
     };
-    dead: {
+    list_dead_jobs: {
         parameters: {
             query?: {
                 /** @description Jobs per page, 1 to 200; default 50 */
@@ -704,7 +704,7 @@ export interface operations {
             };
         };
     };
-    retry: {
+    retry_job: {
         parameters: {
             query?: never;
             header?: never;
@@ -763,7 +763,7 @@ export interface operations {
             };
         };
     };
-    current: {
+    get_session: {
         parameters: {
             query?: never;
             header?: never;
@@ -879,7 +879,7 @@ export interface operations {
             };
         };
     };
-    methods: {
+    get_sign_in_methods: {
         parameters: {
             query?: never;
             header?: never;
@@ -899,7 +899,7 @@ export interface operations {
             };
         };
     };
-    callback: {
+    finish_oidc_sign_in: {
         parameters: {
             query?: {
                 /** @description The authorization code */
@@ -942,7 +942,7 @@ export interface operations {
             };
         };
     };
-    start: {
+    start_oidc_sign_in: {
         parameters: {
             query?: never;
             header?: never;
@@ -978,7 +978,7 @@ export interface operations {
             };
         };
     };
-    status: {
+    get_setup_status: {
         parameters: {
             query?: never;
             header?: never;
@@ -998,7 +998,7 @@ export interface operations {
             };
         };
     };
-    complete: {
+    complete_setup: {
         parameters: {
             query?: never;
             header?: never;
@@ -1049,7 +1049,7 @@ export interface operations {
             };
         };
     };
-    users_list: {
+    list_users: {
         parameters: {
             query?: never;
             header?: never;
@@ -1087,7 +1087,7 @@ export interface operations {
             };
         };
     };
-    users_create: {
+    create_user: {
         parameters: {
             query?: never;
             header?: never;
@@ -1147,7 +1147,7 @@ export interface operations {
             };
         };
     };
-    version: {
+    get_version: {
         parameters: {
             query?: never;
             header?: never;
@@ -1167,7 +1167,7 @@ export interface operations {
             };
         };
     };
-    workspaces_list: {
+    list_workspaces: {
         parameters: {
             query?: never;
             header?: never;
@@ -1205,7 +1205,7 @@ export interface operations {
             };
         };
     };
-    workspaces_create: {
+    create_workspace: {
         parameters: {
             query?: never;
             header?: never;
@@ -1265,7 +1265,7 @@ export interface operations {
             };
         };
     };
-    workspaces_get: {
+    get_workspace: {
         parameters: {
             query?: never;
             header?: never;
@@ -1315,7 +1315,7 @@ export interface operations {
             };
         };
     };
-    apiKeys_list: {
+    list_api_keys: {
         parameters: {
             query?: never;
             header?: never;
@@ -1365,7 +1365,7 @@ export interface operations {
             };
         };
     };
-    apiKeys_create: {
+    create_api_key: {
         parameters: {
             query?: never;
             header?: never;
@@ -1428,7 +1428,7 @@ export interface operations {
             };
         };
     };
-    revoke: {
+    revoke_api_key: {
         parameters: {
             query?: never;
             header?: never;
@@ -1478,7 +1478,7 @@ export interface operations {
             };
         };
     };
-    members_list: {
+    list_members: {
         parameters: {
             query?: never;
             header?: never;
@@ -1528,7 +1528,7 @@ export interface operations {
             };
         };
     };
-    set: {
+    set_member_role: {
         parameters: {
             query?: never;
             header?: never;
@@ -1593,7 +1593,7 @@ export interface operations {
             };
         };
     };
-    remove: {
+    remove_member: {
         parameters: {
             query?: never;
             header?: never;
@@ -1643,7 +1643,7 @@ export interface operations {
             };
         };
     };
-    traces_get: {
+    get_trace: {
         parameters: {
             query?: never;
             header?: never;
@@ -1704,7 +1704,7 @@ export interface operations {
             };
         };
     };
-    healthz: {
+    get_healthz: {
         parameters: {
             query?: never;
             header?: never;
@@ -1724,7 +1724,7 @@ export interface operations {
             };
         };
     };
-    readyz: {
+    get_readyz: {
         parameters: {
             query?: never;
             header?: never;

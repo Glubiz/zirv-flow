@@ -11,6 +11,7 @@ pub(crate) struct VersionBody {
 /// The running zirv-flow version.
 #[utoipa::path(
     get,
+    operation_id = "get_version",
     path = "/api/v1/version",
     tag = "meta",
     responses((status = 200, description = "The running version", body = VersionBody))

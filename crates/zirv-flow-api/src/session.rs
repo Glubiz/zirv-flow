@@ -61,6 +61,7 @@ pub(crate) struct SessionBody {
 /// account for a growing time, up to 15 minutes.
 #[utoipa::path(
     post,
+    operation_id = "sign_in",
     path = "/api/v1/session",
     tag = "session",
     request_body = SignInRequest,
@@ -221,6 +222,7 @@ pub(crate) struct MethodsBody {
 /// Which sign-in methods this instance accepts, for the sign-in screen.
 #[utoipa::path(
     get,
+    operation_id = "get_sign_in_methods",
     path = "/api/v1/session/methods",
     tag = "session",
     responses(
@@ -241,6 +243,7 @@ pub(crate) async fn methods(State(state): State<AppState>) -> impl IntoResponse 
 /// The signed-in user and their CSRF token.
 #[utoipa::path(
     get,
+    operation_id = "get_session",
     path = "/api/v1/session",
     tag = "session",
     responses(
@@ -264,6 +267,7 @@ pub(crate) async fn current(principal: Principal) -> Result<impl IntoResponse, A
 /// Signs out: ends the session and clears the cookie. Needs the CSRF token.
 #[utoipa::path(
     delete,
+    operation_id = "sign_out",
     path = "/api/v1/session",
     tag = "session",
     responses(

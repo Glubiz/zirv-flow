@@ -129,4 +129,20 @@ mod tests {
             "openapi.json is stale; regenerate with ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi"
         );
     }
+
+    #[test]
+    fn every_operation_id_is_unique() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let mut seen = std::collections::BTreeMap::new();
+        for (path, item) in document["paths"].as_object().unwrap() {
+            for (method, operation) in item.as_object().unwrap() {
+                let id = operation["operationId"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{method} {path} has no operationId"));
+                if let Some(first) = seen.insert(id.to_owned(), format!("{method} {path}")) {
+                    panic!("operationId {id} is used by {first} and {method} {path}");
+                }
+            }
+        }
+    }
 }
