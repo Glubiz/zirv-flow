@@ -10,13 +10,14 @@ mod tests {
     use zirv_flow_core::people::{Identifier, Precedence, TraitType};
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceId, WorkspaceName};
 
-    use crate::create_workspace;
     use crate::people::{
-        NewTraitDefinition, ProfileOutcome, ProfileRecord, TraitDefinitionUpdate,
-        apply_profile_batch, create_trait_definition, find_person, find_person_by_identifier,
-        find_trait_definition, list_identities, list_identity_conflicts, list_trait_definitions,
-        update_trait_definition,
+        ConflictResolution, NewTraitDefinition, ProfileOutcome, ProfileRecord, ResolveError,
+        TraitDefinitionUpdate, apply_profile_batch, create_trait_definition, current_person,
+        find_conflict, find_person, find_person_by_identifier, find_trait_definition,
+        list_conflicts, list_identities, list_identity_conflicts, list_trait_definitions,
+        resolve_conflict, update_trait_definition,
     };
+    use crate::{begin, create_workspace};
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
@@ -39,9 +40,11 @@ mod tests {
         }
     }
 
-    /// Seeds the same shape in a workspace: a person with an email, a second one with a
-    /// phone, a record that touches both (a conflict) and a registry definition.
-    async fn seed(pool: &PgPool, ws: WorkspaceId) -> Uuid {
+    /// Seeds the same shape in a workspace: a person with an email and an external id, a
+    /// second one with another external id, a record that touches both (a conflict, since a
+    /// person holds one external id) and a registry definition. Returns the first person, who
+    /// owns the email, and the second, who holds the conflict.
+    async fn seed(pool: &PgPool, ws: WorkspaceId) -> (Uuid, Uuid) {
         create_trait_definition(
             pool,
             ws,
@@ -62,20 +65,25 @@ mod tests {
             pool,
             ws,
             &[
-                record("1", vec![("email", "a@example.com")]),
-                record("2", vec![("phone", "+4512345678")]),
-                record(
-                    "3",
-                    vec![("email", "a@example.com"), ("phone", "+4512345678")],
-                ),
+                record("1", vec![("email", "a@example.com"), ("external:crm", "1")]),
+                record("2", vec![("external:crm", "2")]),
+                record("3", vec![("email", "a@example.com"), ("external:crm", "2")]),
             ],
         )
         .await
         .unwrap();
-        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+        let (
+            ProfileOutcome::Applied {
+                person_id: first, ..
+            },
+            ProfileOutcome::Applied {
+                person_id: second, ..
+            },
+        ) = (&outcomes[0], &outcomes[1])
+        else {
             panic!("not applied");
         };
-        person_id
+        (*first, *second)
     }
 
     #[sqlx::test]
@@ -83,8 +91,8 @@ mod tests {
     async fn every_read_returns_only_its_own_workspaces_rows(pool: PgPool) {
         let one = workspace(&pool, "one").await;
         let two = workspace(&pool, "two").await;
-        let person_one = seed(&pool, one).await;
-        let person_two = seed(&pool, two).await;
+        let (person_one, holder_one) = seed(&pool, one).await;
+        let (person_two, holder_two) = seed(&pool, two).await;
         assert_ne!(person_one, person_two);
         let email = Identifier::parse("email", "a@example.com").unwrap();
 
@@ -133,12 +141,13 @@ mod tests {
         );
         assert_eq!(
             list_identities(&pool, one, person_one).await.unwrap().len(),
-            1
+            2
         );
 
-        // Conflicts.
-        for (ws, own, foreign) in [(one, person_one, person_two), (two, person_two, person_one)] {
-            let conflicts = list_identity_conflicts(&pool, ws, own).await.unwrap();
+        // Conflicts: each workspace lists its own, and a foreign person reads as empty.
+        for (ws, holder, foreign) in [(one, holder_one, holder_two), (two, holder_two, holder_one)]
+        {
+            let conflicts = list_identity_conflicts(&pool, ws, holder).await.unwrap();
             assert_eq!(conflicts.len(), 1);
             assert_ne!(conflicts[0].other_person_id, foreign);
             assert!(
@@ -147,6 +156,39 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            let (open, more) = list_conflicts(&pool, ws, false, 10, None).await.unwrap();
+            assert!(!more);
+            assert_eq!(open, conflicts);
+            assert_eq!(
+                find_conflict(&pool, ws, conflicts[0].id).await.unwrap(),
+                Some(conflicts[0].clone())
+            );
         }
+        let foreign = list_identity_conflicts(&pool, one, holder_one)
+            .await
+            .unwrap();
+        assert!(
+            find_conflict(&pool, two, foreign[0].id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut tx = begin(&pool).await.unwrap();
+        let refused = resolve_conflict(
+            &mut tx,
+            two,
+            foreign[0].id,
+            ConflictResolution::KeepSeparate,
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await;
+        assert!(matches!(refused, Err(ResolveError::NotFound)));
+
+        // Merges: the current person of another workspace's id is nothing.
+        assert_eq!(current_person(&pool, one, holder_two).await.unwrap(), None);
+        assert_eq!(
+            current_person(&pool, one, holder_one).await.unwrap(),
+            Some(holder_one)
+        );
     }
 }

@@ -65,18 +65,41 @@ pub struct IdentityConflict {
     pub kind: String,
     pub source_record_id: Uuid,
     pub reason: String,
+    /// The shared identity; absent on conflicts recorded before merges existed.
+    pub identity_id: Option<Uuid>,
+    pub created_at: OffsetDateTime,
     pub resolved_at: Option<OffsetDateTime>,
+    /// `merged`, `kept_separate` or `identifier_moved`; set with `resolved_at`.
+    pub resolution: Option<String>,
 }
 
+/// The columns of [`IdentityConflict`].
+macro_rules! conflict_columns {
+    () => {
+        "id, person_id, other_person_id, kind, source_record_id, reason, identity_id, \
+         created_at, resolved_at, resolution"
+    };
+}
+pub(super) use conflict_columns;
+
+/// SQL for the person that stands for `$2`: its survivor when it was merged.
+macro_rules! current_person_sql {
+    () => {
+        "COALESCE((SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2), $2)"
+    };
+}
+
+/// The person, or the survivor it was merged into.
 pub async fn find_person<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Option<Person>, StoreError> {
-    sqlx::query_as(
+    sqlx::query_as(concat!(
         "SELECT id, workspace_id, traits, trait_sources, merged_into, created_at, updated_at \
-         FROM people WHERE workspace_id = $1 AND id = $2",
-    )
+         FROM people WHERE workspace_id = $1 AND id = ",
+        current_person_sql!()
+    ))
     .bind(workspace.as_uuid())
     .bind(person)
     .fetch_optional(executor)
@@ -104,16 +127,19 @@ pub async fn find_person_by_identifier<'e>(
     .map_err(StoreError::query)
 }
 
-/// The identities of a person, ordered by kind then value.
+/// The identities of a person (of its survivor when it was merged), ordered by kind then
+/// value.
 pub async fn list_identities<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Vec<StoredIdentity>, StoreError> {
-    sqlx::query_as(
+    sqlx::query_as(concat!(
         "SELECT id, person_id, kind, value FROM identities \
-         WHERE workspace_id = $1 AND person_id = $2 ORDER BY kind, value",
-    )
+         WHERE workspace_id = $1 AND person_id = ",
+        current_person_sql!(),
+        " ORDER BY kind, value"
+    ))
     .bind(workspace.as_uuid())
     .bind(person)
     .fetch_all(executor)
@@ -121,17 +147,19 @@ pub async fn list_identities<'e>(
     .map_err(StoreError::query)
 }
 
-/// The conflicts recorded against a person, oldest first.
+/// The conflicts recorded against a person (or its survivor), oldest first.
 pub async fn list_identity_conflicts<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Vec<IdentityConflict>, StoreError> {
-    sqlx::query_as(
-        "SELECT id, person_id, other_person_id, kind, source_record_id, reason, resolved_at \
-         FROM identity_conflicts WHERE workspace_id = $1 AND person_id = $2 \
-         ORDER BY created_at, id",
-    )
+    sqlx::query_as(concat!(
+        "SELECT ",
+        conflict_columns!(),
+        " FROM identity_conflicts WHERE workspace_id = $1 AND person_id = ",
+        current_person_sql!(),
+        " ORDER BY created_at, id"
+    ))
     .bind(workspace.as_uuid())
     .bind(person)
     .fetch_all(executor)

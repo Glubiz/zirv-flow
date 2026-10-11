@@ -100,4 +100,61 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_scan_finds_the_merge_provenance_of_both_people(pool: PgPool) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let record = |key: &str, identifiers: &[(&str, &str)]| ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: key.into(),
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect(),
+            traits: json!({}).as_object().cloned().unwrap(),
+            observed_at: datetime!(2026-01-01 00:00 UTC),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record("1", &[("external:crm", "1")]),
+                record("2", &[("anonymous_id", "a")]),
+                record("3", &[("external:crm", "1"), ("anonymous_id", "a")]),
+            ],
+        )
+        .await
+        .unwrap();
+        let ProfileOutcome::Applied {
+            person_id: survivor,
+            ..
+        } = outcomes[0]
+        else {
+            panic!("not applied");
+        };
+        let ProfileOutcome::Applied {
+            person_id: merged, ..
+        } = outcomes[1]
+        else {
+            panic!("not applied");
+        };
+
+        let for_survivor = rows_referencing_person(&pool, survivor).await;
+        let for_merged = rows_referencing_person(&pool, merged).await;
+
+        assert!(for_survivor.contains(&("person_merges.survivor_person_id".to_owned(), 1)));
+        assert!(for_merged.contains(&("person_merges.merged_person_id".to_owned(), 1)));
+        assert!(for_merged.contains(&("people.id".to_owned(), 1)));
+        assert!(
+            for_merged
+                .iter()
+                .all(|(place, _)| place != "people.merged_into")
+        );
+        assert!(for_survivor.contains(&("people.merged_into".to_owned(), 1)));
+    }
 }
