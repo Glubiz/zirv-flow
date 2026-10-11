@@ -21,12 +21,31 @@ const csrf: Middleware = {
   },
 };
 
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+const OWN_STATUS_PATHS = ["/api/v1/session", "/api/v1/setup"];
+
+const expiry: Middleware = {
+  onResponse({ request, response }) {
+    const path = new URL(request.url).pathname;
+    if (response.status === 401 && !OWN_STATUS_PATHS.some((own) => path.startsWith(own))) {
+      onUnauthorized?.();
+    }
+    return response;
+  },
+};
+
 export const client = createClient<paths>({
   baseUrl: globalThis.location.origin,
   credentials: "same-origin",
   fetch: (request) => globalThis.fetch(request),
 });
 client.use(csrf);
+client.use(expiry);
 
 interface Result<T> {
   data?: T;

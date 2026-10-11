@@ -112,3 +112,29 @@ describe("navigation without a workspace", () => {
     expect(nav).toHaveTextContent("pick a workspace first");
   });
 });
+
+describe("expired session", () => {
+  it("sends the user to sign-in when a later call answers 401", async () => {
+    let first = true;
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/admin/jobs": () => {
+        if (first) {
+          first = false;
+          return json({ kinds: [] });
+        }
+        return problem(401, "Unauthorized", "session expired");
+      },
+      "GET /api/v1/admin/jobs/dead": () => json({ jobs: [], next_before: null }),
+      "GET /api/v1/setup": () => json({ required: false }),
+      "GET /api/v1/version": () => json({ version: "0.10.0" }),
+    });
+    const user = userEvent.setup();
+    renderApp("/jobs");
+
+    await user.click(await screen.findByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
+  });
+});

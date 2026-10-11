@@ -49,6 +49,9 @@ describe("jobs admin", () => {
     expect(await screen.findByText("Nothing needs attention")).toBeInTheDocument();
     const retry = calls.find((call) => call.method === "POST");
     expect(retry?.headers.get("x-csrf-token")).toBe("csrf-jobs");
+    const reads = calls.filter((call) => call.method === "GET");
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((call) => !call.headers.has("x-csrf-token"))).toBe(true);
     expect(calls.filter((call) => call.path === "/api/v1/admin/jobs/dead")).toHaveLength(2);
   });
 
@@ -79,5 +82,28 @@ describe("jobs admin", () => {
 
     expect(await screen.findByText("Only the instance owner can see jobs")).toBeInTheDocument();
     expect(calls.some((call) => call.path.startsWith("/api/v1/admin"))).toBe(false);
+  });
+
+  it("loads the next page with the cursor, appends without duplicates and hides the button at the end", async () => {
+    const job = (n: number) => ({ ...DEAD_JOB, id: `0000000${n}-0000-4000-8000-00000000000${n}`, kind: `kind.n${n}` });
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/admin/jobs": () => json(DEPTH),
+      "GET /api/v1/admin/jobs/dead": (request) =>
+        new URL(request.url).searchParams.get("before") === "cursor-1"
+          ? json({ jobs: [job(2)], next_before: null })
+          : json({ jobs: [job(1)], next_before: "cursor-1" }),
+    });
+    const user = userEvent.setup();
+    renderRoute("/jobs", "/jobs", <JobsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+
+    expect(await screen.findByText("kind.n2")).toBeInTheDocument();
+    expect(screen.getAllByText("kind.n1")).toHaveLength(1);
+    expect(screen.getAllByText("kind.n2")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    const second = calls.filter((call) => call.path === "/api/v1/admin/jobs/dead")[1];
+    expect(second?.search).toContain("before=cursor-1");
   });
 });

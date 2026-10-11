@@ -53,4 +53,29 @@ describe("API keys", () => {
     expect(post?.body).toEqual({ name: "Nightly import", scopes: ["read"] });
     expect(post?.headers.get("x-csrf-token")).toBe("csrf-keys");
   });
+
+  it("keeps focus inside the secret dialog, closes it on Escape and returns focus to the trigger", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([{ user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
+      "GET /api/v1/workspaces/ws1/api-keys": () => json([]),
+      "POST /api/v1/workspaces/ws1/api-keys": () => json(CREATED, 201),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/api-keys", "/w/:ws/api-keys", <ApiKeysPage />);
+
+    const trigger = await screen.findByRole("button", { name: "Create key" });
+    await user.click(trigger);
+    const form = within(screen.getByRole("dialog", { name: "Create an API key" }));
+    await user.type(form.getByLabelText("Name"), "Nightly import");
+    await user.click(form.getByRole("button", { name: "Create key" }));
+
+    const secretDialog = await screen.findByRole("dialog", { name: "Copy your new key" });
+    expect(secretDialog).toContainElement(document.activeElement as HTMLElement);
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
 });

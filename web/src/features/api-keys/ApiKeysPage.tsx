@@ -32,7 +32,7 @@ export function ApiKeysPage() {
       <ResourceView resource={access} loadingLabel="Checking your access">
         {(data) =>
           data.canManage ? (
-            <KeyList workspaceId={ws} />
+            <KeyList key={ws} workspaceId={ws} />
           ) : (
             <Panel flush>
               <EmptyState title="You cannot manage API keys here">

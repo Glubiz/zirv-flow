@@ -9,6 +9,10 @@ import { accessFor, useMembers, type Member, type MemberRole } from "./useWorksp
 
 export function MembersPage() {
   const { ws = "" } = useParams();
+  return <WorkspaceMembers key={ws} ws={ws} />;
+}
+
+function WorkspaceMembers({ ws }: { ws: string }) {
   const user = useSignedInUser();
   const workspaces = useWorkspaces();
   const members = useMembers(ws);

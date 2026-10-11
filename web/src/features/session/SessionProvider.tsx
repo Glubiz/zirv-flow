@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ApiError, client, setCsrfToken, unwrap, unwrapEmpty, type components } from "../../api";
+import { ApiError, client, setCsrfToken, setUnauthorizedHandler, unwrap, unwrapEmpty, type components } from "../../api";
 
 export type SessionUser = components["schemas"]["UserBody"];
 type SessionBody = components["schemas"]["SessionBody"];
@@ -52,6 +52,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       live = false;
     };
   }, [adopt, tick]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setCsrfToken(null);
+      setState((current) => (current.status === "signed-in" ? { status: "signed-out" } : current));
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   const signIn = useCallback(
     async (email: string, password: string) => {

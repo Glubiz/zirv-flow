@@ -5,6 +5,7 @@ export type Handler = (request: Request) => Response | Promise<Response>;
 export interface Call {
   method: string;
   path: string;
+  search: string;
   headers: Headers;
   body: unknown;
 }
@@ -29,6 +30,7 @@ export function mockApi(routes: Record<string, Handler>): Call[] {
     calls.push({
       method: request.method,
       path,
+      search: new URL(request.url).search,
       headers: request.headers,
       body: text === "" ? null : (JSON.parse(text) as unknown),
     });

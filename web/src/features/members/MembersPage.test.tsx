@@ -1,4 +1,6 @@
 import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Link } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, session, WORKSPACE } from "../../test/mockApi";
@@ -48,5 +50,30 @@ describe("members", () => {
     expect(await screen.findByRole("button", { name: "Add member" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove boss@example.test" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Role for boss@example.test" })).toBeInTheDocument();
+  });
+
+  it("closes an open dialog when the user switches to another workspace", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE, { ...WORKSPACE, id: "ws2", name: "Autumn" }]),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
+      "GET /api/v1/workspaces/ws2/members": () => json(members("admin")),
+    });
+    const user = userEvent.setup();
+    renderRoute(
+      "/w/ws1/members",
+      "/w/:ws/members",
+      <>
+        <Link to="/w/ws2/members">Other workspace</Link>
+        {page()}
+      </>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Add member" }));
+    expect(screen.getByRole("dialog", { name: "Add a member" })).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Other workspace" }));
+
+    expect(await screen.findByRole("button", { name: "Add member" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

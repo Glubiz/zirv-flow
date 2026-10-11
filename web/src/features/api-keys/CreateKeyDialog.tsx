@@ -51,7 +51,7 @@ export function CreateKeyDialog({ workspaceId, onClose }: CreateKeyDialogProps) 
 
   if (created) {
     return (
-      <Dialog title="Copy your new key" onClose={onClose}>
+      <Dialog key="secret" title="Copy your new key" onClose={onClose}>
         <p className="muted">
           <span className="strong">You will not see this key again.</span> Copy it now and keep it somewhere safe. If you
           lose it, revoke it and create a new one.
@@ -70,7 +70,7 @@ export function CreateKeyDialog({ workspaceId, onClose }: CreateKeyDialogProps) 
   }
 
   return (
-    <Dialog title="Create an API key" onClose={onClose}>
+    <Dialog key="form" title="Create an API key" onClose={onClose}>
       <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
         <TextField
           label="Name"
