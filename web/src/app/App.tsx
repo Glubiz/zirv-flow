@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import { ApiKeysPage } from "../features/api-keys";
 import { EventSchemaPage, EventSettingsPage, EventsPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
+import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
 import { MembersPage } from "../features/members";
@@ -117,6 +118,9 @@ export function AppRoutes() {
           <Route path="w/:ws/people" element={<PeoplePage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
           <Route path="w/:ws/people/:id" element={<ProfilePage />} />
+          <Route path="w/:ws/imports" element={<ImportsPage />} />
+          <Route path="w/:ws/imports/new" element={<NewImportPage />} />
+          <Route path="w/:ws/imports/:importId" element={<ImportPage />} />
           <Route path="w/:ws/events" element={<EventsPage />} />
           <Route path="w/:ws/events/rejects" element={<RejectsPage />} />
           <Route path="w/:ws/events/settings" element={<EventSettingsPage />} />
