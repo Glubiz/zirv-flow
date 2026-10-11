@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "clap",
  "figment",
@@ -4009,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4034,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -4052,7 +4052,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "axum",
  "chrono",
@@ -4067,7 +4067,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "getrandom 0.4.3",
  "metrics",
@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",

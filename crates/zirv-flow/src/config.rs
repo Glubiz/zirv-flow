@@ -13,10 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 17] = [
+const CONFIG_KEYS: [&str; 18] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
+    "ops.bind",
     "auth.local.enabled",
     "auth.oidc.issuer_url",
     "auth.oidc.client_id",
@@ -37,6 +38,8 @@ const CONFIG_KEYS: [&str; 17] = [
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     server: ServerConfig,
+    #[serde(default)]
+    ops: OpsConfig,
     auth: AuthConfig,
     database: DatabaseConfig,
     worker: WorkerConfig,
@@ -69,6 +72,15 @@ struct ServerConfig {
     /// The URL users reach the server at; the OIDC redirect URI is built from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     public_url: Option<String>,
+}
+
+/// The metrics and health listener of worker-only and scheduler-only processes.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpsConfig {
+    /// Unset means no listener.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bind: Option<SocketAddr>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -387,6 +399,10 @@ impl Config {
         self.server.bind
     }
 
+    pub(crate) fn ops_bind(&self) -> Option<SocketAddr> {
+        self.ops.bind
+    }
+
     /// Where browsers reach the server: the public URL without a trailing slash, else the
     /// bind address over plain HTTP.
     pub(crate) fn base_url(&self) -> String {
@@ -674,6 +690,45 @@ mod tests {
 
         assert!(error.contains("server.bind"));
         assert!(error.contains("ZIRV_FLOW_SERVER__BIND"));
+    }
+
+    #[test]
+    fn ops_bind_is_unset_by_default_and_read_from_file_or_environment() {
+        let unset = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_OPS__BIND".into(), "127.0.0.1:9100".into()));
+        let from_env = Config::load(None, env).unwrap();
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[ops]
+bind = \"127.0.0.1:9101\"
+",
+        );
+        let from_file = Config::load(Some(&file.0), []).unwrap();
+
+        assert_eq!(unset.ops_bind(), None);
+        assert_eq!(from_env.ops_bind(), Some("127.0.0.1:9100".parse().unwrap()));
+        assert_eq!(
+            from_file.ops_bind(),
+            Some("127.0.0.1:9101".parse().unwrap())
+        );
+        assert!(
+            toml::to_string_pretty(&from_env)
+                .unwrap()
+                .contains("127.0.0.1:9100")
+        );
+    }
+
+    #[test]
+    fn an_invalid_ops_bind_names_its_key() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_OPS__BIND".into(), "nope".into()));
+
+        let error = Config::load(None, env).unwrap_err().to_string();
+
+        assert!(error.contains("ops.bind"));
+        assert!(error.contains("ZIRV_FLOW_OPS__BIND"));
     }
 
     #[test]

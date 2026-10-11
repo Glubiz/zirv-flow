@@ -77,6 +77,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `server.bind` | socket address | `127.0.0.1:8080` | must parse |
 | `server.cookie_secure` | bool | true | none; set false only for plain-HTTP development |
 | `server.public_url` | http(s) URL | none | required when `auth.oidc` is set; the URL users reach the server at |
+| `ops.bind` | socket address | none (off) | must parse; serves `/metrics`, `/healthz` and `/readyz` for `worker` and `scheduler` processes, ignored when `serve` runs |
 | `auth.local.enabled` | bool | true | none; false turns off `POST /api/v1/session` (404) |
 | `auth.oidc.issuer_url` | URL | none | https, or http for localhost; setting any `auth.oidc` key turns OIDC on |
 | `auth.oidc.client_id` | string | required with `auth.oidc` | not empty |
@@ -189,7 +190,11 @@ running jobs; any still running are left to lease expiry. `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
 `zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
 `zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
-leader. A worker-only or scheduler-only process has no metrics endpoint yet.
+leader. A `worker` or `scheduler` process has no HTTP server, so set `ops.bind` (for
+example `ZIRV_FLOW_OPS__BIND=0.0.0.0:9100`) to serve `/metrics`, `/healthz` and
+`/readyz` from it; `/readyz` is 503 once a role loop has stopped or shutdown has
+begun. With `serve` or `all` the same endpoints are on `server.bind` and
+`ops.bind` is ignored.
 
 ## Accounts, workspaces and authentication
 

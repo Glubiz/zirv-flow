@@ -12,6 +12,7 @@ mod members;
 mod metrics;
 mod oidc;
 mod openapi;
+mod ops;
 mod passwords;
 mod problem;
 mod request_id;
@@ -37,6 +38,7 @@ use tokio::net::TcpListener;
 
 pub use oidc::redirect_url as oidc_redirect_url;
 pub use openapi::openapi;
+pub use ops::{OpsState, ops_router, serve_ops};
 pub use problem::Problem;
 pub use state::AppState;
 pub use zirv_flow_identity::{IdentityError, OidcSettings, SecretString};
