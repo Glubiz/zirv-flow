@@ -674,7 +674,13 @@ export interface paths {
         get: operations["get_person"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Deletes a person with every row that refers to them: identities, source records, events,
+         *     consent, list memberships and their history, conflicts, merges and decisions. It adds no
+         *     suppression and no erasure ledger entry; use an erasure request for a data-subject request.
+         *     Needs the workspace admin role and the CSRF token. Audited as `person.deleted`.
+         */
+        delete: operations["delete_person"];
         options?: never;
         head?: never;
         patch?: never;
@@ -781,6 +787,100 @@ export interface paths {
          */
         get: operations["get_person_timeline"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/privacy/erasures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's erasure requests, newest first, with their status. */
+        get: operations["list_erasures"];
+        put?: never;
+        /**
+         * Asks for a person to be erased: the ledger keeps the person id and the keyed hashes of
+         *     their identifiers, the email and phone stay suppressed as `erased`, and the person and
+         *     everything that refers to them is deleted by a background job. The request is given as a
+         *     `person_id` or as an `identifier`; one that resolves to no person is a 404. Needs the
+         *     workspace admin role and the CSRF token. Audited as `privacy.erasure_requested`.
+         */
+        post: operations["request_erasure"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/privacy/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's exports, newest first, with their status and expiry. The content is never
+         *     part of the listing.
+         */
+        get: operations["list_exports"];
+        put?: never;
+        /**
+         * Asks for an export of everything held about a person: profile, identities, ledger
+         *     contributions, events, consent and its history, lists and their history, merges and
+         *     identity conflicts, with the data of merged people under the survivor. A background job
+         *     builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
+         *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
+         *     Audited as `privacy.export_requested`.
+         */
+        post: operations["request_export"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/privacy/exports/{id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Downloads a ready export as gzip-compressed JSON (`zirv-flow.person-export/v1`). It holds
+         *     personal values, so it needs the workspace admin role, and every download is audited as
+         *     `privacy.export_downloaded`. An expired export answers 410.
+         */
+        get: operations["download_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/privacy/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's privacy settings. */
+        get: operations["get_privacy_settings"];
+        /**
+         * Sets the orphan policy. Needs the workspace admin role and the CSRF token. Audited as
+         *     `workspace.privacy_settings_updated`.
+         */
+        put: operations["put_privacy_settings"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1356,6 +1456,37 @@ export interface components {
             masked: boolean;
             value?: string | null;
         };
+        ErasureBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The ledger keeps the person id after the person is gone.
+             */
+            person_id: string;
+            /** Format: date-time */
+            requested_at: string;
+            /**
+             * Format: uuid
+             * @description The user who asked; null for an API key.
+             */
+            requested_by?: string | null;
+            /**
+             * @description `pending`, `completed`, or `failed` once the job ran out of attempts.
+             * @example pending
+             */
+            status: string;
+            /** @description The trace of the request and of its job: 32 lowercase hex characters. */
+            trace_id: string;
+        };
+        ErasuresBody: {
+            /** @description Newest first. */
+            erasures: components["schemas"]["ErasureBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
         EventEntryBody: {
             /**
              * Format: date-time
@@ -1436,6 +1567,44 @@ export interface components {
             schema: components["schemas"]["EventSchemaBody"];
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
+        };
+        ExportBody: {
+            /**
+             * Format: date-time
+             * @description 24 hours after `ready_at`; the download answers 410 from then on.
+             */
+            expires_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            person_id: string;
+            /** Format: date-time */
+            ready_at?: string | null;
+            /** Format: date-time */
+            requested_at: string;
+            /**
+             * Format: uuid
+             * @description The user who asked; null for an API key.
+             */
+            requested_by?: string | null;
+            /**
+             * Format: int64
+             * @description The compressed size; null until the export is ready.
+             */
+            size_bytes?: number | null;
+            /**
+             * @description `pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.
+             * @example ready
+             */
+            status: string;
+            /** @description The trace of the request and of its job: 32 lowercase hex characters. */
+            trace_id: string;
+        };
+        ExportsBody: {
+            /** @description Newest first. */
+            exports: components["schemas"]["ExportBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         HistoryBody: {
             /** @description Newest first. */
@@ -1785,6 +1954,23 @@ export interface components {
             /** @description `ui`, `api`, `import`, `merge` or `flow`. */
             source: string;
         };
+        /** @description The person a privacy request is about: give a `person_id` or an `identifier`, not both. */
+        PersonTarget: {
+            identifier?: null | components["schemas"]["TargetIdentifier"];
+            /**
+             * Format: uuid
+             * @description The person, or the person they were merged into.
+             */
+            person_id?: string | null;
+        };
+        PrivacySettingsBody: {
+            /**
+             * @description What happens to a person left with no source record, event or explicit consent after a
+             *     source retracts a record: `keep` (the default) or `delete`.
+             * @example keep
+             */
+            orphan_policy: string;
+        };
         /** @description An RFC 9457 problem document. */
         Problem: {
             /**
@@ -2067,6 +2253,15 @@ export interface components {
             next_before?: string | null;
             /** @description Newest first. */
             suppressions: components["schemas"]["SuppressionBody"][];
+        };
+        TargetIdentifier: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
+             * @example email
+             */
+            kind: string;
+            /** @description The identifier value. It is looked up and not stored. */
+            value: string;
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -5001,6 +5196,56 @@ export interface operations {
             };
         };
     };
+    delete_person: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_person_consent: {
         parameters: {
             query?: never;
@@ -5372,6 +5617,452 @@ export interface operations {
             };
             /** @description The read ran past its time limit (`code` is `search_timeout`) */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_erasures: {
+        parameters: {
+            query?: {
+                /** @description Requests per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of requests */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErasuresBody"];
+                };
+            };
+            /** @description limit is out of range or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    request_erasure: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonTarget"];
+            };
+        };
+        responses: {
+            /** @description The request, pending until the job has run */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErasureBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_exports: {
+        parameters: {
+            query?: {
+                /** @description Exports per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of exports */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportsBody"];
+                };
+            };
+            /** @description limit is out of range or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    request_export: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonTarget"];
+            };
+        };
+        responses: {
+            /** @description The export, pending until the job has run */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    download_export: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Export id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The gzip-compressed JSON document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": number[];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or export, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The export is not ready */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The export expired */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_privacy_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrivacySettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_privacy_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrivacySettingsBody"];
+            };
+        };
+        responses: {
+            /** @description The saved settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrivacySettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The policy is not keep or delete */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

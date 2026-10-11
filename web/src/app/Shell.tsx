@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router";
 
 import { AccountMenu, useSignedInUser } from "../features/session";
+import { PrivacyNav } from "../features/privacy";
 import { useCurrentWorkspace, WorkspaceSwitcher } from "../features/workspaces";
 import { Brand } from "../ui";
 
@@ -14,6 +15,7 @@ const TITLES: Record<string, string> = {
   lists: "Lists",
   topics: "Topics",
   suppressions: "Suppressions",
+  privacy: "Privacy",
   "api-keys": "API keys",
   traces: "Traces",
   jobs: "Jobs",
@@ -92,6 +94,7 @@ export function Shell() {
             <WorkspaceItem base={base} segment="events">Events</WorkspaceItem>
             <WorkspaceItem base={base} segment="topics">Topics</WorkspaceItem>
             <WorkspaceItem base={base} segment="suppressions">Suppressions</WorkspaceItem>
+            {current ? <PrivacyNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}
