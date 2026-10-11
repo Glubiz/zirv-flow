@@ -132,12 +132,15 @@ Run the applied-latency script after each and save its output beside the report.
 Targets: under 5 ms added transaction time at p95 and under 10% throughput loss against the same
 workload with decision writes disabled.
 
-The feature is compile-time only. Build two binaries and run them natively against the compose
+The feature is compile-time only, and the store refuses to compile it unless `ZIRV_FLOW_BENCH_BUILD`
+is set (a guard against `--all-features` and aliases). Cargo tracks that variable, so changing it
+rebuilds. Build two binaries and run them natively against the compose
 PostgreSQL (published on 55432), not through the image, which never carries the feature:
 
 ```sh
 cargo build --release -p zirv-flow && cp target/release/zirv-flow ./zirv-flow-on
-cargo build --release -p zirv-flow --features zirv-flow-store/bench-no-decisions \
+ZIRV_FLOW_BENCH_BUILD=1 cargo build --release -p zirv-flow \
+  --features zirv-flow-store/bench-no-decisions \
   && cp target/release/zirv-flow ./zirv-flow-off
 ./zirv-flow-on admin generate-master-key --out bench-master.key
 export ZIRV_FLOW_DATABASE__URL=postgres://zirv:zirv-quickstart@localhost:55432/zirv_flow

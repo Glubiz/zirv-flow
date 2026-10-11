@@ -21,6 +21,14 @@ const MAX_BATCH: usize = 1000;
 /// are not affected. Never set in a release build.
 const BENCH_NO_DECISIONS: bool = cfg!(feature = "bench-no-decisions");
 
+// Makes the feature impossible to compile by accident: `--all-features`, an alias in a dependent or
+// a default list all fail here unless the builder deliberately sets the variable.
+#[cfg(feature = "bench-no-decisions")]
+const _: () = assert!(
+    option_env!("ZIRV_FLOW_BENCH_BUILD").is_some(),
+    "bench-no-decisions is for benchmark builds only: set ZIRV_FLOW_BENCH_BUILD=1 to build it",
+);
+
 /// A record to append.
 #[derive(Clone, Debug)]
 pub struct NewDecision {

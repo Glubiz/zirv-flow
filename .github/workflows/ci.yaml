@@ -54,14 +54,6 @@ jobs:
       - name: Crate dependency gate self-test
         run: bash scripts/check-crate-deps.sh --self-test
 
-      # The benchmark-only `bench-no-decisions` feature must never reach the CD workflow, a
-      # Dockerfile or a release build.
-      - name: Benchmark feature gate
-        run: bash scripts/check-bench-features.sh
-
-      - name: Benchmark feature gate self-test
-        run: bash scripts/check-bench-features.sh --self-test
-
       - name: Cache Cargo Registry
         uses: actions/cache@v4.3.0
         with:
@@ -82,6 +74,16 @@ jobs:
       # target/debug/zirv-flow.
       - name: Build Binary
         run: cargo build
+
+      # The benchmark-only `bench-no-decisions` feature cannot compile without the
+      # ZIRV_FLOW_BENCH_BUILD guard variable; this proves it, and that no shipped-build input
+      # (CD, Dockerfile, compose, scripts they run) mentions either. After the build so the
+      # check reuses the target directory.
+      - name: Benchmark feature gate
+        run: bash scripts/check-bench-features.sh
+
+      - name: Benchmark feature gate self-test
+        run: bash scripts/check-bench-features.sh --self-test
 
       # Catches canonical context drift before it ships: a CLAUDE.md/AGENTS.md
       # regenerated from an older `.zirv/context/` than what is on this branch
@@ -128,6 +130,8 @@ jobs:
 
       # The benchmark-only feature has to keep compiling cleanly.
       - name: Run Clippy Lint (bench-no-decisions)
+        env:
+          ZIRV_FLOW_BENCH_BUILD: "1"
         run: cargo clippy -p zirv-flow-store --features bench-no-decisions -- -D warnings
 
       # Development happens on Windows too, so platform-specific code has to
