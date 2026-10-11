@@ -142,6 +142,7 @@ and erasure working from the start.
 - **Event investigation.** Workspace/source SSE debugger with filters, validation results and PII masking; explorer filters by name, typed properties, time and person, with counts, breakdowns, CSV and statement timeouts; unified person timeline.
 - **Causality.** Decision records for event acceptance/rejection, merge, consent and trait change, with propagated trace ids and typed causes; API and timeline links to trace trees.
 - **CSV import.** Upload, column mapping, dry run, import as a run with downloadable rejects.
+- **Native contacts.** For companies without an external customer store (architecture 7.6): a workspace contact definition on the field registry (typed, required and identifier fields); contacts API (create, read, list, search, replace, partial update, delete by contact key, bulk upsert) through the inbox with idempotency keys; contacts list, detail and edit UI. Contacts are people contributed by the built-in `native` source.
 - **Deletion and privacy.** Person delete and contribution removal with the orphan policy; erasure v1 across all M2 tables with the erasure ledger; export v1.
 - **Consent and suppression.** API and UI for consent and topics; suppression list import and export.
 - **UI.** People search; profile (identities by source, traits with provenance, unified event/decision timeline, consent, lists); event schema registry, rejects/replay, live debugger and explorer; field registry editor; identity conflict review; lists; CSV import wizard; ingestion keys.
@@ -158,6 +159,7 @@ unmerge (unless OQ-3 decides otherwise).
 - [ ] Two sources writing one trait resolve per registry policy; removing one source's contribution restores the other's value.
 - [ ] After erasure, an automated scan finds no row with the person's id in any table; the identifier stays suppressed via its hash; export returns every M2 data class.
 - [ ] A 1-million-row CSV imports with visible progress and downloadable rejects.
+- [ ] A contact created, partially updated and deleted through the contacts API (and edited in the UI) round-trips its typed fields, rejects a missing required field, and a repeated request with the same idempotency key changes nothing.
 - [ ] The live debugger shows accepted, flagged and rejected fixture events; an editor sees PII masked while an owner can reveal it, ingest-redacted values remain unavailable, and the explorer's filters, count, breakdown and CSV agree on the fixture set. A forced slow query ends at its statement timeout.
 - [ ] One person's timeline interleaves an event, trait change, consent change and merge decision; each system entry resolves to a trace tree whose decision records contain ids and reasons but no personal-data values.
 - [ ] Ingestion benchmark attached against the targets: 2,000 events/s sustained, API p99 < 100 ms, inbox to profile p95 < 5 s.
@@ -176,6 +178,7 @@ checkpoints, deletion detection and freshness marketers can see.
 - **Built-in sources.** PostgreSQL and MySQL (tables, or queries with a cursor column); CSV/JSON files over HTTPS.
 - **HTTP manifest v1.** Schema and validation; auth, pagination, incremental cursor, field mapping, delete signal; UI editor and validator; reference manifests tested against a mock server.
 - **Inbound webhooks.** Generic, with signature verification and mapping.
+- **Kafka source.** Consumer-group streams mapped to contacts, events or lists; offsets stored as the checkpoint in the apply-batch transaction; tombstones delete; failed messages become rejects; consumer lag as freshness; SASL/TLS credentials encrypted (architecture 7.6).
 - **Sync runs.** Schedules, manual run, cancel; state machine with lease heartbeat and checkpoint resume; full-refresh mark and sweep; reconciliation runs for incremental streams without a delete signal; reject threshold.
 - **Mapping UI.** Stream to people, events or lists; identifier and trait mapping; bounded transforms; preview on sample records.
 - **Freshness.** Per stream: last success, high-water mark, staleness threshold; stale/failing badges and metrics.
@@ -183,7 +186,7 @@ checkpoints, deletion detection and freshness marketers can see.
 - **AI foundation.** `zirv-flow-ai` provider trait with OpenAI-compatible (including configured local base URLs) and Anthropic adapters; deployment provider/model allowlist; encrypted provider keys; per-workspace provider/model, enablement, budget and PII opt-in; per-user rate limits; call audit and configurable transcript retention; bounded repair; golden-prompt evaluation harness and deterministic fake provider for CI. Calls use the egress policy.
 - **Mapping and manifest assistance.** Read-and-draft typed tools create source field mappings and HTTP manifests, validate them with the existing schemas, and show sample dry runs and field diffs before the user accepts an ordinary draft.
 - **UI.** Sources list with freshness, setup wizard (test connection, discover, mapping preview and optional assistant), run history with logs, rejects and trace links; manifest assistant; provider, privacy, budget and usage settings.
-- **Decisions.** OQ-4 (custom objects), OQ-5 (mapping expressions), OQ-26 (assistant transcript default), OQ-27 (minimum model capabilities).
+- **Decisions.** OQ-4 (custom objects), OQ-5 (mapping expressions), OQ-26 (assistant transcript default), OQ-27 (minimum model capabilities), OQ-31 (Kafka client and value formats).
 
 **Out of scope.** Warehouse-specific connectors, CDC/logical replication,
 federated live sources, WASM plugins, destinations (M6).
@@ -196,6 +199,7 @@ federated live sources, WASM plugins, destinations (M6).
 - [ ] The egress policy blocks loopback, private, link-local and metadata addresses unless allowlisted, including after DNS resolution.
 - [ ] A configured local model server on a private address is blocked until its resolved address is explicitly allowlisted; provider keys appear only as ciphertext.
 - [ ] A source past its staleness threshold shows as stale in the UI and in the freshness metric.
+- [ ] Killing a worker while it consumes a Kafka fixture topic and restarting it applies every contact upsert and tombstone exactly once from the stored offsets; a malformed message lands in rejects without stopping its partition.
 - [ ] A sync fixture's applied, rejected and deleted records appear under one trace with typed causes and source-record ids.
 - [ ] The fake provider drafts an invalid then repaired mapping and manifest; only validator-approved output can be accepted, and the UI shows the dry-run result and diff.
 - [ ] The fake-provider suite proves the tool registry has no publish, send, delete or consent tools and that no identifier values enter a provider request when PII opt-in is off; crossing the workspace budget stops the call before dispatch with a clear error.
