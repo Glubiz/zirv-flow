@@ -1,6 +1,8 @@
 //! The little CSV the suppression import and export need: RFC 4180 records with quoted
 //! fields, `""` as an escaped quote, and LF or CRLF line ends.
 
+use zirv_flow_core::csv_file::write_field;
+
 /// One record and the line of the file it starts on, the first line being 1.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct Record {
@@ -75,11 +77,9 @@ pub(super) fn parse(text: &str) -> Vec<Record> {
 
 /// One field of an exported record: quoted when it holds a comma, a quote or a line break.
 pub(super) fn field(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_owned()
-    }
+    let mut out = String::new();
+    write_field(&mut out, value, ',');
+    out
 }
 
 #[cfg(test)]
