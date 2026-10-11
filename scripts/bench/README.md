@@ -87,7 +87,7 @@ loadgen --url http://localhost:8080 --key-file bench.key --mode identify|track|b
   the same one to repeat a run exactly). Items carry no `timestamp`: the server stamps arrival,
   which `applied-latency.sql` relies on for identify.
 - The report has `total` and one entry per phase with `achieved_rate`, `status`
-  (`accepted_202`, `rate_limited_429`, `server_5xx`, `other`, `transport_errors`), `retries_after_429`
+  (`accepted_202`, `rate_limited_429`, `server_5xx`, `other`, `transport_errors`), `retries_after_429`,
   `late_dispatch` and the three latency blocks above (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
 
 ## 4. Applied latency and backlog drain
