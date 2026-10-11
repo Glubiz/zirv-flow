@@ -12,7 +12,7 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::{Channel, TopicPolicy, validate_topic_key};
 use zirv_flow_store::{NewTopic, PgPool, Topic, TopicUpdate};
 
-use super::invalid;
+use super::{bool_param, invalid};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -203,21 +203,6 @@ pub(crate) async fn update_topic(
     Ok(topic)
 }
 
-/// Whether the query asks for archived topics too: `archived=true`.
-fn wants_archived(query: &str) -> Result<bool, ApiError> {
-    let mut archived = false;
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if key == "archived" {
-            archived = match value.as_ref() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(ApiError::bad_request("archived must be true or false")),
-            };
-        }
-    }
-    Ok(archived)
-}
-
 /// The workspace's topics ordered by key. Archived ones are included with `archived=true`.
 #[utoipa::path(
     get,
@@ -244,7 +229,7 @@ pub(crate) async fn list(
     RawQuery(query): RawQuery,
 ) -> Result<Json<Vec<TopicBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
-    let archived = wants_archived(query.as_deref().unwrap_or_default())?;
+    let archived = bool_param(query.as_deref().unwrap_or_default(), "archived")?;
     let topics = zirv_flow_store::list_topics(&state.pool, workspace.id, archived).await?;
     Ok(Json(topics.iter().map(TopicBody::from).collect()))
 }
@@ -338,10 +323,10 @@ mod tests {
 
     #[test]
     fn the_archived_query_is_true_false_or_absent() {
-        assert!(!wants_archived("").unwrap());
-        assert!(wants_archived("archived=true").unwrap());
-        assert!(!wants_archived("archived=false").unwrap());
-        assert!(wants_archived("archived=yes").is_err());
+        assert!(!bool_param("", "archived").unwrap());
+        assert!(bool_param("archived=true", "archived").unwrap());
+        assert!(!bool_param("archived=false", "archived").unwrap());
+        assert!(bool_param("archived=yes", "archived").is_err());
     }
 
     #[test]

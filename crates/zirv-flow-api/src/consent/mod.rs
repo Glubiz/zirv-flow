@@ -12,6 +12,7 @@ use zirv_flow_core::consent::ChangeSource;
 
 use crate::admin::AdminError;
 use crate::auth::Principal;
+use crate::problem::ApiError;
 
 fn invalid(field: &'static str, message: &'static str) -> AdminError {
     AdminError::Invalid(ValidationError::new(field, message))
@@ -24,6 +25,26 @@ fn origin(principal: &Principal) -> (ChangeSource, Option<Uuid>) {
         Principal::Session(session) => (ChangeSource::Ui, Some(session.user.id.as_uuid())),
         Principal::Key(_) => (ChangeSource::Api, None),
     }
+}
+
+/// The boolean query parameter `name`: false when absent, a bad request unless `true` or
+/// `false`.
+fn bool_param(query: &str, name: &str) -> Result<bool, ApiError> {
+    let mut flag = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key == name {
+            flag = match value.as_ref() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(ApiError::bad_request(format!(
+                        "{name} must be true or false"
+                    )));
+                }
+            };
+        }
+    }
+    Ok(flag)
 }
 
 /// Lowercase hex of `bytes`.

@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor, PgPool};
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, State};
@@ -282,37 +282,20 @@ pub async fn consent_history(
     let Some(person) = current_person(pool, workspace, person).await? else {
         return Ok(None);
     };
-    let mut rows: Vec<ConsentHistoryEntry> =
-        history_page(pool, workspace, person, i64::from(limit) + 1, before).await?;
-    let more = rows.len() > limit as usize;
-    rows.truncate(limit as usize);
-    Ok(Some((rows, more)))
-}
-
-async fn history_page(
-    executor: impl PgExecutor<'_>,
-    workspace: WorkspaceId,
-    person: Uuid,
-    fetch: i64,
-    before: Option<(OffsetDateTime, Uuid)>,
-) -> Result<Vec<ConsentHistoryEntry>, StoreError> {
-    sqlx::query_as(
-        "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.from_status, c.to_status, \
-                c.source, c.evidence, c.occurred_at, c.actor_user_id \
-         FROM consent_changes c \
-         LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
-         WHERE c.workspace_id = $1 AND c.person_id = $2 \
-           AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4)) \
-         ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
+    let mut rows: Vec<ConsentHistoryEntry> = sqlx::query_as(
+        "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.from_status, c.to_status,                 c.source, c.evidence, c.occurred_at, c.actor_user_id          FROM consent_changes c          LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id          WHERE c.workspace_id = $1 AND c.person_id = $2            AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4))          ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
     )
     .bind(workspace.as_uuid())
     .bind(person)
     .bind(before.map(|(at, _)| at))
     .bind(before.map(|(_, id)| id))
-    .bind(fetch)
-    .fetch_all(executor)
+    .bind(i64::from(limit) + 1)
+    .fetch_all(pool)
     .await
-    .map_err(StoreError::query)
+    .map_err(StoreError::query)?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    Ok(Some((rows, more)))
 }
 
 #[cfg(test)]

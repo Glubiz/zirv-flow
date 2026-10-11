@@ -17,7 +17,7 @@ use super::{invalid, origin};
 use crate::AppState;
 use crate::admin::AdminError;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
-use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
+use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -292,31 +292,6 @@ pub(crate) async fn set(
     Ok(Json(states))
 }
 
-fn parse_history_query(query: &str) -> Result<(u32, Option<(OffsetDateTime, Uuid)>), ApiError> {
-    let (mut limit, mut before) = (DEFAULT_LIMIT, None);
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-            "limit" => {
-                limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
-            }
-            "before" => {
-                before = Some(
-                    decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok((limit, before))
-}
-
 /// A person's consent history, newest first: every change with its source and evidence.
 /// Evidence is shown to the owner, workspace admins and `admin` keys, and masked for
 /// everyone else.
@@ -347,7 +322,7 @@ pub(crate) async fn history(
     RawQuery(query): RawQuery,
 ) -> Result<Json<HistoryBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
-    let (limit, before) = parse_history_query(query.as_deref().unwrap_or_default())?;
+    let (limit, before) = parse_page(query.as_deref().unwrap_or_default())?;
     let (entries, more) =
         zirv_flow_store::consent_history(&state.pool, workspace.id, path_id(&id)?, limit, before)
             .await?
@@ -414,11 +389,11 @@ mod tests {
 
     #[test]
     fn the_history_page_defaults_to_fifty_and_refuses_bad_values() {
-        assert_eq!(parse_history_query("").unwrap(), (50, None));
-        assert_eq!(parse_history_query("limit=200").unwrap().0, 200);
+        assert_eq!(parse_page("").unwrap(), (50, None));
+        assert_eq!(parse_page("limit=200").unwrap().0, 200);
         for bad in ["limit=0", "limit=201", "limit=x", "before=%21"] {
             assert_eq!(
-                parse_history_query(bad).unwrap_err().status(),
+                parse_page(bad).unwrap_err().status(),
                 StatusCode::BAD_REQUEST,
                 "{bad}"
             );
@@ -430,8 +405,7 @@ mod tests {
         let at = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_001_000).unwrap();
         let id = Uuid::now_v7();
 
-        let (_, before) =
-            parse_history_query(&format!("before={}", encode_cursor((at, id)))).unwrap();
+        let (_, before) = parse_page(&format!("before={}", encode_cursor((at, id)))).unwrap();
 
         assert_eq!(before, Some((at, id)));
     }

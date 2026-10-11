@@ -27,7 +27,7 @@ use zirv_flow_store::{
     SuppressionCursor,
 };
 
-use super::{csv, hex, origin};
+use super::{bool_param, csv, hex, origin};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -273,7 +273,7 @@ pub(crate) async fn remove(
 /// What an import found in a file.
 struct ParsedImport {
     /// One entry per distinct valid identifier: its hash, kind and note.
-    entries: Vec<([u8; 32], &'static str, Option<String>)>,
+    entries: Vec<([u8; 32], String, Option<String>)>,
     /// Valid rows that repeat an identifier earlier in the file.
     repeats: usize,
     invalid: Vec<InvalidRowBody>,
@@ -286,10 +286,6 @@ impl ParsedImport {
             reason: reason.to_owned(),
         });
     }
-}
-
-fn kind_name(kind: &str) -> Option<&'static str> {
-    SUPPRESSION_KINDS.into_iter().find(|name| *name == kind)
 }
 
 /// Reads the CSV: a header `kind,value` or `kind,value,note`, then one record per
@@ -341,7 +337,6 @@ fn parse_import(text: &str, key: &HmacKey) -> Result<ParsedImport, AdminError> {
         }
         let hash = identifier_hash(key, &identifier);
         if seen.insert(hash) {
-            let kind = kind_name(&kind).expect("parse_identifier accepted the kind");
             parsed.entries.push((hash, kind, note.map(str::to_owned)));
         } else {
             parsed.repeats += 1;
@@ -469,20 +464,6 @@ fn parse_list_query(query: &str) -> Result<ListQuery, ApiError> {
         }
     }
     Ok((limit, before, reason))
-}
-
-fn dry_run_flag(query: &str) -> Result<bool, ApiError> {
-    let mut dry_run = false;
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if key == "dry_run" {
-            dry_run = match value.as_ref() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(ApiError::bad_request("dry_run must be true or false")),
-            };
-        }
-    }
-    Ok(dry_run)
 }
 
 /// The suppressions of the workspace, newest first, as hash prefixes. Values and full
@@ -679,7 +660,7 @@ pub(crate) async fn import_handler(
 ) -> Result<Json<ImportBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let key = identifier_key(&state)?;
-    let dry_run = dry_run_flag(query.as_deref().unwrap_or_default())?;
+    let dry_run = bool_param(query.as_deref().unwrap_or_default(), "dry_run")?;
     let is_csv = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -980,9 +961,9 @@ mod tests {
 
     #[test]
     fn dry_run_is_true_false_or_absent() {
-        assert!(!dry_run_flag("").unwrap());
-        assert!(dry_run_flag("dry_run=true").unwrap());
-        assert!(dry_run_flag("dry_run=1").is_err());
+        assert!(!bool_param("", "dry_run").unwrap());
+        assert!(bool_param("dry_run=true", "dry_run").unwrap());
+        assert!(bool_param("dry_run=1", "dry_run").is_err());
     }
 
     #[test]

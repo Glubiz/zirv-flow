@@ -3,8 +3,12 @@ export const POLICIES: { value: string; label: string; help: string }[] = [
   { value: "opt_in", label: "Opt-in", help: "People receive it only after they have subscribed." },
 ];
 
+function labelOf(options: { value: string; label: string }[], value: string): string {
+  return options.find((option) => option.value === value)?.label ?? value;
+}
+
 export function policyLabel(value: string): string {
-  return POLICIES.find((policy) => policy.value === value)?.label ?? value;
+  return labelOf(POLICIES, value);
 }
 
 export function policyHelp(value: string): string {
@@ -19,7 +23,7 @@ export const REASONS: { value: string; label: string }[] = [
 ];
 
 export function reasonLabel(value: string): string {
-  return REASONS.find((reason) => reason.value === value)?.label ?? value;
+  return labelOf(REASONS, value);
 }
 
 export const KINDS: { value: string; label: string }[] = [
@@ -28,7 +32,7 @@ export const KINDS: { value: string; label: string }[] = [
 ];
 
 export function kindLabel(value: string): string {
-  return KINDS.find((kind) => kind.value === value)?.label ?? value;
+  return labelOf(KINDS, value);
 }
 
 const ROW_PROBLEMS: Record<string, string> = {
