@@ -11,7 +11,7 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::{PgPool, StoreError};
 
@@ -39,10 +39,12 @@ pub struct NewJob {
     pub max_attempts: i32,
     /// At most one ready or running job holds a key; a second enqueue is a no-op.
     pub unique_key: Option<String>,
+    /// The trace the job belongs to and what caused it.
+    pub trace: TraceContext,
 }
 
 impl NewJob {
-    pub fn new(kind: impl Into<String>) -> Self {
+    pub fn new(kind: impl Into<String>, trace: TraceContext) -> Self {
         Self {
             workspace_id: None,
             kind: kind.into(),
@@ -51,6 +53,7 @@ impl NewJob {
             run_at: None,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             unique_key: None,
+            trace,
         }
     }
 }
@@ -73,10 +76,13 @@ pub struct Job {
     pub unique_key: Option<String>,
     pub last_error: Option<String>,
     pub created_at: OffsetDateTime,
+    pub trace_id: Uuid,
+    pub cause_kind: String,
+    pub cause_id: String,
 }
 
 /// A job a worker has claimed. `attempts` already counts this attempt.
-#[derive(Clone, Debug, FromRow)]
+#[derive(Clone, Debug)]
 pub struct ClaimedJob {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -86,6 +92,49 @@ pub struct ClaimedJob {
     pub max_attempts: i32,
     pub lease_token: Uuid,
     pub unique_key: Option<String>,
+    pub trace: TraceContext,
+    /// How long the job waited past its `run_at`, by the database's clock, when claimed.
+    pub claim_lag_seconds: f64,
+}
+
+#[derive(FromRow)]
+struct ClaimedRow {
+    id: Uuid,
+    workspace_id: Option<Uuid>,
+    kind: String,
+    payload: Value,
+    attempts: i32,
+    max_attempts: i32,
+    lease_token: Uuid,
+    unique_key: Option<String>,
+    trace_id: Uuid,
+    cause_kind: String,
+    cause_id: String,
+    claim_lag_seconds: f64,
+}
+
+impl ClaimedRow {
+    fn into_claimed(self) -> Result<ClaimedJob, StoreError> {
+        let kind: CauseKind = self
+            .cause_kind
+            .parse()
+            .map_err(|error| StoreError::query(sqlx::Error::Decode(Box::new(error))))?;
+        Ok(ClaimedJob {
+            id: self.id,
+            workspace_id: self.workspace_id,
+            kind: self.kind,
+            payload: self.payload,
+            attempts: self.attempts,
+            max_attempts: self.max_attempts,
+            lease_token: self.lease_token,
+            unique_key: self.unique_key,
+            trace: TraceContext {
+                trace_id: TraceId::from_uuid(self.trace_id),
+                cause: Cause::from_stored(kind, self.cause_id),
+            },
+            claim_lag_seconds: self.claim_lag_seconds.max(0.0),
+        })
+    }
 }
 
 /// What a fenced failure did to the job.
@@ -102,6 +151,14 @@ pub enum FailOutcome {
 pub struct Reaped {
     pub requeued: u64,
     pub dead: u64,
+}
+
+/// How many jobs of one kind are in one state.
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub struct QueueDepth {
+    pub kind: String,
+    pub state: String,
+    pub count: i64,
 }
 
 /// How many jobs are in each state.
@@ -133,11 +190,12 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
     let notified = sqlx::query(
         "WITH inserted AS ( \
              INSERT INTO jobs \
-                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key) \
-             VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8) \
+                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key, \
+                 trace_id, cause_kind, cause_id) \
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8, $9, $10, $11) \
              ON CONFLICT DO NOTHING \
              RETURNING kind) \
-         SELECT pg_notify($9, kind) FROM inserted",
+         SELECT pg_notify($12, kind) FROM inserted",
     )
     .bind(Uuid::new_v4())
     .bind(job.workspace_id.map(|id| id.as_uuid()))
@@ -147,6 +205,9 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
     .bind(job.run_at)
     .bind(job.max_attempts)
     .bind(job.unique_key.as_deref())
+    .bind(job.trace.trace_id.as_uuid())
+    .bind(job.trace.cause.kind.as_str())
+    .bind(&job.trace.cause.id)
     .bind(NOTIFY_CHANNEL)
     .fetch_optional(executor)
     .await
@@ -191,13 +252,15 @@ pub async fn claim_job(
             ORDER BY j.priority, j.run_at \
             LIMIT 1 \
             FOR UPDATE SKIP LOCKED) \
-            RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, unique_key",
+            RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, \
+            unique_key, trace_id, cause_kind, cause_id, \
+            EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds",
     )
     .bind(worker)
     .bind(lease.as_secs_f64())
     .bind(kinds)
     .bind(cap);
-    let claimed = match tx {
+    let claimed: Option<ClaimedRow> = match tx {
         Some(mut tx) => {
             let claimed = query
                 .fetch_optional(&mut *tx)
@@ -211,7 +274,7 @@ pub async fn claim_job(
             .await
             .map_err(StoreError::query)?,
     };
-    Ok(claimed)
+    claimed.map(ClaimedRow::into_claimed).transpose()
 }
 
 /// Locks the job row in the handler's transaction, to confirm the lease is still held.
@@ -253,7 +316,8 @@ pub async fn complete_job<'e>(
 /// Records a failed attempt: back to `ready` after `retry_in`, or `dead` when the attempts
 /// are used up. `None` means the lease was lost and nothing changed.
 ///
-/// `error` is truncated to 2 KB and must never contain payload values.
+/// `error` is truncated to 2 KB and must never contain payload values. For a workspace
+/// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`.
 pub async fn fail_job<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
@@ -262,13 +326,23 @@ pub async fn fail_job<'e>(
     error: &str,
 ) -> Result<Option<FailOutcome>, StoreError> {
     let state: Option<String> = sqlx::query_scalar(
-        "UPDATE jobs SET \
+        "WITH updated AS ( \
+             UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = CASE WHEN attempts >= max_attempts THEN run_at \
                               ELSE now() + make_interval(secs => $3) END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-         WHERE id = $1 AND lease_token = $2 \
-         RETURNING state",
+             WHERE id = $1 AND lease_token = $2 \
+             RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
+         recorded AS ( \
+             INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
+                 job_id, attempt) \
+             SELECT gen_random_uuid(), workspace_id, trace_id, 'job.attempt', \
+                    CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'failed' END, \
+                    $4, cause_kind, cause_id, id, attempts \
+             FROM updated WHERE workspace_id IS NOT NULL) \
+         SELECT state FROM updated",
     )
     .bind(id)
     .bind(lease_token)
@@ -307,15 +381,26 @@ pub async fn heartbeat_job<'e>(
 }
 
 /// Moves running jobs whose lease expired back to `ready`, to run now, or to `dead` when
-/// their attempts are used up (the attempt was counted at claim time).
+/// their attempts are used up (the attempt was counted at claim time). Each reaped
+/// workspace job gets a `job.attempt` decision, `lease_expired` or `exhausted`.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
-        "UPDATE jobs SET \
+        "WITH updated AS ( \
+             UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = now(), last_error = 'lease expired', \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-         WHERE state = 'running' AND lease_expires_at < now() \
-         RETURNING state",
+             WHERE state = 'running' AND lease_expires_at < now() \
+             RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
+         recorded AS ( \
+             INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
+                 job_id, attempt) \
+             SELECT gen_random_uuid(), workspace_id, trace_id, 'job.attempt', \
+                    CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'lease_expired' END, \
+                    'lease expired', cause_kind, cause_id, id, attempts \
+             FROM updated WHERE workspace_id IS NOT NULL) \
+         SELECT state FROM updated",
     )
     .fetch_all(executor)
     .await
@@ -334,7 +419,7 @@ pub async fn find_job<'e>(
     sqlx::query_as(
         "SELECT id, workspace_id, kind, payload, priority, run_at, state, attempts, \
                 max_attempts, lease_token, lease_expires_at, locked_by, unique_key, \
-                last_error, created_at \
+                last_error, created_at, trace_id, cause_kind, cause_id \
          FROM jobs WHERE id = $1",
     )
     .bind(id)
@@ -358,6 +443,16 @@ pub async fn queue_counts<'e>(executor: impl PgExecutor<'e>) -> Result<QueueCoun
         running,
         dead,
     })
+}
+
+/// Job counts by kind and state, for the queue-depth gauges.
+pub async fn queue_depths<'e>(
+    executor: impl PgExecutor<'e>,
+) -> Result<Vec<QueueDepth>, StoreError> {
+    sqlx::query_as("SELECT kind, state, count(*) AS count FROM jobs GROUP BY kind, state")
+        .fetch_all(executor)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// The database's clock; due times are compared against it, never the host's.
@@ -544,7 +639,7 @@ mod tests {
     const LEASE: Duration = Duration::from_secs(30);
 
     fn job(kind: &str) -> NewJob {
-        NewJob::new(kind)
+        NewJob::new(kind, TraceContext::root(Cause::api("test-request")))
     }
 
     async fn claim(pool: &PgPool, kinds: &[&str]) -> Option<ClaimedJob> {
@@ -580,7 +675,7 @@ mod tests {
 
     #[test]
     fn a_new_job_defaults_to_an_empty_payload_and_five_attempts() {
-        let job = NewJob::new("maintenance.noop");
+        let job = job("maintenance.noop");
 
         assert_eq!(job.payload, json!({}));
         assert_eq!(job.max_attempts, DEFAULT_MAX_ATTEMPTS);
@@ -602,6 +697,162 @@ mod tests {
         assert_eq!(stored.state, "running");
         assert_eq!(stored.lease_token, Some(claimed.lease_token));
         assert_eq!(stored.locked_by.as_deref(), Some("test-worker"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_and_cause_survive_enqueue_and_claim(pool: PgPool) {
+        let schedule = Uuid::new_v4();
+        let trace = TraceContext::root(Cause::schedule(schedule));
+        let new = NewJob::new("a.kind", trace.clone());
+        enqueue(&pool, &new).await.unwrap();
+
+        let stored = only_job(&pool).await;
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+
+        assert_eq!(stored.trace_id, trace.trace_id.as_uuid());
+        assert_eq!(stored.cause_kind, "schedule");
+        assert_eq!(stored.cause_id, schedule.to_string());
+        assert_eq!(claimed.trace, trace);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn claim_lag_is_how_long_the_job_waited_past_its_run_at(pool: PgPool) {
+        let mut late = job("a.kind");
+        late.run_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(90));
+        enqueue(&pool, &late).await.unwrap();
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+
+        let waited = claim(&pool, &["a.kind"]).await.unwrap();
+        let immediate = claim(&pool, &["b.kind"]).await.unwrap();
+
+        assert!(
+            waited.claim_lag_seconds >= 89.0,
+            "{}",
+            waited.claim_lag_seconds
+        );
+        assert!(waited.claim_lag_seconds < 600.0);
+        assert!(immediate.claim_lag_seconds >= 0.0);
+        assert!(immediate.claim_lag_seconds < 30.0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn queue_depths_group_by_kind_and_state(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+        claim(&pool, &["b.kind"]).await.unwrap();
+
+        let mut depths = queue_depths(&pool).await.unwrap();
+        depths.sort_by(|a, b| a.kind.cmp(&b.kind));
+
+        let summary: Vec<(&str, &str, i64)> = depths
+            .iter()
+            .map(|d| (d.kind.as_str(), d.state.as_str(), d.count))
+            .collect();
+        assert_eq!(summary, [("a.kind", "ready", 2), ("b.kind", "running", 1)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_workspace_job_leaves_a_job_attempt_decision_and_an_instance_job_none(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        let mut owned = job("a.kind");
+        owned.workspace_id = Some(ws);
+        owned.max_attempts = 2;
+        let trace = owned.trace.clone();
+        enqueue(&pool, &owned).await.unwrap();
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+        let first = claim(&pool, &["a.kind"]).await.unwrap();
+        fail_job(&pool, first.id, first.lease_token, Duration::ZERO, "boom")
+            .await
+            .unwrap();
+        let second = claim(&pool, &["a.kind"]).await.unwrap();
+        fail_job(&pool, second.id, second.lease_token, Duration::ZERO, "boom")
+            .await
+            .unwrap();
+        let instance = claim(&pool, &["b.kind"]).await.unwrap();
+        fail_job(
+            &pool,
+            instance.id,
+            instance.lease_token,
+            Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+
+        let (records, _) = crate::list_trace(&pool, ws, trace.trace_id, 10)
+            .await
+            .unwrap();
+
+        let seen: Vec<(&str, &str, Option<&str>, Option<i32>)> = records
+            .iter()
+            .map(|r| {
+                (
+                    r.action.as_str(),
+                    r.outcome.as_str(),
+                    r.reason.as_deref(),
+                    r.attempt,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("job.attempt", "failed", Some("boom"), Some(1)),
+                ("job.attempt", "exhausted", Some("boom"), Some(2)),
+            ]
+        );
+        assert_eq!(records[0].cause, trace.cause);
+        assert_eq!(records[0].job_id, Some(first.id));
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reaped_workspace_job_leaves_a_lease_expired_or_exhausted_decision(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let mut retried = job("a.kind");
+        retried.workspace_id = Some(ws);
+        let mut last = job("b.kind");
+        last.workspace_id = Some(ws);
+        last.max_attempts = 1;
+        let traces = [retried.trace.clone(), last.trace.clone()];
+        enqueue(&pool, &retried).await.unwrap();
+        enqueue(&pool, &last).await.unwrap();
+        let first = claim_job(&pool, "w", &["a.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = claim_job(&pool, "w", &["b.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_until_expired(&pool, first.id).await;
+        wait_until_expired(&pool, second.id).await;
+
+        reap_expired(&pool).await.unwrap();
+
+        let mut outcomes = Vec::new();
+        for trace in &traces {
+            let (records, _) = crate::list_trace(&pool, ws, trace.trace_id, 10)
+                .await
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].action, "job.attempt");
+            assert_eq!(records[0].reason.as_deref(), Some("lease expired"));
+            outcomes.push(records[0].outcome.clone());
+        }
+        assert_eq!(outcomes, ["lease_expired", "exhausted"]);
     }
 
     #[sqlx::test]

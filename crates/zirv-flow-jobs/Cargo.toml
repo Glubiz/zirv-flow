@@ -13,9 +13,11 @@ serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 zirv-flow-core.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true
+tracing-subscriber.workspace = true

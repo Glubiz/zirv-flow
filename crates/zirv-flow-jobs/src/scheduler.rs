@@ -1,21 +1,27 @@
 //! The scheduler leader: one instance at a time, elected by an advisory lock, enqueues due
 //! schedules, reaps expired leases and exports queue metrics.
 
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 use tokio::sync::watch;
-use zirv_flow_core::WorkspaceId;
+use tracing::warn;
 use zirv_flow_core::schedule::latest_slot;
+use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, disable_schedule, due_schedules, enqueue, queue_counts, reap_expired, try_lead,
+    database_now, disable_schedule, due_schedules, enqueue, ensure_decision_partitions,
+    queue_depths, reap_expired, try_lead,
 };
 
-use crate::metrics;
+use crate::metrics::QueueGauges;
 
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
+
+/// The longest between checks that the decision log has partitions for this and next month.
+const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// How often the scheduler works.
 #[derive(Clone, Debug)]
@@ -59,6 +65,9 @@ pub struct Scheduler {
     pool: PgPool,
     config: SchedulerConfig,
     leadership: Option<Leadership>,
+    gauges: Mutex<QueueGauges>,
+    /// When the decision-log partitions were last checked; none until this instance leads.
+    partitions_checked: Option<Instant>,
 }
 
 impl Scheduler {
@@ -67,6 +76,8 @@ impl Scheduler {
             pool,
             config,
             leadership: None,
+            gauges: Mutex::new(QueueGauges::default()),
+            partitions_checked: None,
         }
     }
 
@@ -89,6 +100,10 @@ impl Scheduler {
         if let Some(leadership) = self.leadership.take() {
             leadership.release().await;
         }
+        self.gauges
+            .get_mut()
+            .expect("the gauge lock is never held across a panic")
+            .zero_all();
     }
 
     /// One pass: take or keep the lock, and if this instance leads, do the leader's work
@@ -98,6 +113,7 @@ impl Scheduler {
             return Ok(Tick::Standby);
         }
         let now = database_now(&self.pool).await?;
+        self.keep_partitions(now).await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -108,7 +124,23 @@ impl Scheduler {
         if !self.lead().await? {
             return Ok(Tick::Standby);
         }
+        self.keep_partitions(now).await;
         Ok(Tick::Led(self.work_at(now).await?))
+    }
+
+    /// Makes sure the decision log has partitions for this and next month: on gaining
+    /// leadership, then at most hourly. A failure is logged and retried at the next check.
+    async fn keep_partitions(&mut self, now: OffsetDateTime) {
+        let due = self
+            .partitions_checked
+            .is_none_or(|checked| checked.elapsed() >= PARTITION_CHECK_INTERVAL);
+        if !due {
+            return;
+        }
+        self.partitions_checked = Some(Instant::now());
+        if let Err(error) = ensure_decision_partitions(&self.pool, now.date()).await {
+            warn!("could not create the decision-log partitions: {error}");
+        }
     }
 
     /// Whether this instance leads after the call. A lock connection that died has lost
@@ -120,6 +152,11 @@ impl Scheduler {
             }
             warn!("the scheduler lost its leadership lock");
             self.leadership = None;
+            self.partitions_checked = None;
+            self.gauges
+                .get_mut()
+                .expect("the gauge lock is never held across a panic")
+                .zero_all();
         }
         self.leadership = try_lead(&self.pool).await?;
         Ok(self.leadership.is_some())
@@ -136,8 +173,20 @@ impl Scheduler {
                 reaped.dead
             );
         }
-        let counts = queue_counts(&self.pool).await?;
-        metrics::set_queue_gauges(counts);
+        let depths = queue_depths(&self.pool).await?;
+        self.gauges
+            .lock()
+            .expect("the gauge lock is never held across a panic")
+            .update(&depths);
+        let mut counts = QueueCounts::default();
+        for depth in &depths {
+            match depth.state.as_str() {
+                "ready" => counts.ready += depth.count,
+                "running" => counts.running += depth.count,
+                "dead" => counts.dead += depth.count,
+                _ => {}
+            }
+        }
         Ok(LeaderReport {
             fired,
             skipped,
@@ -193,7 +242,8 @@ impl Scheduler {
             return Ok(false);
         };
 
-        let mut job = NewJob::new(schedule.kind.clone());
+        let trace = TraceContext::root(Cause::schedule(schedule.id));
+        let mut job = NewJob::new(schedule.kind.clone(), trace);
         job.workspace_id = schedule.workspace_id.map(WorkspaceId::from_uuid);
         job.payload = schedule.payload.clone();
         job.unique_key = Some(slot_key(&schedule.id, slot));
@@ -221,6 +271,7 @@ mod tests {
     use sqlx::PgPool;
     use time::macros::datetime;
     use uuid::Uuid;
+    use zirv_flow_core::{Cause, TraceContext};
     use zirv_flow_store::{NewSchedule, claim_job, complete_job, create_schedule, find_job};
 
     use super::*;
@@ -372,9 +423,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_reaps_expired_leases_and_reports_the_queue(pool: PgPool) {
         migrated(&pool).await;
-        zirv_flow_store::enqueue(&pool, &NewJob::new("test.tick"))
-            .await
-            .unwrap();
+        zirv_flow_store::enqueue(
+            &pool,
+            &NewJob::new("test.tick", TraceContext::root(Cause::api("test-request"))),
+        )
+        .await
+        .unwrap();
         let claimed = claim_job(
             &pool,
             "gone",
@@ -399,6 +453,166 @@ mod tests {
         let job = find_job(&pool, claimed.id).await.unwrap().unwrap();
         assert_eq!(job.state, "ready");
         assert_eq!(job.last_error.as_deref(), Some("lease expired"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_fired_slot_starts_its_own_trace_caused_by_the_schedule(pool: PgPool) {
+        migrated(&pool).await;
+        let id = create_schedule(&pool, &hourly(BASE)).await.unwrap();
+        let mut leader = scheduler(&pool);
+
+        leader.tick_at(BASE).await.unwrap();
+        leader
+            .tick_at(BASE + time::Duration::hours(1))
+            .await
+            .unwrap();
+
+        let rows: Vec<(Uuid, String, String)> =
+            sqlx::query_as("SELECT trace_id, cause_kind, cause_id FROM jobs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|(_, kind, cause)| kind == "schedule" && *cause == id.to_string())
+        );
+        assert_ne!(rows[0].0, rows[1].0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_creates_the_decision_log_partitions_for_this_month(pool: PgPool) {
+        migrated(&pool).await;
+        let now = database_now(&pool).await.unwrap();
+        let months_ahead = 24;
+        let index = now.year() * 12 + i32::from(u8::from(now.month())) - 1 + months_ahead;
+        let (year, month) = (index / 12, index % 12 + 1);
+        let base = datetime!(2000-01-01 00:00 UTC)
+            .replace_year(year)
+            .unwrap()
+            .replace_month(time::Month::try_from(u8::try_from(month).unwrap()).unwrap())
+            .unwrap();
+        let names = [
+            format!("decision_records_y{year:04}m{month:02}"),
+            if month == 12 {
+                format!("decision_records_y{:04}m01", year + 1)
+            } else {
+                format!("decision_records_y{year:04}m{:02}", month + 1)
+            },
+        ];
+        let mut leader = scheduler(&pool);
+
+        let before = partitions(&pool).await;
+        leader.tick_at(base).await.unwrap();
+        let after = partitions(&pool).await;
+
+        for name in &names {
+            assert!(!before.contains(name), "{name} existed before the tick");
+            assert!(
+                after.contains(name),
+                "{name} missing after the tick: {after:?}"
+            );
+        }
+    }
+
+    async fn partitions(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             WHERE i.inhparent = 'decision_records'::regclass",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn losing_the_leadership_lock_zeroes_the_published_queue_gauges(pool: PgPool) {
+        migrated(&pool).await;
+        zirv_flow_store::enqueue(
+            &pool,
+            &NewJob::new("test.tick", TraceContext::root(Cause::api("test-request"))),
+        )
+        .await
+        .unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        assert!(matches!(leader.tick().await.unwrap(), Tick::Led(_)));
+        let pair = "zirv_flow_jobs{kind=\"test.tick\",state=\"ready\"}";
+        assert!(
+            handle.render().contains(&format!("{pair} 1")),
+            "{}",
+            handle.render()
+        );
+
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks \
+             WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid() \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let _rival = loop {
+            if let Some(rival) = try_lead(&pool).await.unwrap() {
+                break rival;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        assert_eq!(leader.tick().await.unwrap(), Tick::Standby);
+        assert!(
+            handle.render().contains(&format!("{pair} 0")),
+            "{}",
+            handle.render()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_leaves_a_lease_expired_decision_for_a_workspace_job(pool: PgPool) {
+        migrated(&pool).await;
+        let name = zirv_flow_core::WorkspaceName::parse("ours").unwrap();
+        let slug = zirv_flow_core::Slug::parse("ours").unwrap();
+        let workspace = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let mut job = NewJob::new("test.tick", TraceContext::root(Cause::api("req")));
+        job.workspace_id = Some(workspace);
+        let trace = job.trace.clone();
+        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+        claim_job(
+            &pool,
+            "gone",
+            &["test.tick"],
+            Duration::from_millis(1),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut leader = scheduler(&pool);
+
+        loop {
+            if led(leader.tick().await.unwrap()).reaped.requeued == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let (records, _) = zirv_flow_store::list_trace(&pool, workspace, trace.trace_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            (records[0].action.as_str(), records[0].outcome.as_str()),
+            ("job.attempt", "lease_expired")
+        );
     }
 
     #[sqlx::test]

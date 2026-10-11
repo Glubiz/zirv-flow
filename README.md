@@ -18,8 +18,9 @@ from that data, and run automation flows for everyone or for a segment.
 
 Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
-sessions and API keys, OIDC sign-in (Keycloak is the reference provider), and the
-durable job queue and scheduler are implemented, but nothing is ready to use yet.
+sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
+durable job queue and scheduler, and structured logs with a trace id that follows
+a request into its jobs and a per-workspace decision log are implemented, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -48,11 +49,34 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `worker.concurrency` | u32 | 4 | at least 1 |
 | `worker.lease_seconds` | u32 | 30 | at least 1 |
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
+| `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
+| `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password and the OIDC client secret redacted.
 Supply the client secret as `ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET` rather than in
 a file.
+
+## Logs and traces
+
+The long-running commands (`serve`, `worker`, `scheduler`, `all`) write
+structured logs to standard error, as one JSON object per line by default
+(`log.format = "text"` for development, `log.filter` to choose levels). One-shot
+commands (`migrate`, `config check`, `admin`) print plain text.
+
+Every HTTP request runs in an `http.request` span with `request_id`, `trace_id`,
+`method` and the matched `route`, and ends with one `request completed` event
+with `status` and `duration_ms` (at `debug` for `/healthz`, `/readyz` and
+`/metrics`). Every job runs in a `job` span with `job_id`, `kind`, `workspace_id`,
+`attempt`, `trace_id`, `cause_kind` and `cause_id`; payloads are never logged.
+
+The server mints a fresh trace id for each request and returns it in the
+`x-trace-id` response header and in the `trace_id` of problem bodies; an incoming
+trace header is ignored. Jobs enqueued by the request, and by the jobs that
+follow, carry the same trace id. Failed attempts and lease expiries of workspace
+jobs are recorded in the decision log, which
+`GET /api/v1/workspaces/{ws}/traces/{trace_id}` returns for a member or a `read`
+API key (400 for a malformed id, 404 when the workspace has no records for it).
 
 ## Requirements and database migrations
 
@@ -76,10 +100,11 @@ applied migration, or a schema newer than the running binary.
 |----------|-----------|
 | `GET /healthz` | Liveness; always 200 and never touches the database. |
 | `GET /readyz` | 200 when the database is reachable and its schema is up to date, otherwise 503. |
-| `GET /metrics` | Prometheus text, including `zirv_flow_http_requests_total` and `zirv_flow_http_request_duration_seconds`. |
+| `GET /metrics` | Prometheus text, including `zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds` and `zirv_flow_db_pool_connections{pool,state}`. Only a process that runs `serve` (or `all`) has this endpoint. |
 | `GET /api/v1/version` | The running version. |
 
 Errors are `application/problem+json` (RFC 9457). Every response carries an
+`x-trace-id` and an
 `x-request-id`; a valid incoming one (1 to 128 characters of `A-Za-z0-9._-`) is
 kept, otherwise one is generated.
 
@@ -122,7 +147,9 @@ and admin work, so keep it above a few.
 On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
 running jobs; any still running are left to lease expiry. `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
-`zirv_flow_jobs_ready` and `zirv_flow_jobs_running`.
+`zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
+`zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
+leader. A worker-only or scheduler-only process has no metrics endpoint yet.
 
 ## Accounts, workspaces and authentication
 

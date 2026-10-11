@@ -7,9 +7,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::AppState;
 
-const UNMATCHED: &str = "unmatched";
+pub(crate) const UNMATCHED: &str = "unmatched";
 
 pub(crate) async fn render(State(state): State<AppState>) -> Response {
+    zirv_flow_store::observe_pool(&state.pool, "main");
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         (state.render_metrics)(),
@@ -46,7 +47,7 @@ pub(crate) async fn record(request: Request, next: Next) -> Response {
 }
 
 /// Clients may send any method token, so only the standard methods get their own label.
-fn method_label(method: &Method) -> &'static str {
+pub(crate) fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::GET => "GET",
         Method::HEAD => "HEAD",

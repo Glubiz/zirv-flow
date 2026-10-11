@@ -1,6 +1,8 @@
 //! Job metrics, through the `metrics` facade; the binary installs the recorder.
 
-use zirv_flow_store::QueueCounts;
+use std::collections::BTreeSet;
+
+use zirv_flow_store::QueueDepth;
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,9 +35,42 @@ pub(crate) fn record_attempt(kind: &str, outcome: Outcome, seconds: f64) {
         .record(seconds);
 }
 
-pub(crate) fn set_queue_gauges(counts: QueueCounts) {
-    metrics::gauge!("zirv_flow_jobs_ready").set(counts.ready as f64);
-    metrics::gauge!("zirv_flow_jobs_running").set(counts.running as f64);
+pub(crate) fn record_claim_lag(kind: &str, seconds: f64) {
+    metrics::histogram!("zirv_flow_job_claim_lag_seconds", "kind" => kind.to_owned())
+        .record(seconds);
+}
+
+/// The queue-depth gauge `zirv_flow_jobs{kind,state}`. It remembers which pairs it has set,
+/// so a pair that drops out of the counts is set to 0 rather than left at its last value.
+#[derive(Default)]
+pub(crate) struct QueueGauges {
+    seen: BTreeSet<(String, String)>,
+}
+
+impl QueueGauges {
+    pub(crate) fn update(&mut self, depths: &[QueueDepth]) {
+        let current: BTreeSet<(String, String)> = depths
+            .iter()
+            .map(|depth| (depth.kind.clone(), depth.state.clone()))
+            .collect();
+        for (kind, state) in self.seen.difference(&current) {
+            queue_gauge(kind, state, 0.0);
+        }
+        for depth in depths {
+            queue_gauge(&depth.kind, &depth.state, depth.count as f64);
+        }
+        self.seen = current;
+    }
+
+    /// Sets every pair this instance has published to 0, for an instance that stops leading.
+    pub(crate) fn zero_all(&mut self) {
+        self.update(&[]);
+    }
+}
+
+fn queue_gauge(kind: &str, state: &str, value: f64) {
+    metrics::gauge!("zirv_flow_jobs", "kind" => kind.to_owned(), "state" => state.to_owned())
+        .set(value);
 }
 
 #[cfg(test)]
@@ -82,21 +117,81 @@ mod tests {
         assert_eq!(labels, ["completed", "retried", "dead", "lease_lost"]);
     }
 
+    fn depth(kind: &str, state: &str, count: i64) -> QueueDepth {
+        QueueDepth {
+            kind: kind.into(),
+            state: state.into(),
+            count,
+        }
+    }
+
     #[test]
-    fn the_queue_gauges_follow_the_counts() {
+    fn the_queue_gauges_follow_the_counts_and_zero_a_pair_that_vanished() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = QueueGauges::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[depth("a.kind", "ready", 7), depth("a.kind", "running", 3)]);
+        });
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[depth("a.kind", "ready", 2)]);
+        });
+        let second = handle.render();
+
+        assert!(
+            first.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"ready\"} 7"),
+            "{first}"
+        );
+        assert!(
+            first.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"running\"} 3"),
+            "{first}"
+        );
+        assert!(
+            second.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"ready\"} 2"),
+            "{second}"
+        );
+        assert!(
+            second.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"running\"} 0"),
+            "{second}"
+        );
+    }
+
+    #[test]
+    fn stepping_down_zeroes_every_published_pair() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = QueueGauges::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[depth("a.kind", "ready", 7), depth("b.kind", "dead", 4)]);
+            gauges.zero_all();
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"ready\"} 0"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_jobs{kind=\"b.kind\",state=\"dead\"} 0"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn claim_lag_is_recorded_per_kind() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
 
-        metrics::with_local_recorder(&recorder, || {
-            set_queue_gauges(QueueCounts {
-                ready: 7,
-                running: 3,
-                dead: 1,
-            });
-        });
-        let output = handle.render();
+        metrics::with_local_recorder(&recorder, || record_claim_lag("a.kind", 1.5));
 
-        assert!(output.contains("zirv_flow_jobs_ready 7"), "{output}");
-        assert!(output.contains("zirv_flow_jobs_running 3"), "{output}");
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_job_claim_lag_seconds"),
+            "{output}"
+        );
+        assert!(output.contains("kind=\"a.kind\""), "{output}");
     }
 }

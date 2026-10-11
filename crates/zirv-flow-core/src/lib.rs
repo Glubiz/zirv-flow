@@ -9,6 +9,7 @@ mod role;
 pub mod schedule;
 mod scope;
 pub mod token;
+mod trace;
 mod validation;
 mod workspace;
 
@@ -16,5 +17,6 @@ pub use email::Email;
 pub use ids::{ApiKeyId, UserId, WorkspaceId};
 pub use role::Role;
 pub use scope::Scope;
+pub use trace::{Cause, CauseKind, TraceContext, TraceId};
 pub use validation::ValidationError;
 pub use workspace::{Slug, WorkspaceName};

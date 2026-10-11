@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 15] = [
+const CONFIG_KEYS: [&str; 17] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -29,6 +29,8 @@ const CONFIG_KEYS: [&str; 15] = [
     "worker.concurrency",
     "worker.lease_seconds",
     "worker.max_running_per_workspace",
+    "log.filter",
+    "log.format",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,6 +40,25 @@ pub(crate) struct Config {
     auth: AuthConfig,
     database: DatabaseConfig,
     worker: WorkerConfig,
+    log: LogConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogConfig {
+    /// A `tracing` filter directive, such as `info` or `warn,zirv_flow_jobs=debug`.
+    filter: String,
+    format: LogFormat,
+}
+
+/// How log lines are written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LogFormat {
+    /// One JSON object per line.
+    Json,
+    /// Human-readable lines, for local development.
+    Text,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -248,7 +269,9 @@ impl Config {
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32))
-            .merge(Serialized::default("worker.lease_seconds", 30_u32));
+            .merge(Serialized::default("worker.lease_seconds", 30_u32))
+            .merge(Serialized::default("log.filter", "info"))
+            .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
             figment = figment.merge(Toml::string(&read_file(path)?));
         }
@@ -300,6 +323,14 @@ impl Config {
                     source_for(key, path, &env_sources),
                 ));
             }
+        }
+
+        if !crate::log::is_valid_filter(&config.log.filter) {
+            return Err(ConfigError::new(
+                "log.filter",
+                "not a valid filter directive",
+                source_for("log.filter", path, &env_sources),
+            ));
         }
 
         config.validate_auth(path, &env_sources)?;
@@ -397,6 +428,15 @@ impl Config {
 
     pub(crate) fn database_migrate_on_start(&self) -> bool {
         self.database.migrate_on_start
+    }
+
+    /// The `tracing` filter directive for the long-running commands' logs.
+    pub(crate) fn log_filter(&self) -> &str {
+        &self.log.filter
+    }
+
+    pub(crate) fn log_format(&self) -> LogFormat {
+        self.log.format
     }
 
     /// Jobs a worker process runs at once.
@@ -961,5 +1001,38 @@ auto_create_users = true
         assert!(!output.contains("file-secret"));
         assert!(output.contains("client_secret = \"***\""));
         assert!(output.contains("https://idp.example.com/realms/main"));
+    }
+
+    #[test]
+    fn logs_default_to_json_at_info_and_both_keys_can_be_set_from_the_environment() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_LOG__FILTER".into(),
+            "warn,zirv_flow_jobs=debug".into(),
+        ));
+        env.push(("ZIRV_FLOW_LOG__FORMAT".into(), "text".into()));
+
+        let set = Config::load(None, env).unwrap();
+
+        assert_eq!(defaults.log_filter(), "info");
+        assert_eq!(defaults.log_format(), LogFormat::Json);
+        assert_eq!(set.log_filter(), "warn,zirv_flow_jobs=debug");
+        assert_eq!(set.log_format(), LogFormat::Text);
+    }
+
+    #[test]
+    fn an_invalid_log_filter_or_format_is_a_config_error_naming_its_key() {
+        let load = |name: &str, value: &str| {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((name.into(), value.into()));
+            Config::load(None, env).unwrap_err().to_string()
+        };
+
+        assert_eq!(
+            load("ZIRV_FLOW_LOG__FILTER", "zirv=notalevel"),
+            "log.filter: not a valid filter directive (from ZIRV_FLOW_LOG__FILTER)"
+        );
+        assert!(load("ZIRV_FLOW_LOG__FORMAT", "yaml").starts_with("log.format:"));
     }
 }
