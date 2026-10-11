@@ -22,8 +22,15 @@ getrandom = "0.4.3"
 http-body-util = "0.1.5"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 rand = "0.8.5"
+# Only here to choose the TLS stack for the OTLP exporter's HTTP client: rustls on the ring provider
+# the tree already uses, never aws-lc or OpenSSL.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 rust-embed = { version = "8.13.0", default-features = false, features = ["interpolate-folder-path", "mime-guess"] }
 rsa = { version = "0.9.2", features = ["pem"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -35,6 +42,7 @@ time = { version = "0.3.55", features = ["formatting", "macros", "serde-well-kno
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "net", "signal", "sync", "time"] }
 toml = "1.1.8"
 tracing = "0.1.44"
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "registry", "fmt", "json", "env-filter"] }
 tower = { version = "0.5.3", features = ["util"] }
 utoipa = { version = "5.5.0", features = ["uuid"] }

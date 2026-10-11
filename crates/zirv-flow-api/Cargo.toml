@@ -16,6 +16,8 @@ serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
+tracing-opentelemetry.workspace = true
 url.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
@@ -24,6 +26,7 @@ zirv-flow-identity.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 http-body-util.workspace = true
 metrics-exporter-prometheus.workspace = true
 sqlx.workspace = true

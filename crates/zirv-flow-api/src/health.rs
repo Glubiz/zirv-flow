@@ -9,6 +9,7 @@ use zirv_flow_store::SchemaState;
 
 use crate::AppState;
 use crate::problem::{ApiError, Problem};
+use crate::state::SchemaCheck;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -47,12 +48,24 @@ pub(crate) async fn healthz() -> Json<StatusBody> {
     )
 )]
 pub(crate) async fn readyz(State(state): State<AppState>) -> Result<Json<StatusBody>, ApiError> {
-    let check = (state.schema_check)(state.pool.clone());
+    check_database(state.pool.clone(), &state.schema_check).await?;
+    Ok(ready())
+}
+
+pub(crate) fn ready() -> Json<StatusBody> {
+    Json(StatusBody { status: "ready" })
+}
+
+/// Whether the database answers and its schema is up to date; the error is the 503 to return.
+pub(crate) async fn check_database(
+    pool: zirv_flow_store::PgPool,
+    schema_check: &SchemaCheck,
+) -> Result<(), ApiError> {
     let unavailable = |detail: &str| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, detail);
-    match tokio::time::timeout(READINESS_TIMEOUT, check).await {
+    match tokio::time::timeout(READINESS_TIMEOUT, schema_check(pool)).await {
         Err(_) => Err(unavailable("database check timed out")),
         Ok(Err(_)) => Err(unavailable("database unreachable")),
-        Ok(Ok(SchemaState::UpToDate)) => Ok(Json(StatusBody { status: "ready" })),
+        Ok(Ok(SchemaState::UpToDate)) => Ok(()),
         Ok(Ok(SchemaState::Pending { count })) => Err(unavailable(&format!(
             "database schema is not up to date (pending: {count})"
         ))),

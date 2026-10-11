@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod healthcheck;
 mod log;
+mod otlp;
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -97,15 +98,18 @@ async fn run(
     }
 
     if let Some(roles) = Roles::of(&command) {
-        log::install(&config);
+        let export = log::install(&config);
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
             Err(message) => {
                 error!(error = %message, "could not open the database");
+                flush_traces(export).await;
                 return 1;
             }
         };
-        return run_roles(roles, &config, pool, shutdown_signal()).await;
+        let code = run_roles(roles, &config, pool, shutdown_signal()).await;
+        flush_traces(export).await;
+        return code;
     }
 
     let _ = writeln!(
@@ -115,6 +119,17 @@ async fn run(
     );
     1
 }
+
+/// Flushes the trace exporter, if there is one, before the process exits.
+async fn flush_traces(export: Option<otlp::Otlp>) {
+    if let Some(export) = export {
+        export.shutdown(TRACE_FLUSH_TIMEOUT).await;
+    }
+}
+
+/// How long the exit waits for queued spans to reach the collector; well inside
+/// [`SHUTDOWN_GRACE`].
+const TRACE_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The long-running roles a command starts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,14 +167,33 @@ async fn run_roles(
     pool: PgPool,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
-    // A bad server configuration stops the process before any role starts.
-    let state = if roles.serve {
-        match http_state(config, pool.clone()) {
-            Ok(state) => Some(state),
+    run_roles_reporting(roles, config, pool, shutdown, None).await
+}
+
+/// [`run_roles`], sending the address the ops listener bound to `ops_bound` when it starts.
+async fn run_roles_reporting(
+    roles: Roles,
+    config: &Config,
+    pool: PgPool,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    ops_bound: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+) -> u8 {
+    let ops_bind = ops_bind(roles, config);
+    // A bad server configuration or a taken ops address stops the process before any role starts.
+    let render = if roles.serve || ops_bind.is_some() {
+        match install_recorder() {
+            Ok(render) => Some(render),
             Err(code) => return code,
         }
     } else {
         None
+    };
+    let state = match (roles.serve, &render) {
+        (true, Some(render)) => match http_state(config, pool.clone(), Arc::clone(render)) {
+            Ok(state) => Some(state),
+            Err(code) => return code,
+        },
+        _ => None,
     };
     if let Some(state) = &state
         && let Err(code) = announce_setup(state, config).await
@@ -168,6 +202,26 @@ async fn run_roles(
     }
 
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let liveness = Arc::new(RoleLiveness::default());
+    let ops = match (ops_bind, render) {
+        (Some(addr), Some(render)) => {
+            let state = zirv_flow_api::OpsState::new(
+                pool.clone(),
+                render,
+                role_readiness(stopped.clone(), Arc::clone(&liveness)),
+            );
+            match start_ops(addr, state).await {
+                Ok(ops) => {
+                    if let Some(report) = ops_bound {
+                        let _ = report.send(ops.address);
+                    }
+                    Some(ops)
+                }
+                Err(code) => return code,
+            }
+        }
+        _ => None,
+    };
     let stop = Arc::new(stop);
     let deadline = Arc::new(ShutdownDeadline::default());
     tokio::spawn({
@@ -191,7 +245,7 @@ async fn run_roles(
             zirv_flow_jobs::Registry::built_in(),
             worker_config,
         );
-        background.spawn(worker.run(stopped.clone()));
+        background.spawn(liveness.track(Role::Worker, worker.run(stopped.clone())));
         info!(
             role = "worker",
             concurrency = config.worker_concurrency(),
@@ -203,7 +257,7 @@ async fn run_roles(
             pool.clone(),
             zirv_flow_jobs::SchedulerConfig::default(),
         );
-        background.spawn(scheduler.run(stopped.clone()));
+        background.spawn(liveness.track(Role::Scheduler, scheduler.run(stopped.clone())));
         info!(role = "scheduler", "scheduler standing for leadership");
     }
 
@@ -224,7 +278,83 @@ async fn run_roles(
     };
 
     drain(background, deadline.start()).await;
+    if let Some(ops) = ops {
+        ops.stop().await;
+    }
     code
+}
+
+/// The address of the ops listener, when this process should run one: only without the
+/// `serve` role, whose server already answers the same endpoints.
+fn ops_bind(roles: Roles, config: &Config) -> Option<SocketAddr> {
+    let addr = config.ops_bind()?;
+    if roles.serve {
+        warn!(
+            address = %addr,
+            server = %config.server_bind(),
+            "ops.bind is ignored because the serve role is running; /metrics, /healthz and /readyz are on server.bind"
+        );
+        return None;
+    }
+    Some(addr)
+}
+
+/// What `/readyz` asks of the roles: shutdown has begun, or a started role loop has returned.
+fn role_readiness(
+    stopped: tokio::sync::watch::Receiver<bool>,
+    liveness: Arc<RoleLiveness>,
+) -> Arc<dyn Fn() -> Option<&'static str> + Send + Sync> {
+    Arc::new(move || {
+        if *stopped.borrow() {
+            Some("shutting down")
+        } else {
+            liveness.not_ready()
+        }
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Role {
+    Worker,
+    Scheduler,
+}
+
+/// Which role loops of the process have returned. A role the process did not start never does.
+#[derive(Default)]
+struct RoleLiveness {
+    worker_stopped: std::sync::atomic::AtomicBool,
+    scheduler_stopped: std::sync::atomic::AtomicBool,
+}
+
+impl RoleLiveness {
+    /// Runs `role` and records that it returned.
+    fn track<F: Future<Output = ()>>(
+        self: &Arc<Self>,
+        role: Role,
+        future: F,
+    ) -> impl Future<Output = ()> + use<F> {
+        let liveness = Arc::clone(self);
+        async move {
+            future.await;
+            let flag = match role {
+                Role::Worker => &liveness.worker_stopped,
+                Role::Scheduler => &liveness.scheduler_stopped,
+            };
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The reason the process is not ready, or `None` while every started role is running.
+    fn not_ready(&self) -> Option<&'static str> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.worker_stopped.load(SeqCst) {
+            Some("the worker loop has stopped")
+        } else if self.scheduler_stopped.load(SeqCst) {
+            Some("the scheduler loop has stopped")
+        } else {
+            None
+        }
+    }
 }
 
 /// While no owner exists, mints the first-run setup token and logs it, once. This line is
@@ -246,9 +376,58 @@ async fn announce_setup(state: &zirv_flow_api::AppState, config: &Config) -> Res
     }
 }
 
-/// The API state for the `serve` role: the metrics recorder, cookie and sign-in settings.
-/// On failure it reports the problem and returns the exit code.
-fn http_state(config: &Config, pool: PgPool) -> Result<zirv_flow_api::AppState, u8> {
+/// The running ops listener.
+struct OpsListener {
+    address: SocketAddr,
+    drain: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl OpsListener {
+    /// Stops accepting and gives open connections a moment before cutting them.
+    async fn stop(self) {
+        let _ = self.drain.send(true);
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(1), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
+    }
+}
+
+/// Binds `addr` and serves the ops endpoints in the background. On failure it reports the
+/// problem and returns the exit code.
+async fn start_ops(addr: SocketAddr, state: zirv_flow_api::OpsState) -> Result<OpsListener, u8> {
+    let listener = TcpListener::bind(addr).await.map_err(|error| {
+        error!(address = %addr, %error, "could not bind the ops address");
+        1_u8
+    })?;
+    let address = listener.local_addr().unwrap_or(addr);
+    info!(address = %address, "ops listener on {address}");
+    let (drain, draining) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
+        let shutdown = async move {
+            let mut draining = draining;
+            let _ = draining.wait_for(|draining| *draining).await;
+        };
+        if let Err(error) = zirv_flow_api::serve_ops(listener, state, shutdown).await {
+            error!(%error, "the ops listener failed");
+        }
+    });
+    Ok(OpsListener {
+        address,
+        drain,
+        task,
+    })
+}
+
+type Render = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// Installs the process-wide Prometheus recorder and returns what renders it. On failure it
+/// reports the problem and returns the exit code.
+fn install_recorder() -> Result<Render, u8> {
     let handle = PrometheusBuilder::new()
         .set_buckets(&HTTP_DURATION_BUCKETS)
         .and_then(|builder| {
@@ -259,7 +438,16 @@ fn http_state(config: &Config, pool: PgPool) -> Result<zirv_flow_api::AppState, 
             error!(%error, "could not install the metrics recorder");
             1
         })?;
-    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
+    Ok(Arc::new(move || handle.render()))
+}
+
+/// The API state for the `serve` role: the metrics renderer, cookie and sign-in settings.
+/// On failure it reports the problem and returns the exit code.
+fn http_state(
+    config: &Config,
+    pool: PgPool,
+    render: Render,
+) -> Result<zirv_flow_api::AppState, u8> {
     let state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
         .with_local_sign_in(config.auth_local_enabled());
@@ -617,6 +805,47 @@ mod tests {
             output.contains("[log]\nfilter = \"warn\"\nformat = \"text\""),
             "{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn config_check_shows_the_otlp_endpoint_and_a_bad_one_exits_with_code_two() {
+        let check = |endpoint: &str| {
+            let cli = Cli {
+                config: None,
+                command: Some(Command::Config(ConfigCommand::Check)),
+            };
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_LOG__OTLP__ENDPOINT".into(), endpoint.into()));
+            (cli, env)
+        };
+        let (cli, env) = check("http://collector:4318");
+        let mut stdout = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut Vec::new()).await;
+
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(stdout).unwrap().contains(
+            "[log.otlp]
+endpoint = \"http://collector:4318/\""
+        ));
+        let (cli, env) = check("ftp://collector");
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
+
+        assert_eq!(code, 2);
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("log.otlp.endpoint")
+        );
+    }
+
+    #[tokio::test]
+    async fn flushing_without_an_exporter_returns_at_once() {
+        tokio::time::timeout(Duration::from_secs(1), flush_traces(None))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1145,5 +1374,194 @@ mod tests {
         let code = run.await.unwrap();
 
         assert_eq!(code, 0, "{}", logs.text());
+    }
+
+    fn ops_config(bind: Option<&str>) -> Config {
+        let mut env = database_env("postgres://localhost/database");
+        if let Some(bind) = bind {
+            env.push(("ZIRV_FLOW_OPS__BIND".into(), bind.into()));
+        }
+        Config::load(None, env).unwrap()
+    }
+
+    const WORKER_ONLY: Roles = Roles {
+        serve: false,
+        worker: true,
+        scheduler: false,
+    };
+
+    #[tokio::test]
+    async fn a_wrapped_role_that_returns_makes_the_process_not_ready() {
+        let liveness = Arc::new(RoleLiveness::default());
+        let (_keep, pending) = tokio::sync::oneshot::channel::<()>();
+        let still_running = tokio::spawn(liveness.track(Role::Scheduler, async move {
+            let _ = pending.await;
+        }));
+        tokio::task::yield_now().await;
+        assert_eq!(liveness.not_ready(), None);
+
+        liveness.track(Role::Worker, async {}).await;
+
+        assert_eq!(liveness.not_ready(), Some("the worker loop has stopped"));
+        still_running.abort();
+    }
+
+    #[tokio::test]
+    async fn readyz_through_the_real_wiring_reports_a_stopped_loop_then_shutdown() {
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let liveness = Arc::new(RoleLiveness::default());
+        liveness.track(Role::Worker, async {}).await;
+        let state = zirv_flow_api::OpsState::new(
+            lazy_pool(),
+            Arc::new(String::new),
+            role_readiness(stopped, liveness),
+        );
+        let ops = start_ops("127.0.0.1:0".parse().unwrap(), state)
+            .await
+            .unwrap();
+
+        let (status, body) = fetch(ops.address, "/readyz").await.unwrap();
+        assert!(status.contains("503"), "{status}");
+        assert!(body.contains("the worker loop has stopped"), "{body}");
+        stop.send(true).unwrap();
+        let (status, body) = fetch(ops.address, "/readyz").await.unwrap();
+        assert!(status.contains("503"), "{status}");
+        assert!(body.contains("shutting down"), "{body}");
+        ops.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_stopped_scheduler_loop_is_named() {
+        let liveness = Arc::new(RoleLiveness::default());
+
+        liveness.track(Role::Scheduler, async {}).await;
+
+        assert_eq!(liveness.not_ready(), Some("the scheduler loop has stopped"));
+    }
+
+    #[test]
+    fn the_ops_listener_is_off_unless_bound_and_never_runs_beside_serve() {
+        let (logs, _guard) = capture_logs();
+        let serving = Roles {
+            serve: true,
+            worker: true,
+            scheduler: true,
+        };
+
+        assert_eq!(ops_bind(WORKER_ONLY, &ops_config(None)), None);
+        assert_eq!(
+            ops_bind(WORKER_ONLY, &ops_config(Some("127.0.0.1:9100"))),
+            Some("127.0.0.1:9100".parse().unwrap())
+        );
+        assert!(logs.json_lines().is_empty(), "{}", logs.text());
+        assert_eq!(ops_bind(serving, &ops_config(Some("127.0.0.1:9100"))), None);
+
+        let lines = logs.json_lines();
+        assert_eq!(lines.len(), 1, "{}", logs.text());
+        assert_eq!(lines[0]["level"], "WARN");
+        assert!(
+            lines[0]["fields"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("server.bind")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_taken_ops_address_is_logged_as_an_error_with_exit_code_one() {
+        let (logs, _guard) = capture_logs();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap();
+        let state =
+            zirv_flow_api::OpsState::new(lazy_pool(), Arc::new(String::new), Arc::new(|| None));
+
+        let result = start_ops(addr, state).await;
+
+        assert_eq!(result.err(), Some(1));
+        let lines = logs.json_lines();
+        assert_eq!(lines[0]["level"], "ERROR");
+        assert_eq!(
+            lines[0]["fields"]["message"],
+            "could not bind the ops address"
+        );
+    }
+
+    /// One `GET` over a fresh connection: the status line and the body, or `None` when the
+    /// connection could not be made or yielded nothing.
+    async fn fetch(addr: SocketAddr, path: &str) -> Option<(String, String)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.ok()?;
+        let request = format!("GET {path} HTTP/1.1\r\nHost: ops\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.ok()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.ok()?;
+        let (head, body) = response.split_once("\r\n\r\n")?;
+        Some((head.lines().next()?.to_owned(), body.to_owned()))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_only_process_serves_metrics_and_readiness_on_the_ops_listener(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, trace_id, cause_kind, cause_id) \
+             VALUES (gen_random_uuid(), 'maintenance.noop', gen_random_uuid(), 'manual', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = ops_config(Some("127.0.0.1:0"));
+        let (shutdown, shut_down) = tokio::sync::oneshot::channel::<()>();
+        let (bound, bound_to) = tokio::sync::oneshot::channel();
+        let run = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                run_roles_reporting(
+                    WORKER_ONLY,
+                    &config,
+                    pool,
+                    async move {
+                        let _ = shut_down.await;
+                    },
+                    Some(bound),
+                )
+                .await
+            }
+        });
+        let addr = bound_to.await.expect("the ops listener started");
+
+        let give_up = std::time::Instant::now() + Duration::from_secs(60);
+        let metrics = loop {
+            let (status, body) = fetch(addr, "/metrics").await.expect("/metrics answers");
+            assert!(status.contains("200"), "{status}");
+            if body.contains("zirv_flow_jobs_total") {
+                break body;
+            }
+            assert!(
+                std::time::Instant::now() < give_up,
+                "timed out waiting for a job metric"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            metrics.contains("zirv_flow_db_pool_connections"),
+            "{metrics}"
+        );
+        let (status, body) = fetch(addr, "/readyz").await.unwrap();
+        assert!(status.contains("200"), "{status} {body}");
+        assert_eq!(body.trim(), r#"{"status":"ready"}"#);
+        let (status, _) = fetch(addr, "/healthz").await.unwrap();
+        assert!(status.contains("200"), "{status}");
+
+        shutdown.send(()).unwrap();
+        if let Some((status, body)) = fetch(addr, "/readyz").await {
+            assert!(status.contains("503"), "{status}");
+            assert!(body.contains("shutting down"), "{body}");
+        }
+        assert_eq!(run.await.unwrap(), 0);
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "the listener stops when the drain ends"
+        );
     }
 }

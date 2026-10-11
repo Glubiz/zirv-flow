@@ -77,6 +77,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `server.bind` | socket address | `127.0.0.1:8080` | must parse |
 | `server.cookie_secure` | bool | true | none; set false only for plain-HTTP development |
 | `server.public_url` | http(s) URL | none | required when `auth.oidc` is set; the URL users reach the server at |
+| `ops.bind` | socket address | none (off) | must parse; serves `/metrics`, `/healthz` and `/readyz` for `worker` and `scheduler` processes, ignored when `serve` runs |
 | `auth.local.enabled` | bool | true | none; false turns off `POST /api/v1/session` (404) |
 | `auth.oidc.issuer_url` | URL | none | https, or http for localhost; setting any `auth.oidc` key turns OIDC on |
 | `auth.oidc.client_id` | string | required with `auth.oidc` | not empty |
@@ -91,6 +92,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
+| `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
 
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password and the OIDC client secret redacted.
@@ -117,6 +119,21 @@ follow, carry the same trace id. Failed attempts and lease expiries of workspace
 jobs are recorded in the decision log, which
 `GET /api/v1/workspaces/{ws}/traces/{trace_id}` returns for a member or a `read`
 API key (400 for a malformed id, 404 when the workspace has no records for it).
+
+### Tracing export
+
+Set `log.otlp.endpoint` (`ZIRV_FLOW_LOG__OTLP__ENDPOINT`) to send the
+`http.request` and `job` spans, and the spans inside them, to an OTLP collector
+over HTTP/protobuf (spans go to `<endpoint>/v1/traces`). Exported spans use the
+zirv trace id as their trace id, so a trace in the collector matches
+`x-trace-id`, the logged `trace_id` and the decision log, and a request and the
+jobs it enqueued share one trace. A valid W3C `traceparent` on a request is
+attached to its span as a link and never becomes its parent or changes the
+trace id. Without the setting nothing is created or sent. Export failures never
+fail a request or job; spans are batched, a full queue drops spans, and the
+process flushes what is queued (up to 5 seconds) when it shuts down. The log
+output is the same with or without export. `log.filter` also decides which
+spans are exported, so a filter such as `warn` exports none.
 
 ## Requirements and database migrations
 
@@ -189,7 +206,11 @@ running jobs; any still running are left to lease expiry. `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
 `zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
 `zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
-leader. A worker-only or scheduler-only process has no metrics endpoint yet.
+leader. A `worker` or `scheduler` process has no HTTP server, so set `ops.bind` (for
+example `ZIRV_FLOW_OPS__BIND=0.0.0.0:9100`) to serve `/metrics`, `/healthz` and
+`/readyz` from it; `/readyz` is 503 once a role loop has stopped or shutdown has
+begun. With `serve` or `all` the same endpoints are on `server.bind` and
+`ops.bind` is ignored.
 
 ## Accounts, workspaces and authentication
 
