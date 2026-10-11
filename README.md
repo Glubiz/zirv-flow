@@ -749,10 +749,10 @@ replace or patch still writes nothing, because a write that changes nothing is a
 
 **Bulk upsert is asynchronous.** `POST .../contacts/bulk` takes
 `{"contacts": [{"key": "...", "fields": {...}}]}`, at most `ingest.max_batch_items` of them. Every item
-is validated against the definition first; one invalid item makes the whole request a `422`
+is validated first against the definition (or, in a workspace without one, the field registry), as a single write is; one invalid item makes the whole request a `422`
 with `errors` by `index`, `field` and `reason`, and nothing is stored. Valid items are appended
 to the ingestion inbox as kind `contact` and the answer is `202 {"accepted": n}`. The
-`ingest.drain` job applies them in order, replacing the fields of an existing contact, and
+`ingest.drain` job applies them in order, replacing the fields of an existing contact (a field the registry has since archived rejects the row), and
 the result is the same state the single-contact writes make. A bulk request is limited like
 ingestion: the same body size and the same per-key rate, which a signed-in session shares per
 user. Use it for imports and use the single endpoints when you need the stored contact in the

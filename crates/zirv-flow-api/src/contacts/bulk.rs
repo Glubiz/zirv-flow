@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use utoipa::ToSchema;
-use zirv_flow_core::contacts::{FieldProblem, TypedField, plan, validate_contact_key};
+use zirv_flow_core::contacts::{FieldProblem, RegistryKey, TypedField, plan, validate_contact_key};
 use zirv_flow_store::{IngestItem, IngestPayload};
 
 use super::store_error;
@@ -65,11 +65,13 @@ fn invalid(errors: Vec<ItemProblem>) -> ApiError {
     ApiError::unprocessable("one or more contacts are invalid").with_errors(errors)
 }
 
-/// Validates the items of a bulk request against `definition` and maps them to inbox items.
-/// Every invalid item is reported, by index, field and reason.
+/// Validates the items of a bulk request against `definition` (or, without one, `registry`)
+/// the way a single write does, and maps them to inbox items. Every invalid item is reported,
+/// by index, field and reason.
 fn items(
     body: &Value,
     definition: Option<&[TypedField]>,
+    registry: &[RegistryKey],
 ) -> Result<Vec<IngestItem>, Vec<ItemProblem>> {
     let list = contacts_of(body)?;
     let mut errors = Vec::new();
@@ -98,7 +100,7 @@ fn items(
                 continue;
             }
         };
-        match plan(definition, key, &fields) {
+        match plan(definition, registry, key, &fields) {
             Ok(planned) => accepted.push(IngestItem {
                 identifiers: planned.identifiers,
                 timestamp: None,
@@ -189,8 +191,9 @@ pub(crate) async fn bulk(
         .await
         .map_err(|_| ApiError::internal())?;
     let definition = zirv_flow_store::typed_definition(&mut connection, workspace.id).await?;
+    let registry = zirv_flow_store::contact_registry(&mut connection, workspace.id).await?;
     drop(connection);
-    let items = items(&body, definition.as_deref()).map_err(invalid)?;
+    let items = items(&body, definition.as_deref(), &registry).map_err(invalid)?;
 
     zirv_flow_store::append_inbox(&state.pool, workspace.id, sender, &request_trace(), &items)
         .await
@@ -262,7 +265,7 @@ mod tests {
             {"key": "c-2", "fields": {"email": "b@example.com"}}
         ]});
 
-        let items = items(&body, Some(&definition())).unwrap();
+        let items = items(&body, Some(&definition()), &[]).unwrap();
 
         assert_eq!(items.len(), 2);
         assert_eq!(
@@ -289,7 +292,7 @@ mod tests {
             7
         ]});
 
-        let errors = items(&body, Some(&definition())).unwrap_err();
+        let errors = items(&body, Some(&definition()), &[]).unwrap_err();
 
         assert_eq!(
             reasons(&errors),
@@ -309,13 +312,28 @@ mod tests {
     fn without_a_definition_any_valid_key_is_accepted_and_contacts_may_have_no_fields() {
         let body = json!({"contacts": [{"key": "c-1"}, {"key": "c-2", "fields": {"plan": "pro"}}]});
 
-        assert_eq!(items(&body, None).unwrap().len(), 2);
+        assert_eq!(items(&body, None, &[]).unwrap().len(), 2);
     }
 
     #[test]
     fn a_body_without_a_contacts_array_is_refused() {
-        let errors = items(&json!({"contact": []}), None).unwrap_err();
+        let errors = items(&json!({"contact": []}), None, &[]).unwrap_err();
 
         assert_eq!(reasons(&errors), [(0, "contacts", "required")]);
+    }
+
+    #[test]
+    fn without_a_definition_the_registry_types_are_enforced_at_the_edge() {
+        let registry = [RegistryKey {
+            key: "age".into(),
+            trait_type: TraitType::Number,
+            archived: false,
+        }];
+        let body = json!({"contacts": [{"key": "c", "fields": {"age": "secret-age"}}]});
+
+        let errors = items(&body, None, &registry).unwrap_err();
+
+        assert_eq!(reasons(&errors), [(0, "age", "wrong_type")]);
+        assert!(!format!("{errors:?}").contains("secret-age"));
     }
 }

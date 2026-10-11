@@ -502,7 +502,7 @@ mod tests {
             .iter()
             .map(|(key, body)| {
                 let planned =
-                    zirv_flow_core::contacts::plan(None, key, &object(body.clone())).unwrap();
+                    zirv_flow_core::contacts::plan(None, &[], key, &object(body.clone())).unwrap();
                 IngestItem {
                     identifiers: vec![
                         (KEY_KIND.to_owned(), (*key).to_owned()),
@@ -1194,5 +1194,55 @@ mod tests {
             read(&pool, ws, "c-1").await.unwrap().fields,
             object(json!({"email": "a@example.com", "age": 3}))
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_with_a_field_the_registry_no_longer_takes_is_rejected_not_counted_valid(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        registry(&pool, ws, "age", TraitType::Number).await;
+        append_bulk(
+            &pool,
+            ws,
+            "c-1",
+            json!({"age": 424_242, "nick": "zq9-nick"}),
+        )
+        .await;
+        append_bulk(&pool, ws, "c-2", json!({"nick": "bo"})).await;
+        // The key is archived after the rows were enqueued.
+        crate::update_trait_definition(
+            &pool,
+            ws,
+            "age",
+            &crate::TraitDefinitionUpdate {
+                archived: Some(true),
+                ..crate::TraitDefinitionUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+
+        assert!(drain_batch(&pool, ws, &key, 100).await.is_err());
+        assert_eq!(count(&pool, "ingest_inbox").await, 2);
+        let drained = crate::drain_batch_singly(&pool, ws, &key, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(drained.applied.get(&("contact", "rejected")), Some(&1));
+        assert_eq!(drained.applied.get(&("contact", "valid")), Some(&1));
+        assert!(read(&pool, ws, "c-1").await.is_none());
+        assert!(read(&pool, ws, "c-2").await.is_some());
+        assert_eq!(count(&pool, "ingest_inbox").await, 0);
+        let rejects: Vec<String> =
+            sqlx::query_scalar("SELECT to_jsonb(r)::text FROM ingest_rejects r")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rejects.len(), 1);
+        assert!(rejects[0].contains("archived_key") && rejects[0].contains("age"));
+        assert!(!rejects[0].contains("424242") && !rejects[0].contains("zq9-nick"));
     }
 }

@@ -384,6 +384,31 @@ async fn lock_contact_rows(
     lock_contacts(connection, workspace, keys.iter().map(String::as_str)).await
 }
 
+/// Applies a contact record so that it replaces the stored contact's fields.
+async fn apply_contact(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+) -> Result<ProfileOutcome, StoreError> {
+    let mut record = record.clone();
+    replace_stored_fields(connection, workspace, &mut record).await?;
+    apply_profile_record(connection, workspace, &record).await
+}
+
+/// The traits a contact record could not store, as a key to reason-code map: a single write
+/// answers `422` for them, so the drain rejects the row. Holds keys and codes, never values.
+fn dropped_fields(result: &ProfileOutcome) -> Map<String, Value> {
+    match result {
+        ProfileOutcome::Applied { dropped, .. } | ProfileOutcome::Unchanged { dropped, .. } => {
+            dropped
+                .iter()
+                .map(|dropped| (dropped.key.clone(), Value::from(dropped.reason)))
+                .collect()
+        }
+        ProfileOutcome::Rejected { .. } => Map::new(),
+    }
+}
+
 fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &ProfileOutcome) {
     let label = match result {
         ProfileOutcome::Applied { .. } => "valid",
@@ -434,9 +459,12 @@ pub async fn drain_batch(
                 let result = apply_profile_record(&mut tx, workspace, &record).await?;
                 tally_profile(&mut outcome, "identify", &result);
             }
-            Mapped::Contact(mut record) => {
-                replace_stored_fields(&mut tx, workspace, &mut record).await?;
-                let result = apply_profile_record(&mut tx, workspace, &record).await?;
+            Mapped::Contact(record) => {
+                let result = apply_contact(&mut tx, workspace, &record).await?;
+                // Rolls the batch back, so that the row is isolated and rejected singly.
+                if !dropped_fields(&result).is_empty() {
+                    return Err(StoreError::poison());
+                }
                 tally_profile(&mut outcome, "contact", &result);
             }
             Mapped::Event(record) => {
@@ -471,21 +499,21 @@ pub async fn drain_batch_singly(
     for row in &rows {
         let mapped = map_row(row);
         let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
+        let mut unstorable = Map::new();
         let applied = match &mapped {
             Some(Mapped::Profile(record)) => {
                 apply_profile_record(&mut savepoint, workspace, record)
                     .await
                     .map(|result| tally_profile(&mut outcome, "identify", &result))
             }
-            Some(Mapped::Contact(record)) => {
-                let mut record = record.clone();
-                match replace_stored_fields(&mut savepoint, workspace, &mut record).await {
-                    Ok(()) => apply_profile_record(&mut savepoint, workspace, &record)
-                        .await
-                        .map(|result| tally_profile(&mut outcome, "contact", &result)),
-                    Err(error) => Err(error),
-                }
-            }
+            Some(Mapped::Contact(record)) => apply_contact(&mut savepoint, workspace, record)
+                .await
+                .map(|result| {
+                    unstorable = dropped_fields(&result);
+                    if unstorable.is_empty() {
+                        tally_profile(&mut outcome, "contact", &result);
+                    }
+                }),
             Some(Mapped::Event(record)) => {
                 let mut events = EventBatch::default();
                 match apply_event_record(&mut savepoint, workspace, key, &mut events, record).await
@@ -500,7 +528,27 @@ pub async fn drain_batch_singly(
             None => Err(StoreError::poison()),
         };
         match applied {
-            Ok(()) => savepoint.commit().await.map_err(StoreError::query)?,
+            Ok(()) if unstorable.is_empty() => {
+                savepoint.commit().await.map_err(StoreError::query)?;
+            }
+            Ok(()) => {
+                // What a single write answers `422` for: the row is rejected whole, with the
+                // keys and codes of the fields as its sample.
+                savepoint.rollback().await.map_err(StoreError::query)?;
+                if let Some(Mapped::Contact(record)) = &mapped {
+                    let mut rejected = record.clone();
+                    rejected.traits = unstorable;
+                    reject_row(
+                        &mut tx,
+                        workspace,
+                        key,
+                        row,
+                        Some(&Mapped::Contact(rejected)),
+                    )
+                    .await?;
+                }
+                outcome.count("contact", "rejected");
+            }
             Err(error) if error.is_retryable() => return Err(error),
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;

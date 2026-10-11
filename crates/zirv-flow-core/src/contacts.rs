@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use crate::ValidationError;
 use crate::events::{PropertyType, SchemaProperty, check_properties};
-use crate::people::{Identifier, IdentifierKind, TraitType, validate_key};
+use crate::people::{Identifier, IdentifierKind, TraitType, coerce, infer_type, validate_key};
 
 /// The identifier kind of the contact key, which every contact has.
 pub const KEY_KIND: &str = "external:contact_key";
@@ -147,10 +147,12 @@ const fn property_type(trait_type: TraitType) -> PropertyType {
 /// `definition`, and maps them to identifiers and traits.
 ///
 /// With a definition a contact may hold only its fields, and every required one. Without one
-/// only the contact key is required, any valid registry key is accepted, and the profile
-/// path checks each value against the registry.
+/// only the contact key is required, and each field is checked against the `registry` the way
+/// the profile path will check it: a valid key, not archived, and a value of its type (an
+/// unregistered key needs a value its type can be inferred from).
 pub fn plan(
     definition: Option<&[TypedField]>,
+    registry: &[RegistryKey],
     key: &str,
     fields: &Map<String, Value>,
 ) -> Result<Planned, Vec<FieldProblem>> {
@@ -197,15 +199,23 @@ pub fn plan(
                 }
             }
         }
-        None => problems.extend(
-            present
-                .keys()
-                .filter(|name| validate_key(name).is_err())
-                .map(|name| FieldProblem {
-                    field: name.clone(),
-                    reason: "invalid_key",
-                }),
-        ),
+        None => problems.extend(present.iter().filter_map(|(name, value)| {
+            let reason = if validate_key(name).is_err() {
+                "invalid_key"
+            } else if let Some(entry) = registry.iter().find(|entry| &entry.key == name) {
+                if entry.archived {
+                    "archived_key"
+                } else {
+                    coerce(entry.trait_type, value).err()?.as_str()
+                }
+            } else {
+                infer_type(value).err()?.as_str()
+            };
+            Some(FieldProblem {
+                field: name.clone(),
+                reason,
+            })
+        })),
     }
     if problems.is_empty() {
         Ok(Planned {
@@ -304,6 +314,7 @@ mod tests {
     fn a_valid_contact_maps_to_identifiers_and_traits() {
         let planned = plan(
             Some(&definition()),
+            &[],
             "c-1",
             &map(json!({"email": "A@Example.com", "age": 30, "tags": ["x"], "gone": null})),
         );
@@ -326,7 +337,7 @@ mod tests {
     fn a_missing_required_field_is_named_and_null_counts_as_missing() {
         for body in [json!({}), json!({"email": null})] {
             assert_eq!(
-                problems(plan(Some(&definition()), "c", &map(body))),
+                problems(plan(Some(&definition()), &[], "c", &map(body))),
                 [("email".to_owned(), "missing_required")]
             );
         }
@@ -336,6 +347,7 @@ mod tests {
     fn wrong_types_and_undeclared_fields_are_named_without_values() {
         let result = plan(
             Some(&definition()),
+            &[],
             "c",
             &map(json!({"email": "a@example.com", "age": "secret-age", "zeta": 1})),
         );
@@ -356,6 +368,7 @@ mod tests {
     fn an_identifier_field_is_normalised_by_the_identifier_rules() {
         let result = plan(
             Some(&definition()),
+            &[],
             "c",
             &map(json!({"email": "not an address"})),
         );
@@ -365,14 +378,48 @@ mod tests {
 
     #[test]
     fn without_a_definition_only_the_key_is_required_and_keys_must_be_valid() {
-        let planned = plan(None, "c", &map(json!({"plan": "pro"}))).unwrap();
+        let planned = plan(None, &[], "c", &map(json!({"plan": "pro"}))).unwrap();
         assert_eq!(planned.identifiers, [(KEY_KIND.to_owned(), "c".to_owned())]);
         assert_eq!(planned.traits, map(json!({"plan": "pro"})));
-        assert!(plan(None, "c", &Map::new()).is_ok());
+        assert!(plan(None, &[], "c", &Map::new()).is_ok());
 
         assert_eq!(
-            problems(plan(None, "c", &map(json!({"Bad-Key": 1})))),
+            problems(plan(None, &[], "c", &map(json!({"Bad-Key": 1})))),
             [("Bad-Key".to_owned(), "invalid_key")]
         );
+    }
+
+    #[test]
+    fn without_a_definition_the_registry_checks_each_field_like_the_profile_path() {
+        let registry = [
+            RegistryKey {
+                key: "age".into(),
+                trait_type: TraitType::Number,
+                archived: false,
+            },
+            RegistryKey {
+                key: "old".into(),
+                trait_type: TraitType::String,
+                archived: true,
+            },
+        ];
+
+        let found = problems(plan(
+            None,
+            &registry,
+            "c",
+            &map(json!({"age": "secret-age", "old": "x", "blob": {"a": 1}, "ok": "fine"})),
+        ));
+
+        assert_eq!(
+            found,
+            [
+                ("age".to_owned(), "wrong_type"),
+                ("blob".to_owned(), "not_inferable"),
+                ("old".to_owned(), "archived_key")
+            ]
+        );
+        assert!(!format!("{found:?}").contains("secret-age"));
+        assert!(plan(None, &registry, "c", &map(json!({"age": 3, "old": null}))).is_ok());
     }
 }

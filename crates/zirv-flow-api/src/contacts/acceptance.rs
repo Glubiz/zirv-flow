@@ -1004,4 +1004,45 @@ mod tests {
         assert_eq!(read.status, StatusCode::NOT_FOUND);
         assert_eq!(cross.status, StatusCode::NOT_FOUND);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bulk_without_a_definition_checks_the_registry_like_a_single_write(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let registered = fx
+            .send(
+                "POST",
+                "/traits",
+                Some(json!({"key": "age", "type": "number"})),
+                &fx.admin,
+                &[],
+            )
+            .await;
+        assert_eq!(registered.status, StatusCode::CREATED);
+        let before = count(&pool, "ingest_inbox").await;
+
+        let bulk = fx
+            .send(
+                "POST",
+                "/contacts/bulk",
+                Some(json!({"contacts": [{"key": "c", "fields": {"age": "bad"}}]})),
+                &fx.write,
+                &[],
+            )
+            .await;
+        let single = fx.create("c", json!({"age": "bad"})).await;
+
+        assert_eq!(
+            bulk.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            bulk.body
+        );
+        assert_eq!(
+            bulk.body["errors"],
+            json!([{"index": 0, "field": "age", "reason": "wrong_type"}])
+        );
+        assert_eq!(single.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(count(&pool, "ingest_inbox").await, before);
+    }
 }

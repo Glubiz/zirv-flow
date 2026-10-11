@@ -292,7 +292,8 @@ pub async fn write_contact(
         }
     };
     let definition = typed_definition(&mut savepoint, workspace).await?;
-    let planned = plan(definition.as_deref(), key, &fields).map_err(WriteError::Invalid)?;
+    let planned =
+        plan(definition.as_deref(), &registry, key, &fields).map_err(WriteError::Invalid)?;
     let mut traits = planned.traits;
     if let Some(stored) = &stored {
         retract_absent(&mut traits, stored);
