@@ -62,9 +62,7 @@ pub fn next_after(
 ) -> Result<OffsetDateTime, ScheduleError> {
     let pattern = parse_cron(cron)?;
     let zone = parse_timezone(timezone)?;
-    let start = DateTime::<Utc>::from_timestamp(after.unix_timestamp(), after.nanosecond())
-        .ok_or(ScheduleError::NoNextSlot)?
-        .with_timezone(&zone);
+    let start = in_zone(after, zone)?;
 
     let next = pattern
         .find_next_occurrence(&start, false)
@@ -106,9 +104,7 @@ pub fn latest_slot(
     // Too far behind to walk: take the last slot at or before `now` directly.
     let pattern = parse_cron(cron)?;
     let zone = parse_timezone(timezone)?;
-    let at = DateTime::<Utc>::from_timestamp(now.unix_timestamp(), now.nanosecond())
-        .ok_or(ScheduleError::NoNextSlot)?
-        .with_timezone(&zone);
+    let at = in_zone(now, zone)?;
     let latest = pattern
         .find_previous_occurrence(&at, true)
         .map_err(|_| ScheduleError::NoNextSlot)?;
@@ -130,6 +126,12 @@ fn parse_cron(cron: &str) -> Result<Cron, ScheduleError> {
         .build()
         .parse(cron)
         .map_err(|_| ScheduleError::InvalidCron)
+}
+
+fn in_zone(instant: OffsetDateTime, zone: Tz) -> Result<DateTime<Tz>, ScheduleError> {
+    DateTime::<Utc>::from_timestamp(instant.unix_timestamp(), instant.nanosecond())
+        .map(|utc| utc.with_timezone(&zone))
+        .ok_or(ScheduleError::NoNextSlot)
 }
 
 fn parse_timezone(timezone: &str) -> Result<Tz, ScheduleError> {

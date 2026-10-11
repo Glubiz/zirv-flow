@@ -809,7 +809,8 @@ mod tests {
         // worker runs both jobs.
         loop {
             let done: bool = sqlx::query_scalar(
-                "SELECT (SELECT next_run_at > now() FROM schedules)                     AND NOT EXISTS (SELECT 1 FROM jobs)",
+                "SELECT (SELECT next_run_at > now() FROM schedules) \
+                    AND NOT EXISTS (SELECT 1 FROM jobs)",
             )
             .fetch_one(&pool)
             .await

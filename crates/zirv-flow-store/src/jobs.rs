@@ -180,7 +180,18 @@ pub async fn claim_job(
         tx = Some(started);
     }
     let query = sqlx::query_as(
-        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1,                 lease_token = gen_random_uuid(),                 lease_expires_at = now() + make_interval(secs => $2)          WHERE id = (SELECT j.id FROM jobs j                      WHERE j.state = 'ready' AND j.run_at <= now() AND j.kind = ANY($3)                        AND ($4::bigint IS NULL OR j.workspace_id IS NULL                             OR (SELECT count(*) FROM jobs r                                 WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4)                      ORDER BY j.priority, j.run_at                      LIMIT 1                      FOR UPDATE SKIP LOCKED)          RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, unique_key",
+        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
+            lease_token = gen_random_uuid(), \
+            lease_expires_at = now() + make_interval(secs => $2) \
+            WHERE id = (SELECT j.id FROM jobs j \
+            WHERE j.state = 'ready' AND j.run_at <= now() AND j.kind = ANY($3) \
+            AND ($4::bigint IS NULL OR j.workspace_id IS NULL \
+            OR (SELECT count(*) FROM jobs r \
+            WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4) \
+            ORDER BY j.priority, j.run_at \
+            LIMIT 1 \
+            FOR UPDATE SKIP LOCKED) \
+            RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, unique_key",
     )
     .bind(worker)
     .bind(lease.as_secs_f64())

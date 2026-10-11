@@ -121,10 +121,9 @@ async fn listen(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
         };
         tokio::select! {
             result = connected.wait() => match result {
-                Ok(true) => shared.wake.notify_waiters(),
-                // The connection dropped and came back, so notifications may have been
-                // missed: wake everyone to poll.
-                Ok(false) => shared.wake.notify_waiters(),
+                // `Ok(false)` is a dropped and restored connection: notifications may have
+                // been missed, so everyone polls.
+                Ok(_) => shared.wake.notify_waiters(),
                 Err(error) => {
                     warn!("the job listener failed: {error}");
                     listener = None;
@@ -414,6 +413,20 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Claims the one `test.effect` job with a short lease, as a worker that is then killed,
+    /// and waits for the reaper to requeue it once the lease has passed (the database's
+    /// clock).
+    async fn claim_and_reap(pool: &PgPool, lease: Duration) -> ClaimedJob {
+        let doomed = claim_job(pool, "doomed", &["test.effect"], lease, None)
+            .await
+            .unwrap()
+            .unwrap();
+        while zirv_flow_store::reap_expired(pool).await.unwrap().requeued != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        doomed
+    }
+
     async fn effect_count(pool: &PgPool) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM effects")
             .fetch_one(pool)
@@ -423,7 +436,10 @@ mod tests {
 
     async fn enqueue_effects(pool: &PgPool, total: i64, fail_every: i64) {
         sqlx::query(
-            "INSERT INTO jobs (id, kind, payload, max_attempts)              SELECT gen_random_uuid(), 'test.effect',                     jsonb_build_object('index', index, 'fail_every', $1::bigint), 3              FROM generate_series(0, $2::bigint - 1) AS index",
+            "INSERT INTO jobs (id, kind, payload, max_attempts) \
+                SELECT gen_random_uuid(), 'test.effect', \
+                jsonb_build_object('index', index, 'fail_every', $1::bigint), 3 \
+                FROM generate_series(0, $2::bigint - 1) AS index",
         )
         .bind(fail_every)
         .bind(total)
@@ -538,25 +554,7 @@ mod tests {
         job.payload = json!({"index": 1});
         enqueue(&pool, &job).await.unwrap();
         // The first worker claims the job and is killed: no completion, no heartbeat.
-        let doomed = claim_job(
-            &pool,
-            "doomed",
-            &["test.effect"],
-            Duration::from_millis(500),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        // The reaper runs once the lease has passed, by the database's clock.
-        loop {
-            let reaped = zirv_flow_store::reap_expired(&pool).await.unwrap();
-            if reaped.requeued == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let doomed = claim_and_reap(&pool, Duration::from_millis(500)).await;
         let (stop, handle) = start(&pool, test_config(2));
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
@@ -584,22 +582,7 @@ mod tests {
         let mut job = NewJob::new("test.effect");
         job.payload = json!({"index": 1});
         enqueue(&pool, &job).await.unwrap();
-        let doomed = claim_job(
-            &pool,
-            "doomed",
-            &["test.effect"],
-            Duration::from_millis(300),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        loop {
-            if zirv_flow_store::reap_expired(&pool).await.unwrap().requeued == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let doomed = claim_and_reap(&pool, Duration::from_millis(300)).await;
 
         let second = claim_job(
             &pool,
