@@ -18,7 +18,7 @@ use zirv_flow_core::contacts;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
-use crate::contacts::replace_stored_fields;
+use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
@@ -364,6 +364,26 @@ async fn delete_rows(
     Ok(())
 }
 
+/// Takes the contact lock of every contact in `rows`, in the drain's transaction and before any
+/// row is applied, so a single write of the same contact (which holds the lock while it reads
+/// and writes) and this drain see each other's fields. See the module doc of `contacts::write`
+/// for the lock orders.
+async fn lock_contact_rows(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    rows: &[InboxRow],
+) -> Result<(), StoreError> {
+    let keys: Vec<String> = rows
+        .iter()
+        .filter(|row| row.kind == "contact")
+        .filter_map(|row| match map_row(row) {
+            Some(Mapped::Contact(record)) => Some(record.record_key),
+            _ => None,
+        })
+        .collect();
+    lock_contacts(connection, workspace, keys.iter().map(String::as_str)).await
+}
+
 fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &ProfileOutcome) {
     let label = match result {
         ProfileOutcome::Applied { .. } => "valid",
@@ -402,6 +422,7 @@ pub async fn drain_batch(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let rows = take_rows(&mut tx, workspace, limit).await?;
+    lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         ..DrainOutcome::default()
@@ -442,6 +463,7 @@ pub async fn drain_batch_singly(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let rows = take_rows(&mut tx, workspace, limit).await?;
+    lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         ..DrainOutcome::default()

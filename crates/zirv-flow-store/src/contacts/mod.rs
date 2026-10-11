@@ -1,6 +1,11 @@
 //! Native contacts (architecture section 7.6): the contact definition, contact reads and the
 //! synchronous single-contact writes. A contact is a person with a live native source record;
 //! the bulk path goes through the ingestion inbox.
+//!
+//! Lock orders: a single write takes its idempotency lock, then the contact lock, then the
+//! source record and the person; the drain takes its inbox rows, then the contact lock of every
+//! contact in the batch (sorted, before any row is applied), then the source record and the
+//! people. See `write` for why that cannot cycle.
 
 mod definition;
 mod records;
@@ -14,11 +19,11 @@ pub use records::{
     Contact, ContactPage, ContactSearch, ContactSearchError, find_contact, list_contacts,
     search_contacts,
 };
-pub(crate) use write::replace_stored_fields;
 pub use write::{
     ContactChange, Idempotency, WriteError, Written, delete_contact, expire_contact_idempotency,
     write_contact,
 };
+pub(crate) use write::{lock_contacts, replace_stored_fields};
 
 #[cfg(test)]
 mod tests {
@@ -33,9 +38,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        DeleteReason, IngestItem, IngestPayload, NewTraitDefinition, ProfileRecord, append_inbox,
-        apply_profile_batch, begin, commit, create_trait_definition, create_workspace,
-        delete_person, drain_batch, find_person_by_identifier, set_orphan_policy,
+        IngestItem, IngestPayload, NewTraitDefinition, ProfileRecord, append_inbox,
+        apply_profile_batch, begin, commit, create_trait_definition, create_workspace, drain_batch,
+        find_person_by_identifier, set_orphan_policy,
     };
 
     fn object(value: Value) -> Map<String, Value> {
@@ -898,5 +903,109 @@ mod tests {
         );
         assert!(!row.contains("secret@example.com") && !row.contains("4242"));
         assert!(!row.contains(&written.contact.unwrap().person_id.to_string()));
+    }
+
+    /// Appends one bulk contact row, as the API would after validating it.
+    async fn append_bulk(pool: &PgPool, ws: WorkspaceId, key: &str, body: Value) {
+        let mut identifiers = vec![(KEY_KIND.to_owned(), key.to_owned())];
+        if let Some(email) = body.get("email").and_then(Value::as_str) {
+            identifiers.push(("email".to_owned(), email.to_owned()));
+        }
+        let item = IngestItem {
+            identifiers,
+            timestamp: None,
+            message_id: None,
+            payload: IngestPayload::Contact {
+                traits: object(body),
+            },
+        };
+        append_inbox(pool, ws, Uuid::now_v7(), &trace(), &[item])
+            .await
+            .unwrap();
+    }
+
+    /// Starts a drain of the workspace and shows that it has not finished after a pause.
+    async fn drain_that_waits(
+        pool: &PgPool,
+        ws: WorkspaceId,
+    ) -> tokio::task::JoinHandle<crate::DrainOutcome> {
+        let (pool, key) = (
+            pool.clone(),
+            MasterKey::generate().hmac_key(HmacPurpose::Redaction),
+        );
+        let drain = tokio::spawn(async move { drain_batch(&pool, ws, &key, 100).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !drain.is_finished(),
+            "the drain did not wait for the contact lock"
+        );
+        drain
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bulk_replace_waits_for_a_single_write_and_retracts_what_it_added(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com", "age": 1}))),
+            None,
+        )
+        .await
+        .unwrap();
+        // A patch adds `plan`, and has not committed yet.
+        let mut tx = begin(&pool).await.unwrap();
+        write_contact(
+            &mut tx,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"plan": "pro"}))),
+            None,
+            &trace(),
+        )
+        .await
+        .unwrap();
+        append_bulk(
+            &pool,
+            ws,
+            "c-1",
+            json!({"email": "a@example.com", "age": 2}),
+        )
+        .await;
+
+        let drain = drain_that_waits(&pool, ws).await;
+        commit(tx).await.unwrap();
+        let drained = drain.await.unwrap();
+
+        assert_eq!(drained.applied.get(&("contact", "valid")), Some(&1));
+        assert_eq!(
+            read(&pool, ws, "c-1").await.unwrap().fields,
+            object(json!({"email": "a@example.com", "age": 2}))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_create_after_a_waiting_drain_finds_the_contact_the_drain_made(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        append_bulk(&pool, ws, "c-9", json!({"email": "n@example.com"})).await;
+        let mut holder = begin(&pool).await.unwrap();
+        lock_contacts(&mut holder, ws, ["c-9"]).await.unwrap();
+
+        let drain = drain_that_waits(&pool, ws).await;
+        commit(holder).await.unwrap();
+        drain.await.unwrap();
+        let again = write(
+            &pool,
+            ws,
+            "c-9",
+            ContactChange::Create(object(json!({"email": "n@example.com"}))),
+            None,
+        )
+        .await;
+
+        assert!(matches!(again, Err(WriteError::Exists)));
     }
 }

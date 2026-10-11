@@ -6,7 +6,19 @@
 //! two requests that share either one run one after the other, and a repeat sees the first
 //! one's result.
 //!
+//! The ingestion drain takes the same contact lock for every contact key of the rows it claimed,
+//! so a bulk upsert and a single write of one contact also run one after the other and each
+//! reads the fields the other stored. The lock orders that keep this free of cycles:
+//!
+//! - single write: idempotency lock, contact lock, source record, person;
+//! - drain: inbox rows (`SKIP LOCKED`), contact locks (all of them, sorted by key, before any
+//!   savepoint), source record, people in id order. The drain never waits for a contact lock
+//!   while it holds a record or a person, and never takes one after the first row is applied;
+//! - removing a contribution: source record, person.
+//!
 //! Nothing here logs or labels anything with a field or an identifier value.
+
+use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection};
@@ -90,6 +102,25 @@ async fn advisory_lock(connection: &mut PgConnection, name: &str) -> Result<(), 
     Ok(())
 }
 
+/// Takes the contact lock of every key, until the transaction ends. The keys are locked in
+/// sorted order, each once, so two callers that lock overlapping sets cannot wait on each
+/// other.
+pub(crate) async fn lock_contacts<'a>(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Result<(), StoreError> {
+    let keys: BTreeSet<&str> = keys.into_iter().collect();
+    for key in keys {
+        advisory_lock(
+            connection,
+            &format!("contact:{}:{key}", workspace.as_uuid()),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Locks the idempotency key (when there is one) and the contact, and answers a repeat of a
 /// remembered request. Expired keys are forgotten first.
 async fn begin_write(
@@ -105,11 +136,7 @@ async fn begin_write(
         )
         .await?;
     }
-    advisory_lock(
-        connection,
-        &format!("contact:{}:{key}", workspace.as_uuid()),
-    )
-    .await?;
+    lock_contacts(connection, workspace, [key]).await?;
     let Some(idempotency) = idempotency else {
         return Ok(None);
     };

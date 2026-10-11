@@ -614,7 +614,7 @@ its fields. `store::contacts` applies a single write through `apply_profile_reco
 savepoint of the caller's transaction, so the API commits the data and its audit entry
 together, and a registry rejection (a dropped trait) rolls the write back as a `422`. A
 write takes two advisory locks, the idempotency key and then the contact, so concurrent
-requests with either run in turn. `contact_idempotency (workspace_id, key, request_hash,
+requests with either run in turn, and the drain takes the contact lock of every contact in its batch (sorted, after claiming the inbox rows and before the source records and people), so a bulk upsert and a single write of one contact do not overwrite each other. `contact_idempotency (workspace_id, key, request_hash,
 status, created_at)` holds no field value, no person id and no contact key (which may be an
 email address): a replay takes the key from its own request, whose hash covers the path and
 body, and answers the stored status with the contact as it is now (`404` once it is gone, `204` for a delete),
