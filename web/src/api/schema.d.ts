@@ -477,6 +477,183 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's imports, newest first: the run history. */
+        get: operations["list_imports"];
+        put?: never;
+        /**
+         * Uploads a CSV file as a new import. The body is the raw `text/csv` file, streamed into the
+         *     database in 1 MiB chunks; it must be UTF-8 (a byte order mark is ignored) with a header row
+         *     of unique names. The delimiter is detected from `,`, `;` and tab unless one is given. The
+         *     answer holds the import, its header and the first 20 rows, masked for callers who may not
+         *     see values. The import exists as `uploading` (hidden from the history) while the body
+         *     arrives, each 1 MiB chunk is stored on its own, and an upload that is refused, breaks off
+         *     or stalls for 60 seconds is deleted with its chunks. Audited as `import.created`.
+         */
+        post: operations["upload_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One import: its state and counters, which a client polls for progress. With
+         *     `samples=true` it also shows the first 20 rows of the file, masked for callers who may not
+         *     see values.
+         */
+        get: operations["get_import"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancels an import that has not ended. A running pass stops at its next batch boundary, so
+         *     the batches already applied stay applied. Audited as `import.cancelled`.
+         */
+        post: operations["cancel_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Starts the dry run: maps every row of the file and keeps only the rejects (phase
+         *     `dry_run`) and the counters; no person, list or trait is written. The answer is the import
+         *     in `dry_running`; poll it until `dry_run_done`. Needs a saved mapping.
+         */
+        post: operations["dry_run_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Saves the mapping and moves the import to `mapped`. The mapping needs at least one
+         *     identifier target, columns the file has, and trait keys that exist and are not archived;
+         *     list targets must exist. Allowed until the first run starts; saving clears the counters and
+         *     rejects of an earlier dry run.
+         */
+        put: operations["put_import_mapping"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/rejects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The rows an import refused, in row order, with the codes of what was wrong: never a cell.
+         *     `phase` narrows to the dry run's or the run's rejects. Rejects are kept 30 days.
+         */
+        get: operations["list_import_rejects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The rejects as a CSV, `row_number,column,reason` with one line per problem, streamed page
+         *     by page. For the owner, workspace admins and `admin` keys the rows' own cells follow, under
+         *     the file's column names; cells that start like a spreadsheet formula get a leading quote.
+         *     Everyone else with read access gets the codes alone. Audited as `import.rejects_downloaded`.
+         */
+        get: operations["download_import_rejects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/imports/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Starts the run: applies every row in batches of 500, each batch one transaction that
+         *     writes the profile records, adds the list members, keeps the rejects and advances the
+         *     checkpoint. A crash resumes from the checkpoint. The run fails with `reject_threshold` once
+         *     more than 1,000 rows are done and the rejected share is above the import's threshold; the
+         *     batches already applied stay applied. Running the same file again with the same source and
+         *     stream changes nothing. The answer is the import in `running`; poll it. Audited as
+         *     `import.run_started`.
+         */
+        post: operations["run_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/ingest-rejects": {
         parameters: {
             query?: never;
@@ -1217,6 +1394,13 @@ export interface components {
             reason?: string | null;
             suppressed: boolean;
         };
+        ColumnRuleBody: {
+            /** @description A column name of the header. */
+            column: string;
+            target: components["schemas"]["TargetBody"];
+            /** @description Applied in order to the cell before it reaches the target; at most 10. */
+            transforms?: components["schemas"]["TransformBody"][];
+        };
         ConflictBody: {
             /** Format: date-time */
             created_at: string;
@@ -1392,6 +1576,96 @@ export interface components {
              *     of its secret is stored.
              */
             key: string;
+        };
+        /** @description An import: its file, mapping, state and counters. */
+        CsvImportBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            /** @description `,`, `;` or a tab. */
+            delimiter: string;
+            /** @description Why a failed import failed, such as `reject_threshold`; never a value. */
+            error_code?: string | null;
+            file_name: string;
+            /** @description The SHA-256 of the file, in lowercase hex. */
+            file_sha256: string;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /** @description The column names, in file order. */
+            header: string[];
+            /** Format: uuid */
+            id: string;
+            mapping?: null | components["schemas"]["MappingBody"];
+            /** @example Customers May */
+            name: string;
+            /**
+             * Format: double
+             * @description The rejected share above which a run stops, once more than 1,000 rows are done.
+             */
+            reject_threshold: number;
+            /**
+             * Format: int64
+             * @description Rows applied (written); in a dry run, rows that would be.
+             */
+            rows_applied: number;
+            /**
+             * Format: int64
+             * @description Rows the current pass has finished, rejected ones included.
+             */
+            rows_done: number;
+            /** Format: int64 */
+            rows_rejected: number;
+            /**
+             * Format: int64
+             * @description Data rows in the file, the header not counted.
+             */
+            rows_total: number;
+            /**
+             * Format: int64
+             * @description Rows that repeated what is stored already, so nothing was written.
+             */
+            rows_unchanged: number;
+            /** Format: int64 */
+            size_bytes: number;
+            /**
+             * @description The source the import's records are written under.
+             * @example csv
+             */
+            source: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            /**
+             * @description `uploaded`, `mapped`, `dry_running`, `dry_run_done`, `running`, `succeeded`, `failed` or
+             *     `cancelled`.
+             */
+            status: string;
+            /**
+             * @description The stream the import's records are written under; keep it stable between runs of the
+             *     same data.
+             * @example customers
+             */
+            stream: string;
+            /** @description The trace of the upload: 32 lowercase hex characters. */
+            trace_id: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description An import with the first rows of its file. */
+        CsvImportDetailBody: components["schemas"]["CsvImportBody"] & {
+            /**
+             * @description The first 20 data rows, one list of cells per row, in header order. Empty unless asked
+             *     for (`samples=true`) or just uploaded, and empty once the file was deleted.
+             */
+            samples: (string | null)[][];
+            /** @description True when the caller may not see values: every cell of `samples` is null. */
+            samples_masked: boolean;
+        };
+        CsvImportsBody: {
+            /** @description Newest first. */
+            imports: components["schemas"]["CsvImportBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         DeadJobsBody: {
             /** @description Newest first. */
@@ -1716,6 +1990,34 @@ export interface components {
             /** @description How many rows were skipped, however many `unmatched` lists. */
             unmatched_count: number;
         };
+        ImportRejectBody: {
+            errors: components["schemas"]["ImportRejectErrorBody"][];
+            /** @description `dry_run` or `run`. */
+            phase: string;
+            /**
+             * Format: int64
+             * @description The row as a spreadsheet numbers it: the header is row 1.
+             */
+            row_number: number;
+        };
+        ImportRejectErrorBody: {
+            /** @description The column the problem is on; empty when none. */
+            column: string;
+            /**
+             * @description `missing_identifier`, `invalid_identifier`, `wrong_type`, `bad_timestamp`,
+             *     `unknown_column`, `invalid_key` or `apply_failed`.
+             */
+            reason: string;
+        };
+        ImportRejectsBody: {
+            /**
+             * Format: int64
+             * @description Pass as `after` for the next page; null when there is none.
+             */
+            next_after?: number | null;
+            /** @description In row order. */
+            rejects: components["schemas"]["ImportRejectBody"][];
+        };
         IngestRejectBody: {
             /** Format: uuid */
             id: string;
@@ -1854,6 +2156,15 @@ export interface components {
             members: components["schemas"]["ListMemberBody"][];
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
+        };
+        /** @description How the columns of a file become identifiers, traits and lists. */
+        MappingBody: {
+            columns: components["schemas"]["ColumnRuleBody"][];
+            /**
+             * @description The column whose value is the record key. Without it the key is the file's hash and the
+             *     row number, so only the same file can be run again without changes.
+             */
+            key_column?: string | null;
         };
         MemberBody: {
             /** Format: date-time */
@@ -2254,6 +2565,24 @@ export interface components {
             /** @description Newest first. */
             suppressions: components["schemas"]["SuppressionBody"][];
         };
+        /** @description Where a column's value goes. */
+        TargetBody: {
+            kind: string;
+            /** @enum {string} */
+            type: "identifier";
+        } | {
+            key: string;
+            /** @enum {string} */
+            type: "trait";
+        } | {
+            /** Format: uuid */
+            list_id: string;
+            /** @enum {string} */
+            type: "list";
+        } | {
+            /** @enum {string} */
+            type: "ignore";
+        };
         TargetIdentifier: {
             /**
              * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
@@ -2370,6 +2699,49 @@ export interface components {
             op: string;
             /** @description Required for every operator but `exists`; it must fit the trait's type. */
             value?: unknown;
+        };
+        /**
+         * @description The type a `cast` converts to.
+         * @enum {string}
+         */
+        TraitTypeBody: "string" | "number" | "boolean" | "timestamp" | "date" | "string_list";
+        /** @description One step between a cell and its target. */
+        TransformBody: {
+            /** @enum {string} */
+            op: "trim";
+        } | {
+            /** @enum {string} */
+            op: "lower";
+        } | {
+            /** @enum {string} */
+            op: "upper";
+        } | {
+            /** @enum {string} */
+            op: "cast";
+            to: components["schemas"]["TraitTypeBody"];
+        } | {
+            format: string;
+            /** @enum {string} */
+            op: "timestamp";
+        } | {
+            columns: string[];
+            /** @enum {string} */
+            op: "concat";
+            separator: string;
+        } | {
+            /** @enum {string} */
+            op: "constant";
+            value: string;
+        } | {
+            map: {
+                [key: string]: string;
+            };
+            /** @enum {string} */
+            op: "value_map";
+        } | {
+            /** @enum {string} */
+            op: "split";
+            separator: string;
         };
         UnmatchedRow: {
             /**
@@ -4204,6 +4576,625 @@ export interface operations {
             };
             /** @description to_person_id is not one of the conflict's two people */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_imports: {
+        parameters: {
+            query?: {
+                /** @description Imports per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of imports */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportsBody"];
+                };
+            };
+            /** @description limit is out of range or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    upload_import: {
+        parameters: {
+            query: {
+                /** @description A name for the import, 1 to 128 characters */
+                name: string;
+                /** @description The file's name; defaults to name */
+                file_name?: string;
+                /** @description The source records are written under: a-z, 0-9, _ and -; default csv */
+                source?: string;
+                /** @description The stream records are written under; default the file name without its extension */
+                stream?: string;
+                /** @description comma, semicolon or tab; detected when absent */
+                delimiter?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        /** @description The CSV file */
+        requestBody: {
+            content: {
+                "text/csv": string;
+            };
+        };
+        responses: {
+            /** @description The new import with its header and sample rows */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportDetailBody"];
+                };
+            };
+            /** @description A malformed query, or an upload that broke off */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No byte arrived for 60 seconds; the upload was abandoned and nothing was kept */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The file is over imports.max_file_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not text/csv */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not UTF-8, empty, or a header with blank or repeated names */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_import: {
+        parameters: {
+            query?: {
+                /** @description Include the first 20 rows of the file */
+                samples?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The import */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancel_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cancelled import */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The import has ended already */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    dry_run_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The dry run was queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The import has no mapping, is busy, or has ended */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_import_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MappingBody"];
+            };
+        };
+        responses: {
+            /** @description The mapped import */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The import is running or has ended */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mapping is invalid; the detail names the rule and the column */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_import_rejects: {
+        parameters: {
+            query?: {
+                /** @description dry_run or run */
+                phase?: string;
+                /** @description Rejects per page, 1 to 200; default 100 */
+                limit?: number;
+                /** @description The next_after of the previous page */
+                after?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of rejects */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRejectsBody"];
+                };
+            };
+            /** @description A malformed phase, limit or after */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    download_import_rejects: {
+        parameters: {
+            query?: {
+                /** @description dry_run or run */
+                phase?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rejects as CSV */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description A malformed phase */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    run_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Import id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run was queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvImportBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or import, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The import has no mapping, is busy, or has ended */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
