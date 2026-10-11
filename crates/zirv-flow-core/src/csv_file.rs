@@ -30,6 +30,8 @@ pub enum CsvError {
     RecordTooLarge,
     /// One record has more than [`MAX_FIELDS`] fields.
     TooManyFields,
+    /// A quoted field is never closed before the file ends.
+    UnterminatedQuote,
 }
 
 impl CsvError {
@@ -39,6 +41,7 @@ impl CsvError {
             Self::NotUtf8 => "not_utf8",
             Self::RecordTooLarge => "record_too_large",
             Self::TooManyFields => "too_many_fields",
+            Self::UnterminatedQuote => "unterminated_quote",
         }
     }
 }
@@ -49,6 +52,7 @@ impl fmt::Display for CsvError {
             Self::NotUtf8 => "the file must be UTF-8 text",
             Self::RecordTooLarge => "a record is over 1 MiB; a quoted field may never be closed",
             Self::TooManyFields => "a record has more than 1000 fields",
+            Self::UnterminatedQuote => "a quoted field is never closed",
         })
     }
 }
@@ -132,6 +136,9 @@ impl CsvParser {
     pub fn finish(&mut self, on_record: &mut impl FnMut(u64, Vec<String>)) -> Result<(), CsvError> {
         if !self.started {
             self.start(on_record)?;
+        }
+        if self.scan == Scan::Quoted {
+            return Err(CsvError::UnterminatedQuote);
         }
         self.read(&[], on_record)
     }
@@ -436,6 +443,18 @@ mod tests {
         assert_eq!(parse_in(&[b"a\n\xFF\xFE\n"], b','), Err(CsvError::NotUtf8));
     }
 
+    #[test]
+    fn a_quote_that_is_never_closed_is_refused_at_the_end_of_the_file() {
+        assert_eq!(
+            parse_in(&[b"a,b\n1,\"never closed\n2,3\n"], b','),
+            Err(CsvError::UnterminatedQuote)
+        );
+        assert_eq!(CsvError::UnterminatedQuote.code(), "unterminated_quote");
+        // A closed quote at the very end of the file is fine, with or without a line end.
+        assert!(parse_in(&[b"a\n\"b\""], b',').is_ok());
+        assert!(parse_in(&[b"a\n\"b\"\n"], b',').is_ok());
+        assert!(parse_in(&[b"a\n\"b\"\"\""], b',').is_ok());
+    }
     #[test]
     fn a_record_over_the_cap_and_an_unclosed_quote_are_refused() {
         let big = vec![b'x'; MAX_RECORD_BYTES + 10];

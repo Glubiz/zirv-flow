@@ -7426,4 +7426,35 @@ email,b@example.com,
              2,\"'=HYPERLINK(\"\"http://x\"\")\",wrong_type,not-an-email,'=1+1\n"
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_with_an_unterminated_quote_is_a_422_with_a_code_and_keeps_nothing(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let reply = call_text(
+            &router,
+            "POST",
+            &imports_uri(&ws, "?name=Broken"),
+            Some("text/csv"),
+            "Email\n\"ada@example.com\nbob@example.com\n".to_owned(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_str(&reply.text).unwrap();
+        assert_eq!(
+            body["detail"],
+            "body: a quoted field is never closed (unterminated_quote)"
+        );
+        let imports: i64 = sqlx::query_scalar("SELECT count(*) FROM imports")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(imports, 0);
+    }
 }

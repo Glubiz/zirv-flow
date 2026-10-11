@@ -226,7 +226,7 @@ impl FileScan {
 }
 
 fn csv_problem(error: CsvError) -> ApiError {
-    ApiError::unprocessable(format!("body: {error}"))
+    ApiError::unprocessable(format!("body: {error} ({})", error.code()))
 }
 
 fn header_problem(error: HeaderError) -> ApiError {
