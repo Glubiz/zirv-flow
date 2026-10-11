@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, and ingestion over HTTP with a durable inbox, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, and person deletion, erasure and export, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -215,7 +215,7 @@ use it:
 | Command | What it does |
 |---------|--------------|
 | `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time. Run as many as you like. |
-| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, and exports queue gauges. |
+| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
 A running job holds a lease of `worker.lease_seconds`, which its worker extends
@@ -621,6 +621,71 @@ keys see its kind and a `masked` flag instead.
 **Merges.** When two people are merged, the survivor is in every list either of them was in,
 keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
 history moves to the survivor.
+
+## Deletion, erasure and export
+
+Three different things happen to a person's data, and they are kept apart on purpose.
+
+**Removing a contribution.** When a source retracts a record, only that source's contribution
+goes. The record is tombstoned, the person's traits are recomputed from the other sources, and
+each identity that only that record listed is deleted (together with the conflicts about it).
+An identity first seen only through an event is removed too, and the next event with it creates
+it again. Events are not tied to a ledger record yet, so removal leaves them. The person is
+marked changed. What happens if nothing holds the person any more (no live record, no event and
+no explicit consent) is the workspace **orphan policy**: `keep` (the default) or `delete`. Set it
+under **Privacy** in the web UI or with `PUT /api/v1/workspaces/{ws}/privacy/settings`
+(`{"orphan_policy": "delete"}`; workspace admins, CSRF, audited).
+
+**Deleting a person.** `DELETE /api/v1/workspaces/{ws}/people/{id}` (workspace admins and `admin`
+keys; CSRF; audited as `person.deleted` with the id only) deletes the person, the people merged
+into them, and every row that refers to them: identities, source records, events in every
+partition, dedupe rows, ingest rejects, list memberships and their history, consent and its
+history, identity conflicts, merge provenance, pending exports and the person's decision
+records. It adds no suppression and no ledger entry, so the same email can create a new person
+the next time it is ingested.
+
+**Erasing a person.** Use erasure for a data-subject request. `POST
+/api/v1/workspaces/{ws}/privacy/erasures` takes `{"person_id": "..."}` or `{"identifier":
+{"kind": "email", "value": "..."}}` (an identifier that matches nobody is a 404) and needs the
+master key. It writes a row to the erasure ledger with the keyed hash of every identity of the
+person and of the people merged into them (never a value) and enqueues `privacy.erase`. The job
+runs in one transaction: it collects the person's group and identities as they are when it runs, adds
+their hashes (and the group's ids) to the ledger row, suppresses every email and phone hash as
+`erased`, deletes the workspace's undrained ingestion inbox rows with an identifier that hashes to any
+of them, so a row drained later cannot create the person again (an `erased` suppression overrides any other reason and can never be removed); it deletes the group exactly as above; it completes the ledger row; and it audits `privacy.erased`
+with the request id. A failure rolls everything back and the job is retried; a request whose job
+ran out of attempts shows as `failed`. `GET .../privacy/erasures` lists the requests, newest
+first. The ledger is the one place that keeps the person id of an erased person, by design.
+
+Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
+creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
+
+**After a restore.** Backups keep erased data until they age out, so after restoring a backup run
+
+```sh
+zirv-flow admin replay-erasures [--workspace <slug>]
+```
+
+before starting the workers. It needs the master key and no password, and prints counts only. For
+each completed ledger entry it re-adds the `erased` suppressions, erases every person id the erased group had (the survivor and the people merged
+into them) that the restore brought back, including a backup from before a merge, and removes pending inbox rows that name an erased identifier. It is safe to
+run again. Keeping a copy of the ledger outside the database is an open question in the
+architecture.
+
+**Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
+only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
+gzip-compressed JSON document, `zirv-flow.person-export/v1`: `person` holds `profile` (traits
+with their sources), `identities`, `source_records`, `events` (every partition, oldest first),
+`consent`, `consent_history`, `lists`, `list_history`, `merges` and `identity_conflicts`, with the
+data of merged people under the survivor. It is the one place values leave the system, so only
+workspace admins can list exports or download one, and every download is audited as
+`privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for 24 hours
+after the export is ready and then answers 410; the scheduler leader drops expired content
+hourly. Erasing the person deletes their exports.
+
+Everything above is on the **Privacy** page of the web UI, visible to workspace admins and the
+owner. Erasing asks you to type `ERASE` first. Erasure does not reach destinations yet (that
+comes with them) and does not rewrite files outside the database.
 
 ## Ingestion
 

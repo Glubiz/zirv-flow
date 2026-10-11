@@ -27,7 +27,8 @@ pub(crate) enum Command {
     Migrate,
     /// Probe this instance's /readyz and exit 0 when it is ready (for container health checks).
     Healthcheck,
-    /// Administer accounts: create the owner or reset a password.
+    /// Administer the instance: create the owner, reset a password, generate a master key or
+    /// replay the erasure ledger after a restore.
     #[command(subcommand)]
     Admin(AdminCommand),
     /// Validate configuration and print it with secrets redacted.
@@ -74,6 +75,15 @@ pub(crate) enum AdminCommand {
         /// When the file exists and holds a valid key, keep it and succeed.
         #[arg(long)]
         if_missing: bool,
+    },
+    /// Re-apply the erasure ledger after restoring a backup: re-add the erased suppressions,
+    /// erase every ledger person that exists again and drop pending inbox rows naming an
+    /// erased identifier. Prints counts only. Run it after every restore, before starting the
+    /// workers. Needs the master key and no password.
+    ReplayErasures {
+        /// Only this workspace, by slug. All workspaces when omitted.
+        #[arg(long, value_name = "SLUG")]
+        workspace: Option<String>,
     },
 }
 
@@ -159,6 +169,35 @@ mod tests {
         assert!(parse(&[]).is_err());
     }
 
+    #[test]
+    fn replay_erasures_takes_an_optional_workspace_and_no_password() {
+        let all = Cli::try_parse_from(["zirv-flow", "admin", "replay-erasures"]).unwrap();
+        let one = Cli::try_parse_from([
+            "zirv-flow",
+            "admin",
+            "replay-erasures",
+            "--workspace",
+            "acme",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            all.command,
+            Some(Command::Admin(AdminCommand::ReplayErasures {
+                workspace: None
+            }))
+        ));
+        match one.command {
+            Some(Command::Admin(AdminCommand::ReplayErasures { workspace })) => {
+                assert_eq!(workspace.as_deref(), Some("acme"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["zirv-flow", "admin", "replay-erasures", "--password", "x"])
+                .is_err()
+        );
+    }
     #[test]
     fn help_lists_every_role() {
         let error = Cli::try_parse_from(["zirv-flow", "--help"]).unwrap_err();

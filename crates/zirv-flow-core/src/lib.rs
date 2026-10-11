@@ -24,4 +24,4 @@ pub use scope::Scope;
 pub use secrets::{HmacKey, HmacPurpose, MasterKey, MasterKeyError};
 pub use trace::{Cause, CauseKind, TraceContext, TraceId};
 pub use validation::ValidationError;
-pub use workspace::{Slug, WorkspaceName};
+pub use workspace::{OrphanPolicy, Slug, WorkspaceName};

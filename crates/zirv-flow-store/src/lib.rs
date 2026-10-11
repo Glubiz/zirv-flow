@@ -13,6 +13,7 @@ mod lists;
 mod migrations;
 mod people;
 mod pool;
+mod privacy;
 mod sessions;
 mod suppressions;
 mod workspaces;
@@ -82,6 +83,13 @@ pub use people::{
     update_trait_definition,
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
+pub use privacy::{
+    BuildOutcome, DeleteReason, ERASE_JOB_KIND, EXPORT_FORMAT, EXPORT_JOB_KIND, EraseOutcome,
+    ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor, ExportDownload, ExportStatus,
+    PrivacyExport, ReplayReport, build_export, delete_person, download_export, erase_person,
+    expire_exports, find_erasure_request, find_privacy_export, list_erasure_requests,
+    list_privacy_exports, replay_erasures, request_erasure, request_export,
+};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,
@@ -93,8 +101,9 @@ pub use suppressions::{
     is_suppressed, list_suppressions, remove_suppression,
 };
 pub use workspaces::{
-    Member, Membership, Workspace, create_workspace, find_workspace, list_members,
-    list_workspaces_for_user, membership_role, remove_membership, set_membership,
+    Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,
+    list_members, list_workspaces_for_user, membership_role, orphan_policy, remove_membership,
+    set_membership, set_orphan_policy,
 };
 /// The operator master key and its derived keys, re-exported so the binary reaches them
 /// through the store.

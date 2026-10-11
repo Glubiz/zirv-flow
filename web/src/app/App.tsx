@@ -8,6 +8,7 @@ import { ListDetailPage, ListsPage } from "../features/lists";
 import { MembersPage } from "../features/members";
 import { SuppressionsPage, TopicsPage } from "../features/consent";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
+import { PrivacyPage } from "../features/privacy";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
@@ -122,6 +123,7 @@ export function AppRoutes() {
           <Route path="w/:ws/events/schemas/:name" element={<EventSchemaPage />} />
           <Route path="w/:ws/topics" element={<TopicsPage />} />
           <Route path="w/:ws/suppressions" element={<SuppressionsPage />} />
+          <Route path="w/:ws/privacy" element={<PrivacyPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />

@@ -5904,4 +5904,528 @@ email,b@example.com,
         assert_eq!(member_eq.status, StatusCode::OK);
         assert_eq!(member_eq.body["people"][0]["id"], survivor.as_str());
     }
+
+    fn privacy_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/privacy{rest}")
+    }
+
+    /// A GET whose reply is bytes, such as the gzip of an export.
+    async fn call_bytes(
+        router: &Router,
+        uri: &str,
+        auth: Auth<'_>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let request = with_auth(Request::builder().method("GET").uri(uri), auth)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+
+    async fn audit_actions(pool: &PgPool) -> Vec<String> {
+        zirv_flow_store::list_audit(pool, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.action)
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn deleting_a_person_is_204_then_404_audited_with_the_id_only_and_admin_only(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let uri = format!("/api/v1/workspaces/{ws}/people/{person}");
+
+        for auth in [
+            Auth::Session(&member),
+            Auth::Key(&read_key),
+            Auth::Key(&write_key),
+            Auth::SessionWithoutCsrf(&owner),
+        ] {
+            let refused = call(&router, "DELETE", &uri, None, auth).await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        }
+        let anonymous = call(&router, "DELETE", &uri, None, Auth::Anonymous).await;
+        let first = call(&router, "DELETE", &uri, None, Auth::Session(&owner)).await;
+        let second = call(&router, "DELETE", &uri, None, Auth::Session(&owner)).await;
+
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(first.status, StatusCode::NO_CONTENT);
+        assert_eq!(second.status, StatusCode::NOT_FOUND);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        let audit = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let deleted: Vec<_> = audit
+            .iter()
+            .filter(|entry| entry.action == "person.deleted")
+            .collect();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].object_id.map(|id| id.to_string()), Some(person));
+        assert_eq!(deleted[0].summary, json!({}));
+        // Deletion is not erasure: no suppression and no ledger entry.
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM suppressions) + (SELECT count(*) FROM erasure_requests)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_request_by_identifier_creates_a_ledger_row_and_a_job_and_the_job_erases(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let uri = privacy_uri(&ws, "/erasures");
+
+        let by_identifier = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": " Ada@Example.com "}})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            by_identifier.status,
+            StatusCode::ACCEPTED,
+            "{:?}",
+            by_identifier.body
+        );
+        assert_eq!(by_identifier.body["status"], "pending");
+        assert_eq!(by_identifier.body["person_id"], person.as_str());
+        assert_eq!(by_identifier.body["trace_id"].as_str().unwrap().len(), 32);
+        let request = by_identifier.body["id"].as_str().unwrap().to_owned();
+        let ledger: (i64, i32) = sqlx::query_as(
+            "SELECT count(*), max(cardinality(identifier_hashes)) FROM erasure_requests",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger, (1, 1));
+        let jobs: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT kind, unique_key FROM jobs WHERE kind = 'privacy.erase'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            jobs,
+            [(
+                "privacy.erase".to_owned(),
+                Some(format!("privacy.erase:{request}"))
+            )]
+        );
+        assert!(
+            audit_actions(&pool)
+                .await
+                .contains(&"privacy.erasure_requested".to_owned())
+        );
+
+        // Run the job's work, then read the request back.
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::erase_person(
+            &mut tx,
+            ws.parse().unwrap(),
+            request.parse().unwrap(),
+            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY)
+                .unwrap()
+                .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let listed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(listed.status, StatusCode::OK);
+        assert_eq!(listed.body["erasures"][0]["status"], "completed");
+        assert!(listed.body["erasures"][0]["completed_at"].is_string());
+        assert!(!listed.body.to_string().contains("ada@example.com"));
+        assert!(!listed.body.to_string().contains("identifier_hash"));
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 0);
+        let suppressed: Vec<String> = sqlx::query_scalar("SELECT reason FROM suppressions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(suppressed, ["erased"]);
+        let entry = zirv_flow_store::list_audit(&pool, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "privacy.erased")
+            .unwrap();
+        assert_eq!(entry.object_id.map(|id| id.to_string()), Some(request));
+        assert_eq!(entry.summary, json!({}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasure_requests_resolve_the_person_check_the_body_and_follow_the_admin_rules(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let uri = privacy_uri(&ws, "/erasures");
+        let body = json!({"person_id": person});
+
+        for auth in [
+            Auth::Session(&member),
+            Auth::Key(&write_key),
+            Auth::SessionWithoutCsrf(&owner),
+        ] {
+            let refused = call(&router, "POST", &uri, Some(body.clone()), auth).await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        }
+        for auth in [Auth::Session(&member), Auth::Key(&write_key)] {
+            let refused = call(&router, "GET", &uri, None, auth).await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        }
+        let unknown_identifier = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": "nobody@example.com"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown_person = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"person_id": "00000000-0000-7000-8000-000000000000"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let both = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"person_id": person, "identifier": {"kind": "email", "value": "a@b.c"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let neither = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let by_key = call(
+            &router,
+            "POST",
+            &uri,
+            Some(body.clone()),
+            Auth::Key(&admin_key),
+        )
+        .await;
+
+        assert_eq!(unknown_identifier.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown_person.status, StatusCode::NOT_FOUND);
+        assert_eq!(both.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(neither.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(by_key.status, StatusCode::ACCEPTED, "{:?}", by_key.body);
+        assert_eq!(by_key.body["requested_by"], Value::Null);
+        let page = call(
+            &router,
+            "GET",
+            &format!("{uri}?limit=1"),
+            None,
+            Auth::Key(&admin_key),
+        )
+        .await;
+        assert_eq!(page.status, StatusCode::OK);
+        assert_eq!(page.body["erasures"].as_array().unwrap().len(), 1);
+        let bad_limit = call(
+            &router,
+            "GET",
+            &format!("{uri}?limit=0"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasure_is_unavailable_without_a_master_key(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(AppState::new(pool.clone(), Arc::new(String::new)));
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+
+        let reply = call(
+            &router,
+            "POST",
+            &privacy_uri(&ws, "/erasures"),
+            Some(json!({"person_id": person})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_is_requested_built_downloaded_and_audited_and_is_gone_after_expiry(
+        pool: PgPool,
+    ) {
+        use std::io::Read;
+
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let uri = privacy_uri(&ws, "/exports");
+
+        let requested = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"person_id": person})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            requested.status,
+            StatusCode::ACCEPTED,
+            "{:?}",
+            requested.body
+        );
+        assert_eq!(requested.body["status"], "pending");
+        let export = requested.body["id"].as_str().unwrap().to_owned();
+        let download_uri = format!("{uri}/{export}/download");
+        let pending = call_bytes(&router, &download_uri, Auth::Session(&owner)).await;
+        assert_eq!(pending.0, StatusCode::CONFLICT);
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'privacy.export'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 1);
+
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::build_export(&mut tx, ws.parse().unwrap(), export.parse().unwrap())
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let listed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(listed.body["exports"][0]["status"], "ready");
+        assert!(listed.body["exports"][0]["expires_at"].is_string());
+        assert!(listed.body["exports"][0].get("content").is_none());
+        for auth in [Auth::Session(&member), Auth::Key(&read_key)] {
+            let refused = call_bytes(&router, &download_uri, auth).await;
+            assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        }
+        let (status, headers, bytes) =
+            call_bytes(&router, &download_uri, Auth::Session(&owner)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/gzip");
+        assert!(
+            headers[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains(&format!("person-export-{export}.json.gz"))
+        );
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_string(&mut text)
+            .unwrap();
+        let document: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(document["format"], "zirv-flow.person-export/v1");
+        assert_eq!(document["person"]["id"], person.as_str());
+        assert!(text.contains("ada@example.com"));
+        let actions = audit_actions(&pool).await;
+        for action in ["privacy.export_requested", "privacy.export_downloaded"] {
+            assert!(
+                actions.contains(&action.to_owned()),
+                "{action}: {actions:?}"
+            );
+        }
+        let audited = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(
+            audited
+                .iter()
+                .all(|entry| !entry.summary.to_string().contains("ada@"))
+        );
+
+        sqlx::query("UPDATE privacy_exports SET expires_at = now() - interval '1 second'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let gone = call_bytes(&router, &download_uri, Auth::Session(&owner)).await;
+        let unknown = call_bytes(
+            &router,
+            &format!("{uri}/00000000-0000-7000-8000-000000000000/download"),
+            Auth::Session(&owner),
+        )
+        .await;
+        let listed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(gone.0, StatusCode::GONE);
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+        assert_eq!(listed.body["exports"][0]["status"], "expired");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn export_requests_follow_the_admin_rules_and_resolve_identifiers(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let uri = privacy_uri(&ws, "/exports");
+
+        let refused = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"person_id": person})),
+            Auth::Session(&member),
+        )
+        .await;
+        let listing = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        let missing = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": "nobody@example.com"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let found = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": "ada@example.com"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(listing.status, StatusCode::FORBIDDEN);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(found.status, StatusCode::ACCEPTED);
+        assert_eq!(found.body["person_id"], person.as_str());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_orphan_policy_is_read_by_members_and_set_by_admins_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let uri = privacy_uri(&ws, "/settings");
+
+        let default = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        let refused = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"orphan_policy": "delete"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let invalid = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"orphan_policy": "purge"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let saved = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"orphan_policy": "delete"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+
+        assert_eq!(default.body["orphan_policy"], "keep");
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(saved.body["orphan_policy"], "delete");
+        assert_eq!(again.body["orphan_policy"], "delete");
+        let entry = zirv_flow_store::list_audit(&pool, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "workspace.privacy_settings_updated")
+            .unwrap();
+        assert_eq!(entry.summary, json!({"orphan_policy": "delete"}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replaying_the_ledger_through_the_admin_operation_audits_counts_only(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let key = zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap();
+
+        let none = admin::replay_erasures(&pool, &Context::system(), Some("alpha"), &key)
+            .await
+            .unwrap();
+        let missing = admin::replay_erasures(&pool, &Context::system(), Some("nope"), &key).await;
+
+        assert_eq!(none, zirv_flow_store::ReplayReport::default());
+        assert!(matches!(missing, Err(admin::AdminError::NotFound(_))));
+        let entry = zirv_flow_store::list_audit(&pool, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "privacy.erasures_replayed")
+            .unwrap();
+        assert_eq!(entry.workspace_id.map(|id| id.to_string()), Some(ws));
+        assert_eq!(
+            entry.summary,
+            json!({"requests": 0, "suppressions": 0, "people": 0, "inbox_rows": 0})
+        );
+    }
 }

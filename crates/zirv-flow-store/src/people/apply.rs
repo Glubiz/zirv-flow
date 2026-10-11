@@ -16,11 +16,11 @@ use zirv_flow_core::people::{
     Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
 use zirv_flow_core::token::sha256;
-use zirv_flow_core::{TraceContext, WorkspaceId};
+use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
 use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
-use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
+use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
 #[derive(Clone, Debug)]
@@ -92,9 +92,18 @@ pub(crate) async fn apply_profile_records(
     Ok(outcomes)
 }
 
-/// Retracts one source record's contribution: the row is tombstoned and the person's traits
-/// are recomputed from what remains. Returns false when no live record matched. Identities
-/// and the orphan policy are untouched.
+/// Retracts one source record's contribution, in one transaction:
+///
+/// - the row is tombstoned and the person's traits are recomputed from what remains;
+/// - each identity the record listed that no other live record of the person lists is
+///   deleted, with the conflicts about it (an identity first seen only through events is
+///   removed too; the next event creates it again);
+/// - the person is marked dirty and a `contribution.removed` decision is appended;
+/// - when the workspace's orphan policy is `delete` and the person is left with no live
+///   record, no event and no explicit consent, the person is deleted.
+///
+/// Returns false when no live record matched. Events are not ledger records in M2, so they
+/// stay.
 pub async fn remove_contribution(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -104,11 +113,12 @@ pub async fn remove_contribution(
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
     let mut tx = begin(pool).await?;
-    let row: Option<(Uuid, Uuid, Value)> = sqlx::query_as(
-        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
+    // The record is locked first, then its person: the order the drain's existing-record path
+    // uses. With the record locked a merge cannot move it, so the owner cannot change.
+    let record: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, person_id FROM source_records \
          WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
-           AND deleted_at IS NULL \
-         RETURNING id, person_id, traits",
+           AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(source)
@@ -117,15 +127,28 @@ pub async fn remove_contribution(
     .fetch_optional(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    let Some((record_id, person_id, traits)) = row else {
+    let Some((locked_id, owner)) = record else {
         return Ok(false);
     };
+    sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+        .bind(workspace.as_uuid())
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    let (record_id, person_id, traits, identifiers): (Uuid, Uuid, Value, Value) = sqlx::query_as(
+        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
+             WHERE id = $1 RETURNING id, person_id, traits, identifiers",
+    )
+    .bind(locked_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
     let keys: Vec<String> = traits
         .as_object()
         .map(|map| map.keys().cloned().collect())
         .unwrap_or_default();
     if recompute(&mut tx, workspace, person_id, &keys).await? {
-        mark_dirty(&mut tx, workspace, person_id).await?;
         record_decision(
             &mut tx,
             workspace,
@@ -137,8 +160,90 @@ pub async fn remove_contribution(
         )
         .await?;
     }
+    remove_unshared_identities(&mut tx, workspace, person_id, record_id, &identifiers).await?;
+    mark_dirty(&mut tx, workspace, person_id).await?;
+    record_decision(
+        &mut tx,
+        workspace,
+        trace,
+        "contribution.removed",
+        "removed",
+        None,
+        vec![("person", person_id), ("source_record", record_id)],
+    )
+    .await?;
+    if crate::orphan_policy(&mut *tx, workspace).await? == Some(OrphanPolicy::Delete)
+        && is_orphan(&mut tx, workspace, person_id).await?
+    {
+        crate::delete_person(&mut tx, workspace, person_id, DeleteReason::Orphan, trace).await?;
+    }
     commit(tx).await?;
     Ok(true)
+}
+
+/// Deletes each identity in `identifiers` (the removed record's `[{kind, value}]`) that
+/// belongs to the person and that no other live record of the person lists, together with
+/// the conflicts about it.
+async fn remove_unshared_identities(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person_id: Uuid,
+    record_id: Uuid,
+    identifiers: &Value,
+) -> Result<(), StoreError> {
+    let doomed: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT i.id FROM identities i \
+         WHERE i.workspace_id = $1 AND i.person_id = $2 \
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements($3::jsonb) e \
+                       WHERE e ->> 'kind' = i.kind AND e ->> 'value' = i.value) \
+           AND NOT EXISTS (SELECT 1 FROM source_records s \
+                           WHERE s.workspace_id = $1 AND s.person_id = $2 \
+                             AND s.deleted_at IS NULL AND s.id <> $4 \
+                             AND s.identifiers @> jsonb_build_array( \
+                                 jsonb_build_object('kind', i.kind, 'value', i.value)))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .bind(identifiers)
+    .bind(record_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if doomed.is_empty() {
+        return Ok(());
+    }
+    for statement in [
+        "DELETE FROM identity_conflicts WHERE workspace_id = $1 AND identity_id = ANY($2)",
+        "DELETE FROM identities WHERE workspace_id = $1 AND id = ANY($2)",
+    ] {
+        sqlx::query(statement)
+            .bind(workspace.as_uuid())
+            .bind(&doomed)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    Ok(())
+}
+
+/// Whether the person has no live source record, no event and no explicit consent.
+async fn is_orphan(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person_id: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM source_records \
+                            WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL) \
+            AND NOT EXISTS (SELECT 1 FROM events WHERE workspace_id = $1 AND person_id = $2) \
+            AND NOT EXISTS (SELECT 1 FROM consent \
+                            WHERE workspace_id = $1 AND person_id = $2 AND explicit)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)
 }
 
 pub(crate) async fn apply_profile_record(
@@ -1882,5 +1987,286 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(changes, 1);
+    }
+
+    async fn identity_kinds(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> Vec<String> {
+        list_identities(pool, ws, person)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|identity| identity.kind)
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_a_contribution_deletes_only_the_identities_no_other_record_lists(
+        pool: PgPool,
+    ) {
+        use crate::privacy::testing::profile;
+
+        let ws = workspace(&pool, "one").await;
+        let crm = profile(
+            "crm",
+            "1",
+            &[("email", "a@example.com"), ("external:crm", "1")],
+            json!({"plan": "free"}),
+        );
+        let shop = profile(
+            "shop",
+            "9",
+            &[("email", "a@example.com"), ("anonymous_id", "anon-1")],
+            json!({"plan": "pro"}),
+        );
+        let outcomes = apply_profile_batch(&pool, ws, &[crm, shop]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        remove_contribution(&pool, ws, "shop", "contacts", "9", &trace())
+            .await
+            .unwrap();
+
+        // The anonymous id only the shop listed is gone; the shared email stays, and so does
+        // the external id.
+        assert_eq!(
+            identity_kinds(&pool, ws, person).await,
+            ["email", "external:crm"]
+        );
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+        let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(dirty, 1);
+        let removed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed' \
+               AND subject_ids ? 'person' AND subject_ids ? 'source_record'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(removed, 1);
+
+        // Removing the last record frees the rest, and the person stays under `keep`.
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert!(identity_kinds(&pool, ws, person).await.is_empty());
+        assert!(find_person(&pool, ws, person).await.unwrap().is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_a_contribution_deletes_the_conflicts_about_its_identities(pool: PgPool) {
+        use crate::privacy::testing::profile;
+
+        let ws = workspace(&pool, "one").await;
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                profile("crm", "1", &[("email", "a@example.com")], json!({})),
+                profile("shop", "2", &[("email", "b@example.com")], json!({})),
+            ],
+        )
+        .await
+        .unwrap();
+        let (one, two) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        let identity: Uuid =
+            sqlx::query_scalar("SELECT id FROM identities WHERE value = 'b@example.com'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO identity_conflicts \
+                (id, workspace_id, person_id, other_person_id, kind, reason, identity_id) \
+             VALUES ($1, $2, $3, $4, 'email', 'unique_kind', $5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(one)
+        .bind(two)
+        .bind(identity)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        remove_contribution(&pool, ws, "shop", "contacts", "2", &trace())
+            .await
+            .unwrap();
+
+        let conflicts: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_conflicts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conflicts, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_delete_policy_deletes_an_orphan_and_keep_does_not(pool: PgPool) {
+        use crate::privacy::testing::profile;
+
+        let ws = workspace(&pool, "one").await;
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                profile("crm", "1", &[("email", "a@example.com")], json!({"n": 1})),
+                profile("crm", "2", &[("email", "b@example.com")], json!({"n": 2})),
+            ],
+        )
+        .await
+        .unwrap();
+        let (kept, orphan) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert!(find_person(&pool, ws, kept).await.unwrap().is_some());
+        crate::set_orphan_policy(&pool, ws, OrphanPolicy::Delete)
+            .await
+            .unwrap();
+        remove_contribution(&pool, ws, "crm", "contacts", "2", &trace())
+            .await
+            .unwrap();
+
+        assert!(find_person(&pool, ws, orphan).await.unwrap().is_none());
+        assert!(find_person(&pool, ws, kept).await.unwrap().is_some());
+        assert_eq!(
+            crate::people::erasure::rows_referencing_person(&pool, orphan).await,
+            []
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_delete_policy_spares_a_person_with_another_record_an_event_or_explicit_consent(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
+        use zirv_flow_core::{HmacPurpose, MasterKey};
+
+        use crate::privacy::testing::profile;
+        use crate::{ConsentChange, EventRecord, apply_event_batch, set_consent};
+
+        let ws = workspace(&pool, "one").await;
+        crate::set_orphan_policy(&pool, ws, OrphanPolicy::Delete)
+            .await
+            .unwrap();
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                profile("crm", "1", &[("email", "two@example.com")], json!({})),
+                profile("shop", "2", &[("email", "two@example.com")], json!({})),
+                profile("crm", "3", &[("email", "event@example.com")], json!({})),
+                profile("crm", "4", &[("email", "consent@example.com")], json!({})),
+            ],
+        )
+        .await
+        .unwrap();
+        let [two, with_event, with_consent] = [0, 2, 3].map(|index| person_of(&outcomes[index]));
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        apply_event_batch(
+            &pool,
+            ws,
+            &key,
+            &[EventRecord {
+                source: "web".into(),
+                identifiers: vec![("email".into(), "event@example.com".into())],
+                name: "seen".into(),
+                properties: serde_json::Map::new(),
+                timestamp: None,
+                received_at: OffsetDateTime::now_utc(),
+                message_id: None,
+                trace: trace(),
+            }],
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        set_consent(
+            &mut tx,
+            ws,
+            &ConsentChange {
+                person: with_consent,
+                channel: Channel::Email,
+                topic: None,
+                status: ConsentStatus::Subscribed,
+                source: ChangeSource::Api,
+                evidence: json!({}),
+                occurred_at: T0,
+                actor: None,
+            },
+            &trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        for (source, key) in [("crm", "1"), ("crm", "3"), ("crm", "4")] {
+            remove_contribution(&pool, ws, source, "contacts", key, &trace())
+                .await
+                .unwrap();
+        }
+
+        for person in [two, with_event, with_consent] {
+            assert!(find_person(&pool, ws, person).await.unwrap().is_some());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removal_locks_the_record_before_the_person(pool: PgPool) {
+        use crate::privacy::testing::profile;
+
+        let ws = workspace(&pool, "one").await;
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[profile(
+                "crm",
+                "1",
+                &[("email", "a@example.com")],
+                json!({"n": 1}),
+            )],
+        )
+        .await
+        .unwrap();
+        let person = person_of(&outcomes[0]);
+        // The drain's existing-record path holds the record first.
+        let mut drain = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM source_records FOR UPDATE")
+            .execute(&mut *drain)
+            .await
+            .unwrap();
+        let removal = tokio::spawn({
+            let pool = pool.clone();
+            async move { remove_contribution(&pool, ws, "crm", "contacts", "1", &trace()).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // The removal waits on the record; it holds no lock on the person yet, so the drain
+        // can take the person without a deadlock.
+        let mut probe = begin(&pool).await.unwrap();
+        let locked = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(person)
+            .execute(&mut *probe)
+            .await;
+        drop(probe);
+        commit(drain).await.unwrap();
+
+        assert!(
+            locked.is_ok(),
+            "the removal locked the person before the record"
+        );
+        assert!(removal.await.unwrap().unwrap());
     }
 }

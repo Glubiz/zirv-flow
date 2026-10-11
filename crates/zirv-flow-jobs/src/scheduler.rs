@@ -12,8 +12,8 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, disable_schedule, due_schedules, enqueue, enqueue_drain,
-    ensure_decision_partitions, ensure_event_partitions, inbox_heads, queue_depths, reap_expired,
-    try_lead,
+    ensure_decision_partitions, ensure_event_partitions, expire_exports, inbox_heads, queue_depths,
+    reap_expired, try_lead,
 };
 
 use crate::metrics::{QueueGauges, set_inbox_age};
@@ -135,9 +135,10 @@ impl Scheduler {
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
-    /// Makes sure the decision log and the event store have partitions for this and next
-    /// month: on gaining
-    /// leadership, then at most hourly. A failure is logged and retried at the next check.
+    /// The hourly upkeep: makes sure the decision log and the event store have partitions for
+    /// this and next month, and expires the person exports that are past their 24 hours. Runs
+    /// on gaining leadership, then at most hourly. A failure is logged and retried at the next
+    /// check.
     async fn keep_partitions(&mut self, now: OffsetDateTime) {
         let due = self
             .partitions_checked
@@ -151,6 +152,10 @@ impl Scheduler {
         }
         if let Err(error) = ensure_event_partitions(&self.pool, now.date()).await {
             warn!("could not create the event partitions: {error}");
+        }
+        // Person exports expire 24 hours after they are ready; their content goes with them.
+        if let Err(error) = expire_exports(&self.pool).await {
+            warn!("could not expire the person exports: {error}");
         }
     }
 
@@ -525,6 +530,48 @@ mod tests {
                 .all(|(_, kind, cause)| kind == "schedule" && *cause == id.to_string())
         );
         assert_ne!(rows[0].0, rows[1].0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leaders_upkeep_expires_exports_past_their_time_and_keeps_the_others(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        let person = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (expires, label) in [("-1 minute", "past"), ("+1 hour", "future")] {
+            sqlx::query(
+                "INSERT INTO privacy_exports \
+                    (id, workspace_id, person_id, status, ready_at, expires_at, content, \
+                     size_bytes, trace_id, requested_by) \
+                 VALUES (gen_random_uuid(), $1, $2, 'ready', now(), \
+                         now() + $3::interval, '\\x1f8b'::bytea, 2, gen_random_uuid(), NULL)",
+            )
+            .bind(ws.as_uuid())
+            .bind(person)
+            .bind(expires)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        }
+
+        scheduler(&pool).tick().await.unwrap();
+
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT status, content IS NULL FROM privacy_exports ORDER BY expires_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [("expired".to_owned(), true), ("ready".to_owned(), false)]
+        );
     }
 
     #[sqlx::test]

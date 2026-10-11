@@ -11,11 +11,12 @@ use std::fmt;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zirv_flow_core::{
-    ApiKeyId, Email, Role, Scope, Slug, UserId, ValidationError, WorkspaceId, WorkspaceName,
-    password,
+    ApiKeyId, Cause, Email, HmacPurpose, MasterKey, Role, Scope, Slug, TraceContext, UserId,
+    ValidationError, WorkspaceId, WorkspaceName, password,
 };
 use zirv_flow_store::{
-    Actor, ApiKey, Membership, NewAuditEntry, PgConnection, PgPool, StoreError, User, Workspace,
+    Actor, ApiKey, Membership, NewAuditEntry, PgConnection, PgPool, ReplayReport, StoreError, User,
+    Workspace,
 };
 
 use crate::{credentials, passwords};
@@ -425,6 +426,50 @@ pub async fn revoke_api_key(
     .await?;
     zirv_flow_store::commit(tx).await?;
     Ok(())
+}
+
+/// Re-applies the completed erasure ledger of one workspace (by slug) or of all of them after a
+/// backup restore: re-adds the `erased` suppressions, erases every ledger person that exists
+/// again, and removes pending inbox rows that name an erased identifier. Returns counts only,
+/// and audits them as `privacy.erasures_replayed`.
+pub async fn replay_erasures(
+    pool: &PgPool,
+    context: &Context,
+    workspace: Option<&str>,
+    key: &MasterKey,
+) -> Result<ReplayReport, AdminError> {
+    let workspace = match workspace {
+        Some(slug) => {
+            let slug = Slug::parse(slug)?;
+            Some(
+                zirv_flow_store::find_workspace_by_slug(pool, &slug)
+                    .await?
+                    .ok_or(AdminError::NotFound("workspace"))?
+                    .id,
+            )
+        }
+        None => None,
+    };
+    let key = key.hmac_key(HmacPurpose::Identifier);
+    let trace = TraceContext::root(Cause::api("admin.replay-erasures"));
+    let report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    audit(
+        &mut tx,
+        context,
+        workspace,
+        "privacy.erasures_replayed",
+        None,
+        json!({
+            "requests": report.requests,
+            "suppressions": report.suppressions,
+            "people": report.people,
+            "inbox_rows": report.inbox_rows,
+        }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ mod search;
 mod timeline;
 
 #[cfg(test)]
-mod erasure;
+pub(crate) mod erasure;
 #[cfg(test)]
 mod isolation;
 
