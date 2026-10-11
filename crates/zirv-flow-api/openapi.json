@@ -2465,6 +2465,977 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/imports": {
+      "get": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "The workspace's imports, newest first: the run history.",
+        "operationId": "list_imports",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Imports per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of imports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Uploads a CSV file as a new import. The body is the raw `text/csv` file, streamed into the\ndatabase in 1 MiB chunks; it must be UTF-8 (a byte order mark is ignored) with a header row\nof unique names. The delimiter is detected from `,`, `;` and tab unless one is given. The\nanswer holds the import, its header and the first 20 rows, masked for callers who may not\nsee values. The import exists as `uploading` (hidden from the history) while the body\narrives, each 1 MiB chunk is stored on its own, and an upload that is refused, breaks off\nor stalls for 60 seconds is deleted with its chunks. Audited as `import.created`.",
+        "operationId": "upload_import",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "A name for the import, 1 to 128 characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_name",
+            "in": "query",
+            "description": "The file's name; defaults to name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "The source records are written under: a-z, 0-9, _ and -; default csv",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "description": "The stream records are written under; default the file name without its extension",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "delimiter",
+            "in": "query",
+            "description": "comma, semicolon or tab; detected when absent",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The CSV file",
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new import with its header and sample rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportDetailBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed query, or an upload that broke off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file is over imports.max_file_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not text/csv",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not UTF-8, empty, or a header with blank or repeated names",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}": {
+      "get": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "One import: its state and counters, which a client polls for progress. With\n`samples=true` it also shows the first 20 rows of the file, masked for callers who may not\nsee values.",
+        "operationId": "get_import",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "samples",
+            "in": "query",
+            "description": "Include the first 20 rows of the file",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/cancel": {
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Cancels an import that has not ended. A running pass stops at its next batch boundary, so\nthe batches already applied stay applied. Audited as `import.cancelled`.",
+        "operationId": "cancel_import",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancelled import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The import has ended already",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/dry-run": {
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Starts the dry run: maps every row of the file and keeps only the rejects (phase\n`dry_run`) and the counters; no person, list or trait is written. The answer is the import\nin `dry_running`; poll it until `dry_run_done`. Needs a saved mapping.",
+        "operationId": "dry_run_import",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The dry run was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The import has no mapping, is busy, or has ended",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/mapping": {
+      "put": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Saves the mapping and moves the import to `mapped`. The mapping needs at least one\nidentifier target, columns the file has, and trait keys that exist and are not archived;\nlist targets must exist. Allowed until the first run starts; saving clears the counters and\nrejects of an earlier dry run.",
+        "operationId": "put_import_mapping",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MappingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The mapped import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The import is running or has ended",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The mapping is invalid; the detail names the rule and the column",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/rejects": {
+      "get": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "The rows an import refused, in row order, with the codes of what was wrong: never a cell.\n`phase` narrows to the dry run's or the run's rejects. Rejects are kept 30 days.",
+        "operationId": "list_import_rejects",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "phase",
+            "in": "query",
+            "description": "dry_run or run",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rejects per page, 1 to 200; default 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "The next_after of the previous page",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of rejects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRejectsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed phase, limit or after",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv": {
+      "get": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "The rejects as a CSV, `row_number,column,reason` with one line per problem, streamed page\nby page. For the owner, workspace admins and `admin` keys the rows' own cells follow, under\nthe file's column names; cells that start like a spreadsheet formula get a leading quote.\nEveryone else with read access gets the codes alone. Audited as `import.rejects_downloaded`.",
+        "operationId": "download_import_rejects",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "phase",
+            "in": "query",
+            "description": "dry_run or run",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rejects as CSV",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed phase",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/imports/{id}/run": {
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Starts the run: applies every row in batches of 500, each batch one transaction that\nwrites the profile records, adds the list members, keeps the rejects and advances the\ncheckpoint. A crash resumes from the checkpoint. The run fails with `reject_threshold` once\nmore than 1,000 rows are done and the rejected share is above the import's threshold; the\nbatches already applied stay applied. Running the same file again with the same source and\nstream changes nothing. The answer is the import in `running`; poll it. Audited as\n`import.run_started`.",
+        "operationId": "run_import",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Import id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The run was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvImportBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or import, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The import has no mapping, is busy, or has ended",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/ingest-rejects": {
       "get": {
         "tags": [
@@ -6909,6 +7880,30 @@
           }
         }
       },
+      "ColumnRuleBody": {
+        "type": "object",
+        "required": [
+          "column",
+          "target"
+        ],
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "A column name of the header."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBody"
+          },
+          "transforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransformBody"
+            },
+            "description": "Applied in order to the cell before it reaches the target; at most 10."
+          }
+        },
+        "additionalProperties": false
+      },
       "ConflictBody": {
         "type": "object",
         "required": [
@@ -7272,6 +8267,212 @@
             }
           }
         ]
+      },
+      "CsvImportBody": {
+        "type": "object",
+        "description": "An import: its file, mapping, state and counters.",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "stream",
+          "file_name",
+          "file_sha256",
+          "size_bytes",
+          "delimiter",
+          "header",
+          "status",
+          "rows_total",
+          "rows_done",
+          "rows_applied",
+          "rows_unchanged",
+          "rows_rejected",
+          "reject_threshold",
+          "trace_id",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "delimiter": {
+            "type": "string",
+            "description": "`,`, `;` or a tab."
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a failed import failed, such as `reject_threshold`; never a value."
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "file_sha256": {
+            "type": "string",
+            "description": "The SHA-256 of the file, in lowercase hex."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "header": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The column names, in file order."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mapping": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MappingBody"
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "example": "Customers May"
+          },
+          "reject_threshold": {
+            "type": "number",
+            "format": "double",
+            "description": "The rejected share above which a run stops, once more than 1,000 rows are done."
+          },
+          "rows_applied": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows applied (written); in a dry run, rows that would be."
+          },
+          "rows_done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows the current pass has finished, rejected ones included."
+          },
+          "rows_rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rows_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Data rows in the file, the header not counted."
+          },
+          "rows_unchanged": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows that repeated what is stored already, so nothing was written."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string",
+            "description": "The source the import's records are written under.",
+            "example": "csv"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "description": "`uploaded`, `mapped`, `dry_running`, `dry_run_done`, `running`, `succeeded`, `failed` or\n`cancelled`."
+          },
+          "stream": {
+            "type": "string",
+            "description": "The stream the import's records are written under; keep it stable between runs of the\nsame data.",
+            "example": "customers"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace of the upload: 32 lowercase hex characters."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CsvImportDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CsvImportBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "samples",
+              "samples_masked"
+            ],
+            "properties": {
+              "samples": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "description": "The first 20 data rows, one list of cells per row, in header order. Empty unless asked\nfor (`samples=true`) or just uploaded, and empty once the file was deleted."
+              },
+              "samples_masked": {
+                "type": "boolean",
+                "description": "True when the caller may not see values: every cell of `samples` is null."
+              }
+            }
+          }
+        ],
+        "description": "An import with the first rows of its file."
+      },
+      "CsvImportsBody": {
+        "type": "object",
+        "required": [
+          "imports"
+        ],
+        "properties": {
+          "imports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CsvImportBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
       },
       "DeadJobsBody": {
         "type": "object",
@@ -8047,6 +9248,71 @@
           }
         }
       },
+      "ImportRejectBody": {
+        "type": "object",
+        "required": [
+          "row_number",
+          "phase",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportRejectErrorBody"
+            }
+          },
+          "phase": {
+            "type": "string",
+            "description": "`dry_run` or `run`."
+          },
+          "row_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The row as a spreadsheet numbers it: the header is row 1."
+          }
+        }
+      },
+      "ImportRejectErrorBody": {
+        "type": "object",
+        "required": [
+          "column",
+          "reason"
+        ],
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "The column the problem is on; empty when none."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`missing_identifier`, `invalid_identifier`, `wrong_type`, `bad_timestamp`,\n`unknown_column`, `invalid_key` or `apply_failed`."
+          }
+        }
+      },
+      "ImportRejectsBody": {
+        "type": "object",
+        "required": [
+          "rejects"
+        ],
+        "properties": {
+          "next_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `after` for the next page; null when there is none."
+          },
+          "rejects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportRejectBody"
+            },
+            "description": "In row order."
+          }
+        }
+      },
       "IngestRejectBody": {
         "type": "object",
         "required": [
@@ -8386,6 +9652,29 @@
             "description": "Pass as `before` for the next page; null when there is none."
           }
         }
+      },
+      "MappingBody": {
+        "type": "object",
+        "description": "How the columns of a file become identifiers, traits and lists.",
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnRuleBody"
+            }
+          },
+          "key_column": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The column whose value is the record key. Without it the key is the file's hash and the\nrow number, so only the same file can be run again without changes."
+          }
+        },
+        "additionalProperties": false
       },
       "MemberBody": {
         "type": "object",
@@ -9416,6 +10705,84 @@
           }
         }
       },
+      "TargetBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An identifier: `email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+            "required": [
+              "kind",
+              "type"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identifier"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A trait by registry key; it must exist and not be archived.",
+            "required": [
+              "key",
+              "type"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "trait"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A truthy cell (`true`, `1`, `yes`, `x`, and so on) adds the person to the list.",
+            "required": [
+              "list_id",
+              "type"
+            ],
+            "properties": {
+              "list_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "list"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The column is not used.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ignore"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where a column's value goes."
+      },
       "TargetIdentifier": {
         "type": "object",
         "required": [
@@ -9728,6 +11095,192 @@
             "description": "Required for every operator but `exists`; it must fit the trait's type."
           }
         }
+      },
+      "TraitTypeBody": {
+        "type": "string",
+        "description": "The type a `cast` converts to.",
+        "enum": [
+          "string",
+          "number",
+          "boolean",
+          "timestamp",
+          "date",
+          "string_list"
+        ]
+      },
+      "TransformBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "trim"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "lower"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "upper"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Converts the text to a type.",
+            "required": [
+              "to",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "cast"
+                ]
+              },
+              "to": {
+                "$ref": "#/components/schemas/TraitTypeBody"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Parses a date or time into a UTC timestamp. `format` is a strftime pattern such as\n`%d/%m/%Y %H:%M`, or `unix` or `unix_ms`.",
+            "required": [
+              "format",
+              "op"
+            ],
+            "properties": {
+              "format": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "timestamp"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Joins the value with other columns' values, skipping empty ones.",
+            "required": [
+              "columns",
+              "separator",
+              "op"
+            ],
+            "properties": {
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "concat"
+                ]
+              },
+              "separator": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Ignores the cell and uses this text.",
+            "required": [
+              "value",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "constant"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Replaces a value that is a key of the map; others stay as they are.",
+            "required": [
+              "map",
+              "op"
+            ],
+            "properties": {
+              "map": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "value_map"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Splits the text into a list of trimmed, non-empty strings.",
+            "required": [
+              "separator",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "split"
+                ]
+              },
+              "separator": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One step between a cell and its target."
       },
       "UnmatchedRow": {
         "type": "object",

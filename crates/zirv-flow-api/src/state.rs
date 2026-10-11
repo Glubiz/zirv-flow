@@ -6,6 +6,7 @@ use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::imports::ImportLimits;
 use crate::ingest::{IngestLimits, IngestState};
 use crate::oidc;
 
@@ -28,6 +29,8 @@ pub struct AppState {
     pub(crate) event_retention: EventRetention,
     /// The ingestion limits and the per-key rate-limit buckets.
     pub(crate) ingest: IngestState,
+    /// The largest CSV file an upload takes.
+    pub(crate) imports: ImportLimits,
     /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
@@ -58,6 +61,7 @@ impl AppState {
             oidc: None,
             event_retention: EventRetention::default(),
             ingest: IngestState::new(IngestLimits::default()),
+            imports: ImportLimits::default(),
             setup_token: Arc::default(),
             identifier_key: None,
         }
@@ -92,6 +96,12 @@ impl AppState {
     /// The ingestion limits: body size, batch size and the per-key rate, per process.
     pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest = IngestState::new(limits);
+        self
+    }
+
+    /// The limits on CSV uploads.
+    pub fn with_import_limits(mut self, limits: ImportLimits) -> Self {
+        self.imports = limits;
         self
     }
 

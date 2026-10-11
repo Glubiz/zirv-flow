@@ -12,6 +12,7 @@ base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 croner.workspace = true
+csv-core.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true

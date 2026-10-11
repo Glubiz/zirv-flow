@@ -6428,4 +6428,1093 @@ email,b@example.com,
             json!({"requests": 0, "suppressions": 0, "people": 0, "inbox_rows": 0})
         );
     }
+
+    fn imports_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/imports{rest}")
+    }
+
+    const CUSTOMERS: &str = "Email,Plan,Newsletter\n\
+                             ada@example.com,pro,yes\n\
+                             bob@example.com,free,no\n\
+                             not-an-email,free,yes\n";
+
+    /// Uploads `csv` and returns the reply, its body parsed.
+    async fn upload_csv(
+        router: &Router,
+        ws: &str,
+        query: &str,
+        csv: &str,
+        auth: Auth<'_>,
+    ) -> (StatusCode, Value) {
+        let reply = call_text(
+            router,
+            "POST",
+            &imports_uri(ws, &format!("?{query}")),
+            Some("text/csv"),
+            csv.to_owned(),
+            auth,
+        )
+        .await;
+        let body = serde_json::from_str(&reply.text).unwrap_or(Value::Null);
+        (reply.status, body)
+    }
+
+    async fn mapped_import(router: &Router, owner: &Login, ws: &str) -> String {
+        let (status, body) = upload_csv(
+            router,
+            ws,
+            "name=Customers&file_name=customers.csv",
+            CUSTOMERS,
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body:?}");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let reply = call(
+            router,
+            "PUT",
+            &imports_uri(ws, &format!("/{id}/mapping")),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"},
+                 "transforms": [{"op": "trim"}, {"op": "lower"}]}
+            ]})),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_stores_the_file_and_shows_its_header_and_first_rows(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let (status, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers%20May&file_name=Customers%20May.csv",
+            "\u{feff}Email;Plan\r\nada@example.com;pro\r\n\"b;ob@example.com\";free\r\n",
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body:?}");
+        assert_eq!(body["status"], "uploaded");
+        assert_eq!(body["header"], json!(["Email", "Plan"]));
+        assert_eq!(body["delimiter"], ";");
+        assert_eq!(body["rows_total"], 2);
+        assert_eq!(body["source"], "csv");
+        assert_eq!(body["stream"], "customers-may");
+        assert_eq!(
+            body["samples"],
+            json!([["ada@example.com", "pro"], ["b;ob@example.com", "free"]])
+        );
+        assert_eq!(body["samples_masked"], false);
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT data FROM import_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(stored.starts_with(b"\xEF\xBB\xBFEmail;Plan"));
+        let hash: String = zirv_flow_core::token::sha256(std::str::from_utf8(&stored).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(body["file_sha256"], hash.as_str());
+        let audit: Vec<(String, Value)> =
+            sqlx::query_as("SELECT action, summary FROM audit_log WHERE action LIKE 'import.%'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "import.created");
+        assert!(!audit[0].1.to_string().contains("ada@"));
+        assert_eq!(audit[0].1["rows"], 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sample_rows_are_masked_for_a_member_who_may_not_see_values(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+
+        let (status, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers",
+            CUSTOMERS,
+            Auth::Session(&member),
+        )
+        .await;
+        let again = call(
+            &router,
+            "GET",
+            &imports_uri(
+                &ws,
+                &format!("/{}?samples=true", body["id"].as_str().unwrap()),
+            ),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["samples_masked"], true);
+        assert_eq!(body["samples"][0], json!([null, null, null]));
+        assert_eq!(again.body["samples_masked"], true);
+        assert_eq!(again.body["samples"].as_array().unwrap().len(), 3);
+        assert!(!again.body.to_string().contains("ada@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_poll_shows_the_samples_only_when_asked_for(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let id = mapped_import(&router, &owner, &ws).await;
+
+        let plain = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let with = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}?samples=true")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(plain.body["samples"], json!([]));
+        assert_eq!(with.body["samples"][0][0], "ada@example.com");
+        assert_eq!(with.body["status"], "mapped");
+        assert_eq!(with.body["mapping"]["columns"][0]["column"], "Email");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_over_the_limit_is_a_413_whether_declared_or_streamed_and_keeps_nothing(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new)).with_import_limits(
+                crate::ImportLimits {
+                    max_file_bytes: 64,
+                    ..crate::ImportLimits::default()
+                },
+            ),
+        );
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        let owner = login(&router, OWNER_EMAIL).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let big = format!("Email\n{}", "ada@example.com\n".repeat(10));
+
+        let (declared, _) = upload_csv(&router, &ws, "name=x", &big, Auth::Session(&owner)).await;
+        let streamed = {
+            let pieces: Vec<Result<Vec<u8>, std::io::Error>> = big
+                .as_bytes()
+                .chunks(20)
+                .map(|piece| Ok(piece.to_vec()))
+                .collect();
+            let request = Request::builder()
+                .method("POST")
+                .uri(imports_uri(&ws, "?name=x"))
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header(header::COOKIE, &owner.cookie)
+                .header("x-csrf-token", &owner.csrf)
+                .body(Body::from_stream(futures_util::stream::iter(pieces)))
+                .unwrap();
+            router.clone().oneshot(request).await.unwrap().status()
+        };
+        let (fits, _) = upload_csv(
+            &router,
+            &ws,
+            "name=x",
+            "Email\na@example.com\n",
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(declared, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(streamed, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(fits, StatusCode::CREATED);
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM imports")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let chunks: i64 = sqlx::query_scalar("SELECT count(*) FROM import_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((kept, chunks), (1, 1), "only the file that fit was kept");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bad_file_is_refused_and_leaves_nothing_behind(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let post = |query: &'static str, content_type: Option<&'static str>, body: Vec<u8>| {
+            let (router, owner, ws) = (router.clone(), &owner, ws.clone());
+            async move {
+                let reply = call_text_bytes(
+                    &router,
+                    &imports_uri(&ws, &format!("?{query}")),
+                    content_type,
+                    body,
+                    Auth::Session(owner),
+                )
+                .await;
+                (reply.0, reply.1)
+            }
+        };
+
+        let duplicate = post("name=x", Some("text/csv"), b"A,B,A\n1,2,3\n".to_vec()).await;
+        let blank = post("name=x", Some("text/csv"), b"A,,C\n1,2,3\n".to_vec()).await;
+        let not_utf8 = post("name=x", Some("text/csv"), b"A\n\xFF\xFE\n".to_vec()).await;
+        let empty = post("name=x", Some("text/csv"), b"\n\n".to_vec()).await;
+        let wrong_type = post("name=x", Some("application/json"), b"{}".to_vec()).await;
+        let no_type = post("name=x", None, b"A\n1\n".to_vec()).await;
+        let no_name = post("", Some("text/csv"), b"A\n1\n".to_vec()).await;
+        let bad_delimiter = post("name=x&delimiter=pipe", Some("text/csv"), b"A\n".to_vec()).await;
+
+        assert_eq!(duplicate.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(duplicate.1.contains("unique"), "{}", duplicate.1);
+        assert_eq!(blank.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(not_utf8.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(empty.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(wrong_type.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(no_type.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(no_name.0, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_delimiter.0, StatusCode::BAD_REQUEST);
+        for table in ["imports", "import_chunks"] {
+            let rows: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+    }
+
+    /// An upload with an optional content type, as status and body text.
+    async fn call_text_bytes(
+        router: &Router,
+        uri: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+        auth: Auth<'_>,
+    ) -> (StatusCode, String) {
+        let reply = call_raw(router, uri, content_type, body, auth).await;
+        (reply.status, reply.body.to_string())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_mapping_is_validated_against_the_header_the_registry_and_the_lists(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers",
+            CUSTOMERS,
+            Auth::Session(&owner),
+        )
+        .await;
+        let id = body["id"].as_str().unwrap();
+        let uri = imports_uri(&ws, &format!("/{id}/mapping"));
+        let email = json!({"column": "Email", "target": {"type": "identifier", "kind": "email"}});
+        let put = |columns: Value| {
+            let (router, owner, uri) = (router.clone(), &owner, uri.clone());
+            async move {
+                call(
+                    &router,
+                    "PUT",
+                    &uri,
+                    Some(json!({ "columns": columns })),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+        call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/traits"),
+            Some(json!({"key": "plan", "type": "string"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let none = put(json!([])).await;
+        let ghost = put(json!([email, {"column": "Ghost", "target": {"type": "ignore"}}])).await;
+        let unknown_trait = put(json!([
+            email,
+            {"column": "Plan", "target": {"type": "trait", "key": "nope"}}
+        ]))
+        .await;
+        let unknown_list = put(json!([
+            email,
+            {"column": "Newsletter",
+             "target": {"type": "list", "list_id": "00000000-0000-7000-8000-000000000000"}}
+        ]))
+        .await;
+        let bad_transform = put(json!([{
+            "column": "Email", "target": {"type": "identifier", "kind": "email"},
+            "transforms": [{"op": "timestamp", "format": "%Q"}]
+        }]))
+        .await;
+        let script = put(json!([{
+            "column": "Email", "target": {"type": "identifier", "kind": "email"},
+            "transforms": [{"op": "eval", "code": "1"}]
+        }]))
+        .await;
+        let ok = put(json!([
+            email,
+            {"column": "Plan", "target": {"type": "trait", "key": "plan"}}
+        ]))
+        .await;
+
+        assert_eq!(none.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(none.body["detail"], "mapping: no_identifier");
+        assert_eq!(ghost.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"Ghost\")"
+        );
+        assert_eq!(
+            unknown_trait.body["detail"],
+            "mapping: unknown_trait (column \"Plan\")"
+        );
+        assert_eq!(
+            unknown_list.body["detail"],
+            "mapping: unknown_list (column \"Newsletter\")"
+        );
+        assert_eq!(bad_transform.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(script.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ok.status, StatusCode::OK, "{:?}", ok.body);
+        assert_eq!(ok.body["status"], "mapped");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_needs_a_mapping_and_a_run_is_audited_and_queued_once(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers",
+            CUSTOMERS,
+            Auth::Session(&owner),
+        )
+        .await;
+        let id = body["id"].as_str().unwrap().to_owned();
+        let post = |action: &str| {
+            let (router, owner) = (router.clone(), &owner);
+            let uri = imports_uri(&ws, &format!("/{id}/{action}"));
+            async move { call(&router, "POST", &uri, None, Auth::Session(owner)).await }
+        };
+
+        let unmapped_dry = post("dry-run").await;
+        let unmapped_run = post("run").await;
+        call(
+            &router,
+            "PUT",
+            &imports_uri(&ws, &format!("/{id}/mapping")),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let started = post("run").await;
+        let twice = post("run").await;
+        let dry_while_running = post("dry-run").await;
+        let remap = call(
+            &router,
+            "PUT",
+            &imports_uri(&ws, &format!("/{id}/mapping")),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(unmapped_dry.status, StatusCode::CONFLICT);
+        assert_eq!(unmapped_run.status, StatusCode::CONFLICT);
+        assert_eq!(started.status, StatusCode::ACCEPTED, "{:?}", started.body);
+        assert_eq!(started.body["status"], "running");
+        assert!(started.body["started_at"].is_string());
+        assert_eq!(twice.status, StatusCode::CONFLICT);
+        assert_eq!(dry_while_running.status, StatusCode::CONFLICT);
+        assert_eq!(remap.status, StatusCode::CONFLICT);
+        let jobs: Vec<(String, Value, Option<String>)> =
+            sqlx::query_as("SELECT kind, payload, unique_key FROM jobs WHERE kind LIKE 'import.%'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, "import.run");
+        assert_eq!(jobs[0].1["import_id"], id.as_str());
+        assert_eq!(
+            jobs[0].2.as_deref(),
+            Some(format!("import.run:{id}").as_str())
+        );
+        let audit: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT action, summary FROM audit_log WHERE action LIKE 'import.%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let actions: Vec<&str> = audit.iter().map(|(action, _)| action.as_str()).collect();
+        assert_eq!(actions, ["import.created", "import.run_started"]);
+        assert_eq!(audit[1].1, json!({"rows": 3}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dry_run_is_queued_and_a_poll_follows_the_counters(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let id = mapped_import(&router, &owner, &ws).await;
+
+        let started = call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/dry-run")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        sqlx::query(
+            "UPDATE imports SET rows_done = 2, rows_applied = 1, rows_rejected = 1 WHERE id = $1",
+        )
+        .bind(id.parse::<uuid::Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let polled = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(started.status, StatusCode::ACCEPTED);
+        assert_eq!(started.body["status"], "dry_running");
+        assert_eq!(polled.status, StatusCode::OK);
+        assert_eq!(
+            (
+                &polled.body["rows_total"],
+                &polled.body["rows_done"],
+                &polled.body["rows_applied"],
+                &polled.body["rows_rejected"]
+            ),
+            (&json!(3), &json!(2), &json!(1), &json!(1))
+        );
+        let kind: String = sqlx::query_scalar("SELECT kind FROM jobs WHERE kind LIKE 'import.%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kind, "import.dry_run");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_import_can_be_cancelled_once_and_the_job_stops_at_its_checkpoint(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let id = mapped_import(&router, &owner, &ws).await;
+        call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/run")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let cancelled = call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/cancel")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/cancel")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let run_again = call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/run")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(cancelled.status, StatusCode::OK);
+        assert_eq!(cancelled.body["status"], "cancelled");
+        assert!(cancelled.body["finished_at"].is_string());
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(run_again.status, StatusCode::CONFLICT);
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit_log WHERE action LIKE 'import.%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            actions,
+            ["import.created", "import.run_started", "import.cancelled"]
+        );
+        let import = zirv_flow_store::find_import(&pool, ws.parse().unwrap(), id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = zirv_flow_store::commit_import_batch(
+            &pool,
+            &zirv_flow_store::ImportBatch {
+                import_id: import.id,
+                workspace: ws.parse().unwrap(),
+                expected_done: 0,
+                records: &[],
+                details: &[],
+                rejected: &[],
+                trace: &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, zirv_flow_store::BatchOutcome::Superseded);
+    }
+
+    /// Writes rejects the way a run does, through the store.
+    async fn seed_rejects(pool: &PgPool, ws: &str, id: &str) {
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        zirv_flow_store::start_import_run(&mut tx, ws.parse().unwrap(), id.parse().unwrap())
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let rejected = [
+            zirv_flow_store::RejectedRow {
+                row_number: 4,
+                reasons: vec![
+                    zirv_flow_store::RejectReason {
+                        column: "Email".into(),
+                        reason: "invalid_identifier",
+                    },
+                    zirv_flow_store::RejectReason {
+                        column: "Plan".into(),
+                        reason: "wrong_type",
+                    },
+                ],
+                raw: vec!["not-an-email".into(), "=cmd".into(), "yes".into()],
+            },
+            zirv_flow_store::RejectedRow {
+                row_number: 6,
+                reasons: vec![zirv_flow_store::RejectReason {
+                    column: "Email".into(),
+                    reason: "missing_identifier",
+                }],
+                raw: vec![String::new(), "x".into(), "no".into()],
+            },
+        ];
+        zirv_flow_store::commit_import_batch(
+            pool,
+            &zirv_flow_store::ImportBatch {
+                import_id: id.parse().unwrap(),
+                workspace: ws.parse().unwrap(),
+                expected_done: 0,
+                records: &[],
+                details: &[],
+                rejected: &rejected,
+                trace: &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rejects_list_codes_and_the_csv_holds_cells_for_admins_only(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let id = mapped_import(&router, &owner, &ws).await;
+        seed_rejects(&pool, &ws, &id).await;
+
+        let json_page = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects?limit=1")),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let next = call(
+            &router,
+            "GET",
+            &imports_uri(
+                &ws,
+                &format!(
+                    "/{id}/rejects?limit=1&after={}",
+                    json_page.body["next_after"]
+                ),
+            ),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let admin_csv = call_text(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects.csv")),
+            None,
+            String::new(),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member_csv = call_text(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects.csv?phase=run")),
+            None,
+            String::new(),
+            Auth::Session(&member),
+        )
+        .await;
+
+        assert_eq!(json_page.status, StatusCode::OK);
+        assert_eq!(
+            json_page.body["rejects"],
+            json!([{"row_number": 4, "phase": "run", "errors": [
+                {"column": "Email", "reason": "invalid_identifier"},
+                {"column": "Plan", "reason": "wrong_type"}]}])
+        );
+        assert_eq!(json_page.body["next_after"], 4);
+        assert_eq!(next.body["rejects"][0]["row_number"], 6);
+        assert_eq!(next.body["next_after"], Value::Null);
+        assert!(!json_page.body.to_string().contains("not-an-email"));
+        assert_eq!(admin_csv.status, StatusCode::OK);
+        assert_eq!(
+            admin_csv.headers[header::CONTENT_TYPE],
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(
+            admin_csv.text,
+            "row_number,column,reason,Email,Plan,Newsletter\n\
+             4,Email,invalid_identifier,not-an-email,'=cmd,yes\n\
+             4,Plan,wrong_type\n\
+             6,Email,missing_identifier,,x,no\n"
+        );
+        assert_eq!(member_csv.status, StatusCode::OK);
+        assert_eq!(
+            member_csv.text,
+            "row_number,column,reason\n\
+             4,Email,invalid_identifier\n\
+             4,Plan,wrong_type\n\
+             6,Email,missing_identifier\n"
+        );
+        let audit: Vec<Value> = sqlx::query_scalar(
+            "SELECT summary FROM audit_log WHERE action = 'import.rejects_downloaded' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0]["with_cells"], true);
+        assert_eq!(audit[1]["with_cells"], false);
+        assert_eq!(audit[1]["phase"], "run");
+        assert!(!audit[0].to_string().contains("not-an-email"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn read_keys_read_and_cannot_change_and_other_workspaces_see_nothing(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        let id = mapped_import(&router, &owner, &ws).await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
+        let mapping = json!({"columns": [
+            {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]});
+
+        let mut forbidden = Vec::new();
+        for (method, path, body) in [
+            ("PUT", format!("/{id}/mapping"), Some(mapping.clone())),
+            ("POST", format!("/{id}/dry-run"), None),
+            ("POST", format!("/{id}/run"), None),
+            ("POST", format!("/{id}/cancel"), None),
+        ] {
+            let reply = call(
+                &router,
+                method,
+                &imports_uri(&ws, &path),
+                body,
+                Auth::Key(&read_key),
+            )
+            .await;
+            forbidden.push(reply.status);
+        }
+        let upload = call_raw(
+            &router,
+            &imports_uri(&ws, "?name=x"),
+            Some("text/csv"),
+            b"Email\na@example.com\n".to_vec(),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let list = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, ""),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let get = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}?samples=true")),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let rejects_csv = call_text(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects.csv")),
+            None,
+            String::new(),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let write_cannot_read = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, ""),
+            None,
+            Auth::Key(&write_key),
+        )
+        .await;
+        let write_uploads = call_raw(
+            &router,
+            &imports_uri(&ws, "?name=y"),
+            Some("text/csv"),
+            b"Email\na@example.com\n".to_vec(),
+            Auth::Key(&write_key),
+        )
+        .await;
+        let admin_get = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}?samples=true")),
+            None,
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &imports_uri(&ws, &format!("/{id}/run")),
+            None,
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let foreign = call(
+            &router,
+            "GET",
+            &imports_uri(&other, &format!("/{id}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_key = call(
+            &router,
+            "GET",
+            &imports_uri(&other, ""),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let foreign_rejects = call(
+            &router,
+            "GET",
+            &imports_uri(&other, &format!("/{id}/rejects")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert!(
+            forbidden
+                .iter()
+                .all(|status| *status == StatusCode::FORBIDDEN),
+            "{forbidden:?}"
+        );
+        assert_eq!(upload.status, StatusCode::FORBIDDEN);
+        assert_eq!(list.status, StatusCode::OK);
+        assert_eq!(list.body["imports"].as_array().unwrap().len(), 1);
+        assert_eq!(get.status, StatusCode::OK);
+        assert_eq!(
+            get.body["samples_masked"], true,
+            "a read key sees no values"
+        );
+        assert_eq!(get.body["samples"][0], json!([null, null, null]));
+        assert_eq!(rejects_csv.status, StatusCode::OK);
+        assert_eq!(write_cannot_read.status, StatusCode::FORBIDDEN);
+        assert_eq!(write_uploads.status, StatusCode::CREATED);
+        assert_eq!(admin_get.body["samples_masked"], false);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_key.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_rejects.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_history_lists_newest_first_in_pages_with_a_cursor(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let (_, body) = upload_csv(
+                &router,
+                &ws,
+                &format!("name=Import%20{n}"),
+                "Email\na@example.com\n",
+                Auth::Session(&owner),
+            )
+            .await;
+            ids.push(body["id"].as_str().unwrap().to_owned());
+        }
+        ids.reverse();
+
+        let first = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, "?limit=2"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let second = call(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("?limit=2&before={cursor}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let listed: Vec<&str> = first.body["imports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second.body["imports"].as_array().unwrap())
+            .map(|import| import["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ids.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(second.body["next_before"], Value::Null);
+        assert!(!first.body.to_string().contains("a@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rejects_csv_guards_the_header_names_and_columns_against_formulas(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (status, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Formulas",
+            "Email,=HYPERLINK(\"http://x\")\nnot-an-email,1\n",
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body:?}");
+        let id = body["id"].as_str().unwrap().to_owned();
+        call(
+            &router,
+            "PUT",
+            &imports_uri(&ws, &format!("/{id}/mapping")),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::start_import_run(&mut tx, ws.parse().unwrap(), id.parse().unwrap())
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let rejected = [zirv_flow_store::RejectedRow {
+            row_number: 2,
+            reasons: vec![zirv_flow_store::RejectReason {
+                column: "=HYPERLINK(\"http://x\")".into(),
+                reason: "wrong_type",
+            }],
+            raw: vec!["not-an-email".into(), "=1+1".into()],
+        }];
+        zirv_flow_store::commit_import_batch(
+            &pool,
+            &zirv_flow_store::ImportBatch {
+                import_id: id.parse().unwrap(),
+                workspace: ws.parse().unwrap(),
+                expected_done: 0,
+                records: &[],
+                details: &[],
+                rejected: &rejected,
+                trace: &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let csv = call_text(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects.csv")),
+            None,
+            String::new(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            csv.text,
+            "row_number,column,reason,Email,\"'=HYPERLINK(\"\"http://x\"\")\"\n\
+             2,\"'=HYPERLINK(\"\"http://x\"\")\",wrong_type,not-an-email,'=1+1\n"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_with_an_unterminated_quote_is_a_422_with_a_code_and_keeps_nothing(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let reply = call_text(
+            &router,
+            "POST",
+            &imports_uri(&ws, "?name=Broken"),
+            Some("text/csv"),
+            "Email\n\"ada@example.com\nbob@example.com\n".to_owned(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_str(&reply.text).unwrap();
+        assert_eq!(
+            body["detail"],
+            "body: a quoted field is never closed (unterminated_quote)"
+        );
+        let imports: i64 = sqlx::query_scalar("SELECT count(*) FROM imports")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(imports, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_that_stalls_or_breaks_off_mid_body_leaves_no_import_and_no_chunks(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new)).with_import_limits(
+                crate::ImportLimits {
+                    idle_timeout: std::time::Duration::from_millis(200),
+                    ..crate::ImportLimits::default()
+                },
+            ),
+        );
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        let owner = login(&router, OWNER_EMAIL).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let first = format!("Email\n{}", "ada@example.com\n".repeat(150_000)).into_bytes();
+        let send = |body: Body| {
+            let request = Request::builder()
+                .method("POST")
+                .uri(imports_uri(&ws, "?name=x"))
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header(header::COOKIE, &owner.cookie)
+                .header("x-csrf-token", &owner.csrf)
+                .body(body)
+                .unwrap();
+            let router = router.clone();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+
+        let stalled = send(Body::from_stream(futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok::<_, std::io::Error>(first.clone())]),
+            futures_util::stream::pending(),
+        )))
+        .await;
+        let broken = send(Body::from_stream(futures_util::stream::iter([
+            Ok(first.clone()),
+            Err(std::io::Error::other("connection reset")),
+        ])))
+        .await;
+
+        assert_eq!(stalled, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(broken, StatusCode::BAD_REQUEST);
+        for table in ["imports", "import_chunks"] {
+            let rows: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+    }
 }

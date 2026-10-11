@@ -113,7 +113,9 @@ mod tests {
                 "events.retention",
                 "ingest.drain",
                 "privacy.erase",
-                "privacy.export"
+                "privacy.export",
+                "import.dry_run",
+                "import.run"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -145,6 +147,8 @@ mod tests {
                 "ingest.drain",
                 "privacy.erase",
                 "privacy.export",
+                "import.dry_run",
+                "import.run",
                 "test.first",
                 "test.second"
             ]

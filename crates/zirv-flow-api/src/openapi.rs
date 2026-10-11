@@ -8,6 +8,7 @@ use crate::events::{
     SchemaVersionBody, UpdateEventSchemaRequest,
 };
 use crate::health::{self, StatusBody};
+use crate::imports;
 use crate::ingest::{
     self, AcceptedBody, BatchItemRequest, BatchRequest, IdentifyRequest, TrackRequest,
 };
@@ -85,6 +86,15 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::import::import,
         lists::person::lists,
         lists::person::history,
+        imports::upload::upload,
+        imports::crud::list,
+        imports::crud::get,
+        imports::crud::put_mapping,
+        imports::crud::dry_run,
+        imports::crud::run,
+        imports::crud::cancel,
+        imports::rejects::list,
+        imports::rejects::download,
         topics::list,
         topics::create,
         topics::update,
@@ -191,6 +201,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::person::PersonListBody,
         lists::person::MembershipHistoryBody,
         lists::person::MembershipChangeBody,
+        imports::CsvImportBody,
+        imports::CsvImportDetailBody,
+        imports::crud::CsvImportsBody,
+        imports::MappingBody,
+        imports::ColumnRuleBody,
+        imports::TargetBody,
+        imports::TransformBody,
+        imports::TraitTypeBody,
+        imports::rejects::ImportRejectBody,
+        imports::rejects::ImportRejectErrorBody,
+        imports::rejects::ImportRejectsBody,
         topics::TopicBody,
         topics::CreateTopicRequest,
         topics::UpdateTopicRequest,

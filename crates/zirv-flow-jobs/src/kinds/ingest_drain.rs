@@ -91,7 +91,7 @@ async fn drain_once(
 const CONFLICTED: JobError = JobError::new("the inbox batch kept conflicting with another");
 
 /// Runs `operation`, and again up to [`RETRIES`] times while it fails with a retryable error.
-async fn retrying<T, F, Fut>(mut operation: F) -> Result<T, StoreError>
+pub(super) async fn retrying<T, F, Fut>(mut operation: F) -> Result<T, StoreError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, StoreError>>,

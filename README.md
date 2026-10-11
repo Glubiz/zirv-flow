@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, and person deletion, erasure and export, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, and CSV imports with mapping, a dry run and checkpointed runs, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -103,6 +103,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
 | `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
 | `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
+| `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -215,7 +216,7 @@ use it:
 | Command | What it does |
 |---------|--------------|
 | `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time. Run as many as you like. |
-| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, and exports queue gauges. |
+| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
 A running job holds a lease of `worker.lease_seconds`, which its worker extends
@@ -660,6 +661,12 @@ first. The ledger is the one place that keeps the person id of an erased person,
 Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
 
+**CSV imports.** The import tables hold no person id, so erasure and deletion do not reach them.
+The stored file (`import_chunks`) is deleted 7 days after its import ends, and the rejected
+rows' cells (`import_rejects.raw`) 30 days after they were written, so the cells of an erased
+person can survive in either until then. Both age out within the one-month window of an erasure
+request; see [CSV import](#csv-import).
+
 **After a restore.** Backups keep erased data until they age out, so after restoring a backup run
 
 ```sh
@@ -835,6 +842,115 @@ are shown to the owner, workspace admins and `admin` keys. Members and `read` ke
 cannot say which of its properties are personal, so all of its values are hidden from them.
 Search is not masked on the way in: a caller who may search can find a person by a value
 they already know.
+
+## CSV import
+
+Load people from a CSV file in four steps: upload it, map its columns, check the mapping with
+a dry run, then run it. Open **Imports** (under People) in the web UI, or use the API under
+`/api/v1/workspaces/{ws}/imports`. Any member of the workspace can import; an API key needs
+the `write` scope to change anything and `read` to look. Sessions send the CSRF token as for
+every other write.
+
+**The file.** UTF-8 text (a byte order mark is ignored), RFC 4180 quoting (quoted values may
+hold the delimiter, quotes written twice and line breaks), a header row of unique, non-blank
+names, and the delimiter detected from comma, semicolon and tab unless one is given. The
+upload is `POST .../imports?name=...` with `Content-Type: text/csv` and the file as the raw body;
+`file_name`, `source`, `stream` and `delimiter` (`comma`, `semicolon` or `tab`) are optional.
+The body is streamed, never held whole: it goes into PostgreSQL in 1 MiB chunks while its
+SHA-256 and row count are taken, so separate `serve` and `worker` processes need no shared
+disk. A file over `imports.max_file_bytes` (512 MiB by default) is a 413, a header with a
+blank or repeated name or a file that is not UTF-8 is a 422, and a refused or interrupted
+upload keeps nothing: the import exists as `uploading` (hidden from the history) while the body arrives, each chunk is a statement of its own so no transaction stays open, and an upload that breaks off, is refused or sends no byte for 60 seconds (408) is deleted with its chunks. The
+answer is the import with its header and the first 20 rows; the cells of those rows are null
+and `samples_masked` is true for callers who may not see values (members and `read` keys).
+Row numbers are the ones a spreadsheet shows: the header is row 1, every blank line counts as a row, and a quoted value over several lines is one row.
+
+**The mapping.** `PUT .../imports/{id}/mapping` saves it and moves the import to `mapped`:
+
+```json
+{
+  "key_column": "customer_id",
+  "columns": [
+    {"column": "Email", "target": {"type": "identifier", "kind": "email"},
+     "transforms": [{"op": "trim"}, {"op": "lower"}]},
+    {"column": "Joined", "target": {"type": "trait", "key": "joined_at"},
+     "transforms": [{"op": "timestamp", "format": "%d/%m/%Y"}]},
+    {"column": "Newsletter", "target": {"type": "list", "list_id": "..."}}
+  ]
+}
+```
+
+A column becomes an `identifier` of a kind (`email`, `phone`, `anonymous_id` or
+`external:<namespace>`), a `trait` by registry key (the registry supplies the type), a `list`
+(a truthy cell such as `true`, `1`, `yes`, `y`, `t`, `on` or `x` adds the person; `false`, `0`,
+`no`, `n`, `f`, `off` and an empty cell do not; anything else is `wrong_type`), or is left out.
+Between the cell and the target run the transforms, in order: `trim`, `lower`, `upper`,
+`cast` (to a trait type), `timestamp` (a strftime `format` such as `%d/%m/%Y %H:%M`, or `unix`
+or `unix_ms`; a value without a time zone is read as UTC), `concat` (the value and other
+columns, skipping empty ones, with a separator), `constant`, `value_map` (replaces the values
+it lists) and `split` (into a list of trimmed, non-empty strings). That is all: there are no
+expressions or scripts. An empty cell leaves its trait out. The mapping is rejected with a 422
+that names the rule and the column unless it has at least one identifier target, every column
+and list exists, every trait key exists and is not archived, no trait is filled by two columns
+and every transform is well formed. It can be saved again until the first run starts; saving
+clears an earlier dry run.
+
+**Dry run.** `POST .../imports/{id}/dry-run` queues the `import.dry_run` job. It reads the
+whole file with the mapping and writes nothing but the rejected rows (phase `dry_run`) and the
+counters: no person, identifier, field or list changes. Poll `GET .../imports/{id}` for
+`status` (`dry_running`, then `dry_run_done`) and the counters `rows_total`, `rows_done`,
+`rows_applied` (rows that would be imported) and `rows_rejected`.
+
+**Run.** `POST .../imports/{id}/run` queues the `import.run` job; a dry run is not required.
+The file is read in batches of 500 rows. Each batch is one transaction that applies the profile
+records, adds the list members (source `import`), writes the batch's rejects (phase `run`)
+and advances the `rows_done` checkpoint with the counters, so a crash or a lost lease resumes
+from the checkpoint when the job is retried and neither skips nor repeats a row. Poll the
+import for progress: `rows_done` of `rows_total`, `rows_applied`, `rows_unchanged` (the row
+repeats what is stored, so nothing was written) and `rows_rejected`. `POST .../imports/{id}/cancel`
+stops it at the next batch boundary; the batches already applied stay applied. One run per
+import: starting a second is a 409. A run whose job ran out of attempts is marked `failed` with `job_failed` (rows already
+applied stay applied); upload the file again to finish, which changes only what is missing.
+
+**Idempotency.** Records are written under the import's `source` (default `csv`) and `stream`
+(default the file name without its extension). A row's record key is the value of the
+`key_column`, or, without one, the file's SHA-256 and the row number. Running the same file
+again with the same source and stream therefore changes nothing: the keys are equal and the
+content hashes make every write a no-op. A file that changes between runs needs a key column
+to update the same records; without one every row of the new file is a new record. Records
+are observed at the time the run was started, so with the default precedence a later import wins where fields conflict.
+Keep the source and the stream stable for data you import repeatedly.
+
+**Rejected rows and the threshold.** A row the mapping or the profile store refuses is
+rejected, not applied, and the import goes on. The reasons are codes: `missing_identifier`,
+`invalid_identifier`, `wrong_type`, `bad_timestamp`, `unknown_column`, `invalid_key` (a key
+over 512 characters) and `apply_failed`. They name the column and never a value. Once more
+than 1,000 rows are done and more than 5% of them were rejected, the run stops as `failed` with
+`error_code` `reject_threshold`, so a broken mapping cannot flood a workspace. The batches
+applied before it stopped stay applied; fix the mapping and run the file again, which changes
+only what is still missing. Other failure codes: `list_not_found` (a mapped list was
+deleted), `file_missing` (the file was already deleted), `file_unreadable`, `job_failed` and `abandoned`.
+
+`GET .../imports/{id}/rejects?phase=&limit=&after=` pages through the rejects in row order
+with `row_number` and the codes (`limit` 1 to 200). `GET .../imports/{id}/rejects.csv?phase=` downloads them as
+`row_number,column,reason`, one line per problem. For the owner, workspace admins and `admin`
+keys each row's own cells follow under the file's column names, in a file that may hold
+personal data; cells that start like a spreadsheet formula get a leading `'`. Everyone else
+who may read gets the codes alone. Each download is audited.
+
+**Retention and personal data.** The cells of rejected rows are the one place the file's
+values are kept beyond the people they created: they are admin-only and deleted 30 days after
+they were written. The scheduler leader deletes the uploaded file 7 days after an import ends
+(succeeded, failed or cancelled) and the rejects after 30 days. An import that is uploaded, mapped or dry-run and untouched for 7 days is cancelled as `abandoned` and loses its file at once, and an upload that never finished (a crash mid-body) is deleted after a day.
+The import itself, its mapping and its counters are kept. The import
+tables hold no person id, so an erasure does not reach the cells in a reject; they age out. The
+audit log records `import.created`, `import.run_started`, `import.cancelled` and
+`import.rejects_downloaded` with ids and counts only. No log line, metric label, decision or
+audit entry holds a cell, an identifier or a trait value.
+
+To time a large file, run the ignored test against a PostgreSQL instance with
+`ZIRV_FLOW_BENCH_ROWS=1000000 cargo nextest run -p zirv-flow-jobs a_big_file --run-ignored all --no-capture`;
+it prints the duration and the rows per second.
 
 ## Web UI
 

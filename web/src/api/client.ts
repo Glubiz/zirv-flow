@@ -67,3 +67,48 @@ export async function unwrapEmpty(call: Promise<Result<unknown>>): Promise<void>
     throw problemFrom(error, response);
   }
 }
+
+/**
+ * Sends `file` as the raw body of a POST, with the CSRF token, and reports how much has gone
+ * out. `fetch` cannot report upload progress, so this one call uses XMLHttpRequest. Resolves
+ * with the parsed JSON answer; rejects with an ApiError for a problem answer.
+ */
+export function uploadFile<T>(
+  url: string,
+  file: Blob,
+  contentType: string,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.setRequestHeader("Content-Type", contentType);
+    if (csrfToken !== null) {
+      request.setRequestHeader(CSRF_HEADER, csrfToken);
+    }
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(event.loaded, event.total);
+      }
+    };
+    request.onerror = () => reject(new Error("The upload did not reach the server. Check your connection and try again."));
+    request.onabort = () => reject(new Error("The upload was cancelled."));
+    request.onload = () => {
+      let body: unknown;
+      try {
+        body = JSON.parse(request.responseText) as unknown;
+      } catch {
+        body = request.responseText;
+      }
+      if (request.status >= 200 && request.status < 300) {
+        resolve(body as T);
+        return;
+      }
+      if (request.status === 401) {
+        onUnauthorized?.();
+      }
+      reject(problemFrom(body, new Response(null, { status: request.status === 0 ? 500 : request.status })));
+    };
+    request.send(file);
+  });
+}

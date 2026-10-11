@@ -7,6 +7,9 @@ use zirv_flow_core::WorkspaceId;
 use crate::{ErasedKind, JobError};
 
 mod events_retention;
+mod import_dry_run;
+mod import_rows;
+mod import_run;
 mod ingest_drain;
 mod noop;
 mod person_merge_rewrite;
@@ -22,6 +25,8 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &ingest_drain::IngestDrain,
     &privacy_erase::PrivacyErase,
     &privacy_export::PrivacyExport,
+    &import_dry_run::ImportDryRun,
+    &import_run::ImportRun,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

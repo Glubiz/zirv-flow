@@ -6,14 +6,14 @@ use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, disable_schedule, due_schedules, enqueue, enqueue_drain,
-    ensure_decision_partitions, ensure_event_partitions, expire_exports, inbox_heads, queue_depths,
-    reap_expired, try_lead,
+    database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
+    enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_exports,
+    inbox_heads, queue_depths, reap_expired, try_lead,
 };
 
 use crate::metrics::{QueueGauges, set_inbox_age};
@@ -24,6 +24,9 @@ const DUE_BATCH: i64 = 100;
 /// The longest between checks that the decision log and the event store have partitions for
 /// this and next month.
 const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// The longest between deletes of the data imports keep past their end (architecture 16.3).
+const IMPORT_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -75,6 +78,8 @@ pub struct Scheduler {
     gauges: Mutex<QueueGauges>,
     /// When the partitions were last checked; none until this instance leads.
     partitions_checked: Option<Instant>,
+    /// When the import retention last ran; none until this instance leads.
+    imports_checked: Option<Instant>,
 }
 
 impl Scheduler {
@@ -85,6 +90,7 @@ impl Scheduler {
             leadership: None,
             gauges: Mutex::new(QueueGauges::default()),
             partitions_checked: None,
+            imports_checked: None,
         }
     }
 
@@ -121,6 +127,7 @@ impl Scheduler {
         }
         let now = database_now(&self.pool).await?;
         self.keep_partitions(now).await;
+        self.keep_imports().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -132,6 +139,7 @@ impl Scheduler {
             return Ok(Tick::Standby);
         }
         self.keep_partitions(now).await;
+        self.keep_imports().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -159,6 +167,29 @@ impl Scheduler {
         }
     }
 
+    /// Deletes the files and rejects of imports that are past their retention: on gaining
+    /// leadership, then at most hourly. A failure is logged and retried at the next check.
+    async fn keep_imports(&mut self) {
+        let due = self
+            .imports_checked
+            .is_none_or(|checked| checked.elapsed() >= IMPORT_CHECK_INTERVAL);
+        if !due {
+            return;
+        }
+        self.imports_checked = Some(Instant::now());
+        match delete_expired_import_data(&self.pool).await {
+            Ok(report) if report.chunks + report.rejects > 0 => {
+                info!(
+                    chunks = report.chunks,
+                    rejects = report.rejects,
+                    "deleted import data past its retention"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => warn!("could not delete expired import data: {error}"),
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -169,6 +200,7 @@ impl Scheduler {
             warn!("the scheduler lost its leadership lock");
             self.leadership = None;
             self.partitions_checked = None;
+            self.imports_checked = None;
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")
@@ -612,6 +644,54 @@ mod tests {
         for name in names.map(|name| name.replace("decision_records", "events")) {
             assert!(events.contains(&name), "{name} missing: {events:?}");
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_deletes_import_files_and_rejects_past_their_retention(pool: PgPool) {
+        migrated(&pool).await;
+        let name = zirv_flow_core::WorkspaceName::parse("ours").unwrap();
+        let slug = zirv_flow_core::Slug::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let import = Uuid::now_v7();
+        for statement in [
+            "INSERT INTO imports (id, workspace_id, name, stream, file_name, file_sha256, \
+                size_bytes, delimiter, header, rows_total, trace_id, status, finished_at) \
+             VALUES ($1, $2, 'old', 'old', 'old.csv', decode(repeat('00', 32), 'hex'), 1, ',', \
+                '[\"email\"]', 0, gen_random_uuid(), 'succeeded', now() - interval '8 days')",
+            "INSERT INTO import_chunks (import_id, seq, workspace_id, data) \
+             VALUES ($1, 0, $2, 'email'::bytea)",
+            "INSERT INTO import_rejects (import_id, row_number, workspace_id, phase, errors, \
+                raw, created_at) \
+             VALUES ($1, 2, $2, 'run', '[]', '[]', now() - interval '31 days')",
+        ] {
+            sqlx::query(statement)
+                .bind(import)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut leader = scheduler(&pool);
+
+        leader.tick_at(BASE).await.unwrap();
+
+        for table in ["import_chunks", "import_rejects"] {
+            let left: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 0, "{table}");
+        }
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM imports")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "the import and its status stay");
     }
 
     async fn partitions(pool: &PgPool) -> Vec<String> {
