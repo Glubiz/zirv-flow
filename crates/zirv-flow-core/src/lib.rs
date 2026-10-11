@@ -5,7 +5,6 @@
 pub mod consent;
 pub mod contacts;
 pub mod csv_file;
-pub mod contacts;
 mod email;
 pub mod events;
 mod ids;

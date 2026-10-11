@@ -14,9 +14,11 @@ use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+use zirv_flow_core::contacts;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
+use crate::contacts::replace_stored_fields;
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
@@ -35,6 +37,11 @@ pub enum IngestPayload {
     Identify {
         traits: Map<String, Value>,
     },
+    /// A native contact: the traits are all of the contact's fields, and `identifiers` start
+    /// with the contact key.
+    Contact {
+        traits: Map<String, Value>,
+    },
     Track {
         event: String,
         properties: Map<String, Value>,
@@ -47,6 +54,7 @@ impl IngestPayload {
         match self {
             Self::Identify { .. } => "identify",
             Self::Track { .. } => "track",
+            Self::Contact { .. } => "contact",
         }
     }
 }
@@ -78,7 +86,9 @@ fn stored_json(item: &IngestItem) -> Value {
         .and_then(|timestamp| timestamp.format(&Rfc3339).ok());
     let mut stored = json!({ "identifiers": item.identifiers, "timestamp": timestamp });
     match &item.payload {
-        IngestPayload::Identify { traits } => stored["traits"] = Value::Object(traits.clone()),
+        IngestPayload::Identify { traits } | IngestPayload::Contact { traits } => {
+            stored["traits"] = Value::Object(traits.clone());
+        }
         IngestPayload::Track { event, properties } => {
             stored["event"] = Value::String(event.clone());
             stored["properties"] = Value::Object(properties.clone());
@@ -256,6 +266,8 @@ impl InboxRow {
 
 enum Mapped {
     Profile(ProfileRecord),
+    /// A native contact, which replaces the stored contact's fields.
+    Contact(ProfileRecord),
     Event(EventRecord),
 }
 
@@ -273,6 +285,20 @@ fn map_row(row: &InboxRow) -> Option<Mapped> {
             source: SOURCE.to_owned(),
             stream: "identify".to_owned(),
             record_key: strongest_identifier(&stored.identifiers)?,
+            identifiers: stored.identifiers,
+            traits: stored.traits,
+            observed_at: timestamp.unwrap_or(row.received_at),
+            trace,
+        })),
+        "contact" => Some(Mapped::Contact(ProfileRecord {
+            source: contacts::SOURCE.to_owned(),
+            stream: contacts::STREAM.to_owned(),
+            record_key: stored
+                .identifiers
+                .iter()
+                .find(|(kind, _)| kind == contacts::KEY_KIND)?
+                .1
+                .clone(),
             identifiers: stored.identifiers,
             traits: stored.traits,
             observed_at: timestamp.unwrap_or(row.received_at),
@@ -338,13 +364,13 @@ async fn delete_rows(
     Ok(())
 }
 
-fn tally_profile(outcome: &mut DrainOutcome, result: &ProfileOutcome) {
+fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &ProfileOutcome) {
     let label = match result {
         ProfileOutcome::Applied { .. } => "valid",
         ProfileOutcome::Unchanged { .. } => "duplicate",
         ProfileOutcome::Rejected { .. } => "rejected",
     };
-    outcome.count("identify", label);
+    outcome.count(kind, label);
 }
 
 fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
@@ -385,7 +411,12 @@ pub async fn drain_batch(
         match map_row(row).ok_or_else(StoreError::poison)? {
             Mapped::Profile(record) => {
                 let result = apply_profile_record(&mut tx, workspace, &record).await?;
-                tally_profile(&mut outcome, &result);
+                tally_profile(&mut outcome, "identify", &result);
+            }
+            Mapped::Contact(mut record) => {
+                replace_stored_fields(&mut tx, workspace, &mut record).await?;
+                let result = apply_profile_record(&mut tx, workspace, &record).await?;
+                tally_profile(&mut outcome, "contact", &result);
             }
             Mapped::Event(record) => {
                 let result =
@@ -422,7 +453,16 @@ pub async fn drain_batch_singly(
             Some(Mapped::Profile(record)) => {
                 apply_profile_record(&mut savepoint, workspace, record)
                     .await
-                    .map(|result| tally_profile(&mut outcome, &result))
+                    .map(|result| tally_profile(&mut outcome, "identify", &result))
+            }
+            Some(Mapped::Contact(record)) => {
+                let mut record = record.clone();
+                match replace_stored_fields(&mut savepoint, workspace, &mut record).await {
+                    Ok(()) => apply_profile_record(&mut savepoint, workspace, &record)
+                        .await
+                        .map(|result| tally_profile(&mut outcome, "contact", &result)),
+                    Err(error) => Err(error),
+                }
             }
             Some(Mapped::Event(record)) => {
                 let mut events = EventBatch::default();
@@ -443,7 +483,9 @@ pub async fn drain_batch_singly(
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;
                 reject_row(&mut tx, workspace, key, row, mapped.as_ref()).await?;
-                let kind = if row.kind == "identify" {
+                let kind = if row.kind == "contact" {
+                    "contact"
+                } else if row.kind == "identify" {
                     "identify"
                 } else {
                     "track"
@@ -477,6 +519,16 @@ async fn reject_row(
             message_id: Some(&row.message_id),
             trace: &trace,
         },
+        Some(Mapped::Contact(record)) => FailedItem {
+            kind: "record",
+            source: &record.source,
+            name: None,
+            values: &record.traits,
+            timestamp: Some(record.observed_at),
+            received_at: row.received_at,
+            message_id: Some(&row.message_id),
+            trace: &trace,
+        },
         Some(Mapped::Event(record)) => FailedItem {
             kind: "event",
             source: SOURCE,
@@ -488,7 +540,7 @@ async fn reject_row(
             trace: &trace,
         },
         None => FailedItem {
-            kind: if row.kind == "identify" {
+            kind: if row.kind != "track" {
                 "record"
             } else {
                 "event"

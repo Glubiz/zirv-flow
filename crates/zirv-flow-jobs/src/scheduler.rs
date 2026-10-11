@@ -12,8 +12,8 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
-    enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_exports,
-    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, try_lead,
+    enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
+    expire_exports, inbox_heads, prune_debugger_feed, queue_depths, reap_expired, try_lead,
 };
 
 use crate::metrics::{QueueGauges, set_inbox_age};
@@ -151,7 +151,8 @@ impl Scheduler {
     }
 
     /// The hourly upkeep: makes sure the decision log and the event store have partitions for
-    /// this and next month, and expires the person exports that are past their 24 hours. Runs
+    /// this and next month, expires the person exports that are past their 24 hours and forgets
+    /// contact idempotency keys older than that. Runs
     /// on gaining leadership, then at most hourly. A failure is logged and retried at the next
     /// check.
     async fn keep_partitions(&mut self, now: OffsetDateTime) {
@@ -167,6 +168,10 @@ impl Scheduler {
         }
         if let Err(error) = ensure_event_partitions(&self.pool, now.date()).await {
             warn!("could not create the event partitions: {error}");
+        }
+        // Contact idempotency keys are remembered for 24 hours.
+        if let Err(error) = expire_contact_idempotency(&self.pool).await {
+            warn!("could not expire the contact idempotency keys: {error}");
         }
         // Person exports expire 24 hours after they are ready; their content goes with them.
         if let Err(error) = expire_exports(&self.pool).await {
