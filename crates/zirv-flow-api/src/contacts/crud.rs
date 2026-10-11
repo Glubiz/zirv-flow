@@ -31,7 +31,7 @@ pub(crate) struct CreateContactRequest {
     key: String,
     /// The fields by registry key, checked against the contact definition.
     #[serde(default)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
     fields: Map<String, Value>,
 }
 
@@ -40,7 +40,7 @@ pub(crate) struct CreateContactRequest {
 pub(crate) struct ContactFieldsRequest {
     /// For `PUT`, all the contact's fields. For `PATCH`, a JSON merge patch: a field set to
     /// `null` is removed, and removing a required field is refused with 422.
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
     fields: Map<String, Value>,
 }
 

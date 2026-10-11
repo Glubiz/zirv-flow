@@ -45,7 +45,7 @@ pub(crate) struct ContactBody {
     /// The person the contact belongs to; the merged profile is at `/people/{person_id}`.
     person_id: Uuid,
     /// The fields as written, by registry key.
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
     fields: Map<String, Value>,
     /// The keys of `fields` whose value is hidden from this caller.
     masked_fields: Vec<String>,

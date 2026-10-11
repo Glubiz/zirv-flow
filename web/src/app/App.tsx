@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router";
 
 import { ApiKeysPage } from "../features/api-keys";
+import { ContactDefinitionPage, ContactPage, ContactsPage } from "../features/contacts";
 import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
@@ -115,6 +116,9 @@ export function AppRoutes() {
           <Route path="w/:ws/traits" element={<TraitsPage />} />
           <Route path="w/:ws/lists" element={<ListsPage />} />
           <Route path="w/:ws/lists/:listId" element={<ListDetailPage />} />
+          <Route path="w/:ws/contacts" element={<ContactsPage />} />
+          <Route path="w/:ws/contacts/:key" element={<ContactPage />} />
+          <Route path="w/:ws/contact-definition" element={<ContactDefinitionPage />} />
           <Route path="w/:ws/people" element={<PeoplePage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
           <Route path="w/:ws/people/:id" element={<ProfilePage />} />

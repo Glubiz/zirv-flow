@@ -30,7 +30,7 @@ pub(crate) struct BulkContactItem {
     #[schema(example = "c-1001")]
     key: String,
     /// All the contact's fields: an upsert replaces the fields of an existing contact.
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
     fields: Option<Map<String, Value>>,
 }
 
