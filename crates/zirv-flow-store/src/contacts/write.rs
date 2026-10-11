@@ -24,11 +24,11 @@ use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use zirv_flow_core::contacts::{
-    FieldProblem, RegistryKey, SOURCE, STREAM, plan, validate_contact_key,
+    FieldProblem, RegistryKey, SOURCE, STREAM, TypedField, plan, validate_contact_key,
 };
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::definition::{contact_registry, typed_definition};
+use super::definition::{contact_registry, find_contact_definition, typed_definition};
 use super::records::{Contact, find_contact};
 use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record, remove_contribution_in};
 use crate::{PgPool, StoreError};
@@ -225,6 +225,47 @@ fn live_fields(fields: &Map<String, Value>, registry: &[RegistryKey]) -> Map<Str
         .collect()
 }
 
+/// The fields the definition lists; all of them while the workspace has no definition.
+fn listed_fields(
+    fields: Map<String, Value>,
+    definition: Option<&[TypedField]>,
+) -> Map<String, Value> {
+    let Some(definition) = definition else {
+        return fields;
+    };
+    fields
+        .into_iter()
+        .filter(|(key, _)| definition.iter().any(|typed| &typed.field.key == key))
+        .collect()
+}
+
+/// The identities that stored values of archived identifier fields give the contact. A write
+/// never validates those fields, so it lists these identities itself, and replacing the
+/// contact's identifiers does not release them while the trait stays.
+async fn archived_identifiers(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    stored: &Map<String, Value>,
+    registry: &[RegistryKey],
+) -> Result<Vec<(String, String)>, StoreError> {
+    let Some(definition) = find_contact_definition(&mut *connection, workspace).await? else {
+        return Ok(Vec::new());
+    };
+    Ok(definition
+        .fields
+        .into_iter()
+        .filter(|field| {
+            registry
+                .iter()
+                .any(|entry| entry.archived && entry.key == field.key)
+        })
+        .filter_map(|field| {
+            let value = stored.get(&field.key)?.as_str()?;
+            Some((field.identifier?, value.to_owned()))
+        })
+        .collect())
+}
+
 /// Makes an inbox contact record replace the contact's fields: the keys the stored contact has
 /// and the record leaves out are retracted, except those of archived registry keys.
 pub(crate) async fn replace_stored_fields(
@@ -235,6 +276,9 @@ pub(crate) async fn replace_stored_fields(
     if let Some(contact) = find_contact(connection, workspace, &record.record_key).await? {
         let registry = contact_registry(connection, workspace).await?;
         retract_absent(&mut record.traits, &live_fields(&contact.fields, &registry));
+        record
+            .identifiers
+            .extend(archived_identifiers(connection, workspace, &contact.fields, &registry).await?);
     }
     Ok(())
 }
@@ -273,36 +317,45 @@ pub async fn write_contact(
     let stored = existing
         .as_ref()
         .map(|contact| live_fields(&contact.fields, &registry));
-    let (status, fields) = match change {
+    let definition = typed_definition(&mut savepoint, workspace).await?;
+    // The stored fields the write retracts: a replacement retracts all of them, a patch only
+    // those the definition still lists, so it leaves the others as they are.
+    let (status, fields, retracted) = match change {
         ContactChange::Create(fields) => {
             if existing.is_some() {
                 return Err(WriteError::Exists);
             }
-            (201, fields)
+            (201, fields, None)
         }
         ContactChange::Replace(fields) => {
             if existing.is_none() {
                 return Err(WriteError::NotFound);
             }
-            (200, fields)
+            (200, fields, stored)
         }
         ContactChange::Patch(patch) => {
-            let current = stored.clone().ok_or(WriteError::NotFound)?;
-            (200, merge_patch(current, patch))
+            let current = stored.ok_or(WriteError::NotFound)?;
+            let current = listed_fields(current, definition.as_deref());
+            (200, merge_patch(current.clone(), patch), Some(current))
         }
     };
-    let definition = typed_definition(&mut savepoint, workspace).await?;
     let planned =
         plan(definition.as_deref(), &registry, key, &fields).map_err(WriteError::Invalid)?;
     let mut traits = planned.traits;
-    if let Some(stored) = &stored {
-        retract_absent(&mut traits, stored);
+    let mut identifiers = planned.identifiers;
+    if let Some(retracted) = &retracted {
+        retract_absent(&mut traits, retracted);
+    }
+    if let Some(existing) = &existing {
+        identifiers.extend(
+            archived_identifiers(&mut savepoint, workspace, &existing.fields, &registry).await?,
+        );
     }
     let record = ProfileRecord {
         source: SOURCE.to_owned(),
         stream: STREAM.to_owned(),
         record_key: key.to_owned(),
-        identifiers: planned.identifiers,
+        identifiers,
         traits,
         observed_at: OffsetDateTime::now_utc(),
         trace: trace.clone(),

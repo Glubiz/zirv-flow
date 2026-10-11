@@ -1245,4 +1245,190 @@ mod tests {
         assert!(rejects[0].contains("archived_key") && rejects[0].contains("age"));
         assert!(!rejects[0].contains("424242") && !rejects[0].contains("zq9-nick"));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resolver_waiting_on_a_person_whose_identity_is_deleted_ends_with_an_identity(
+        pool: PgPool,
+    ) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        // The contact changes its email and has not committed yet: it holds the person.
+        let mut tx = begin(&pool).await.unwrap();
+        write_contact(
+            &mut tx,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"email": "b@example.com"}))),
+            None,
+            &trace(),
+        )
+        .await
+        .unwrap();
+        // Another source lists the old email, and waits for the person's lock.
+        let resolver = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                apply_profile_batch(
+                    &pool,
+                    ws,
+                    &[ProfileRecord {
+                        source: "crm".into(),
+                        stream: "people".into(),
+                        record_key: "9".into(),
+                        identifiers: vec![("email".into(), "a@example.com".into())],
+                        traits: Map::new(),
+                        observed_at: time::macros::datetime!(2026-01-01 00:00 UTC),
+                        trace: trace(),
+                    }],
+                )
+                .await
+                .unwrap()
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!resolver.is_finished());
+        commit(tx).await.unwrap();
+        resolver.await.unwrap();
+
+        let record_person: Uuid = sqlx::query_scalar(
+            "SELECT person_id FROM source_records WHERE workspace_id = $1 AND source = 'crm'",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            person_of_email(&pool, ws, "a@example.com").await,
+            Some(record_person)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_patch_leaves_fields_outside_a_shrunk_definition_and_a_put_retracts_them(
+        pool: PgPool,
+    ) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com", "plan": "pro"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        put_contact_definition(
+            &mut tx,
+            ws,
+            &[
+                field("email", true, Some("email")),
+                field("age", false, None),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        let patched = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 4}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let explicit = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"plan": "free"}))),
+            None,
+        )
+        .await
+        .unwrap_err();
+        let replaced = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"email": "a@example.com"}))),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            patched.contact.unwrap().fields,
+            object(json!({"email": "a@example.com", "plan": "pro", "age": 4}))
+        );
+        assert_eq!(
+            reasons(explicit),
+            [("plan".to_owned(), "unplanned_property")]
+        );
+        assert_eq!(
+            replaced.contact.unwrap().fields,
+            object(json!({"email": "a@example.com"}))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_identifier_field_keeps_its_identity_while_its_value_stays(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let created = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = created.contact.unwrap().person_id;
+        crate::update_trait_definition(
+            &pool,
+            ws,
+            "email",
+            &crate::TraitDefinitionUpdate {
+                archived: Some(true),
+                ..crate::TraitDefinitionUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"plan": "pro"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        append_bulk(&pool, ws, "c-1", json!({"plan": "free"})).await;
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        drain_batch(&pool, ws, &key, 100).await.unwrap();
+
+        assert_eq!(
+            read(&pool, ws, "c-1").await.unwrap().fields,
+            object(json!({"email": "a@example.com", "plan": "free"}))
+        );
+        assert_eq!(
+            person_of_email(&pool, ws, "a@example.com").await,
+            Some(person)
+        );
+    }
 }
