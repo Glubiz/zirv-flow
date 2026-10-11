@@ -1,4 +1,4 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -42,6 +42,8 @@ function open() {
 
 async function connected() {
   await screen.findByText("Connecting");
+  // The page shows "Connecting" before its effect opens the stream.
+  await waitFor(() => expect(FakeEventSource.instances).not.toHaveLength(0));
   act(() => {
     FakeEventSource.latest.open();
   });

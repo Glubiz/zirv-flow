@@ -1224,37 +1224,6 @@ main:focus {
 }
 
 .advanced summary {
-.chart {
-  margin: 0;
-}
-
-.chart svg {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-height: 280px;
-}
-
-.chart-axis {
-  stroke: var(--line-2);
-  stroke-width: 1;
-}
-
-.chart-bar {
-  fill: var(--night);
-}
-
-.chart-bar:hover {
-  fill: var(--link);
-}
-
-.chart-label {
-  fill: var(--ink-2);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.chart-table summary {
   min-height: 44px;
   display: flex;
   align-items: center;
@@ -1297,6 +1266,43 @@ main:focus {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
+}
+
+.chart {
+  margin: 0;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 280px;
+}
+
+.chart-axis {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.chart-bar {
+  fill: var(--night);
+}
+
+.chart-bar:hover {
+  fill: var(--link);
+}
+
+.chart-label {
+  fill: var(--ink-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-table summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
 }
 
 .filter-builder {
