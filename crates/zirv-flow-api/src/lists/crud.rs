@@ -9,9 +9,10 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
+use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_store::{List, PgPool};
 
+use super::invalid;
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -67,10 +68,6 @@ pub(crate) struct CreateListRequest {
 pub(crate) struct UpdateListRequest {
     name: Option<String>,
     description: Option<String>,
-}
-
-fn invalid(field: &'static str, message: &'static str) -> AdminError {
-    AdminError::Invalid(ValidationError::new(field, message))
 }
 
 fn check_name(name: &str) -> Result<&str, AdminError> {

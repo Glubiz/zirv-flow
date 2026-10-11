@@ -7,13 +7,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::ValidationError;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::{ListMember, MAX_PEOPLE_PER_CALL};
 
-use super::{membership_error, source_of};
+use super::{invalid, membership_error, source_of};
 use crate::AppState;
-use crate::admin::AdminError;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
@@ -117,10 +115,6 @@ pub(crate) struct RemoveMembersBody {
     /// People who were not members.
     not_member: usize,
     not_found: Vec<NotFoundBody>,
-}
-
-fn invalid(field: &'static str, message: &'static str) -> AdminError {
-    AdminError::Invalid(ValidationError::new(field, message))
 }
 
 fn not_found(field: &'static str, index: usize) -> NotFoundBody {

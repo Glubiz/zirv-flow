@@ -20,13 +20,14 @@ fn source_of(principal: &Principal) -> ListSource {
     }
 }
 
+fn invalid(field: &'static str, message: &'static str) -> AdminError {
+    AdminError::Invalid(ValidationError::new(field, message))
+}
+
 fn membership_error(error: MembershipError) -> AdminError {
     match error {
         MembershipError::NoSuchList => AdminError::NotFound("list"),
-        MembershipError::TooMany => AdminError::Invalid(ValidationError::new(
-            "people",
-            "a call takes at most 1000 people",
-        )),
+        MembershipError::TooMany => invalid("people", "a call takes at most 1000 people"),
         MembershipError::Store(error) if error.is_retryable() => {
             AdminError::Conflict("the list or the people changed at the same moment, try again")
         }

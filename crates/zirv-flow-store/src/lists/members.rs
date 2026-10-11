@@ -157,16 +157,6 @@ async fn prepare(
     if people.len() > MAX_PEOPLE_PER_CALL {
         return Err(MembershipError::TooMany);
     }
-    let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM lists WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace.as_uuid())
-            .bind(list)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
-    if exists.is_none() {
-        return Err(MembershipError::NoSuchList);
-    }
     let current = lock_current_people(connection, workspace, people).await?;
     let locked: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
