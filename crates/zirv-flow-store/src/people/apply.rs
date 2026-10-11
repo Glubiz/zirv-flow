@@ -113,52 +113,37 @@ pub async fn remove_contribution(
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
     let mut tx = begin(pool).await?;
-    // The person is locked before the record, the order a drain and a merge use. A merge can
-    // move the record to its survivor while this waits, so the record is looked up again.
-    let mut row: Option<(Uuid, Uuid, Value, Value)> = None;
-    for _ in 0..3 {
-        let owner: Option<Uuid> = sqlx::query_scalar(
-            "SELECT person_id FROM source_records \
-             WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
-               AND deleted_at IS NULL",
-        )
-        .bind(workspace.as_uuid())
-        .bind(source)
-        .bind(stream)
-        .bind(record_key)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(StoreError::query)?;
-        let Some(owner) = owner else {
-            return Ok(false);
-        };
-        sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
-            .bind(workspace.as_uuid())
-            .bind(owner)
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::query)?;
-        row = sqlx::query_as(
-            "UPDATE source_records SET deleted_at = now(), updated_at = now() \
-             WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
-               AND deleted_at IS NULL AND person_id = $5 \
-             RETURNING id, person_id, traits, identifiers",
-        )
-        .bind(workspace.as_uuid())
-        .bind(source)
-        .bind(stream)
-        .bind(record_key)
-        .bind(owner)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(StoreError::query)?;
-        if row.is_some() {
-            break;
-        }
-    }
-    let Some((record_id, person_id, traits, identifiers)) = row else {
-        return Err(StoreError::retryable_race());
+    // The record is locked first, then its person: the order the drain's existing-record path
+    // uses. With the record locked a merge cannot move it, so the owner cannot change.
+    let record: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, person_id FROM source_records \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+           AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source)
+    .bind(stream)
+    .bind(record_key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let Some((locked_id, owner)) = record else {
+        return Ok(false);
     };
+    sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+        .bind(workspace.as_uuid())
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    let (record_id, person_id, traits, identifiers): (Uuid, Uuid, Value, Value) = sqlx::query_as(
+        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
+             WHERE id = $1 RETURNING id, person_id, traits, identifiers",
+    )
+    .bind(locked_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
     let keys: Vec<String> = traits
         .as_object()
         .map(|map| map.keys().cloned().collect())
@@ -2239,7 +2224,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_removal_waits_for_the_person_before_it_touches_the_source_record(pool: PgPool) {
+    async fn a_removal_locks_the_record_before_the_person(pool: PgPool) {
         use crate::privacy::testing::profile;
 
         let ws = workspace(&pool, "one").await;
@@ -2256,11 +2241,10 @@ mod tests {
         .await
         .unwrap();
         let person = person_of(&outcomes[0]);
-        // A drain or a merge holds the person first.
-        let mut holder = begin(&pool).await.unwrap();
-        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
-            .bind(person)
-            .execute(&mut *holder)
+        // The drain's existing-record path holds the record first.
+        let mut drain = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM source_records FOR UPDATE")
+            .execute(&mut *drain)
             .await
             .unwrap();
         let removal = tokio::spawn({
@@ -2269,17 +2253,19 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // The removal is waiting on the person; it holds no lock on the record yet.
+        // The removal waits on the record; it holds no lock on the person yet, so the drain
+        // can take the person without a deadlock.
         let mut probe = begin(&pool).await.unwrap();
-        let record = sqlx::query("SELECT id FROM source_records FOR UPDATE NOWAIT")
+        let locked = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(person)
             .execute(&mut *probe)
             .await;
         drop(probe);
-        commit(holder).await.unwrap();
+        commit(drain).await.unwrap();
 
         assert!(
-            record.is_ok(),
-            "the removal locked the record before the person"
+            locked.is_ok(),
+            "the removal locked the person before the record"
         );
         assert!(removal.await.unwrap().unwrap());
     }
