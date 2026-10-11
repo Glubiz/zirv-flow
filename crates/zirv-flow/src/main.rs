@@ -185,18 +185,11 @@ async fn run_roles_reporting(
     let liveness = Arc::new(RoleLiveness::default());
     let ops = match (ops_bind, render) {
         (Some(addr), Some(render)) => {
-            let readiness = {
-                let liveness = Arc::clone(&liveness);
-                let stopped = stopped.clone();
-                move || {
-                    if *stopped.borrow() {
-                        Some("shutting down")
-                    } else {
-                        liveness.not_ready()
-                    }
-                }
-            };
-            let state = zirv_flow_api::OpsState::new(pool.clone(), render, Arc::new(readiness));
+            let state = zirv_flow_api::OpsState::new(
+                pool.clone(),
+                render,
+                role_readiness(stopped.clone(), Arc::clone(&liveness)),
+            );
             match start_ops(addr, state).await {
                 Ok(ops) => {
                     if let Some(report) = ops_bound {
@@ -284,6 +277,20 @@ fn ops_bind(roles: Roles, config: &Config) -> Option<SocketAddr> {
         return None;
     }
     Some(addr)
+}
+
+/// What `/readyz` asks of the roles: shutdown has begun, or a started role loop has returned.
+fn role_readiness(
+    stopped: tokio::sync::watch::Receiver<bool>,
+    liveness: Arc<RoleLiveness>,
+) -> Arc<dyn Fn() -> Option<&'static str> + Send + Sync> {
+    Arc::new(move || {
+        if *stopped.borrow() {
+            Some("shutting down")
+        } else {
+            liveness.not_ready()
+        }
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1253,6 +1260,30 @@ mod tests {
 
         assert_eq!(liveness.not_ready(), Some("the worker loop has stopped"));
         still_running.abort();
+    }
+
+    #[tokio::test]
+    async fn readyz_through_the_real_wiring_reports_a_stopped_loop_then_shutdown() {
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let liveness = Arc::new(RoleLiveness::default());
+        liveness.track(Role::Worker, async {}).await;
+        let state = zirv_flow_api::OpsState::new(
+            lazy_pool(),
+            Arc::new(String::new),
+            role_readiness(stopped, liveness),
+        );
+        let ops = start_ops("127.0.0.1:0".parse().unwrap(), state)
+            .await
+            .unwrap();
+
+        let (status, body) = fetch(ops.address, "/readyz").await.unwrap();
+        assert!(status.contains("503"), "{status}");
+        assert!(body.contains("the worker loop has stopped"), "{body}");
+        stop.send(true).unwrap();
+        let (status, body) = fetch(ops.address, "/readyz").await.unwrap();
+        assert!(status.contains("503"), "{status}");
+        assert!(body.contains("shutting down"), "{body}");
+        ops.stop().await;
     }
 
     #[tokio::test]
