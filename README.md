@@ -526,8 +526,9 @@ create one:
 - by CSV: `POST .../lists/{id}/members/import` with `Content-Type: text/csv`, a header row
   `kind,value` and one identifier per row, up to 10 MiB and 100,000 rows. Add
   `?dry_run=true` to see `{matched, added, already_member, unmatched}` without changing
-  anything; the web UI always previews first. `unmatched` lists row numbers (the header is
-  row 1) with a reason code and never echoes a value.
+  anything; the web UI always previews first. `unmatched` lists the line of the file each skipped row
+  starts on (the header is line 1, as an editor shows it; the field is named `row`) with a
+  reason code and never echoes a value.
 
 Remove people with `POST .../lists/{id}/members/remove` and `{"person_ids": [...]}`, or tick
 them on the list page. One call takes at most 1,000 people.

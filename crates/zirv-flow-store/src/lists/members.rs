@@ -489,8 +489,29 @@ pub async fn membership_history<'e>(
     Ok((rows, more))
 }
 
+/// Locks, in id order and in one statement, every list any of `losers` is in. A merge calls
+/// it once for its whole group before [`move_on_merge`], after the people are locked, so two
+/// merges that share lists always take them in the same order.
+pub(crate) async fn lock_lists_for_merge(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    losers: &[Uuid],
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "SELECT id FROM lists WHERE workspace_id = $1 AND id IN \
+            (SELECT list_id FROM list_members WHERE workspace_id = $1 AND person_id = ANY($2)) \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(losers)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Moves the memberships and history of `loser` to `survivor`, in the transaction of the
-/// merge, which holds both people locked. The survivor ends up in the union of both people's
+/// merge, which holds both people and (through [`lock_lists_for_merge`]) their lists locked. The survivor ends up in the union of both people's
 /// lists and keeps the earlier `added_at` of the two; counts follow.
 pub(crate) async fn move_on_merge(
     connection: &mut PgConnection,
@@ -509,15 +530,6 @@ pub(crate) async fn move_on_merge(
     .await
     .map_err(StoreError::query)?;
     if !held.is_empty() {
-        sqlx::query(
-            "SELECT id FROM lists WHERE workspace_id = $1 AND id = ANY($2) \
-             ORDER BY id FOR UPDATE",
-        )
-        .bind(workspace.as_uuid())
-        .bind(&held)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
         // Lists both are in: the survivor keeps the earlier time, and one member is gone.
         let shared: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE list_members s SET added_at = LEAST(s.added_at, l.added_at) \
@@ -906,6 +918,68 @@ mod tests {
                 .iter()
                 .any(|d| d.action == "list.membership" && d.outcome == "moved")
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_of_several_people_moves_every_membership_across_overlapping_lists(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let mut lists = Vec::new();
+        for name in ["A", "B", "C", "D"] {
+            lists.push(create_list(&pool, ws, name, "", None).await.unwrap().id);
+        }
+        let [a, b, c, d] = [lists[0], lists[1], lists[2], lists[3]];
+        let survivor = person(&pool, ws, "1", &[("external:crm", "1")]).await;
+        let first = person(&pool, ws, "2", &[("anonymous_id", "a1")]).await;
+        let second = person(&pool, ws, "3", &[("anonymous_id", "a2")]).await;
+        // The losers hold overlapping lists in opposite orders.
+        add(&pool, ws, a, &[survivor]).await.unwrap();
+        add(&pool, ws, a, &[first]).await.unwrap();
+        add(&pool, ws, b, &[first]).await.unwrap();
+        add(&pool, ws, c, &[first]).await.unwrap();
+        add(&pool, ws, c, &[second]).await.unwrap();
+        add(&pool, ws, b, &[second]).await.unwrap();
+        add(&pool, ws, d, &[second]).await.unwrap();
+        let joined = record(
+            "9",
+            &[
+                ("external:crm", "1"),
+                ("anonymous_id", "a1"),
+                ("anonymous_id", "a2"),
+            ],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[joined]).await.unwrap();
+
+        assert!(
+            matches!(&outcomes[0], ProfileOutcome::Applied { person_id, .. } if *person_id == survivor)
+        );
+        let names: Vec<String> = lists_for(&pool, ws, survivor)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(names, ["A", "B", "C", "D"]);
+        for list in [a, b, c, d] {
+            assert_eq!(count(&pool, ws, list).await, 1);
+            assert_eq!(rows(&pool, "list_members", list).await, 1);
+        }
+        let left_on_losers: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM list_members WHERE person_id = ANY($1)) \
+                  + (SELECT count(*) FROM list_member_changes WHERE person_id = ANY($1))",
+        )
+        .bind([first, second].as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left_on_losers, 0);
+        let (history, _) = membership_history(&pool, ws, survivor, 20, None)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 7);
     }
 
     #[sqlx::test]

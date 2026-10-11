@@ -1,5 +1,5 @@
 //! Adding people to a list from a CSV of identifiers. The file names people that exist; it
-//! never creates one. The answer holds counts, row numbers and reason codes, never values.
+//! never creates one. The answer holds counts, line numbers and reason codes, never values.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -27,7 +27,8 @@ const LOOKUP_BATCH: usize = 5_000;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct UnmatchedRow {
-    /// The row in the file, counting the header as row 1.
+    /// The line of the file the row starts on, counting the header as line 1. A quoted value
+    /// that spans lines moves later rows down, as an editor shows them.
     row: usize,
     /// `not_found`, `malformed_row`, or the rule the identifier broke, such as `invalid_email`.
     #[schema(example = "not_found")]
@@ -69,29 +70,36 @@ impl CsvError {
 }
 
 /// Splits CSV text (RFC 4180: quoted fields may hold commas, quotes written twice, and line
-/// breaks) into records, and refuses a file of more than `max` records. Lines that are empty
-/// are not records.
-fn parse_records(text: &str, max: usize) -> Result<Vec<Vec<String>>, CsvError> {
-    let mut records: Vec<Vec<String>> = Vec::new();
+/// breaks) into records, each with the line of the file it starts on (the first line is 1),
+/// and refuses a file of more than `max` records. Lines that are empty are not records.
+fn parse_records(text: &str, max: usize) -> Result<Vec<(usize, Vec<String>)>, CsvError> {
+    let mut records: Vec<(usize, Vec<String>)> = Vec::new();
     let mut record: Vec<String> = Vec::new();
     let mut field = String::new();
     let mut quoted = false;
     let mut was_quoted = false;
+    let mut line = 1;
+    let mut start: Option<usize> = None;
     let mut chars = text.chars().peekable();
-    let mut finish_record =
-        |record: &mut Vec<String>, field: &mut String, was_quoted: &mut bool| {
-            if record.is_empty() && field.is_empty() && !*was_quoted {
-                return Ok(());
-            }
-            record.push(std::mem::take(field));
-            *was_quoted = false;
-            if records.len() == max {
-                return Err(CsvError::TooManyRows);
-            }
-            records.push(std::mem::take(record));
-            Ok(())
+    let mut finish_record = |record: &mut Vec<String>,
+                             field: &mut String,
+                             was_quoted: &mut bool,
+                             start: &mut Option<usize>| {
+        let Some(first_line) = start.take() else {
+            return Ok(());
         };
+        record.push(std::mem::take(field));
+        *was_quoted = false;
+        if records.len() == max {
+            return Err(CsvError::TooManyRows);
+        }
+        records.push((first_line, std::mem::take(record)));
+        Ok(())
+    };
     while let Some(c) = chars.next() {
+        if start.is_none() && !matches!(c, '\n' | '\r') {
+            start = Some(line);
+        }
         match c {
             '"' if quoted => {
                 if chars.peek() == Some(&'"') {
@@ -110,19 +118,27 @@ fn parse_records(text: &str, max: usize) -> Result<Vec<Vec<String>>, CsvError> {
                 was_quoted = false;
             }
             '\r' if !quoted && chars.peek() == Some(&'\n') => {}
-            '\n' | '\r' if !quoted => finish_record(&mut record, &mut field, &mut was_quoted)?,
-            _ => field.push(c),
+            '\n' | '\r' if !quoted => {
+                finish_record(&mut record, &mut field, &mut was_quoted, &mut start)?;
+                line += 1;
+            }
+            _ => {
+                field.push(c);
+                if c == '\n' || (c == '\r' && chars.peek() != Some(&'\n')) {
+                    line += 1;
+                }
+            }
         }
     }
     if quoted {
         return Err(CsvError::UnterminatedQuote);
     }
-    finish_record(&mut record, &mut field, &mut was_quoted)?;
+    finish_record(&mut record, &mut field, &mut was_quoted, &mut start)?;
     Ok(records)
 }
 
-/// The data rows of a file whose header is `kind,value`, each with its row number (the header
-/// is row 1). The `max` rows are counted after the header.
+/// The data rows of a file whose header is `kind,value`, each with the line it starts on (the
+/// header is line 1). At most [`MAX_ROWS`] data rows.
 fn read_rows(body: &[u8]) -> Result<Vec<(usize, Vec<String>)>, CsvError> {
     let text = std::str::from_utf8(body).map_err(|_| CsvError::NotUtf8)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -130,18 +146,14 @@ fn read_rows(body: &[u8]) -> Result<Vec<(usize, Vec<String>)>, CsvError> {
     if records.is_empty() {
         return Err(CsvError::BadHeader);
     }
-    let header = records.remove(0);
+    let (_, header) = records.remove(0);
     let is_header = header.len() == 2
         && header[0].trim().eq_ignore_ascii_case("kind")
         && header[1].trim().eq_ignore_ascii_case("value");
     if !is_header {
         return Err(CsvError::BadHeader);
     }
-    Ok(records
-        .into_iter()
-        .enumerate()
-        .map(|(index, record)| (index + 2, record))
-        .collect())
+    Ok(records)
 }
 
 fn dry_run(query: &str) -> Result<bool, ApiError> {
@@ -168,7 +180,7 @@ fn is_csv(headers: &HeaderMap) -> bool {
 
 /// Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and
 /// the answer says what a real import would do. Rows no person owns, and rows that are
-/// malformed, come back as row numbers with a reason code; values are never echoed. At most
+/// malformed, come back as line numbers (the header is line 1) with a reason code; values are never echoed. At most
 /// 10 MiB and 100,000 rows. Membership changes go to the people's history and the decision
 /// log, not the audit log.
 #[utoipa::path(
@@ -300,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_numbered_from_the_header_as_row_one() {
+    fn rows_are_numbered_by_line_with_the_header_as_line_one() {
         let parsed = rows("kind,value\nemail,a@example.com\r\nphone,+4512345678\n");
 
         assert_eq!(parsed.len(), 2);
@@ -316,15 +328,35 @@ mod tests {
 
         assert_eq!(parsed[0].1, ["external:crm", "a,\"b\"\nc"]);
         assert_eq!(parsed[1].1, ["email", "x@example.com"]);
-        assert_eq!(parsed[1].0, 3);
+        assert_eq!((parsed[0].0, parsed[1].0), (2, 4));
     }
 
     #[test]
     fn a_bom_blank_lines_and_a_missing_final_newline_are_tolerated() {
-        let parsed = rows("\u{feff}Kind , VALUE\n\nemail,a@example.com\n\n");
+        let parsed = rows("\u{feff}Kind , VALUE\n\nemail,a@example.com\n\n\nphone,+4512345678");
 
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].0, 2);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, 3);
+        assert_eq!(parsed[1].0, 6);
+    }
+
+    #[test]
+    fn a_quoted_value_over_several_lines_moves_the_later_lines_down() {
+        let parsed = rows(
+            "kind,value\r\n\"email\",\"a\r\nb\r\nc\"\r\n\r\nphone,+4512345678\r\nemail,x@example.com\r\n",
+        );
+
+        let lines: Vec<usize> = parsed.iter().map(|(line, _)| *line).collect();
+        assert_eq!(lines, [2, 6, 7]);
+        assert_eq!(parsed[0].1[1], "a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_counts_as_a_line_break() {
+        let parsed = rows("kind,value\remail,a@example.com\rphone,+4512345678");
+
+        let lines: Vec<usize> = parsed.iter().map(|(line, _)| *line).collect();
+        assert_eq!(lines, [2, 3]);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute, record_decision};
-use crate::lists::move_on_merge;
+use crate::lists::{lock_lists_for_merge, move_on_merge};
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
 
 /// The job kind that re-points what [`merge_people`] leaves behind.
@@ -57,6 +57,7 @@ pub(super) async fn merge_people(
     losers: &[Uuid],
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
+    lock_lists_for_merge(connection, workspace, losers).await?;
     for &loser in losers {
         let mut identity_ids: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE identities SET person_id = $3 \

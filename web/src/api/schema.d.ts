@@ -517,7 +517,7 @@ export interface paths {
         /**
          * Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and
          *     the answer says what a real import would do. Rows no person owns, and rows that are
-         *     malformed, come back as row numbers with a reason code; values are never echoed. At most
+         *     malformed, come back as line numbers (the header is line 1) with a reason code; values are never echoed. At most
          *     10 MiB and 100,000 rows. Membership changes go to the people's history and the decision
          *     log, not the audit log.
          */
@@ -1365,7 +1365,10 @@ export interface components {
              * @example not_found
              */
             reason: string;
-            /** @description The row in the file, counting the header as row 1. */
+            /**
+             * @description The line of the file the row starts on, counting the header as line 1. A quoted value
+             *     that spans lines moves later rows down, as an editor shows them.
+             */
             row: number;
         };
         UpdateEventSchemaRequest: {

@@ -2926,7 +2926,7 @@
         "tags": [
           "lists"
         ],
-        "summary": "Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and\nthe answer says what a real import would do. Rows no person owns, and rows that are\nmalformed, come back as row numbers with a reason code; values are never echoed. At most\n10 MiB and 100,000 rows. Membership changes go to the people's history and the decision\nlog, not the audit log.",
+        "summary": "Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and\nthe answer says what a real import would do. Rows no person owns, and rows that are\nmalformed, come back as line numbers (the header is line 1) with a reason code; values are never echoed. At most\n10 MiB and 100,000 rows. Membership changes go to the people's history and the decision\nlog, not the audit log.",
         "operationId": "import_list_members",
         "parameters": [
           {
@@ -5702,7 +5702,7 @@
           },
           "row": {
             "type": "integer",
-            "description": "The row in the file, counting the header as row 1.",
+            "description": "The line of the file the row starts on, counting the header as line 1. A quoted value\nthat spans lines moves later rows down, as an editor shows them.",
             "minimum": 0
           }
         }
