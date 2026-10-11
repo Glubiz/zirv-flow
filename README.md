@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, and the governed event store's schemas, rejects and retention, and ingestion over HTTP with a durable inbox, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -98,6 +98,11 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
 | `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
 | `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
+| `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
+| `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
+| `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
+| `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
+| `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -224,14 +229,17 @@ to `worker.max_running_per_workspace` running jobs when that is set, so one busy
 workspace cannot take every worker.
 
 The worker runs on pools of its own, so HTTP traffic and running jobs cannot
-starve a heartbeat: it opens up to `2 * worker.concurrency + 1` connections (one
-pool for claims and job transactions, one for heartbeats), in addition to
+starve a heartbeat: it opens up to `3 * worker.concurrency + 1` connections (one
+pool for claims, job transactions and the transactions a handler such as
+`ingest.drain` commits on its own, one for heartbeats), in addition to
 `database.max_connections`. The `LISTEN` connection and the scheduler's leader
 lock each take one connection from `database.max_connections`, as does all HTTP
 and admin work, so keep it above a few.
 
 On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
-running jobs; any still running are left to lease expiry. `/metrics` carries
+running jobs; any still running are left to lease expiry. The
+`ingest.drain` kind (one per workspace) applies that workspace's ingestion inbox; see
+[Ingestion](#ingestion). `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
 `zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
 `zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
@@ -452,9 +460,9 @@ shown on people; unarchiving brings its values back.
 ## Events
 
 The event store holds the typed events people produce. Each event name has a schema; the
-store checks every incoming event against it before it is kept. Ingestion over HTTP is not
-available yet, so for now the store is exercised through its Rust API and the schemas,
-settings and rejects are the parts you can use, under **Events** in the web UI.
+store checks every incoming event against it before it is kept. Events arrive through the
+[ingestion API](#ingestion); the schemas, settings and rejects are managed under **Events**
+in the web UI.
 
 **Schemas and versions.** A schema lists the properties of one event name: each has a type
 (`string`, `number`, `integer`, `boolean`, `timestamp`, `date`, `string_list` or `object`),
@@ -613,6 +621,111 @@ keys see its kind and a `masked` flag instead.
 **Merges.** When two people are merged, the survivor is in every list either of them was in,
 keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
 history moves to the survivor.
+
+## Ingestion
+
+Applications send profile updates and events over HTTP with a write-only API key. There are
+no client SDKs; the API is three JSON endpoints.
+
+**Create a key.** A workspace admin creates a key whose only scope is `ingest`
+(`POST /api/v1/workspaces/{ws}/api-keys` with `{"name": "web app", "scopes": ["ingest"]}`).
+The response shows the `zfk_...` key once. The key implies its workspace. A key without the
+`ingest` scope, and a signed-in session, get 403; a missing or invalid key gets 401. Ingestion
+needs no CSRF token.
+
+| Endpoint | Body |
+|----------|------|
+| `POST /api/v1/ingest/identify` | one profile update |
+| `POST /api/v1/ingest/track` | one event |
+| `POST /api/v1/ingest/batch` | `{"batch": [item, ...]}`, each item an identify or a track with `"type": "identify"` or `"type": "track"` |
+
+```sh
+curl -X POST https://flow.example.com/api/v1/ingest/identify \
+  -H "Authorization: Bearer $ZIRV_FLOW_KEY" -H "Content-Type: application/json" \
+  -d '{"userId": "u-1042", "identifiers": {"email": "sam@example.com"},
+       "traits": {"plan": "pro"}, "messageId": "signup-u-1042"}'
+
+curl -X POST https://flow.example.com/api/v1/ingest/track \
+  -H "Authorization: Bearer $ZIRV_FLOW_KEY" -H "Content-Type: application/json" \
+  -d '{"userId": "u-1042", "event": "order_placed", "properties": {"total": 59.9},
+       "timestamp": "2026-03-01T09:30:00Z", "messageId": "order-7731"}'
+
+curl -X POST https://flow.example.com/api/v1/ingest/batch \
+  -H "Authorization: Bearer $ZIRV_FLOW_KEY" -H "Content-Type: application/json" \
+  -d '{"batch": [
+        {"type": "identify", "userId": "u-1042", "traits": {"plan": "team"}},
+        {"type": "track", "userId": "u-1042", "event": "plan_changed", "messageId": "chg-55"}]}'
+```
+
+```js
+const response = await fetch("https://flow.example.com/api/v1/ingest/track", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${process.env.ZIRV_FLOW_KEY}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    anonymousId: "a-77",
+    event: "page_viewed",
+    properties: { path: "/pricing" },
+    messageId: crypto.randomUUID(),
+  }),
+});
+if (response.status === 429) {
+  const seconds = Number(response.headers.get("Retry-After")); // wait, then resend the same body
+}
+```
+
+**Fields.** Every item takes the following; any other top-level field is refused with
+`unknown_field`, never dropped.
+
+| Field | Meaning |
+|-------|---------|
+| `userId` | your id for the person; stored as the identifier `external:user_id` |
+| `anonymousId` | stored as the identifier `anonymous_id` |
+| `identifiers` | an object of identifier kind to value: `email`, `phone`, `anonymous_id` or `external:<namespace>`, such as `{"email": "...", "external:crm": "..."}` |
+| `timestamp` | RFC 3339; when it happened. The arrival time when absent |
+| `messageId` | 1 to 200 characters; the retry key |
+| `traits` | identify only: an object of trait key to value; `null` removes the trait this source set |
+| `event`, `properties` | track only: the event name (required, 1 to 128 characters) and an object |
+
+At least one of `userId`, `anonymousId` and `identifiers` is required. Identifiers are checked
+and normalised as everywhere else (an e-mail is lower-cased, a phone number is E.164). The
+request is checked for structure only; whether an event name is planned or its properties fit
+its schema is decided when the event is applied, and a refused event appears under **Rejects**.
+If any item is invalid the whole request is a 400 and nothing is stored; the problem body lists
+`errors: [{index, field, reason}]` with field names and reason codes, never values.
+
+**Limits.** A body over `ingest.max_request_bytes` is a 413 and more than `ingest.max_batch_items`
+items is a 400 (`too_many_items`). Each key has a token bucket of `ingest.burst_per_key` items
+refilled at `ingest.rate_per_key` per second, counted in items, in each `serve` process; with
+several, a key may send each its own share. A request that does not fit is a 429 with a
+`Retry-After` header in whole seconds (at least 1): wait that long and resend it unchanged.
+When PostgreSQL is unavailable the answer is 503 and nothing was stored; there is no local
+buffer, so retry.
+
+**What 202 means.** `{"accepted": n}` is returned after the items have been appended to a
+durable inbox in PostgreSQL. It means durable, not applied: workers, woken at once, apply the
+inbox in order, normally within moments. The request's trace id (the `x-trace-id` response
+header) is carried into the decisions the items cause, so
+`GET /api/v1/workspaces/{ws}/traces/{trace_id}` shows what became of them.
+
+**Retries.** Send the same `messageId` when you resend an item: an event with a `messageId`
+that was already stored is counted as a repeat and not stored twice, and a repeated identify
+changes nothing. An item without a `messageId` is given a server-generated one when it is
+appended, so a retry of the same request by the client without its own `messageId` can store
+an event twice. An item that cannot be applied at all becomes an `apply_failed` reject instead
+of blocking the workspace's inbox.
+
+**Operation.** The `ingest.drain` job applies up to `ingest.drain_batch_size` inbox rows per
+transaction, in arrival order, and deletes them in that transaction. Concurrent workers never
+apply a row twice. The scheduler leader enqueues a drain for any workspace whose oldest row
+has waited more than 2 seconds, which covers an append that lands as a drain finishes. The
+inbox holds the raw item only until it is applied. Metrics: a `serve` process exports
+`zirv_flow_ingest_requests_total{endpoint,status}` and `zirv_flow_ingest_items_total{kind}`;
+a `worker` process exports `zirv_flow_ingest_applied_total{kind,outcome}` (`valid`, `flagged`,
+`unplanned`, `rejected`, `duplicate`, `apply_failed`) and `zirv_flow_ingest_late_total`; the
+scheduler leader exports `zirv_flow_ingest_inbox_age_seconds`, the age of the oldest row.
 
 ## Web UI
 

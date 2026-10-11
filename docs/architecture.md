@@ -391,6 +391,21 @@ the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
 
+As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
+structure, charge the key's in-process token bucket (items, per `serve` process), and append
+one row per item to `ingest_inbox` with the request's trace id in a single transaction that
+also enqueues `ingest.drain` for the workspace (`unique_key = ingest.drain:<workspace>`). The
+inbox row's `message_id` is the client's or a server-assigned UUID v7. A drain job loops
+`drain_batch`: in one transaction it selects the workspace's oldest rows with `FOR UPDATE SKIP
+LOCKED`, applies them in id order through the transaction-taking profile and event paths of
+apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
+drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
+any other error applies the batch's rows one at a time, each in a savepoint, and a row that
+still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it
+holds its unique key; the scheduler leader enqueues a drain for each workspace whose oldest
+row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
+from a sequence, so two requests that commit out of order drain in id order, not commit order.
+
 ### 7.2 Sources, streams and sync runs
 
 A **source** is a connector instance (type, config, encrypted credentials,
@@ -877,8 +892,8 @@ rules. Property values flagged as PII are masked without `view_pii`; until M8
 adds that grant, only owners and admins can view them. Per-event-name retention
 may shorten or extend the deployment default within operator-set bounds.
 
-**As built.** The store ships the registry, validation and storage of this section; HTTP
-ingestion, the debugger, explorer and replay come later. Versions are immutable
+**As built.** The store ships the registry, validation and storage of this section, and 7.1
+describes the ingestion API; the debugger, explorer and replay come later. Versions are immutable
 (a trigger refuses an update), an unplanned name drafts a schema only when it has no entry yet,
 and a reject sample keeps a value only when the published schema marks the property as
 non-PII and not an `object`. Only an accepted event claims its `message_id`, so a rejected
