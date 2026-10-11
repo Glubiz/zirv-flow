@@ -54,6 +54,14 @@ jobs:
       - name: Crate dependency gate self-test
         run: bash scripts/check-crate-deps.sh --self-test
 
+      # The benchmark-only `bench-no-decisions` feature must never reach the CD workflow, a
+      # Dockerfile or a release build.
+      - name: Benchmark feature gate
+        run: bash scripts/check-bench-features.sh
+
+      - name: Benchmark feature gate self-test
+        run: bash scripts/check-bench-features.sh --self-test
+
       - name: Cache Cargo Registry
         uses: actions/cache@v4.3.0
         with:
@@ -117,6 +125,10 @@ jobs:
 
       - name: Run Clippy Lint
         run: cargo clippy --all-targets -- -D warnings
+
+      # The benchmark-only feature has to keep compiling cleanly.
+      - name: Run Clippy Lint (bench-no-decisions)
+        run: cargo clippy -p zirv-flow-store --features bench-no-decisions -- -D warnings
 
       # Development happens on Windows too, so platform-specific code has to
       # keep compiling cleanly for it, tests included.
