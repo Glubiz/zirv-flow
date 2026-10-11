@@ -2,11 +2,13 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
 use utoipa::{Modify, OpenApi};
 
 use crate::health::{self, StatusBody};
+use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::problem::Problem;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
+use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
@@ -42,6 +44,11 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         keys::create,
         keys::revoke,
         traces::get,
+        setup::status,
+        setup::complete,
+        jobs_admin::depth,
+        jobs_admin::dead,
+        jobs_admin::retry,
     ),
     components(schemas(
         Problem,
@@ -62,6 +69,12 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         TraceBody,
         DecisionBody,
         CauseBody,
+        SetupStatus,
+        SetupRequest,
+        DepthBody,
+        KindDepthBody,
+        JobBody,
+        DeadJobsBody,
     )),
     modifiers(&SecuritySchemes)
 )]

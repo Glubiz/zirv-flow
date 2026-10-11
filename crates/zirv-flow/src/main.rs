@@ -180,6 +180,11 @@ async fn run_roles_reporting(
         },
         _ => None,
     };
+    if let Some(state) = &state
+        && let Err(code) = announce_setup(state, config).await
+    {
+        return code;
+    }
 
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let liveness = Arc::new(RoleLiveness::default());
@@ -333,6 +338,25 @@ impl RoleLiveness {
             Some("the scheduler loop has stopped")
         } else {
             None
+        }
+    }
+}
+
+/// While no owner exists, mints the first-run setup token and logs it, once. This line is
+/// the only place the token appears.
+async fn announce_setup(state: &zirv_flow_api::AppState, config: &Config) -> Result<(), u8> {
+    match state.mint_setup_token().await {
+        Ok(Some(token)) => {
+            warn!(
+                "no owner exists; finish setup at {}/setup with setup token {token}, or run zirv-flow admin create-owner",
+                config.base_url()
+            );
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            error!(%error, "could not check whether an owner exists");
+            Err(1)
         }
     }
 }
@@ -1042,6 +1066,70 @@ mod tests {
         let captured = log::Captured::default();
         let dispatch = log::dispatch("info", config::LogFormat::Json, captured.clone());
         (captured, tracing::dispatcher::set_default(&dispatch))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_an_owner_the_setup_token_is_logged_once_with_the_setup_address(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let state = zirv_flow_api::AppState::new(pool, Arc::new(String::new));
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let (logs, _guard) = capture_logs();
+
+        announce_setup(&state, &config).await.unwrap();
+
+        let lines = logs.json_lines();
+        assert_eq!(lines.len(), 1, "{}", logs.text());
+        assert_eq!(lines[0]["level"], "WARN");
+        let message = lines[0]["fields"]["message"].as_str().unwrap();
+        let token = message
+            .split("setup token ")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .unwrap();
+        assert_eq!(token.len(), 43, "{message}");
+        assert!(message.starts_with(
+            "no owner exists; finish setup at http://127.0.0.1:8080/setup with setup token "
+        ));
+        assert!(message.ends_with(", or run zirv-flow admin create-owner"));
+        assert_eq!(logs.text().matches(token).count(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_an_owner_nothing_is_logged_and_no_token_is_minted(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        zirv_flow_api::admin::create_owner(
+            &pool,
+            &zirv_flow_api::admin::Context::system(),
+            "owner@example.com",
+            "correct horse battery",
+        )
+        .await
+        .unwrap();
+        let state = zirv_flow_api::AppState::new(pool, Arc::new(String::new));
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let (logs, _guard) = capture_logs();
+
+        announce_setup(&state, &config).await.unwrap();
+
+        assert!(logs.text().is_empty(), "{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_database_stops_the_announcement_with_exit_code_one() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(500))
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let state = zirv_flow_api::AppState::new(pool, Arc::new(String::new));
+        let (logs, _guard) = capture_logs();
+
+        let result = announce_setup(&state, &config).await;
+
+        assert_eq!(result, Err(1));
+        assert_eq!(logs.json_lines()[0]["level"], "ERROR");
     }
 
     #[tokio::test]

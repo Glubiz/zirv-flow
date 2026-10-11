@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{PgPool, SchemaState, StoreError};
@@ -22,6 +22,8 @@ pub struct AppState {
     pub(crate) cookie_secure: bool,
     pub(crate) local_sign_in: bool,
     pub(crate) oidc: Option<OidcState>,
+    /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
+    pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -46,6 +48,7 @@ impl AppState {
             cookie_secure: true,
             local_sign_in: true,
             oidc: None,
+            setup_token: Arc::default(),
         }
     }
 
@@ -101,6 +104,17 @@ mod tests {
     async fn cookies_are_secure_unless_turned_off() {
         assert!(state().cookie_secure);
         assert!(!state().with_cookie_secure(false).cookie_secure);
+    }
+
+    #[tokio::test]
+    async fn there_is_no_setup_token_until_one_is_minted_and_clones_share_it() {
+        let state = state();
+        let clone = state.clone();
+
+        assert!(state.setup_token().is_none());
+        *clone.setup_token() = Some([7; 32]);
+
+        assert_eq!(*state.setup_token(), Some([7; 32]));
     }
 
     #[tokio::test]

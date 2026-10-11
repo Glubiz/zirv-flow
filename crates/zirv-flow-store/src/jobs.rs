@@ -79,6 +79,7 @@ pub struct Job {
     pub trace_id: Uuid,
     pub cause_kind: String,
     pub cause_id: String,
+    pub dead_at: Option<OffsetDateTime>,
 }
 
 /// A job a worker has claimed. `attempts` already counts this attempt.
@@ -331,6 +332,7 @@ pub async fn fail_job<'e>(
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = CASE WHEN attempts >= max_attempts THEN run_at \
                               ELSE now() + make_interval(secs => $3) END, \
+                dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id = $1 AND lease_token = $2 \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
@@ -389,6 +391,7 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
              UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = now(), last_error = 'lease expired', \
+                dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE state = 'running' AND lease_expires_at < now() \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
@@ -419,7 +422,7 @@ pub async fn find_job<'e>(
     sqlx::query_as(
         "SELECT id, workspace_id, kind, payload, priority, run_at, state, attempts, \
                 max_attempts, lease_token, lease_expires_at, locked_by, unique_key, \
-                last_error, created_at, trace_id, cause_kind, cause_id \
+                last_error, created_at, trace_id, cause_kind, cause_id, dead_at \
          FROM jobs WHERE id = $1",
     )
     .bind(id)
@@ -453,6 +456,145 @@ pub async fn queue_depths<'e>(
         .fetch_all(executor)
         .await
         .map_err(StoreError::query)
+}
+
+/// The queue of one job kind, for the jobs-admin view.
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct KindDepth {
+    pub kind: String,
+    pub ready: i64,
+    pub running: i64,
+    pub dead: i64,
+    /// How long the longest-waiting runnable job has waited, by the database's clock.
+    pub oldest_ready_seconds: Option<f64>,
+}
+
+/// One job without its payload, as the jobs-admin view shows it.
+#[derive(Clone, Debug)]
+pub struct JobSummary {
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub kind: String,
+    pub state: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub last_error: Option<String>,
+    pub trace_id: TraceId,
+    pub cause: Cause,
+    pub dead_at: Option<OffsetDateTime>,
+}
+
+#[derive(FromRow)]
+struct JobSummaryRow {
+    id: Uuid,
+    workspace_id: Option<Uuid>,
+    kind: String,
+    state: String,
+    attempts: i32,
+    max_attempts: i32,
+    last_error: Option<String>,
+    trace_id: Uuid,
+    cause_kind: String,
+    cause_id: String,
+    dead_at: Option<OffsetDateTime>,
+}
+
+impl JobSummaryRow {
+    fn into_summary(self) -> Result<JobSummary, StoreError> {
+        let kind: CauseKind = self
+            .cause_kind
+            .parse()
+            .map_err(|error| StoreError::query(sqlx::Error::Decode(Box::new(error))))?;
+        Ok(JobSummary {
+            id: self.id,
+            workspace_id: self.workspace_id,
+            kind: self.kind,
+            state: self.state,
+            attempts: self.attempts,
+            max_attempts: self.max_attempts,
+            last_error: self.last_error,
+            trace_id: TraceId::from_uuid(self.trace_id),
+            cause: Cause::from_stored(kind, self.cause_id),
+            dead_at: self.dead_at,
+        })
+    }
+}
+
+/// Where the next page of dead jobs starts: strictly before this `(dead_at, id)`.
+pub type DeadCursor = (OffsetDateTime, Uuid);
+
+/// Job counts per kind and state, and the age of the oldest runnable job, in one query.
+/// Sorted by kind.
+pub async fn kind_depths<'e>(executor: impl PgExecutor<'e>) -> Result<Vec<KindDepth>, StoreError> {
+    sqlx::query_as(
+        "SELECT kind, \
+                count(*) FILTER (WHERE state = 'ready') AS ready, \
+                count(*) FILTER (WHERE state = 'running') AS running, \
+                count(*) FILTER (WHERE state = 'dead') AS dead, \
+                EXTRACT(EPOCH FROM now() - min(run_at) \
+                    FILTER (WHERE state = 'ready' AND run_at <= now()))::float8 \
+                    AS oldest_ready_seconds \
+         FROM jobs GROUP BY kind ORDER BY kind",
+    )
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Dead jobs, newest first, at most `limit`, starting after `before`. The flag is true when
+/// more exist. The payload is never read.
+pub async fn list_dead_jobs<'e>(
+    executor: impl PgExecutor<'e>,
+    limit: u32,
+    before: Option<DeadCursor>,
+) -> Result<(Vec<JobSummary>, bool), StoreError> {
+    let rows: Vec<JobSummaryRow> = sqlx::query_as(
+        "SELECT id, workspace_id, kind, state, attempts, max_attempts, last_error, trace_id, \
+                cause_kind, cause_id, dead_at \
+         FROM jobs \
+         WHERE state = 'dead' AND ($1::timestamptz IS NULL OR (dead_at, id) < ($1, $2)) \
+         ORDER BY dead_at DESC, id DESC LIMIT $3",
+    )
+    .bind(before.map(|(dead_at, _)| dead_at))
+    .bind(before.map(|(_, id)| id))
+    .bind(i64::from(limit) + 1)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    let more = rows.len() > limit as usize;
+    let jobs = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(JobSummaryRow::into_summary)
+        .collect::<Result<_, _>>()?;
+    Ok((jobs, more))
+}
+
+/// Puts a dead job back to `ready` with fresh attempts, to run now, keeping its trace and
+/// cause, and wakes the workers. `None` means there is no such dead job.
+///
+/// An error for which [`StoreError::is_conflict`] holds means another ready or running job
+/// holds the same unique key; nothing changed, but the caller's transaction is aborted.
+pub async fn retry_dead_job(
+    connection: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<JobSummary>, StoreError> {
+    let row: Option<JobSummaryRow> = sqlx::query_as(
+        "WITH updated AS ( \
+             UPDATE jobs SET state = 'ready', attempts = 0, run_at = now(), \
+                lease_token = NULL, lease_expires_at = NULL, locked_by = NULL, \
+                last_error = NULL, dead_at = NULL \
+             WHERE id = $1 AND state = 'dead' \
+             RETURNING id, workspace_id, kind, state, attempts, max_attempts, last_error, \
+                       trace_id, cause_kind, cause_id, dead_at) \
+         SELECT updated.*, pg_notify($2, kind) AS notified FROM updated",
+    )
+    .bind(id)
+    .bind(NOTIFY_CHANNEL)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    row.map(JobSummaryRow::into_summary).transpose()
 }
 
 /// The database's clock; due times are compared against it, never the host's.
@@ -1323,5 +1465,252 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    fn dead_candidate(kind: &str) -> NewJob {
+        let mut new = job(kind);
+        new.max_attempts = 1;
+        new
+    }
+
+    /// Enqueues a job with one attempt, claims it and fails it, leaving it dead.
+    async fn make_dead(pool: &PgPool, new: NewJob) -> Uuid {
+        let kind = new.kind.clone();
+        enqueue(pool, &new).await.unwrap();
+        let claimed = claim(pool, &[kind.as_str()]).await.unwrap();
+        let outcome = fail_job(
+            pool,
+            claimed.id,
+            claimed.lease_token,
+            Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some(FailOutcome::Dead));
+        claimed.id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn failing_a_job_out_of_attempts_stamps_dead_at_and_a_retried_failure_does_not(
+        pool: PgPool,
+    ) {
+        enqueue(&pool, &job("retrying.kind")).await.unwrap();
+        let claimed = claim(&pool, &["retrying.kind"]).await.unwrap();
+        fail_job(&pool, claimed.id, claimed.lease_token, Duration::ZERO, "x")
+            .await
+            .unwrap();
+        assert!(only_job(&pool).await.dead_at.is_none());
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let id = make_dead(&pool, dead_candidate("dying.kind")).await;
+
+        let stored = find_job(&pool, id).await.unwrap().unwrap();
+        assert_eq!(stored.state, "dead");
+        assert!(stored.dead_at.is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reaping_a_job_out_of_attempts_stamps_dead_at(pool: PgPool) {
+        enqueue(&pool, &dead_candidate("reaped.kind"))
+            .await
+            .unwrap();
+        let claimed = claim_job(&pool, "w", &["reaped.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let reaped = reap_expired(&pool).await.unwrap();
+
+        assert_eq!(reaped.dead, 1);
+        let stored = find_job(&pool, claimed.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, "dead");
+        assert!(stored.dead_at.is_some());
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dead_at_migration_applies_to_a_table_that_already_has_dead_rows(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 5)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        for (state, kind) in [("dead", "old.dead"), ("ready", "old.ready")] {
+            sqlx::query(
+                "INSERT INTO jobs (id, kind, state, trace_id, cause_kind, cause_id) \
+                 VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), 'manual', '')",
+            )
+            .bind(kind)
+            .bind(state)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        crate::migrate(&pool).await.unwrap();
+
+        let rows: Vec<(String, Option<OffsetDateTime>)> =
+            sqlx::query_as("SELECT state, dead_at FROM jobs ORDER BY state")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows[0].0, "dead");
+        assert!(rows[0].1.is_some(), "a dead row is backfilled");
+        assert_eq!(rows[1].0, "ready");
+        assert!(rows[1].1.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn depths_count_each_state_per_kind_and_age_only_runnable_ready_jobs(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let mut later = job("a.kind");
+        later.run_at = Some(OffsetDateTime::now_utc() + time::Duration::hours(1));
+        enqueue(&pool, &later).await.unwrap();
+        make_dead(&pool, dead_candidate("b.kind")).await;
+        enqueue(&pool, &job("c.kind")).await.unwrap();
+        claim(&pool, &["c.kind"]).await.unwrap();
+        sqlx::query(
+            "UPDATE jobs SET run_at = now() - interval '90 seconds' \
+             WHERE kind = 'a.kind' AND run_at <= now()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let depths = kind_depths(&pool).await.unwrap();
+
+        let kinds: Vec<&str> = depths.iter().map(|depth| depth.kind.as_str()).collect();
+        assert_eq!(kinds, ["a.kind", "b.kind", "c.kind"]);
+        let counts = |depth: &KindDepth| (depth.ready, depth.running, depth.dead);
+        assert_eq!(counts(&depths[0]), (3, 0, 0));
+        assert_eq!(counts(&depths[1]), (0, 0, 1));
+        assert_eq!(counts(&depths[2]), (0, 1, 0));
+        let oldest = depths[0].oldest_ready_seconds.unwrap();
+        assert!((90.0..120.0).contains(&oldest), "{oldest}");
+        assert_eq!(depths[1].oldest_ready_seconds, None);
+        assert_eq!(depths[2].oldest_ready_seconds, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dead_list_is_newest_first_and_pages_without_gaps_or_duplicates(pool: PgPool) {
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(make_dead(&pool, dead_candidate("dead.kind")).await);
+        }
+        // Two rows share an instant, so the id must break the tie.
+        sqlx::query("UPDATE jobs SET dead_at = '2030-01-01T00:00:00Z' WHERE id = ANY($1)")
+            .bind(&ids[..2])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (first, more) = list_dead_jobs(&pool, 2, None).await.unwrap();
+        assert!(more);
+        let cursor = |job: &JobSummary| (job.dead_at.unwrap(), job.id);
+        let (second, more) = list_dead_jobs(&pool, 2, Some(cursor(&first[1])))
+            .await
+            .unwrap();
+        assert!(more);
+        let (third, more) = list_dead_jobs(&pool, 2, Some(cursor(&second[1])))
+            .await
+            .unwrap();
+        assert!(!more);
+
+        let paged: Vec<Uuid> = first
+            .iter()
+            .chain(&second)
+            .chain(&third)
+            .map(|job| job.id)
+            .collect();
+        let (all, _) = list_dead_jobs(&pool, 50, None).await.unwrap();
+        let everything: Vec<Uuid> = all.iter().map(|job| job.id).collect();
+        assert_eq!(paged, everything);
+        let mut unique = paged.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5);
+        let stamps: Vec<_> = all.iter().map(|job| (job.dead_at, job.id)).collect();
+        assert!(stamps.windows(2).all(|pair| pair[0] > pair[1]));
+        assert_eq!(first[0].last_error.as_deref(), Some("boom"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_a_dead_job_resets_it_and_keeps_its_trace(pool: PgPool) {
+        let trace = TraceContext::root(Cause::schedule(Uuid::new_v4()));
+        let mut new = dead_candidate("retry.kind");
+        new.trace = trace.clone();
+        let id = make_dead(&pool, new).await;
+        let mut listener = listen_for_jobs(&pool).await.unwrap();
+
+        let mut connection = pool.acquire().await.unwrap();
+        let retried = retry_dead_job(&mut connection, id).await.unwrap().unwrap();
+        drop(connection);
+
+        assert_eq!(retried.state, "ready");
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(retried.last_error, None);
+        assert_eq!(retried.dead_at, None);
+        assert_eq!(retried.trace_id, trace.trace_id);
+        assert_eq!(retried.cause, trace.cause);
+        assert!(listener.wait().await.unwrap(), "workers are woken");
+        let claimed = claim(&pool, &["retry.kind"]).await.unwrap();
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.trace, trace);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_a_dead_job_can_be_retried(pool: PgPool) {
+        enqueue(&pool, &job("live.kind")).await.unwrap();
+        let ready = only_job(&pool).await.id;
+        let mut connection = pool.acquire().await.unwrap();
+
+        assert!(
+            retry_dead_job(&mut connection, ready)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            retry_dead_job(&mut connection, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_into_a_held_unique_key_is_a_conflict_and_changes_nothing(pool: PgPool) {
+        let mut keyed = dead_candidate("keyed.kind");
+        keyed.unique_key = Some("only-one".into());
+        let dead = make_dead(&pool, keyed.clone()).await;
+        keyed.max_attempts = 5;
+        assert!(enqueue(&pool, &keyed).await.unwrap());
+
+        let mut connection = pool.acquire().await.unwrap();
+        let error = retry_dead_job(&mut connection, dead).await.unwrap_err();
+        drop(connection);
+
+        assert!(error.is_conflict());
+        let stored = find_job(&pool, dead).await.unwrap().unwrap();
+        assert_eq!(stored.state, "dead");
+        assert!(stored.dead_at.is_some());
+        assert_eq!(stored.attempts, 1);
     }
 }

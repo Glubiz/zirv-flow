@@ -403,6 +403,15 @@ impl Config {
         self.ops.bind
     }
 
+    /// Where browsers reach the server: the public URL without a trailing slash, else the
+    /// bind address over plain HTTP.
+    pub(crate) fn base_url(&self) -> String {
+        match &self.server.public_url {
+            Some(public_url) => public_url.trim_end_matches('/').to_owned(),
+            None => format!("http://{}", self.server.bind),
+        }
+    }
+
     /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn server_cookie_secure(&self) -> bool {
         self.server.cookie_secure
@@ -896,6 +905,17 @@ client_secret = \"file-secret\"
 scopes = [\"email\", \"groups\"]
 auto_create_users = true
 ";
+
+    #[test]
+    fn the_base_url_is_the_public_url_without_a_trailing_slash_else_the_bind_address() {
+        let file = TestFile::new(OIDC_FILE);
+
+        let public = Config::load(Some(&file.0), []).unwrap();
+        let bound = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(public.base_url(), "https://flow.example.com");
+        assert_eq!(bound.base_url(), "http://127.0.0.1:8080");
+    }
 
     #[test]
     fn local_sign_in_is_on_and_oidc_is_off_by_default() {
