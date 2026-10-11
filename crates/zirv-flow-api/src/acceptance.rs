@@ -4534,6 +4534,7 @@ mod tests {
         assert!(entries[1]["actor_user_id"].is_string());
         assert_eq!(entries[1]["topic_key"], "news");
         assert_eq!(entries[1]["evidence"], evidence);
+        assert_eq!(entries[1]["masked"], false);
         assert_eq!(history.body["next_before"], serde_json::Value::Null);
 
         let first_page = call(
@@ -5213,5 +5214,47 @@ mod tests {
 
         assert_eq!(check.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(list.status, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_evidence_is_masked_for_callers_who_may_not_see_values(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
+        let put = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "status": "subscribed", "evidence": {"ip": "203.0.113.9"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(put.status, StatusCode::OK);
+        let uri = format!("{}/history", consent_uri(&ws, &person));
+
+        let as_member = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        let as_read_key = call(&router, "GET", &uri, None, Auth::Key(&read_key)).await;
+        let as_admin_key = call(&router, "GET", &uri, None, Auth::Key(&admin_key)).await;
+        let as_owner = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+
+        for masked in [&as_member, &as_read_key] {
+            assert_eq!(masked.status, StatusCode::OK);
+            let entry = &masked.body["entries"][0];
+            assert_eq!(entry["evidence"], serde_json::Value::Null);
+            assert_eq!(entry["masked"], true);
+            assert_eq!(entry["source"], "ui");
+            assert!(!masked.body.to_string().contains("203.0.113.9"));
+        }
+        for shown in [&as_admin_key, &as_owner] {
+            let entry = &shown.body["entries"][0];
+            assert_eq!(entry["evidence"], json!({"ip": "203.0.113.9"}));
+            assert_eq!(entry["masked"], false);
+        }
     }
 }

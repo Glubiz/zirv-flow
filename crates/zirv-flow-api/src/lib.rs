@@ -139,6 +139,8 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/ingest-rejects",
             get(events::rejects::list),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/topics",
             get(consent::topics::list).post(consent::topics::create),
         )

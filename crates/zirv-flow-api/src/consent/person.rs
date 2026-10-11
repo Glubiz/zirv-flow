@@ -16,7 +16,7 @@ use zirv_flow_store::{
 use super::{invalid, origin};
 use crate::AppState;
 use crate::admin::AdminError;
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -93,16 +93,19 @@ pub(crate) struct HistoryEntryBody {
     /// `api`, `ui`, `import`, `merge`, `unsubscribe_link` or `ingest`.
     #[schema(example = "ui")]
     source: String,
-    #[schema(value_type = Object)]
-    evidence: Value,
+    /// Null when `masked`: only workspace admins, the owner and `admin` keys see evidence,
+    /// which can hold an IP address or user agent.
+    #[schema(value_type = Option<Object>)]
+    evidence: Option<Value>,
+    masked: bool,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     occurred_at: OffsetDateTime,
     actor_user_id: Option<Uuid>,
 }
 
-impl From<ConsentHistoryEntry> for HistoryEntryBody {
-    fn from(entry: ConsentHistoryEntry) -> Self {
+impl HistoryEntryBody {
+    fn new(entry: ConsentHistoryEntry, reveal: bool) -> Self {
         Self {
             id: entry.id,
             channel: entry.channel,
@@ -110,7 +113,8 @@ impl From<ConsentHistoryEntry> for HistoryEntryBody {
             from_status: entry.from_status,
             to_status: entry.to_status,
             source: entry.source,
-            evidence: entry.evidence,
+            evidence: reveal.then_some(entry.evidence),
+            masked: !reveal,
             occurred_at: entry.occurred_at,
             actor_user_id: entry.actor_user_id,
         }
@@ -314,6 +318,8 @@ fn parse_history_query(query: &str) -> Result<(u32, Option<(OffsetDateTime, Uuid
 }
 
 /// A person's consent history, newest first: every change with its source and evidence.
+/// Evidence is shown to the owner, workspace admins and `admin` keys, and masked for
+/// everyone else.
 #[utoipa::path(
     get,
     operation_id = "get_person_consent_history",
@@ -346,12 +352,16 @@ pub(crate) async fn history(
         zirv_flow_store::consent_history(&state.pool, workspace.id, path_id(&id)?, limit, before)
             .await?
             .ok_or_else(ApiError::not_found)?;
+    let reveal = may_see_values(&state, &principal, workspace.id).await;
     let next_before = match entries.last() {
         Some(last) if more => Some(encode_cursor((last.occurred_at, last.id))),
         _ => None,
     };
     Ok(Json(HistoryBody {
-        entries: entries.into_iter().map(HistoryEntryBody::from).collect(),
+        entries: entries
+            .into_iter()
+            .map(|entry| HistoryEntryBody::new(entry, reveal))
+            .collect(),
         next_before,
     }))
 }

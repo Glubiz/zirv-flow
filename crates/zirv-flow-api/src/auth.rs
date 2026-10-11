@@ -237,8 +237,9 @@ pub(crate) async fn authorize(
         .ok_or_else(ApiError::not_found)
 }
 
-/// Whether the caller may see identifier values: the owner, a workspace admin or an `admin`
-/// key. Everyone else who may read the workspace sees them masked.
+/// Whether the caller may see personal values such as identifiers and consent evidence: the
+/// owner, a workspace admin or an `admin` key. Everyone else who may read the workspace sees
+/// them masked.
 pub(crate) async fn may_see_values(
     state: &AppState,
     principal: &Principal,
