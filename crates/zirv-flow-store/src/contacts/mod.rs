@@ -12,8 +12,8 @@ mod records;
 mod write;
 
 pub use definition::{
-    ContactDefinition, DefinitionError, DefinitionProblem, find_contact_definition,
-    put_contact_definition, typed_definition,
+    ContactDefinition, DefinitionError, DefinitionProblem, contact_registry,
+    find_contact_definition, put_contact_definition, typed_definition,
 };
 pub use records::{
     Contact, ContactPage, ContactSearch, ContactSearchError, find_contact, list_contacts,
@@ -1114,6 +1114,85 @@ mod tests {
         assert_eq!(
             person_of_email(&pool, ws, "other@example.test").await,
             Some(person)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_field_whose_registry_key_was_archived_keeps_its_value_and_does_not_block_updates(
+        pool: PgPool,
+    ) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com", "age": 3}))),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::update_trait_definition(
+            &pool,
+            ws,
+            "age",
+            &crate::TraitDefinitionUpdate {
+                archived: Some(true),
+                ..crate::TraitDefinitionUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let patched = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"plan": "pro"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let replaced = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"email": "a@example.com", "plan": "free"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let explicit = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 4}))),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            patched.contact.unwrap().fields,
+            object(json!({"email": "a@example.com", "age": 3, "plan": "pro"}))
+        );
+        assert_eq!(
+            replaced.contact.unwrap().fields,
+            object(json!({"email": "a@example.com", "age": 3, "plan": "free"}))
+        );
+        assert_eq!(
+            reasons(explicit),
+            [("age".to_owned(), "unplanned_property")]
+        );
+
+        // A bulk replacement leaves it alone too.
+        append_bulk(&pool, ws, "c-1", json!({"email": "a@example.com"})).await;
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let drained = drain_batch(&pool, ws, &key, 100).await.unwrap();
+        assert_eq!(drained.applied.get(&("contact", "valid")), Some(&1));
+        assert_eq!(
+            read(&pool, ws, "c-1").await.unwrap().fields,
+            object(json!({"email": "a@example.com", "age": 3}))
         );
     }
 }

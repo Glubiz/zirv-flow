@@ -43,6 +43,14 @@ pub struct TypedField {
     pub trait_type: TraitType,
 }
 
+/// A key of the field registry as a contact write sees it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryKey {
+    pub key: String,
+    pub trait_type: TraitType,
+    pub archived: bool,
+}
+
 /// The path segments of the contacts API that are not contact keys.
 const RESERVED_KEYS: [&str; 2] = ["search", "bulk"];
 

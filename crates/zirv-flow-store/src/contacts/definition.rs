@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::contacts::{ContactField, TypedField, validate_definition};
+use zirv_flow_core::contacts::{ContactField, RegistryKey, TypedField, validate_definition};
 use zirv_flow_core::people::TraitType;
 use zirv_flow_core::{ValidationError, WorkspaceId};
 
@@ -126,6 +126,22 @@ pub async fn put_contact_definition(
         updated_at,
         updated_by,
     })
+}
+
+/// Every key of the workspace's field registry, archived ones included.
+pub async fn contact_registry(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<RegistryKey>, StoreError> {
+    Ok(list_trait_definitions(connection, workspace)
+        .await?
+        .into_iter()
+        .map(|entry| RegistryKey {
+            key: entry.key,
+            trait_type: entry.trait_type,
+            archived: entry.archived,
+        })
+        .collect())
 }
 
 /// The definition with the registry type of each field, for validating a write. A field whose

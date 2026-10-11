@@ -40,9 +40,9 @@ pub use consent::{
 };
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
-    DefinitionError, DefinitionProblem, Idempotency, WriteError, Written, delete_contact,
-    expire_contact_idempotency, find_contact, find_contact_definition, list_contacts,
-    put_contact_definition, search_contacts, typed_definition, write_contact,
+    DefinitionError, DefinitionProblem, Idempotency, WriteError, Written, contact_registry,
+    delete_contact, expire_contact_idempotency, find_contact, find_contact_definition,
+    list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
 };
 pub use decisions::{
     Decision, NewDecision, append_decision, append_decisions, ensure_decision_partitions,
