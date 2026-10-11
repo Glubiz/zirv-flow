@@ -3,23 +3,31 @@
 //!
 //! The store writes a feed row per outcome only while some `serve` process keeps the
 //! workspace watched. Here, one shared `LISTEN` connection per process hears a batch commit
-//! and wakes the viewers of that workspace; a heartbeat every 10 seconds keeps the watch
-//! alive for 30. Each viewer reads the feed after its own cursor with its own filters,
-//! masks each row for its own viewer, and sends it through a bounded channel: when the
-//! channel is full the viewer skips ahead and says so with an `event: gap` frame, so a slow
-//! viewer never blocks ingestion or another viewer.
+//! and wakes the viewers of that workspace, and a timer of its own renews the watch every 10
+//! seconds for 30, whether or not the listener is up. While the listener is down the viewers
+//! fall back to polling and tell the client with an `event: status` frame. Each viewer reads
+//! the feed after its own cursor with its own filters, masks each row for its own viewer, and
+//! sends it through a bounded channel: when the channel is full the viewer skips ahead and
+//! says so with an `event: gap` frame, so a slow viewer never blocks ingestion or another
+//! viewer.
+//!
+//! The feed's `seq` is assigned when a row is inserted, not when its transaction commits, so
+//! rows can become visible out of order. A viewer therefore keeps a low watermark (every
+//! `seq` up to it is settled) and the set of rows it sent above it, and waits a few seconds
+//! for a missing number before giving up on it (its writer rolled back). A frame's `id` is
+//! the watermark after it, so resuming from it never skips a row; it may repeat rows above it.
 //!
 //! The feed holds redacted values only; `reveal` shows them as stored, never as received.
 //! Nothing here logs a name, an identifier or a value.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
@@ -33,8 +41,8 @@ use uuid::Uuid;
 use zirv_flow_core::events::{mask_event, mask_sample};
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
-    FeedFilter, FeedItem, PgPool, debugger_feed_head, listen_for_debugger, read_debugger_feed,
-    touch_debugger_watch,
+    FeedFilter, FeedItem, PgPool, debugger_feed_head, debugger_feed_seqs, listen_for_debugger,
+    read_debugger_feed, touch_debugger_watch,
 };
 
 use crate::AppState;
@@ -48,8 +56,17 @@ const CHANNEL_FRAMES: usize = 64;
 /// Feed rows read per query.
 const BATCH: i64 = 200;
 
+/// How many `seq` numbers a viewer looks at when settling its watermark.
+const WINDOW: i64 = 1000;
+
+/// How long a viewer waits for a missing `seq` before it gives up on it.
+const PATIENCE: Duration = Duration::from_secs(10);
+
+/// The most rows a viewer holds above its watermark; beyond it, holes are given up at once.
+const MAX_AHEAD: usize = 5000;
+
 /// A viewer that hears nothing still polls this often, as a safety net for a missed
-/// notification.
+/// notification and the only way it learns of new rows while the listener is down.
 const POLL: Duration = Duration::from_secs(5);
 
 /// How often the watch is renewed for workspaces with a viewer.
@@ -57,6 +74,12 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// How often an idle stream sends a comment, so proxies keep the connection.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+/// The most streams one workspace may have open in one process.
+pub(crate) const MAX_VIEWERS: usize = 20;
+
+/// What a refused viewer is told to wait, in seconds.
+const RETRY_AFTER: u64 = 5;
 
 const OUTCOMES: [&str; 5] = ["accepted", "flagged", "unplanned", "rejected", "duplicate"];
 
@@ -70,6 +93,8 @@ struct HubInner {
     pool: PgPool,
     slots: Mutex<HashMap<WorkspaceId, Slot>>,
     started: AtomicBool,
+    /// The shared listener is not connected: viewers poll instead of being woken.
+    degraded: AtomicBool,
 }
 
 struct Slot {
@@ -82,6 +107,13 @@ pub(crate) struct Subscription {
     hub: Arc<HubInner>,
     workspace: WorkspaceId,
     ticks: watch::Receiver<u64>,
+}
+
+impl Subscription {
+    /// Whether the shared listener is down, so the viewer only polls.
+    fn degraded(&self) -> bool {
+        self.hub.degraded.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for Subscription {
@@ -107,14 +139,17 @@ impl DebuggerHub {
                 pool,
                 slots: Mutex::new(HashMap::new()),
                 started: AtomicBool::new(false),
+                degraded: AtomicBool::new(false),
             }),
         }
     }
 
-    /// Joins the viewers of `workspace`, starting the shared listener on the first call.
-    pub(crate) fn subscribe(&self, workspace: WorkspaceId) -> Subscription {
+    /// Joins the viewers of `workspace`, starting the shared tasks on the first call. `None`
+    /// when the workspace already has [`MAX_VIEWERS`] streams in this process.
+    pub(crate) fn subscribe(&self, workspace: WorkspaceId) -> Option<Subscription> {
         if !self.inner.started.swap(true, Ordering::SeqCst) {
-            tokio::spawn(run(Arc::downgrade(&self.inner)));
+            tokio::spawn(listen(Arc::downgrade(&self.inner)));
+            tokio::spawn(renew(Arc::downgrade(&self.inner)));
         }
         let mut slots = self
             .inner
@@ -125,12 +160,15 @@ impl DebuggerHub {
             viewers: 0,
             tick: watch::channel(0).0,
         });
+        if slot.viewers >= MAX_VIEWERS {
+            return None;
+        }
         slot.viewers += 1;
-        Subscription {
+        Some(Subscription {
             hub: Arc::clone(&self.inner),
             workspace,
             ticks: slot.tick.subscribe(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -141,6 +179,19 @@ impl DebuggerHub {
             .lock()
             .expect("the hub lock is never poisoned");
         slots.get(&workspace).map_or(0, |slot| slot.viewers)
+    }
+
+    /// Pretends the shared listener went down or came back, and wakes every viewer.
+    #[cfg(test)]
+    pub(crate) fn set_degraded_for_test(&self, degraded: bool) {
+        self.inner.degraded.store(degraded, Ordering::Relaxed);
+        self.inner.wake(None);
+    }
+
+    /// Renews the watch of every workspace with a viewer, once, as the timer does.
+    #[cfg(test)]
+    pub(crate) async fn renew_once_for_test(&self) {
+        self.inner.renew_watches().await;
     }
 }
 
@@ -158,11 +209,39 @@ impl HubInner {
         let slots = self.slots.lock().expect("the hub lock is never poisoned");
         slots.keys().copied().collect()
     }
+
+    async fn renew_watches(&self) {
+        for workspace in self.watched() {
+            if let Err(error) = touch_debugger_watch(&self.pool, workspace).await {
+                warn!(%error, "the debugger watch could not be renewed");
+            }
+        }
+    }
+
+    fn set_degraded(&self, degraded: bool) {
+        if self.degraded.swap(degraded, Ordering::Relaxed) != degraded {
+            self.wake(None);
+        }
+    }
 }
 
-/// The shared listener: wakes viewers on a notification, renews the watch on a timer, and
-/// ends when the hub is gone. A lost connection wakes every viewer to poll.
-async fn run(hub: Weak<HubInner>) {
+/// Keeps the watch alive on a timer of its own, so a failing listener cannot let it expire.
+/// Ends when the hub is gone.
+async fn renew(hub: Weak<HubInner>) {
+    let mut beat = tokio::time::interval(HEARTBEAT);
+    loop {
+        beat.tick().await;
+        let Some(strong) = hub.upgrade() else {
+            return;
+        };
+        strong.renew_watches().await;
+    }
+}
+
+/// The shared listener: wakes the viewers of a workspace on a notification. While it is not
+/// connected the hub is degraded and every viewer is woken so it can say so and poll. Ends
+/// when the hub is gone.
+async fn listen(hub: Weak<HubInner>) {
     loop {
         let Some(strong) = hub.upgrade() else {
             return;
@@ -173,40 +252,101 @@ async fn run(hub: Weak<HubInner>) {
             Ok(listener) => listener,
             Err(error) => {
                 warn!(%error, "the debugger listener could not connect");
+                if let Some(strong) = hub.upgrade() {
+                    strong.set_degraded(true);
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
-        let mut beat = tokio::time::interval(HEARTBEAT);
+        if let Some(strong) = hub.upgrade() {
+            // Anything sent while it was down was missed: wake everyone to catch up.
+            strong.set_degraded(false);
+            strong.wake(None);
+        }
         loop {
-            tokio::select! {
-                heard = listener.wait() => {
-                    let Some(strong) = hub.upgrade() else {
-                        return;
-                    };
-                    match heard {
-                        Ok(Some(workspace)) => strong.wake(Some(workspace)),
-                        Ok(None) => strong.wake(None),
-                        Err(error) => {
-                            warn!(%error, "the debugger listener lost its connection");
-                            strong.wake(None);
-                            break;
-                        }
-                    }
-                }
-                _ = beat.tick() => {
-                    let Some(strong) = hub.upgrade() else {
-                        return;
-                    };
-                    for workspace in strong.watched() {
-                        if let Err(error) = touch_debugger_watch(&pool, workspace).await {
-                            warn!(%error, "the debugger watch could not be renewed");
-                        }
-                    }
+            let heard = listener.wait().await;
+            let Some(strong) = hub.upgrade() else {
+                return;
+            };
+            match heard {
+                Ok(Some(workspace)) => strong.wake(Some(workspace)),
+                Ok(None) => strong.wake(None),
+                Err(error) => {
+                    warn!(%error, "the debugger listener lost its connection");
+                    strong.set_degraded(true);
+                    break;
                 }
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// One viewer's place in the feed: every `seq` up to `watermark` is settled, and `sent` holds
+/// the rows already delivered above it. See the module documentation.
+struct Cursor {
+    watermark: i64,
+    sent: BTreeSet<i64>,
+    /// The first missing `seq` above the watermark, and when it was first missed.
+    waiting: Option<(i64, Instant)>,
+}
+
+impl Cursor {
+    fn new(watermark: i64) -> Self {
+        Self {
+            watermark,
+            sent: BTreeSet::new(),
+            waiting: None,
+        }
+    }
+
+    fn sent_list(&self) -> Vec<i64> {
+        self.sent.iter().copied().collect()
+    }
+
+    fn deliver(&mut self, seq: i64) {
+        self.sent.insert(seq);
+    }
+
+    /// Moves the watermark over every `seq` that is settled. `present` lists, in order, the
+    /// numbers the feed holds above the watermark and whether the viewer's filters match
+    /// them. A number is settled when the viewer sent it, or the feed holds it and the
+    /// filters hide it. A number the feed does not hold is a hole while a later one exists:
+    /// the viewer waits `patience` for its writer to commit, then gives up on it.
+    fn advance(&mut self, present: &[(i64, bool)], now: Instant, patience: Duration) {
+        loop {
+            let next = self.watermark + 1;
+            let held = present.binary_search_by_key(&next, |(seq, _)| *seq).ok();
+            let settled = self.sent.remove(&next) || held.is_some_and(|at| !present[at].1);
+            if settled {
+                self.watermark = next;
+                self.waiting = None;
+                continue;
+            }
+            if held.is_some() {
+                // A row to send that the viewer has not read yet.
+                return;
+            }
+            let later = present.iter().any(|(seq, _)| *seq > next)
+                || self.sent.iter().any(|seq| *seq > next);
+            if !later {
+                return;
+            }
+            let give_up = self.sent.len() > MAX_AHEAD
+                || self.waiting.is_some_and(|(seq, since)| {
+                    seq == next && now.duration_since(since) >= patience
+                });
+            if give_up {
+                self.watermark = next;
+                self.waiting = None;
+                continue;
+            }
+            if self.waiting.is_none_or(|(seq, _)| seq != next) {
+                self.waiting = Some((next, now));
+            }
+            return;
+        }
     }
 }
 
@@ -279,26 +419,37 @@ fn item_body(item: FeedItem, reveal: bool) -> DebuggerItemBody {
     }
 }
 
-fn item_frame(item: FeedItem, reveal: bool) -> Event {
-    let seq = item.seq;
+/// The frame of one row. Its `id` is the viewer's watermark after it, not the row's `seq`:
+/// the position from which resuming skips nothing.
+fn item_frame(item: FeedItem, reveal: bool, watermark: i64) -> Event {
     let body = item_body(item, reveal);
     Event::default()
         .event("item")
-        .id(seq.to_string())
+        .id(watermark.to_string())
         .json_data(&body)
         .unwrap_or_else(|_| {
             Event::default()
                 .event("item")
-                .id(seq.to_string())
+                .id(watermark.to_string())
                 .data("{}")
         })
 }
 
-fn gap_frame(skipped: u64) -> Event {
+/// `skipped` rows were not sent because the viewer could not keep up; `reset` says the
+/// position the client resumed from was beyond the feed, which was cut short (a crash).
+fn gap_frame(skipped: u64, reset: bool) -> Event {
     Event::default()
         .event("gap")
-        .json_data(json!({ "skipped": skipped }))
+        .json_data(json!({ "skipped": skipped, "reset": reset }))
         .unwrap_or_else(|_| Event::default().event("gap").data("{}"))
+}
+
+/// Tells the client whether the server's notifier is down, so the stream only polls.
+fn status_frame(degraded: bool) -> Event {
+    Event::default()
+        .event("status")
+        .json_data(json!({ "degraded": degraded }))
+        .unwrap_or_else(|_| Event::default().event("status").data("{}"))
 }
 
 struct Filter {
@@ -353,84 +504,156 @@ fn resume_from(headers: &HeaderMap) -> Option<i64> {
         .filter(|seq| *seq >= 0)
 }
 
-/// One viewer's reader: sends the rows after its cursor whenever woken, and ends when the
-/// client is gone.
-async fn pump(
+/// What one viewer needs to read the feed.
+struct Viewer {
     pool: PgPool,
     workspace: WorkspaceId,
     filter: Filter,
     reveal: bool,
-    mut cursor: i64,
-    mut subscription: Subscription,
+    subscription: Subscription,
     frames: mpsc::Sender<Event>,
-) {
+    /// Fires when the server is shutting down.
+    stop: Option<watch::Receiver<bool>>,
+}
+
+/// Resolves when the server is shutting down; never when it is not told about shutdown.
+async fn stopped(stop: &mut Option<watch::Receiver<bool>>) {
+    match stop {
+        Some(stop) => {
+            while !*stop.borrow() {
+                if stop.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// One viewer's reader: sends the rows it has not sent whenever woken, and ends when the
+/// client is gone or the server shuts down. `start` is the watermark to begin at; `reset` says
+/// the client's position was beyond the feed, so it is told with a gap frame.
+async fn pump(mut viewer: Viewer, start: i64, reset: bool) {
+    let mut cursor = Cursor::new(start);
     let mut skipped = 0_u64;
+    let mut told_degraded = false;
+    if reset && viewer.frames.try_send(gap_frame(0, true)).is_err() {
+        return;
+    }
     loop {
+        let degraded = viewer.subscription.degraded();
+        if degraded != told_degraded {
+            match viewer.frames.try_send(status_frame(degraded)) {
+                Ok(()) => told_degraded = degraded,
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+            }
+        }
         if skipped > 0 {
-            match frames.try_send(gap_frame(skipped)) {
+            match viewer.frames.try_send(gap_frame(skipped, false)) {
                 Ok(()) => skipped = 0,
                 Err(mpsc::error::TrySendError::Closed(_)) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    if let Ok(head) = debugger_feed_head(&pool, workspace).await {
-                        skipped += u64::try_from(head - cursor).unwrap_or(0);
-                        cursor = cursor.max(head);
+                    if let Ok(head) = debugger_feed_head(&viewer.pool, viewer.workspace).await {
+                        skipped += u64::try_from(head - cursor.watermark).unwrap_or(0);
+                        cursor = Cursor::new(cursor.watermark.max(head));
                     }
                 }
             }
         }
-        'read: loop {
-            let rows = match read_debugger_feed(&pool, workspace, cursor, filter.as_store(), BATCH)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    warn!(%error, "the debugger feed could not be read");
-                    break;
-                }
-            };
-            let count = rows.len();
-            for item in rows {
-                cursor = item.seq;
-                match frames.try_send(item_frame(item, reveal)) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Closed(_)) => return,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Skip ahead rather than wait: a slow viewer must not hold anything.
-                        skipped += 1;
-                        if let Ok(head) = debugger_feed_head(&pool, workspace).await {
-                            skipped += u64::try_from(head - cursor).unwrap_or(0);
-                            cursor = cursor.max(head);
-                        }
-                        break 'read;
-                    }
-                }
-            }
-            if i64::try_from(count).is_ok_and(|count| count < BATCH) {
-                break;
-            }
+        if !read_new(&mut viewer, &mut cursor, &mut skipped).await {
+            return;
         }
         tokio::select! {
-            changed = subscription.ticks.changed() => {
+            changed = viewer.subscription.ticks.changed() => {
                 if changed.is_err() {
                     return;
                 }
             }
             () = tokio::time::sleep(POLL) => {}
-            () = frames.closed() => return,
+            () = viewer.frames.closed() => return,
+            () = stopped(&mut viewer.stop) => return,
+        }
+    }
+}
+
+/// Sends every row the viewer has not sent, then settles the watermark. False when the
+/// client is gone.
+async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -> bool {
+    let pool = &viewer.pool;
+    let workspace = viewer.workspace;
+    loop {
+        let rows = match read_debugger_feed(
+            pool,
+            workspace,
+            cursor.watermark,
+            &cursor.sent_list(),
+            viewer.filter.as_store(),
+            BATCH,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "the debugger feed could not be read");
+                return true;
+            }
+        };
+        // Read after the rows, so it holds every number they do.
+        let present = debugger_feed_seqs(
+            pool,
+            workspace,
+            cursor.watermark,
+            viewer.filter.as_store(),
+            WINDOW,
+        )
+        .await
+        .unwrap_or_default();
+        let count = rows.len();
+        for item in rows {
+            cursor.deliver(item.seq);
+            cursor.advance(&present, Instant::now(), PATIENCE);
+            match viewer
+                .frames
+                .try_send(item_frame(item, viewer.reveal, cursor.watermark))
+            {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Skip ahead rather than wait: a slow viewer must not hold anything.
+                    *skipped += 1;
+                    if let Ok(head) = debugger_feed_head(pool, workspace).await {
+                        *skipped += u64::try_from(head - cursor.watermark).unwrap_or(0);
+                        *cursor = Cursor::new(cursor.watermark.max(head));
+                    }
+                    return true;
+                }
+            }
+        }
+        cursor.advance(&present, Instant::now(), PATIENCE);
+        if i64::try_from(count).is_ok_and(|count| count < BATCH) {
+            return true;
         }
     }
 }
 
 /// Watches the workspace's events as they are decided: one `item` frame per outcome
 /// (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live only, with no
-/// history. The stream resumes from the `Last-Event-ID` header, the `seq` of the last frame
-/// seen, if the feed still holds the rows after it. A viewer that cannot keep up gets an
-/// `event: gap` frame with the number of rows skipped (an upper bound when filters apply).
+/// history. Each frame's `id` is a position that is safe to resume from: send it back as
+/// `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
+/// client already has (their `seq` identifies them). A position beyond the feed (the feed is
+/// unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
+/// frame whose `reset` is true. A viewer that cannot keep up gets an `event: gap` frame with
+/// the number of rows skipped (an upper bound when filters apply). While the server's
+/// notifier is down, an `event: status` frame says `degraded` and the stream polls every few
+/// seconds instead of reacting at once; another says it recovered.
 ///
 /// While at least one viewer watches a workspace, ingestion writes a feed row per event;
 /// when none does, it writes nothing extra. Values are masked per viewer as in the person
 /// timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
-/// (owner, workspace admin or `admin` key) and is ignored for anyone else.
+/// (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
+/// most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
+/// server shuts down.
 #[utoipa::path(
     get,
     operation_id = "stream_event_debugger",
@@ -445,11 +668,12 @@ async fn pump(
         ("Last-Event-ID" = Option<String>, Header, description = "The `id` of the last frame received")
     ),
     responses(
-        (status = 200, description = "A text/event-stream of `item` and `gap` frames", body = DebuggerItemBody, content_type = "text/event-stream"),
+        (status = 200, description = "A text/event-stream of `item`, `gap` and `status` frames", body = DebuggerItemBody, content_type = "text/event-stream"),
         (status = 400, description = "outcome or reveal is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
-        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
+        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "The workspace already has 20 streams open on this server; see `Retry-After`", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -466,23 +690,35 @@ pub(crate) async fn stream(
     let asked = bool_param(&query, "reveal")?;
     let reveal = asked && may_see_values(&state, &principal, workspace.id).await;
 
+    let subscription = state.debugger.subscribe(workspace.id).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "this workspace already has the most debugger streams open on this server",
+        )
+        .with_retry_after(RETRY_AFTER)
+    })?;
     // Watch first, so every event decided from now on is fed; then start at the head.
-    let subscription = state.debugger.subscribe(workspace.id);
     touch_debugger_watch(&state.pool, workspace.id).await?;
-    let cursor = match resume_from(&headers) {
-        Some(cursor) => cursor,
-        None => debugger_feed_head(&state.pool, workspace.id).await?,
+    let head = debugger_feed_head(&state.pool, workspace.id).await?;
+    let (start, reset) = match resume_from(&headers) {
+        Some(position) if position <= head => (position, false),
+        Some(_) => (head, true),
+        None => (head, false),
     };
 
     let (frames, received) = mpsc::channel::<Event>(CHANNEL_FRAMES);
     tokio::spawn(pump(
-        state.pool.clone(),
-        workspace.id,
-        filter,
-        reveal,
-        cursor,
-        subscription,
-        frames,
+        Viewer {
+            pool: state.pool.clone(),
+            workspace: workspace.id,
+            filter,
+            reveal,
+            subscription,
+            frames,
+            stop: state.stop.clone(),
+        },
+        start,
+        reset,
     ));
     let body = stream::unfold(received, |mut received| async {
         received
@@ -612,8 +848,8 @@ mod tests {
         let hub = DebuggerHub::new(pool);
         let ws = WorkspaceId::new();
 
-        let first = hub.subscribe(ws);
-        let second = hub.subscribe(ws);
+        let first = hub.subscribe(ws).unwrap();
+        let second = hub.subscribe(ws).unwrap();
         assert_eq!(hub.viewers(ws), 2);
         drop(first);
         assert_eq!(hub.viewers(ws), 1);
@@ -630,8 +866,8 @@ mod tests {
             .unwrap();
         let hub = DebuggerHub::new(pool);
         let (one, two) = (WorkspaceId::new(), WorkspaceId::new());
-        let first = hub.subscribe(one);
-        let second = hub.subscribe(two);
+        let first = hub.subscribe(one).unwrap();
+        let second = hub.subscribe(two).unwrap();
 
         hub.inner.wake(Some(one));
 
@@ -639,5 +875,137 @@ mod tests {
         assert!(!second.ticks.has_changed().unwrap());
         hub.inner.wake(None);
         assert!(second.ticks.has_changed().unwrap());
+    }
+
+    fn present(seqs: &[i64]) -> Vec<(i64, bool)> {
+        seqs.iter().map(|seq| (*seq, true)).collect()
+    }
+
+    #[test]
+    fn a_row_that_commits_late_below_the_cursor_is_still_delivered() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(4);
+        // B took seq 6 and committed; A (seq 5) is still open.
+        cursor.deliver(6);
+        cursor.advance(&present(&[6]), now, PATIENCE);
+        let held_back = cursor.watermark;
+        let reads_while_open = cursor.sent_list();
+        // A commits.
+        cursor.deliver(5);
+        cursor.advance(&present(&[5, 6]), now, PATIENCE);
+
+        assert_eq!(held_back, 4, "the watermark waits for the hole");
+        assert_eq!(
+            reads_while_open,
+            [6],
+            "the next read excludes what was sent"
+        );
+        assert_eq!(cursor.watermark, 6);
+        assert!(cursor.sent.is_empty());
+    }
+
+    #[test]
+    fn a_hole_is_given_up_after_the_patience_and_not_before() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(4);
+        cursor.deliver(6);
+        cursor.advance(&present(&[6]), now, PATIENCE);
+
+        cursor.advance(&present(&[6]), now + PATIENCE / 2, PATIENCE);
+        let early = cursor.watermark;
+        cursor.advance(&present(&[6]), now + PATIENCE, PATIENCE);
+
+        assert_eq!(early, 4);
+        assert_eq!(cursor.watermark, 6, "the writer of seq 5 rolled back");
+    }
+
+    #[test]
+    fn rows_a_filter_hides_settle_without_waiting_and_a_tail_is_not_a_hole() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(0);
+        cursor.deliver(3);
+
+        cursor.advance(&[(1, false), (2, false), (3, true)], now, PATIENCE);
+        let settled = cursor.watermark;
+        cursor.advance(&[], now + PATIENCE * 3, PATIENCE);
+
+        assert_eq!(settled, 3);
+        assert_eq!(cursor.watermark, 3);
+        assert!(cursor.waiting.is_none());
+    }
+
+    #[test]
+    fn a_row_to_send_blocks_the_watermark_until_it_is_sent() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(0);
+
+        cursor.advance(&present(&[1, 2]), now, PATIENCE);
+
+        assert_eq!(cursor.watermark, 0);
+    }
+
+    #[test]
+    fn a_frame_id_is_the_watermark_so_a_resume_never_skips_a_row() {
+        let frame = item_frame(item("accepted", None), false, 4);
+
+        let text = format!("{frame:?}");
+
+        assert!(text.contains("id: 4") || text.contains("\"4\""), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_most_streams_per_workspace_is_enforced_and_a_leaver_frees_a_place() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let hub = DebuggerHub::new(pool);
+        let (ws, other) = (WorkspaceId::new(), WorkspaceId::new());
+        let mut held: Vec<Subscription> = (0..MAX_VIEWERS)
+            .map(|_| hub.subscribe(ws).unwrap())
+            .collect();
+
+        let refused = hub.subscribe(ws);
+        let elsewhere = hub.subscribe(other);
+        held.pop();
+        let after_leaving = hub.subscribe(ws);
+
+        assert!(refused.is_none());
+        assert!(elsewhere.is_some());
+        assert!(after_leaving.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_hub_reports_degraded_until_told_otherwise_and_wakes_viewers_on_a_change() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let hub = DebuggerHub::new(pool);
+        let mut viewer = hub.subscribe(WorkspaceId::new()).unwrap();
+        assert!(!viewer.degraded());
+
+        hub.inner.set_degraded(true);
+
+        assert!(viewer.degraded());
+        assert!(viewer.ticks.has_changed().unwrap());
+        viewer.ticks.mark_unchanged();
+        hub.inner.set_degraded(true);
+        assert!(!viewer.ticks.has_changed().unwrap(), "no change, no wake");
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_signal_resolves_stopped_and_no_signal_never_does() {
+        let (stop, rx) = watch::channel(false);
+        let mut with_signal = Some(rx);
+        let mut without = None;
+
+        let before =
+            tokio::time::timeout(Duration::from_millis(50), stopped(&mut with_signal)).await;
+        stop.send(true).unwrap();
+        let after = tokio::time::timeout(Duration::from_secs(1), stopped(&mut with_signal)).await;
+        let never = tokio::time::timeout(Duration::from_millis(50), stopped(&mut without)).await;
+
+        assert!(before.is_err());
+        assert!(after.is_ok());
+        assert!(never.is_err());
     }
 }

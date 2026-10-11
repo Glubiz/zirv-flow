@@ -226,11 +226,13 @@ struct FeedRow {
 }
 
 /// The workspace's feed rows after `after`, oldest first, at most `limit`, that match
-/// `filter`.
+/// `filter` and whose `seq` is not in `exclude`. A viewer excludes the rows it has sent above
+/// its low watermark.
 pub async fn read_debugger_feed<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     after: i64,
+    exclude: &[i64],
     filter: FeedFilter<'_>,
     limit: i64,
 ) -> Result<Vec<FeedItem>, StoreError> {
@@ -244,6 +246,7 @@ pub async fn read_debugger_feed<'e>(
            AND ($3::text IS NULL OR f.source = $3) \
            AND ($4::text IS NULL OR f.name = $4) \
            AND ($5::text IS NULL OR f.outcome = $5) \
+           AND NOT (f.seq = ANY($7)) \
          ORDER BY f.seq LIMIT $6",
     )
     .bind(workspace.as_uuid())
@@ -252,6 +255,7 @@ pub async fn read_debugger_feed<'e>(
     .bind(filter.name)
     .bind(filter.outcome)
     .bind(limit)
+    .bind(exclude)
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
@@ -277,6 +281,35 @@ pub async fn read_debugger_feed<'e>(
             trace_id: row.trace_id,
         })
         .collect())
+}
+
+/// The `seq` of every feed row of the workspace after `after`, oldest first, at most `limit`,
+/// with whether it matches `filter`. A viewer uses it to tell a row a filter hides from a
+/// number that no committed row holds (a writer still open, or rolled back).
+pub async fn debugger_feed_seqs<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    after: i64,
+    filter: FeedFilter<'_>,
+    limit: i64,
+) -> Result<Vec<(i64, bool)>, StoreError> {
+    sqlx::query_as(
+        "SELECT f.seq, \
+                (($3::text IS NULL OR f.source = $3) \
+                 AND ($4::text IS NULL OR f.name = $4) \
+                 AND ($5::text IS NULL OR f.outcome = $5)) AS matched \
+         FROM debugger_feed f WHERE f.workspace_id = $1 AND f.seq > $2 \
+         ORDER BY f.seq LIMIT $6",
+    )
+    .bind(workspace.as_uuid())
+    .bind(after)
+    .bind(filter.source)
+    .bind(filter.name)
+    .bind(filter.outcome)
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// Deletes feed rows older than [`FEED_RETENTION_MINUTES`] and watch marks that expired more
@@ -410,18 +443,33 @@ mod tests {
         feed(&pool, ws, "b", "rejected").await;
         feed(&pool, ws, "a", "flagged").await;
 
-        let all = read_debugger_feed(&pool, ws, 0, FeedFilter::default(), 10)
+        let all = read_debugger_feed(&pool, ws, 0, &[], FeedFilter::default(), 10)
             .await
             .unwrap();
-        let after = read_debugger_feed(&pool, ws, all[0].seq, FeedFilter::default(), 1)
+        let after = read_debugger_feed(&pool, ws, all[0].seq, &[], FeedFilter::default(), 1)
             .await
             .unwrap();
         let named = FeedFilter {
             name: Some("a"),
             ..FeedFilter::default()
         };
-        let by_name = read_debugger_feed(&pool, ws, 0, named, 10).await.unwrap();
+        let by_name = read_debugger_feed(&pool, ws, 0, &[], named, 10)
+            .await
+            .unwrap();
         let head = debugger_feed_head(&pool, ws).await.unwrap();
+        let skipping = read_debugger_feed(
+            &pool,
+            ws,
+            0,
+            &[all[0].seq, all[2].seq],
+            FeedFilter::default(),
+            10,
+        )
+        .await
+        .unwrap();
+        let seqs = debugger_feed_seqs(&pool, ws, all[0].seq, named, 10)
+            .await
+            .unwrap();
 
         assert_eq!(
             all.iter()
@@ -433,6 +481,11 @@ mod tests {
         assert_eq!(after[0].outcome, "rejected");
         assert_eq!(by_name.len(), 2);
         assert_eq!(head, all[2].seq);
+        assert_eq!(
+            skipping.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            [all[1].seq]
+        );
+        assert_eq!(seqs, [(all[1].seq, false), (all[2].seq, true)]);
     }
 
     #[sqlx::test]
@@ -451,7 +504,7 @@ mod tests {
         let deleted = prune_debugger_feed(&pool).await.unwrap();
 
         assert_eq!(deleted, 1);
-        let left = read_debugger_feed(&pool, ws, 0, FeedFilter::default(), 10)
+        let left = read_debugger_feed(&pool, ws, 0, &[], FeedFilter::default(), 10)
             .await
             .unwrap();
         assert_eq!(left.len(), 1);

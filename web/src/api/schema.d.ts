@@ -337,13 +337,20 @@ export interface paths {
         /**
          * Watches the workspace's events as they are decided: one `item` frame per outcome
          *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live only, with no
-         *     history. The stream resumes from the `Last-Event-ID` header, the `seq` of the last frame
-         *     seen, if the feed still holds the rows after it. A viewer that cannot keep up gets an
-         *     `event: gap` frame with the number of rows skipped (an upper bound when filters apply).
+         *     history. Each frame's `id` is a position that is safe to resume from: send it back as
+         *     `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
+         *     client already has (their `seq` identifies them). A position beyond the feed (the feed is
+         *     unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
+         *     frame whose `reset` is true. A viewer that cannot keep up gets an `event: gap` frame with
+         *     the number of rows skipped (an upper bound when filters apply). While the server's
+         *     notifier is down, an `event: status` frame says `degraded` and the stream polls every few
+         *     seconds instead of reacting at once; another says it recovered.
          * @description While at least one viewer watches a workspace, ingestion writes a feed row per event;
          *     when none does, it writes nothing extra. Values are masked per viewer as in the person
          *     timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
-         *     (owner, workspace admin or `admin` key) and is ignored for anyone else.
+         *     (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
+         *     most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
+         *     server shuts down.
          */
         get: operations["stream_event_debugger"];
         put?: never;
@@ -4330,7 +4337,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A text/event-stream of `item` and `gap` frames */
+            /** @description A text/event-stream of `item`, `gap` and `status` frames */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4368,6 +4375,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace already has 20 streams open on this server; see `Retry-After` */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

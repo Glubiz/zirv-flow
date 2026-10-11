@@ -141,6 +141,8 @@ function LiveFeed({ workspaceId, url, onReconnect }: { workspaceId: string; url:
   const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const [skipped, setSkipped] = useState(0);
+  const [reset, setReset] = useState(false);
+  const [degraded, setDegraded] = useState(false);
   const pausedRef = useRef(false);
 
   useEffect(() => {
@@ -154,16 +156,26 @@ function LiveFeed({ workspaceId, url, onReconnect }: { workspaceId: string; url:
     source.addEventListener("item", (event) => {
       const item = parse(event);
       if (!isItem(item)) return;
+      // A resume can repeat rows the page already has; the seq says which.
       if (pausedRef.current) {
-        setHeld((current) => [item, ...current].slice(0, KEEP));
+        setHeld((current) => (current.some((other) => other.seq === item.seq) ? current : [item, ...current].slice(0, KEEP)));
       } else {
-        setItems((current) => [item, ...current].slice(0, KEEP));
+        setItems((current) => (current.some((other) => other.seq === item.seq) ? current : [item, ...current].slice(0, KEEP)));
       }
     });
     source.addEventListener("gap", (event) => {
       const gap = parse(event);
       const count = typeof gap === "object" && gap !== null && "skipped" in gap && typeof gap.skipped === "number" ? gap.skipped : 0;
       setSkipped((total) => total + count);
+      if (typeof gap === "object" && gap !== null && "reset" in gap && gap.reset === true) {
+        setReset(true);
+      }
+    });
+    source.addEventListener("status", (event) => {
+      const status = parse(event);
+      if (typeof status === "object" && status !== null && "degraded" in status) {
+        setDegraded(status.degraded === true);
+      }
     });
     return () => {
       source.close();
@@ -198,6 +210,23 @@ function LiveFeed({ workspaceId, url, onReconnect }: { workspaceId: string; url:
           </Button>
         ) : null}
       </div>
+      {degraded ? (
+        <p className="notice" role="status">
+          Live updates are delayed: the server is checking for new events every few seconds instead of being told about them.
+        </p>
+      ) : null}
+      {reset ? (
+        <p className="notice" role="status">
+          The feed was reset on the server, so events from before this moment may be missing.
+          <Button
+            onClick={() => {
+              setReset(false);
+            }}
+          >
+            Dismiss
+          </Button>
+        </p>
+      ) : null}
       {skipped > 0 ? (
         <p className="notice" role="status">
           The page could not keep up, so about {skipped} {skipped === 1 ? "event was" : "events were"} skipped.

@@ -8623,4 +8623,228 @@ email,b@example.com,
         );
         assert_eq!(preview.body["code"], "query_timeout");
     }
+
+    async fn feed_row(executor: impl sqlx::PgExecutor<'_>, ws: &str, name: &str) {
+        sqlx::query(
+            "INSERT INTO debugger_feed (workspace_id, source, name, outcome, trace_id) \
+             VALUES ($1::uuid, 'web', $2, 'accepted', gen_random_uuid())",
+        )
+        .bind(ws)
+        .bind(name)
+        .execute(executor)
+        .await
+        .unwrap();
+    }
+
+    async fn notify_feed(pool: &PgPool, ws: &str) {
+        sqlx::query("SELECT pg_notify('zf_debugger', $1)")
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_that_commits_after_a_later_one_is_still_delivered(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+
+        // Writer A takes the lower seq and stays open; writer B takes the next and commits.
+        let mut writer_a = pool.begin().await.unwrap();
+        feed_row(&mut *writer_a, &ws, "from_a").await;
+        feed_row(&pool, &ws, "from_b").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        writer_a.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let second = viewer.take(1).await;
+
+        assert_eq!(first[0].data["name"], "from_b");
+        assert_eq!(second[0].data["name"], "from_a");
+        // The first frame could not claim a position past the open writer; the second can.
+        assert_eq!(first[0].id.as_deref(), Some("0"));
+        assert_eq!(second[0].id.as_deref(), Some("2"));
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(600))
+                .await
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_position_beyond_the_feed_is_clamped_and_announced(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let mut viewer = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some("500"),
+        )
+        .await;
+        let announced = viewer.take(1).await;
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record("a@example.com", "seen", None, 1, json!({}))],
+        )
+        .await;
+        let live = viewer.take(1).await;
+
+        assert_eq!(announced[0].event, "gap");
+        assert_eq!(announced[0].data["reset"], true);
+        assert_eq!(live[0].event, "item");
+        assert_eq!(live[0].data["name"], "seen");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_down_notifier_is_announced_and_the_watch_renews_without_it(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (router, state) = app_with_state(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+
+        // Let the real listener connect first, so it does not report itself up afterwards.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        state.debugger.set_degraded_for_test(true);
+        let down = viewer.take(1).await;
+        // The viewer keeps reading by polling while the notifier is down.
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record("a@example.com", "seen", None, 1, json!({}))],
+        )
+        .await;
+        let polled = viewer.take(1).await;
+        state.debugger.set_degraded_for_test(false);
+        let up = viewer.take(1).await;
+        sqlx::query("DELETE FROM debugger_watch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        state.debugger.renew_once_for_test().await;
+        let renewed: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM debugger_watch WHERE until > now()")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            (down[0].event.as_str(), &down[0].data["degraded"]),
+            ("status", &json!(true))
+        );
+        assert_eq!(polled[0].data["name"], "seen");
+        assert_eq!(
+            (up[0].event.as_str(), &up[0].data["degraded"]),
+            ("status", &json!(false))
+        );
+        assert_eq!(renewed, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_twenty_first_stream_of_a_workspace_is_refused_until_one_closes(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        let mut open = Vec::new();
+        for _ in 0..20 {
+            open.push(
+                open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await,
+            );
+        }
+
+        let refused = call(
+            &router,
+            "GET",
+            &stream_uri(&ws, ""),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let elsewhere = open_stream(
+            &router,
+            &stream_uri(&other, ""),
+            Auth::Session(&owner),
+            None,
+        )
+        .await;
+        drop(open.pop());
+        let mut admitted = None;
+        for _ in 0..40 {
+            let again = router
+                .clone()
+                .oneshot(
+                    with_auth(
+                        Request::builder().method("GET").uri(stream_uri(&ws, "")),
+                        Auth::Session(&owner),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            if again.status() == StatusCode::OK {
+                admitted = Some(again);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+
+        assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers[header::RETRY_AFTER], "5");
+        drop(elsewhere);
+        assert!(admitted.is_some(), "a closed stream frees its place");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_shutdown_signal_ends_the_streams(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let state = AppState::new(pool.clone(), Arc::new(String::new))
+            .with_master_key(&zirv_flow_core::MasterKey::generate())
+            .with_stop(stopped);
+        let router = router(state);
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(300))
+                .await
+                .is_none()
+        );
+
+        stop.send(true).unwrap();
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match viewer.body.frame().await {
+                    None => return true,
+                    Some(Err(_)) => return true,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            ended,
+            Ok(true),
+            "the stream ends when the server shuts down"
+        );
+    }
 }

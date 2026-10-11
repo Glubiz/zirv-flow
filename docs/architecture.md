@@ -955,8 +955,11 @@ the policy hashes although the schema types them as something other than text
 with counts and enqueues one `ingest.replay` job on a trace whose cause is the typed one.
 The job replays each reject in its own transaction: it stores the event once under the
 reject's original `message_id` and person (the payload keeps no identifiers, so a reject that
-named no person is `still_rejected` as `no_person`), skips redaction because the payload is
-already redacted, sets `replayed_at` and `replay_event_id`, flags the event `replayed` and
+named no person is `still_rejected` as `no_person`), applies the redaction rules the payload
+has not had yet (a reject records the rules it was stored under in `ingest_rejects.redaction`;
+`drop` and `truncate_ip` are applied in full, `hash` only for paths not recorded, a legacy
+reject gets the full current rules; the dry run reports `redaction_changed`), writes the
+debugger feed row when the workspace is watched, sets `replayed_at` and `replay_event_id`, flags the event `replayed` and
 appends an `event.replayed` decision (subjects `reject`, `event`, `person`). A second replay
 finds `replayed_at` and does nothing; a `message_id` that is already stored resolves the
 reject as a duplicate. With `emit_triggers` false the event is also flagged `no_triggers`.
@@ -1026,21 +1029,28 @@ As built (debugger, explorer):
   one `pg_notify('zf_debugger', workspace_id)`; otherwise it writes nothing extra. Rows hold
   the redacted properties only, the reject code, the reasons and the published schema version
   for later masking. The leader deletes rows older than 15 minutes every minute. The feed
-  does not survive a crash, and `seq` follows insert order, so a transaction that commits late
-  can surface behind a newer `seq`; the drain applies a workspace's inbox one batch at a time,
-  which keeps this rare.
+  does not survive a crash, which also starts `seq` over. `seq` is taken when a row is
+  inserted, not when its transaction commits, so a row can become visible behind a newer one.
 - **Stream.** `GET /debugger/stream` (`read`) uses one shared `PgListener` per `serve`
-  process. A notification wakes the viewers of that workspace; each reads `seq > cursor`
-  (200 rows at most, with its `source`, `name` and `outcome` filters), masks per viewer with
-  `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
+  process; a separate timer renews the watch, so a failing listener cannot let it expire, and
+  while the listener is down the viewers poll every 5 s and send `event: status` with
+  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a low
+  watermark (every `seq` up to it is settled) and the rows it sent above it, reads what it has
+  not sent, and waits 10 s for a missing `seq` before giving up on it (its writer rolled
+  back), so a late commit is never lost. A frame's `id` is the watermark after it, so
+  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells);
+  a position beyond the feed is clamped to its end with a `gap` frame whose `reset` is true.
+  At most 20 streams per workspace per process (`429` with `Retry-After`), and every stream
+  ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
   sample rule), and sends `item` frames through a bounded channel. A full channel makes the
   viewer skip to the head and send `event: gap` with the number skipped. `Last-Event-ID`
-  resumes from a `seq`; without it the stream starts at the head (live only). `reveal=true`
+  resumes as described; without it the stream starts at the head (live only). `reveal=true`
   shows stored values only to owners, admins and `admin` keys. Comments keep idle
   connections open every 15 s.
 - **Explorer.** `POST /events/explore/{count,breakdown,list,export}` (`read`). Every query
   carries `workspace_id` and `[from, to)` (at most 400 days), so partitions are pruned, and
-  runs under `SET LOCAL statement_timeout` through the shared bounded-read helper; a timeout
+  runs in one `REPEATABLE READ READ ONLY` snapshot under `SET LOCAL statement_timeout`
+  through the shared bounded-read helper, so a breakdown and its totals agree; a timeout
   is `503` with the code `query_timeout`. Filter operators follow the published schema type of
   the chosen name (undeclared properties compare as text); callers without value access may
   use only `eq` and `exists` on PII or undeclared properties and cannot break them down

@@ -328,8 +328,14 @@ pub async fn serve(
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
+    // A debugger stream never ends by itself, so it must be told, or the drain would wait on it.
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let state = state.with_stop(stopped);
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stop.send(true);
+        })
         .await
 }
 

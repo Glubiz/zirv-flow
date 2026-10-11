@@ -41,6 +41,9 @@ pub struct AppState {
     pub(crate) explorer: ExplorerLimits,
     /// The shared listener and the viewers of the event debugger.
     pub(crate) debugger: DebuggerHub,
+    /// Fires when the server is shutting down, so long-lived streams end and do not hold the
+    /// graceful shutdown up. Absent when nothing tells the state about shutdown.
+    pub(crate) stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -72,6 +75,7 @@ impl AppState {
             setup_token: Arc::default(),
             identifier_key: None,
             explorer: ExplorerLimits::default(),
+            stop: None,
         }
     }
 
@@ -97,6 +101,13 @@ impl AppState {
     /// The explorer's query timeouts and row limits.
     pub fn with_explorer_limits(mut self, limits: ExplorerLimits) -> Self {
         self.explorer = limits;
+        self
+    }
+
+    /// Ends the debugger streams when `stop` becomes true. [`serve`](crate::serve) does this
+    /// from its shutdown future.
+    pub(crate) fn with_stop(mut self, stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.stop = Some(stop);
         self
     }
 

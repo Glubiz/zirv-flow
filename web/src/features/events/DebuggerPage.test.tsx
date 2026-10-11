@@ -192,4 +192,51 @@ describe("event debugger", () => {
     expect(screen.queryByLabelText(/Reveal PII/)).not.toBeInTheDocument();
     expect(FakeEventSource.latest.url).not.toContain("reveal");
   });
+
+  it("shows a row once when a resume repeats it", async () => {
+    signedInAs(OWNER, "admin");
+    open();
+    const source = await connected();
+
+    act(() => {
+      source.emit("item", item(1, { name: "once_only" }), "0");
+      source.emit("item", item(1, { name: "once_only" }), "0");
+    });
+
+    await screen.findByText("once_only");
+    expect(screen.getAllByText("once_only")).toHaveLength(1);
+  });
+
+  it("says when the server's notifier is down and when it recovers", async () => {
+    signedInAs(OWNER, "admin");
+    open();
+    const source = await connected();
+
+    act(() => {
+      source.emit("status", { degraded: true });
+    });
+    expect(await screen.findByText(/Live updates are delayed/)).toBeInTheDocument();
+    act(() => {
+      source.emit("status", { degraded: false });
+    });
+
+    expect(screen.queryByText(/Live updates are delayed/)).not.toBeInTheDocument();
+  });
+
+  it("says when the feed was reset and lets the notice be dismissed", async () => {
+    signedInAs(OWNER, "admin");
+    const user = userEvent.setup();
+    open();
+    const source = await connected();
+
+    act(() => {
+      source.emit("gap", { skipped: 0, reset: true });
+    });
+
+    expect(await screen.findByText(/feed was reset on the server/)).toBeInTheDocument();
+    expect(screen.queryByText(/were skipped/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText(/feed was reset/)).not.toBeInTheDocument();
+  });
 });
+
