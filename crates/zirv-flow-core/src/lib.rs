@@ -3,9 +3,11 @@
 //! This crate is pure: no database, HTTP or network dependencies.
 
 pub mod consent;
+pub mod csv_file;
 mod email;
 pub mod events;
 mod ids;
+pub mod mapping;
 pub mod password;
 pub mod people;
 mod role;
