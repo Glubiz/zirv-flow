@@ -118,8 +118,8 @@ jobs:
       - name: Run Clippy Lint
         run: cargo clippy --all-targets -- -D warnings
 
-      # CD releases a Windows binary, so platform-specific code has to keep
-      # compiling cleanly for it, tests included.
+      # Development happens on Windows too, so platform-specific code has to
+      # keep compiling cleanly for it, tests included.
       - name: Add Windows Target
         run: rustup target add x86_64-pc-windows-gnu
 

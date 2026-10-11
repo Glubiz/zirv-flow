@@ -21,25 +21,15 @@ concurrency:
 
 jobs:
   build:
-    name: Build Binaries
+    name: Build Linux Binary
     # Only release from main: workflow_dispatch can be invoked from any
     # ref, and an off-main run would rebuild and re-publish whatever
     # version that ref carries — failing at the release step
     # on the duplicate.
     if: ${{ github.ref == 'refs/heads/main' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            suffix: linux
-            ext: tar.gz
-          - os: windows-latest
-            suffix: windows
-            ext: exe
-          - os: macos-latest
-            suffix: macos
-            ext: tar.gz
+    # zirv-flow runs in the container image; the Linux binary is the only
+    # one released next to it.
+    runs-on: ubuntu-latest
 
     outputs:
       version: ${{ steps.get_version.outputs.version }}
@@ -76,79 +66,27 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Only Windows ships this build; macOS and Linux build their own
-      # targets in "Package artifact".
-      - name: Build release
-        if: matrix.os == 'windows-latest'
-        run: cargo build --release
-
+      # Static musl build. The default glibc build (from ubuntu-24.04) links
+      # GLIBC_2.39, which fails to run on Debian 12 / Ubuntu 22.04; musl gives
+      # a static-pie binary that runs everywhere.
       - name: Package artifact
         shell: bash
         run: |
           V=${{ steps.get_version.outputs.version }}
-          SUF=${{ matrix.suffix }}
-          EXT=${{ matrix.ext }}
-
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Rename the .exe
-            mv target/release/zirv-flow.exe zirv-flow-${V}-windows.exe
-
-          else
-            # For macOS or Linux, produce a tarball containing 'zirv-flow'
-            if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-              # Build universal for Intel & ARM
-              rustup target add x86_64-apple-darwin
-              rustup target add aarch64-apple-darwin
-              cargo build --release --target x86_64-apple-darwin
-              cargo build --release --target aarch64-apple-darwin
-              lipo -create \
-                target/x86_64-apple-darwin/release/zirv-flow \
-                target/aarch64-apple-darwin/release/zirv-flow \
-                -output zirv-flow
-            else
-              # Linux: static musl build. The default glibc build (from
-              # ubuntu-24.04) links GLIBC_2.39, which fails to run on
-              # Debian 12 / Ubuntu 22.04; musl gives a static-pie binary
-              # that runs everywhere.
-              sudo apt-get update && sudo apt-get install -y musl-tools
-              rustup target add x86_64-unknown-linux-musl
-              cargo build --release --target x86_64-unknown-linux-musl
-              cp target/x86_64-unknown-linux-musl/release/zirv-flow zirv-flow
-            fi
-
-            chmod +x zirv-flow
-            tar -czvf zirv-flow-${V}-${SUF}.tar.gz zirv-flow
-            rm zirv-flow
-          fi
-
-      - name: Checksum artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $ver = "${{ steps.get_version.outputs.version }}"
-          $artifact = "zirv-flow-$ver-windows.exe"
-          $hash = (Get-FileHash -Algorithm SHA256 -Path $artifact).Hash.ToLowerInvariant()
-          $line = "$hash  $artifact"
-          # sha256sum text format, LF-terminated -- Set-Content on Windows
-          # defaults to CRLF, which sha256sum -c rejects.
-          [System.IO.File]::WriteAllText("$artifact.sha256", "$line`n")
-
-      - name: Checksum artifact (Unix)
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        run: |
-          V=${{ steps.get_version.outputs.version }}
-          SUF=${{ matrix.suffix }}
-          ARTIFACT="zirv-flow-${V}-${SUF}.tar.gz"
-          sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/zirv-flow zirv-flow
+          chmod +x zirv-flow
+          tar -czvf zirv-flow-${V}-linux.tar.gz zirv-flow
+          rm zirv-flow
+          sha256sum zirv-flow-${V}-linux.tar.gz > zirv-flow-${V}-linux.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: zirv-flow-${{ matrix.suffix }}
-          path: |
-            ${{ matrix.os == 'windows-latest' && format('zirv-flow-{0}-windows.exe', steps.get_version.outputs.version) || format('zirv-flow-{0}-{1}.tar.gz', steps.get_version.outputs.version, matrix.suffix) }}
-            ${{ matrix.os == 'windows-latest' && format('zirv-flow-{0}-windows.exe.sha256', steps.get_version.outputs.version) || format('zirv-flow-{0}-{1}.tar.gz.sha256', steps.get_version.outputs.version, matrix.suffix) }}
+          name: zirv-flow-linux
+          path: zirv-flow-${{ steps.get_version.outputs.version }}-linux.tar.gz*
 
   release:
     name: Create GitHub Release & Upload Assets
@@ -242,22 +180,10 @@ jobs:
             fi
           fi
 
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4.3.0
-        with:
-          name: zirv-flow-windows
-          path: artifacts
-
       - name: Download Linux artifact
         uses: actions/download-artifact@v4.3.0
         with:
           name: zirv-flow-linux
-          path: artifacts
-
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4.3.0
-        with:
-          name: zirv-flow-macos
           path: artifacts
 
       - name: Attest Release Assets
@@ -287,12 +213,8 @@ jobs:
           fi
 
           gh release upload "$TAG" \
-            "artifacts/zirv-flow-${{ needs.build.outputs.version }}-windows.exe" \
-            "artifacts/zirv-flow-${{ needs.build.outputs.version }}-windows.exe.sha256" \
             "artifacts/zirv-flow-${{ needs.build.outputs.version }}-linux.tar.gz" \
             "artifacts/zirv-flow-${{ needs.build.outputs.version }}-linux.tar.gz.sha256" \
-            "artifacts/zirv-flow-${{ needs.build.outputs.version }}-macos.tar.gz" \
-            "artifacts/zirv-flow-${{ needs.build.outputs.version }}-macos.tar.gz.sha256" \
             --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "published=true" >> "$GITHUB_OUTPUT"
