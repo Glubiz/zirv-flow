@@ -3409,6 +3409,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3418,12 +3428,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
@@ -3975,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "clap",
  "figment",
@@ -3986,6 +3999,8 @@ dependencies = [
  "time",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "zirv-flow-api",
  "zirv-flow-jobs",
@@ -3994,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum",
  "http-body-util",
@@ -4007,6 +4022,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "uuid",
@@ -4017,7 +4033,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -4035,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum",
  "chrono",
@@ -4050,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "getrandom 0.4.3",
  "metrics",
@@ -4059,6 +4075,8 @@ dependencies = [
  "sqlx",
  "time",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "zirv-flow-core",
  "zirv-flow-store",
@@ -4066,8 +4084,10 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
+ "metrics",
+ "metrics-exporter-prometheus",
  "serde_json",
  "sqlx",
  "time",

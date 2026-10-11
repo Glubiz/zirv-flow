@@ -317,4 +317,43 @@ mod tests {
                 .unwrap();
         assert_eq!(versions, vec![1, 2]);
     }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_migration_applies_to_a_jobs_table_that_already_has_rows(pool: PgPool) {
+        for earlier in [
+            include_str!("../migrations/0001_accounts.sql"),
+            include_str!("../migrations/0002_identities.sql"),
+            include_str!("../migrations/0003_jobs.sql"),
+        ] {
+            sqlx::raw_sql(earlier).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO jobs (id, kind) VALUES (gen_random_uuid(), 'a'), (gen_random_uuid(), 'b')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0004_traces.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (distinct, kind, id): (i64, String, String) = sqlx::query_as(
+            "SELECT count(DISTINCT trace_id), min(cause_kind), min(cause_id) FROM jobs",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((distinct, kind.as_str(), id.as_str()), (2, "manual", ""));
+        let missing_default =
+            sqlx::query("INSERT INTO jobs (id, kind) VALUES (gen_random_uuid(), 'c')")
+                .execute(&pool)
+                .await;
+        assert!(
+            missing_default.is_err(),
+            "the backfill defaults must be dropped"
+        );
+    }
 }

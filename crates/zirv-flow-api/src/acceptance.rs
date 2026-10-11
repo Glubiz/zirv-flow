@@ -26,6 +26,17 @@ mod tests {
         body: Value,
     }
 
+    impl Reply {
+        /// The body without the trace id, which differs on every request.
+        fn problem(&self) -> Value {
+            let mut body = self.body.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove("trace_id");
+            }
+            body
+        }
+    }
+
     struct Login {
         cookie: String,
         csrf: String,
@@ -471,7 +482,8 @@ mod tests {
             );
             assert_eq!(by_key.status, StatusCode::NOT_FOUND, "key {method} {uri}");
             assert_eq!(
-                by_admin.body, unknown.body,
+                by_admin.problem(),
+                unknown.problem(),
                 "a workspace the caller cannot see looks like one that does not exist"
             );
         }
@@ -832,7 +844,7 @@ mod tests {
 
         assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
         assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(unknown.body, wrong.body);
+        assert_eq!(unknown.problem(), wrong.problem());
         assert_eq!(unknown.body["detail"], "invalid email or password");
         assert!(unknown.headers.get(header::SET_COOKIE).is_none());
         assert!(wrong.headers.get(header::SET_COOKIE).is_none());
@@ -867,7 +879,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "the correct password is refused while locked"
         );
-        assert_eq!(locked_out.body, wrong.body);
+        assert_eq!(locked_out.problem(), wrong.problem());
 
         sqlx::query("UPDATE users SET locked_until = now() - interval '1 second'")
             .execute(&pool)
@@ -939,7 +951,7 @@ mod tests {
         assert_eq!(repeat.status, StatusCode::NOT_FOUND);
         for reply in [&revoked, &malformed, &wrong, &unknown, &none] {
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
-            assert_eq!(reply.body, revoked.body);
+            assert_eq!(reply.problem(), revoked.problem());
         }
     }
 
@@ -1197,5 +1209,131 @@ mod tests {
             "application/problem+json"
         );
         assert_eq!(reply.body["request_id"], "test-request");
+    }
+
+    async fn record(
+        pool: &PgPool,
+        ws: &str,
+        trace: &zirv_flow_core::TraceContext,
+        action: &'static str,
+    ) {
+        let decision = zirv_flow_store::NewDecision {
+            workspace_id: ws.parse().unwrap(),
+            trace: trace.clone(),
+            action,
+            outcome: "done",
+            reason: None,
+            subject_ids: Vec::new(),
+            job: None,
+        };
+        zirv_flow_store::append_decision(pool, &decision)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_endpoint_returns_a_workspaces_records_and_nothing_of_another(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let a = workspace(&router, &owner, "Alpha").await;
+        let b = workspace(&router, &owner, "Beta").await;
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("req-1"));
+        record(&pool, &a, &trace, "first").await;
+        record(&pool, &a, &trace, "second").await;
+        let uri = |ws: &str, id: &str| format!("/api/v1/workspaces/{ws}/traces/{id}");
+        let id = trace.trace_id.to_string();
+
+        let found = call(&router, "GET", &uri(&a, &id), None, Auth::Session(&owner)).await;
+        let elsewhere = call(&router, "GET", &uri(&b, &id), None, Auth::Session(&owner)).await;
+        let unknown = call(
+            &router,
+            "GET",
+            &uri(&a, &zirv_flow_core::TraceId::new().to_string()),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(found.status, StatusCode::OK, "{:?}", found.body);
+        assert_eq!(found.body["trace_id"], id.as_str());
+        assert_eq!(found.body["truncated"], false);
+        let actions: Vec<&str> = found.body["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, ["first", "second"]);
+        assert_eq!(
+            found.body["records"][0]["cause"],
+            json!({"kind": "api", "id": "req-1"})
+        );
+        assert_eq!(elsewhere.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(elsewhere.problem(), unknown.problem());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_malformed_trace_id_is_a_400_problem(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        for bad in [
+            "nope",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "01234567-89ab-cdef-0123-456789abcdef",
+        ] {
+            let reply = call(
+                &router,
+                "GET",
+                &format!("/api/v1/workspaces/{ws}/traces/{bad}"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(
+                reply.headers[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            assert!(reply.body["trace_id"].is_string());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_endpoint_follows_the_workspace_read_rules(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let (_, other_key) = make_key(&router, &owner, &other, &["read"]).await;
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("req-1"));
+        record(&pool, &ws, &trace, "step").await;
+        let uri = format!("/api/v1/workspaces/{ws}/traces/{}", trace.trace_id);
+        let status = |auth| {
+            let router = router.clone();
+            let uri = uri.clone();
+            async move { call(&router, "GET", &uri, None, auth).await.status }
+        };
+
+        assert_eq!(status(Auth::Anonymous).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status(Auth::Session(&member)).await, StatusCode::OK);
+        assert_eq!(status(Auth::Key(&read_key)).await, StatusCode::OK);
+        assert_eq!(status(Auth::Key(&write_key)).await, StatusCode::FORBIDDEN);
+        assert_eq!(status(Auth::Key(&other_key)).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            status(Auth::Session(&outsider)).await,
+            StatusCode::NOT_FOUND
+        );
     }
 }

@@ -16,6 +16,8 @@ mod problem;
 mod request_id;
 mod session;
 mod state;
+mod trace;
+mod traces;
 mod users;
 mod version;
 mod workspaces;
@@ -39,6 +41,11 @@ pub use zirv_flow_identity::{IdentityError, OidcSettings, SecretString};
 
 /// Builds the router for every HTTP surface of the server.
 pub fn router(state: AppState) -> Router {
+    with_layers(routes(), state)
+}
+
+/// Every route and the fallbacks, before the layers every request passes through.
+fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
@@ -71,9 +78,19 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/{ws}/api-keys/{id}",
             axum::routing::delete(keys::revoke),
         )
+        .route(
+            "/api/v1/workspaces/{ws}/traces/{trace_id}",
+            get(traces::get),
+        )
         .fallback(problem::not_found)
         .method_not_allowed_fallback(problem::method_not_allowed)
+}
+
+/// Outermost first: the request id, then the trace, then the metrics.
+fn with_layers(routes: Router<AppState>, state: AppState) -> Router {
+    routes
         .layer(from_fn(metrics::record))
+        .layer(from_fn(trace::assign))
         .layer(from_fn(request_id::assign))
         .with_state(state)
 }
@@ -95,6 +112,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
+    use axum::extract::State;
     use axum::http::{Request, Response, StatusCode};
     use http_body_util::BodyExt;
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -288,5 +306,121 @@ mod tests {
         assert!(body.contains(r#"method="OTHER""#));
         assert!(!body.contains("1234"));
         assert!(body.contains("zirv_flow_http_request_duration_seconds"));
+    }
+
+    #[tokio::test]
+    async fn rendering_metrics_publishes_the_main_pool_gauges() {
+        recorder();
+        let state = AppState::new(unreachable_pool(), Arc::new(|| recorder().render()));
+
+        let body = text(get(state, "/metrics").await).await;
+
+        assert!(
+            body.contains(r#"zirv_flow_db_pool_connections{pool="main",state="idle"}"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"zirv_flow_db_pool_connections{pool="main",state="in_use"}"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"zirv_flow_db_pool_max_connections{pool="main"}"#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_response_names_its_trace_and_a_problem_body_repeats_it() {
+        let response = get(state(), "/api/v1/x").await;
+
+        let header = response.headers()["x-trace-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(header.len(), 32);
+        assert_eq!(json(response).await["trace_id"], header);
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    async fn enqueue_follow_up(State(state): State<AppState>) -> StatusCode {
+        let trace = trace::current().expect("the trace middleware wraps every route");
+        zirv_flow_store::enqueue(
+            &state.pool,
+            &zirv_flow_store::NewJob::new("maintenance.noop", trace),
+        )
+        .await
+        .unwrap();
+        StatusCode::ACCEPTED
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_enqueued_by_a_request_logs_the_same_trace_id_as_the_request(pool: sqlx::PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let captured = Captured::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_writer(captured.clone())
+                .finish(),
+        );
+        let app = with_layers(
+            routes().route("/test/enqueue", axum::routing::post(enqueue_follow_up)),
+            AppState::new(pool.clone(), Arc::new(String::new)),
+        );
+
+        let response = app
+            .oneshot(
+                Request::post("/test/enqueue")
+                    .header("x-request-id", "req-42")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let trace_id = response.headers()["x-trace-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let job = sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+            "SELECT trace_id, cause_kind, cause_id FROM jobs",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(job.0.simple().to_string(), trace_id);
+        assert_eq!((job.1.as_str(), job.2.as_str()), ("api", "req-42"));
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let line: Value = output
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|line| line["fields"]["message"] == "request completed")
+            .unwrap_or_else(|| panic!("no request line in {output}"));
+        assert_eq!(line["span"]["trace_id"], trace_id.as_str());
+        assert_eq!(line["span"]["request_id"], "req-42");
+        assert_eq!(line["span"]["route"], "/test/enqueue");
     }
 }

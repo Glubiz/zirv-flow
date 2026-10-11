@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
+use tracing::{Instrument, Span, info, info_span, warn};
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     ClaimedJob, FailOutcome, PgPool, begin, claim_job, complete_job, fail_job, heartbeat_job,
-    listen_for_jobs, lock_lease, sized_like,
+    listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
 use crate::context::JobContext;
@@ -18,6 +19,9 @@ use crate::registry::Registry;
 
 /// How long a claim or a handler transaction waits for a connection of the worker's own.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the worker's pools are sampled for the pool gauges.
+const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How a worker pool behaves.
 #[derive(Clone, Debug)]
@@ -100,12 +104,24 @@ impl Worker {
         });
 
         let listener = AbortOnDrop(tokio::spawn(listen(Arc::clone(&shared), stop.clone())));
+        let sampler = AbortOnDrop(tokio::spawn(sample_pools(Arc::clone(&shared))));
         let mut slots = JoinSet::new();
         for slot in 0..shared.config.concurrency {
             slots.spawn(work(Arc::clone(&shared), slot, stop.clone()));
         }
         while slots.join_next().await.is_some() {}
         drop(listener);
+        drop(sampler);
+    }
+}
+
+/// Publishes the worker pools' gauges, until the task is aborted.
+async fn sample_pools(shared: Arc<Shared>) {
+    let mut ticker = tokio::time::interval(POOL_SAMPLE_INTERVAL);
+    loop {
+        ticker.tick().await;
+        observe_pool(&shared.pool, "jobs");
+        observe_pool(&shared.heartbeat_pool, "heartbeat");
     }
 }
 
@@ -171,6 +187,7 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
         .await
         {
             Ok(Some(job)) => {
+                metrics::record_claim_lag(&job.kind, job.claim_lag_seconds);
                 process(&shared, job).await;
                 continue;
             }
@@ -202,25 +219,58 @@ enum Attempt {
     Failed(String),
 }
 
-/// Runs one claimed job and records what happened to it.
+/// Runs one claimed job inside its `job` span and records what happened to it.
 async fn process(shared: &Arc<Shared>, job: ClaimedJob) {
+    let span = info_span!(
+        "job",
+        job_id = %job.id,
+        kind = %job.kind,
+        workspace_id = tracing::field::Empty,
+        attempt = job.attempts,
+        trace_id = %job.trace.trace_id,
+        cause_kind = %job.trace.cause.kind,
+        cause_id = %job.trace.cause.id,
+    );
+    if let Some(workspace) = job.workspace_id {
+        span.record("workspace_id", tracing::field::display(workspace));
+    }
+    run_attempt(shared, job).instrument(span).await;
+}
+
+async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     let started = Instant::now();
-    let mut task = AbortOnDrop(tokio::spawn(execute(Arc::clone(shared), job.clone())));
+    let mut task = AbortOnDrop(tokio::spawn(
+        execute(Arc::clone(shared), job.clone()).instrument(Span::current()),
+    ));
     // A panicking handler fails the attempt instead of taking the worker down.
     let attempt = match (&mut task.0).await {
         Ok(attempt) => attempt,
         Err(_) => Attempt::Failed("the job handler panicked".into()),
     };
 
+    let mut failure = None;
     let outcome = match attempt {
         Attempt::Completed => Outcome::Completed,
         Attempt::LeaseLost => Outcome::LeaseLost,
-        Attempt::Failed(reason) => settle_failure(shared, &job, &reason).await,
+        Attempt::Failed(reason) => {
+            let outcome = settle_failure(shared, &job, &reason).await;
+            failure = Some(reason);
+            outcome
+        }
     };
-    if outcome == Outcome::LeaseLost {
-        warn!("job {} lost its lease; its work was discarded", job.id);
+    let elapsed = started.elapsed();
+    let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    match (outcome, failure) {
+        (Outcome::Completed, _) => info!(duration_ms, "job completed"),
+        (Outcome::Retried | Outcome::Dead, Some(reason)) => warn!(
+            duration_ms,
+            reason = %reason,
+            retry = outcome == Outcome::Retried,
+            "job attempt failed"
+        ),
+        _ => warn!(duration_ms, "job lost its lease; its work was discarded"),
     }
-    metrics::record_attempt(&job.kind, outcome, started.elapsed().as_secs_f64());
+    metrics::record_attempt(&job.kind, outcome, elapsed.as_secs_f64());
 }
 
 /// Retries or buries a job whose handler failed, fenced on its lease.
@@ -325,6 +375,8 @@ fn random_unit() -> f64 {
 mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
+    use uuid::Uuid;
+    use zirv_flow_core::{Cause, TraceContext};
     use zirv_flow_store::{NewJob, QueueCounts, enqueue, find_job, queue_counts};
 
     use super::*;
@@ -378,6 +430,22 @@ mod tests {
         }
     }
 
+    /// Records a decision, then fails its first attempt, which rolls the decision back.
+    struct RecordsThenFails;
+
+    impl JobKind for RecordsThenFails {
+        const KIND: &'static str = "test.records";
+
+        async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
+            ctx.record_decision("fixture.step", "done", None, Vec::new())
+                .await?;
+            if ctx.attempts() == 1 {
+                return Err(JobError::new("planned failure"));
+            }
+            Ok(())
+        }
+    }
+
     /// Writes an effect, takes a transaction-scoped advisory lock to say so, and never ends.
     struct Hangs;
 
@@ -427,6 +495,10 @@ mod tests {
     const NOT_HANGING: &str =
         "SELECT NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = 4242)";
 
+    fn new_job(kind: &str) -> NewJob {
+        NewJob::new(kind, TraceContext::root(Cause::api("test-request")))
+    }
+
     fn registry() -> Registry {
         Registry::built_in()
             .with(&Effect)
@@ -434,6 +506,7 @@ mod tests {
             .with(&Panics)
             .with(&Hangs)
             .with(&Gated)
+            .with(&RecordsThenFails)
     }
 
     fn test_config(concurrency: usize) -> WorkerConfig {
@@ -522,9 +595,10 @@ mod tests {
 
     async fn enqueue_effects(pool: &PgPool, total: i64, fail_every: i64) {
         sqlx::query(
-            "INSERT INTO jobs (id, kind, payload, max_attempts) \
+            "INSERT INTO jobs (id, kind, payload, max_attempts, trace_id, cause_kind, cause_id) \
                 SELECT gen_random_uuid(), 'test.effect', \
-                jsonb_build_object('index', index, 'fail_every', $1::bigint), 3 \
+                jsonb_build_object('index', index, 'fail_every', $1::bigint), 3, \
+                gen_random_uuid(), 'manual', '' \
                 FROM generate_series(0, $2::bigint - 1) AS index",
         )
         .bind(fail_every)
@@ -587,7 +661,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failing_handler_ends_dead_with_a_safe_error_after_max_attempts(pool: PgPool) {
         migrated(&pool).await;
-        let mut job = NewJob::new("test.fails");
+        let mut job = new_job("test.fails");
         job.payload = json!({"secret": "hunter2"});
         job.max_attempts = 3;
         enqueue(&pool, &job).await.unwrap();
@@ -609,11 +683,148 @@ mod tests {
         );
     }
 
+    async fn workspace(pool: &PgPool) -> zirv_flow_core::WorkspaceId {
+        let name = zirv_flow_core::WorkspaceName::parse("ours").unwrap();
+        let slug = zirv_flow_core::Slug::parse("ours").unwrap();
+        zirv_flow_store::create_workspace(pool, &name, &slug)
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn trace_of(
+        pool: &PgPool,
+        workspace: zirv_flow_core::WorkspaceId,
+        trace: &TraceContext,
+    ) -> Vec<(String, String, Option<String>)> {
+        let (records, _) = zirv_flow_store::list_trace(pool, workspace, trace.trace_id, 100)
+            .await
+            .unwrap();
+        records
+            .into_iter()
+            .map(|record| (record.action, record.outcome, record.reason))
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_fails_once_leaves_the_failure_and_only_the_surviving_decision_under_its_trace(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        let mut job = new_job("test.records");
+        job.workspace_id = Some(ws);
+        let trace = job.trace.clone();
+        enqueue(&pool, &job).await.unwrap();
+        let (stop, handle) = start(&pool, test_config(1));
+
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+
+        let seen = trace_of(&pool, ws, &trace).await;
+        assert_eq!(
+            seen,
+            [
+                (
+                    "job.attempt".to_owned(),
+                    "failed".to_owned(),
+                    Some("planned failure".to_owned())
+                ),
+                ("fixture.step".to_owned(), "done".to_owned(), None),
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_runs_out_of_attempts_leaves_a_failed_then_an_exhausted_record(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        let mut job = new_job("test.fails");
+        job.workspace_id = Some(ws);
+        job.max_attempts = 2;
+        let trace = job.trace.clone();
+        enqueue(&pool, &job).await.unwrap();
+        let (stop, handle) = start(&pool, test_config(1));
+
+        wait_for(&pool, |counts| counts.dead == 1).await;
+        stop_and_join(stop, handle).await;
+
+        let outcomes: Vec<String> = trace_of(&pool, ws, &trace)
+            .await
+            .into_iter()
+            .map(|(_, outcome, _)| outcome)
+            .collect();
+        assert_eq!(outcomes, ["failed", "exhausted"]);
+    }
+
+    /// Collects what a JSON `tracing` subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_runs_in_a_span_that_puts_its_trace_and_job_ids_on_every_log_line(pool: PgPool) {
+        migrated(&pool).await;
+        let captured = Captured::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_writer(captured.clone())
+                .finish(),
+        );
+        let job = new_job("maintenance.noop");
+        let trace_id = job.trace.trace_id.to_string();
+        enqueue(&pool, &job).await.unwrap();
+        let job_id: Uuid = sqlx::query_scalar("SELECT id FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (stop, handle) = start(&pool, test_config(1));
+
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let line: Value = output
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|line| line["fields"]["message"] == "job completed")
+            .unwrap_or_else(|| panic!("no completion line in {output}"));
+        assert_eq!(line["span"]["trace_id"], trace_id.as_str());
+        assert_eq!(line["span"]["job_id"], job_id.to_string().as_str());
+        assert_eq!(line["span"]["kind"], "maintenance.noop");
+        assert_eq!(line["span"]["cause_kind"], "api");
+        assert!(line["fields"]["duration_ms"].is_u64());
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_panicking_handler_fails_the_attempt_and_the_worker_carries_on(pool: PgPool) {
         migrated(&pool).await;
-        let mut panics = NewJob::new("test.panics");
+        let mut panics = new_job("test.panics");
         panics.max_attempts = 1;
         enqueue(&pool, &panics).await.unwrap();
         enqueue_effects(&pool, 5, 0).await;
@@ -636,7 +847,7 @@ mod tests {
         pool: PgPool,
     ) {
         migrated(&pool).await;
-        let mut job = NewJob::new("test.effect");
+        let mut job = new_job("test.effect");
         job.payload = json!({"index": 1});
         enqueue(&pool, &job).await.unwrap();
         // The first worker claims the job and is killed: no completion, no heartbeat.
@@ -665,7 +876,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_rerun_of_a_killed_job_is_its_second_attempt(pool: PgPool) {
         migrated(&pool).await;
-        let mut job = NewJob::new("test.effect");
+        let mut job = new_job("test.effect");
         job.payload = json!({"index": 1});
         enqueue(&pool, &job).await.unwrap();
         let doomed = claim_and_reap(&pool, Duration::from_millis(300)).await;
@@ -691,7 +902,7 @@ mod tests {
         pool: PgPool,
     ) {
         migrated(&pool).await;
-        let mut job = NewJob::new("test.hangs");
+        let mut job = new_job("test.hangs");
         job.max_attempts = 2;
         enqueue(&pool, &job).await.unwrap();
         let mut config = test_config(1);
@@ -724,7 +935,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_late_worker_cannot_complete_or_fail_a_job_another_worker_holds(pool: PgPool) {
         migrated(&pool).await;
-        let mut job = NewJob::new("test.effect");
+        let mut job = new_job("test.effect");
         job.payload = json!({"index": 1});
         enqueue(&pool, &job).await.unwrap();
         // Worker A's lease expires and the reaper requeues the job; worker B claims it.
@@ -781,7 +992,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let mut job = NewJob::new("test.gated");
+        let mut job = new_job("test.gated");
         job.payload = json!({"index": 7});
         enqueue(&pool, &job).await.unwrap();
         // The given pool has one connection and the worker's listener holds it, so
@@ -825,10 +1036,8 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unregistered_kind_is_left_in_the_queue(pool: PgPool) {
         migrated(&pool).await;
-        enqueue(&pool, &NewJob::new("sync.run")).await.unwrap();
-        enqueue(&pool, &NewJob::new("maintenance.noop"))
-            .await
-            .unwrap();
+        enqueue(&pool, &new_job("sync.run")).await.unwrap();
+        enqueue(&pool, &new_job("maintenance.noop")).await.unwrap();
         let (stop, handle) = start(&pool, test_config(1));
 
         wait_for(&pool, |counts| counts.ready == 1).await;
@@ -852,9 +1061,7 @@ mod tests {
         // Wait until the listener is subscribed, so the notification cannot be missed.
         wait_until(&pool, "the listener to subscribe", LISTENING).await;
 
-        enqueue(&pool, &NewJob::new("maintenance.noop"))
-            .await
-            .unwrap();
+        enqueue(&pool, &new_job("maintenance.noop")).await.unwrap();
 
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;

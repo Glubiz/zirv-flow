@@ -50,9 +50,51 @@ pub fn sized_like(
     options.connect_lazy_with((*pool.connect_options()).clone())
 }
 
+/// Sets the pool gauges through the `metrics` facade. `name` labels the pool.
+pub fn observe_pool(pool: &PgPool, name: &'static str) {
+    let size = pool.size();
+    let idle = u32::try_from(pool.num_idle()).unwrap_or(u32::MAX).min(size);
+    metrics::gauge!("zirv_flow_db_pool_connections", "pool" => name, "state" => "idle")
+        .set(f64::from(idle));
+    metrics::gauge!("zirv_flow_db_pool_connections", "pool" => name, "state" => "in_use")
+        .set(f64::from(size - idle));
+    metrics::gauge!("zirv_flow_db_pool_max_connections", "pool" => name)
+        .set(f64::from(pool.options().get_max_connections()));
+}
+
 #[cfg(test)]
 mod tests {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
     use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn pool_gauges_split_idle_from_in_use_and_report_the_maximum(pool: PgPool) {
+        let held = pool.acquire().await.unwrap();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || observe_pool(&pool, "main"));
+        let output = handle.render();
+
+        assert!(
+            output.contains("zirv_flow_db_pool_connections{pool=\"main\",state=\"in_use\"} 1"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_db_pool_connections{pool=\"main\",state=\"idle\"}"),
+            "{output}"
+        );
+        let max = pool.options().get_max_connections();
+        assert!(
+            output.contains(&format!(
+                "zirv_flow_db_pool_max_connections{{pool=\"main\"}} {max}"
+            )),
+            "{output}"
+        );
+        drop(held);
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
