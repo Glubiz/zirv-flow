@@ -169,7 +169,9 @@ reference. This runs Keycloak 26.8.0 locally on port 8081 and zirv-flow on 8080.
 1. Start Keycloak (development mode, admin console at http://localhost:8081):
 
    ```sh
-   docker run -d --name zf-keycloak -p 8081:8080      -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin      quay.io/keycloak/keycloak:26.8.0 start-dev
+   docker run -d --name zf-keycloak -p 8081:8080 \
+     -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+     quay.io/keycloak/keycloak:26.8.0 start-dev
    ```
 
 2. Create the realm, a confidential client and a user with a verified e-mail
@@ -180,8 +182,13 @@ reference. This runs Keycloak 26.8.0 locally on port 8081 and zirv-flow on 8080.
    kcadm="docker exec zf-keycloak /opt/keycloak/bin/kcadm.sh"
    $kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin
    $kcadm create realms -s realm=zirv -s enabled=true
-   $kcadm create clients -r zirv -s clientId=zirv-flow -s enabled=true      -s protocol=openid-connect -s publicClient=false -s secret=zirv-flow-dev-secret      -s standardFlowEnabled=true -s directAccessGrantsEnabled=false      -s 'redirectUris=["http://localhost:8080/api/v1/session/oidc/callback"]'      -s 'attributes."pkce.code.challenge.method"=S256'
-   $kcadm create users -r zirv -s username=jane -s email=jane@example.com      -s emailVerified=true -s firstName=Jane -s lastName=Doe -s enabled=true
+   $kcadm create clients -r zirv -s clientId=zirv-flow -s enabled=true \
+     -s protocol=openid-connect -s publicClient=false -s secret=zirv-flow-dev-secret \
+     -s standardFlowEnabled=true -s directAccessGrantsEnabled=false \
+     -s 'redirectUris=["http://localhost:8080/api/v1/session/oidc/callback"]' \
+     -s 'attributes."pkce.code.challenge.method"=S256'
+   $kcadm create users -r zirv -s username=jane -s email=jane@example.com \
+     -s emailVerified=true -s firstName=Jane -s lastName=Doe -s enabled=true
    $kcadm set-password -r zirv --username jane --new-password jane-password
    ```
 
