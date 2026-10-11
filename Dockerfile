@@ -70,9 +70,12 @@ WORKDIR /src
 COPY . .
 COPY --from=web /web/dist /src/web/dist
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+# A multi-platform build runs this step once per architecture at the same time
+# on the build platform; locking the shared caches keeps the two cargo runs from
+# unpacking the same crate into the registry at once.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
     triple="$(cat /triple)"; \
     var="$(echo "$triple" | tr 'a-z-' 'A-Z_')"; \
