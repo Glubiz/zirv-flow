@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat};
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 use crate::ValidationError;
 
@@ -78,7 +78,8 @@ impl FromStr for TraitType {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TraitValue {
     String(String),
-    Number(f64),
+    /// Kept exactly as sent: an integer stays an integer.
+    Number(Number),
     Boolean(bool),
     /// Normalized to UTC RFC 3339.
     Timestamp(String),
@@ -130,10 +131,13 @@ pub fn coerce(kind: TraitType, value: &Value) -> Result<TraitValue, DropReason> 
                 Ok(TraitValue::String(text.clone()))
             }
         }
-        (TraitType::Number, Value::Number(number)) => number
-            .as_f64()
-            .map(TraitValue::Number)
-            .ok_or(DropReason::WrongType),
+        (TraitType::Number, Value::Number(number)) => {
+            if number.as_f64().is_some_and(f64::is_finite) {
+                Ok(TraitValue::Number(number.clone()))
+            } else {
+                Err(DropReason::WrongType)
+            }
+        }
         (TraitType::Boolean, Value::Bool(flag)) => Ok(TraitValue::Boolean(*flag)),
         (TraitType::Timestamp, Value::String(text)) => DateTime::parse_from_rfc3339(text)
             .map(|parsed| {
@@ -228,7 +232,11 @@ mod tests {
     fn number_takes_only_numbers() {
         assert_eq!(
             coerce(TraitType::Number, &json!(1.5)),
-            Ok(TraitValue::Number(1.5))
+            Ok(TraitValue::Number(Number::from_f64(1.5).unwrap()))
+        );
+        assert_eq!(
+            coerce(TraitType::Number, &json!(9007199254740993_i64)),
+            Ok(TraitValue::Number(9007199254740993_i64.into()))
         );
         assert_eq!(
             coerce(TraitType::Number, &text("1")),

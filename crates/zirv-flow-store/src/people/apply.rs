@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 use sqlx::PgConnection;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -64,6 +64,10 @@ pub enum ProfileOutcome {
 }
 
 /// Applies `records` in one transaction. Callers chunk their input (500 by default).
+///
+/// When the error is [`StoreError::is_retryable`] (a deadlock, a serialization failure or an
+/// identity race that outlasted its retries) nothing was committed, and the caller retries
+/// the whole batch.
 pub async fn apply_profile_batch(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -158,7 +162,7 @@ async fn apply_record(
     )
     .await?;
     let person_id = resolution.person_id;
-    let record_id = upsert_ledger_row(
+    let (record_id, ledger_keys) = upsert_ledger_row(
         connection,
         workspace,
         record,
@@ -238,7 +242,12 @@ async fn apply_record(
         .await?;
     }
 
-    let keys: Vec<String> = updates.iter().map(|(key, _)| key.clone()).collect();
+    // Every key the row now holds, plus the keys it just retracted. A record that moved
+    // brings all its keys to the new person.
+    let mut keys = ledger_keys;
+    keys.extend(updates.iter().map(|(key, _)| key.clone()));
+    keys.sort();
+    keys.dedup();
     let changed = recompute(connection, workspace, person_id, &keys).await?;
     if changed || resolution.created {
         mark_dirty(connection, workspace, person_id).await?;
@@ -341,14 +350,7 @@ fn to_json(value: &TraitValue) -> Value {
         TraitValue::String(text) | TraitValue::Timestamp(text) | TraitValue::Date(text) => {
             Value::String(text.clone())
         }
-        TraitValue::Number(number) => {
-            if number.fract() == 0.0 && number.abs() < 9.0e15 {
-                // Safe: integral and well inside the exact range of f64 and i64.
-                Value::from(*number as i64)
-            } else {
-                Number::from_f64(*number).map_or(Value::Null, Value::Number)
-            }
-        }
+        TraitValue::Number(number) => Value::Number(number.clone()),
         TraitValue::Boolean(flag) => Value::Bool(*flag),
         TraitValue::StringList(items) => {
             Value::Array(items.iter().cloned().map(Value::String).collect())
@@ -429,7 +431,7 @@ async fn upsert_ledger_row(
     existing: Option<&LedgerRow>,
     person_id: Uuid,
     normalized: &Normalized<'_>,
-) -> Result<Uuid, StoreError> {
+) -> Result<(Uuid, Vec<String>), StoreError> {
     let Normalized {
         identifiers,
         updates,
@@ -440,7 +442,9 @@ async fn upsert_ledger_row(
         .to_offset(UtcOffset::UTC)
         .format(&Rfc3339)
         .map_err(|_| decode_error("observed_at cannot be formatted"))?;
-    let mut traits = existing
+    // A revived tombstone starts empty, so what was deleted never comes back.
+    let live = existing.filter(|row| row.deleted_at.is_none());
+    let mut traits = live
         .and_then(|row| row.traits.as_object().cloned())
         .unwrap_or_default();
     for (key, value) in *updates {
@@ -453,7 +457,7 @@ async fn upsert_ledger_row(
             }
         }
     }
-    let mut union: Vec<(String, String)> = existing
+    let mut union: Vec<(String, String)> = live
         .and_then(|row| row.identifiers.as_array())
         .into_iter()
         .flatten()
@@ -476,6 +480,7 @@ async fn upsert_ledger_row(
         .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
         .collect();
 
+    let keys: Vec<String> = traits.keys().cloned().collect();
     match existing {
         Some(row) => {
             sqlx::query(
@@ -492,7 +497,7 @@ async fn upsert_ledger_row(
             .execute(connection)
             .await
             .map_err(StoreError::query)?;
-            Ok(row.id)
+            Ok((row.id, keys))
         }
         None => {
             let id = Uuid::now_v7();
@@ -514,14 +519,14 @@ async fn upsert_ledger_row(
             .execute(connection)
             .await
             .map_err(StoreError::query)?;
-            Ok(id)
+            Ok((id, keys))
         }
     }
 }
 
 /// Recomputes `keys` of one person from the live ledger rows, and writes the person only if
 /// a value or its source changed. Returns whether a value changed.
-async fn recompute(
+pub(super) async fn recompute(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person_id: Uuid,
@@ -557,7 +562,9 @@ async fn recompute(
         let definition: Option<TraitDefinition> =
             find_trait_definition(&mut *connection, workspace, key).await?;
         let mut contributions = Vec::new();
-        for (record_id, source, record_traits) in &rows {
+        // An archived key is not materialized; the ledger keeps its values for an unarchive.
+        let archived = definition.as_ref().is_some_and(|d| d.archived);
+        for (record_id, source, record_traits) in rows.iter().filter(|_| !archived) {
             let Some(entry) = record_traits.get(key) else {
                 continue;
             };
@@ -611,7 +618,7 @@ async fn recompute(
     Ok(values_changed)
 }
 
-async fn mark_dirty(
+pub(super) async fn mark_dirty(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person_id: Uuid,
@@ -628,7 +635,7 @@ async fn mark_dirty(
     Ok(())
 }
 
-async fn record_decision(
+pub(super) async fn record_decision(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     trace: &TraceContext,
@@ -781,8 +788,19 @@ mod tests {
 
     #[test]
     fn whole_numbers_stay_integers_in_json() {
-        assert_eq!(to_json(&TraitValue::Number(5.0)), json!(5));
-        assert_eq!(to_json(&TraitValue::Number(2.5)), json!(2.5));
+        assert_eq!(to_json(&TraitValue::Number(5.into())), json!(5));
+        let big = 9_007_199_254_740_993_i64;
+        assert_eq!(to_json(&TraitValue::Number(big.into())), json!(big));
+        assert_eq!(
+            to_json(&TraitValue::Number(big.into())).to_string(),
+            "9007199254740993"
+        );
+        assert_eq!(
+            to_json(&TraitValue::Number(
+                serde_json::Number::from_f64(2.5).unwrap()
+            )),
+            json!(2.5)
+        );
         assert_eq!(
             to_json(&TraitValue::StringList(vec!["a".into()])),
             json!(["a"])
@@ -1284,5 +1302,159 @@ mod tests {
             outcomes[1],
             ProfileOutcome::Applied { created: false, .. }
         ));
+    }
+
+    const T0: OffsetDateTime = datetime!(2026-01-01 00:00 UTC);
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_that_changes_its_identifier_keeps_its_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "old@example.com", json!({"plan": "pro"}), T0);
+        let renamed = record("crm", "1", "new@example.com", json!({"plan": "pro"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[renamed]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { created: false, .. }
+        ));
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 1);
+        assert_eq!(list_identities(&pool, ws, person).await.unwrap().len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_moving_between_people_takes_all_its_keys_with_it(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mine = record("crm", "1", "a@example.com", json!({"a": "1", "b": "2"}), T0);
+        let other = record("shop", "9", "b@example.com", json!({"c": "3"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[mine, other])
+            .await
+            .unwrap();
+        let (old, new) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert_ne!(old, new);
+        // The record now carries the other person's identifier, and touches only key `a`.
+        let moved = record("crm", "1", "b@example.com", json!({"a": "5"}), T0);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[moved]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), new);
+        let new = find_person(&pool, ws, new).await.unwrap().unwrap();
+        assert_eq!(new.traits, json!({"a": "5", "b": "2", "c": "3"}));
+        let old = find_person(&pool, ws, old).await.unwrap().unwrap();
+        assert_eq!(old.traits, json!({}));
+        assert_eq!(old.trait_sources, json!({}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_revived_tombstone_does_not_resurrect_deleted_traits(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "a@example.com", json!({"a": "1", "b": "2"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert_eq!(
+            find_person(&pool, ws, person)
+                .await
+                .unwrap()
+                .unwrap()
+                .traits,
+            json!({})
+        );
+
+        let revived = record("crm", "1", "a@example.com", json!({"b": "3"}), T0);
+        apply_profile_batch(&pool, ws, &[revived]).await.unwrap();
+
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits, json!({"b": "3"}));
+        let ledger: Value =
+            sqlx::query_scalar("SELECT traits FROM source_records WHERE record_key = '1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(ledger.get("a").is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn null_for_an_unregistered_key_registers_nothing_and_drops_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let rec = record("crm", "1", "a@example.com", json!({"ghost": null}), T0);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec]).await.unwrap();
+
+        let ProfileOutcome::Applied { dropped, .. } = &outcomes[0] else {
+            panic!("not applied");
+        };
+        assert!(dropped.is_empty());
+        let definitions = crate::people::list_trait_definitions(&pool, ws)
+            .await
+            .unwrap();
+        assert!(definitions.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn numbers_keep_their_exact_value_through_the_ledger_and_the_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut rec = record("crm", "1", "a@example.com", json!({}), T0);
+        rec.traits = serde_json::from_str(r#"{"big": 9007199254740993, "small": 7}"#).unwrap();
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec]).await.unwrap();
+
+        let person = find_person(&pool, ws, person_of(&outcomes[0]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(person.traits["big"].to_string(), "9007199254740993");
+        assert_eq!(person.traits["small"].to_string(), "7");
+        let ledger: String = sqlx::query_scalar("SELECT traits::text FROM source_records LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ledger.contains("9007199254740993"), "{ledger}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_key_is_not_materialized_even_when_a_record_is_rewritten(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro", "x": "1"}),
+            T0,
+        );
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        update_trait_definition(
+            &pool,
+            ws,
+            "plan",
+            &TraitDefinitionUpdate {
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let again = record("crm", "1", "a@example.com", json!({"x": "2"}), T0);
+        apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits, json!({"x": "2"}));
     }
 }

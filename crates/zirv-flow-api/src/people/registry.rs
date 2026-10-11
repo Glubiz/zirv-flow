@@ -8,8 +8,8 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use zirv_flow_core::people::{Precedence, TraitType, validate_key};
-use zirv_flow_core::{ValidationError, WorkspaceId};
-use zirv_flow_store::{NewTraitDefinition, PgPool, TraitDefinition, TraitDefinitionUpdate};
+use zirv_flow_core::{Cause, TraceContext, ValidationError, WorkspaceId};
+use zirv_flow_store::{NewJob, NewTraitDefinition, PgPool, TraitDefinition, TraitDefinitionUpdate};
 
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
@@ -99,9 +99,16 @@ pub(crate) struct UpdateTraitRequest {
     description: Option<String>,
     archived: Option<bool>,
     /// Refused with 422 when present: the type of a trait never changes.
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type", default, deserialize_with = "present")]
     #[schema(ignore)]
     trait_type: Option<serde_json::Value>,
+}
+
+/// Deserializes a field that was sent at all, `null` included, as `Some`.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 fn invalid(field: &'static str, message: &'static str) -> AdminError {
@@ -244,6 +251,20 @@ pub(crate) async fn update_trait(
         json!({ "key": definition.key, "fields": fields }),
     )
     .await?;
+    // Materialized values follow the registry: a rule change reaches existing people through
+    // a job that commits with this change.
+    if fields
+        .iter()
+        .any(|field| matches!(*field, "precedence" | "source_order" | "archived"))
+    {
+        let trace = crate::trace::current().unwrap_or_else(|| {
+            TraceContext::root(Cause::api(crate::request_id::current().unwrap_or_default()))
+        });
+        let mut job = NewJob::new("traits.recompute", trace);
+        job.workspace_id = Some(workspace);
+        job.payload = json!({ "workspace_id": workspace, "key": definition.key });
+        zirv_flow_store::enqueue(&mut *tx, &job).await?;
+    }
     zirv_flow_store::commit(tx).await?;
     Ok(definition)
 }
@@ -395,7 +416,10 @@ mod tests {
         let with: UpdateTraitRequest = serde_json::from_value(json!({"type": "number"})).unwrap();
         let without: UpdateTraitRequest = serde_json::from_value(json!({"pii": true})).unwrap();
 
+        let null: UpdateTraitRequest = serde_json::from_value(json!({"type": null})).unwrap();
+
         assert!(with.trait_type.is_some());
+        assert!(null.trait_type.is_some());
         assert!(without.trait_type.is_none() && without.pii == Some(true));
     }
 }

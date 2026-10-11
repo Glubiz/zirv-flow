@@ -2202,4 +2202,103 @@ mod tests {
         assert_eq!(own.status, StatusCode::OK);
         assert_eq!(own.body, json!([]));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_null_type_is_refused_like_any_other_type(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "age", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let reply = call(
+            &router,
+            "PATCH",
+            &format!("{}/age", traits_uri(&ws)),
+            Some(json!({"type": null, "pii": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["detail"], "type: cannot be changed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn changing_a_rule_enqueues_a_recompute_in_the_same_transaction(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "age", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let uri = format!("{}/age", traits_uri(&ws));
+        let queued = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM jobs WHERE kind = 'traits.recompute'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"description": "x", "pii": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(queued(pool.clone()).await, 0);
+        let archived = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"archived": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(archived.status, StatusCode::OK);
+        let rule = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"precedence": "first"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(rule.status, StatusCode::OK);
+
+        assert_eq!(queued(pool.clone()).await, 2);
+        let payload: Value =
+            sqlx::query_scalar("SELECT payload FROM jobs WHERE kind = 'traits.recompute' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(payload, json!({"workspace_id": ws, "key": "age"}));
+        let refused = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"precedence": "newest"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(queued(pool).await, 2);
+    }
 }

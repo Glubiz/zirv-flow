@@ -422,6 +422,15 @@ As built (people, identities and the field registry):
   boolean `boolean`, an array of strings `string_list`. Timestamp and date are never
   inferred, and an object or a mixed array is dropped with a reason. Concurrent inference is
   `ON CONFLICT DO NOTHING` followed by a re-read. A type is fixed at creation.
+- **Changing a rule.** Changing a trait's `precedence`, `source_order` or `archived` flag
+  enqueues a `traits.recompute` job (payload `{workspace_id, key}`) in the same transaction
+  as the registry change. The job recomputes that key for every person with a live
+  contribution, 500 people per run and transaction (each run enqueues the next with an
+  `after` person-id cursor), and appends a `trait.change` decision (ids only) and a dirty
+  mark where a value changed. An archived key is not materialized: its values leave
+  `people.traits` and `trait_sources` while the ledger keeps them, so unarchiving restores
+  them. Retry: `StoreError::is_retryable()` is true for deadlocks, serialization failures and
+  an identity race that outlasts three attempts; the caller retries the whole batch.
 
 ### 7.4 Deletion propagation
 

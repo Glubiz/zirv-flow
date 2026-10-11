@@ -3,6 +3,7 @@
 
 mod apply;
 mod profiles;
+mod recompute;
 mod registry;
 mod resolve;
 
@@ -18,6 +19,7 @@ pub use profiles::{
     IdentityConflict, Person, StoredIdentity, find_person, find_person_by_identifier,
     list_identities, list_identity_conflicts,
 };
+pub use recompute::{RECOMPUTE_BATCH, recompute_trait_batch};
 pub use registry::{
     NewTraitDefinition, TraitDefinition, TraitDefinitionUpdate, create_trait_definition,
     find_trait_definition, list_trait_definitions, update_trait_definition,

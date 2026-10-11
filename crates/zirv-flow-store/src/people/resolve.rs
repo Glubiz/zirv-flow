@@ -12,6 +12,9 @@ use zirv_flow_core::people::Identifier;
 
 use crate::StoreError;
 
+/// How many times a record's resolution runs when identity inserts keep losing races.
+const MAX_ATTEMPTS: u32 = 3;
+
 /// An identifier that points at a person other than the one the record attached to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Conflict {
@@ -34,7 +37,7 @@ struct Owned {
 /// Resolves the person for `identifiers` (normalized, sorted, non-empty). `existing` is the
 /// person the record is already attached to, which wins ties and receives a record whose
 /// identifiers are all unknown. An identity insert that loses a unique race re-runs the
-/// resolution once.
+/// resolution, up to three attempts in all, and then fails with a retryable error.
 pub(crate) async fn resolve_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -44,7 +47,7 @@ pub(crate) async fn resolve_person(
     let mut attempt = 0;
     loop {
         let owners = lookup_owners(connection, workspace, identifiers).await?;
-        let (person_id, created) = match choose(identifiers, &owners, existing) {
+        let (person_id, created) = match choose(identifiers, &owners, existing).or(existing) {
             Some(person_id) => (person_id, false),
             None => (create_person(connection, workspace).await?, true),
         };
@@ -56,7 +59,10 @@ pub(crate) async fn resolve_person(
             .map(|(_, identifier)| identifier)
             .collect();
         let inserted = insert_identities(connection, workspace, person_id, &missing).await?;
-        if inserted < missing.len() && attempt == 0 {
+        if inserted < missing.len() {
+            if attempt + 1 >= MAX_ATTEMPTS {
+                return Err(StoreError::retryable_race());
+            }
             // Another transaction claimed an identifier first. Undo a person made only for
             // this pass, then look again: the winner's identity now resolves.
             if created {
@@ -276,5 +282,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(identities, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_truly_concurrent_identity_race_resolves_to_one_person(pool: PgPool) {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use tokio::sync::Barrier;
+
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let email = identifier("email", "race@example.com");
+        let barrier = Arc::new(Barrier::new(2));
+
+        // The first transaction inserts the identity and holds it uncommitted until the
+        // second one is blocked waiting on that row.
+        let first = {
+            let (pool, barrier, email) = (pool.clone(), barrier.clone(), email.clone());
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.unwrap();
+                let resolution = resolve_person(&mut tx, ws, &[email], None).await.unwrap();
+                barrier.wait().await;
+                let mut blocked = false;
+                for _ in 0..400 {
+                    let waiting: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_stat_activity \
+                         WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting > 0 {
+                        blocked = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                assert!(
+                    blocked,
+                    "the second transaction never blocked on the identity"
+                );
+                tx.commit().await.unwrap();
+                resolution
+            })
+        };
+        let second = {
+            let (pool, barrier, email) = (pool.clone(), barrier.clone(), email.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let mut tx = pool.begin().await.unwrap();
+                let resolution = resolve_person(&mut tx, ws, &[email], None).await.unwrap();
+                tx.commit().await.unwrap();
+                resolution
+            })
+        };
+
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+        assert!(first.created);
+        assert!(!second.created);
+        assert_eq!(first.person_id, second.person_id);
+        let identities: i64 = sqlx::query_scalar("SELECT count(*) FROM identities")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((identities, people), (1, 1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_with_no_known_identifier_stays_with_its_existing_person(pool: PgPool) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let mut connection = pool.acquire().await.unwrap();
+        let first = resolve_person(
+            &mut connection,
+            ws,
+            &[identifier("email", "old@example.com")],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let again = resolve_person(
+            &mut connection,
+            ws,
+            &[identifier("email", "new@example.com")],
+            Some(first.person_id),
+        )
+        .await
+        .unwrap();
+
+        assert!(!again.created);
+        assert_eq!(again.person_id, first.person_id);
     }
 }

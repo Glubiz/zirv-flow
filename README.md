@@ -422,6 +422,10 @@ policy picks the value, and the person shows which source it came from:
 Sending `null` for a field removes that source's value, and the next source's value
 (if any) takes over.
 
+Changing a field's precedence, source order or archived flag also re-evaluates the people
+who already hold a value for it, through a background job. An archived field is no longer
+shown on people; unarchiving brings its values back.
+
 ## Web UI
 
 The server serves a React single-page app (`web/`, TypeScript and Vite) from the same
