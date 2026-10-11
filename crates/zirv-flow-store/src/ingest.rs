@@ -1099,6 +1099,83 @@ mod tests {
         assert_eq!(people, 1);
     }
 
+    /// The benchmark script's rows as `(kind, items, p50_ms, p99_ms)`.
+    async fn applied_latency(pool: &PgPool) -> Vec<(String, i64, Option<f64>, Option<f64>)> {
+        let script = include_str!("../../../scripts/bench/applied-latency.sql");
+        let statement = format!(
+            "SELECT kind, items, p50_ms::float8, p99_ms::float8 FROM ({}) s ORDER BY kind",
+            script.trim().trim_end_matches(';')
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(statement))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_applied_latency_script_measures_inbox_arrival_to_the_decision(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+
+        // Before anything is applied both kinds are listed with no items.
+        let empty = applied_latency(&pool).await;
+        assert_eq!(
+            empty,
+            [
+                ("identify".to_owned(), 0, None, None),
+                ("track".to_owned(), 0, None, None)
+            ]
+        );
+
+        // First drain: both rows arrived 5 s before they were applied.
+        append(
+            &pool,
+            ws,
+            &trace,
+            &[
+                identify("u1", "m-1", json!({"plan": "free"})),
+                track("u1", "m-2", "seen", json!({})),
+            ],
+        )
+        .await;
+        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '5 seconds'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drain_batch(&pool, ws, &key(), 500).await.unwrap();
+
+        let rows = applied_latency(&pool).await;
+        for (kind, items, p50, p99) in &rows {
+            let (p50, p99) = (p50.unwrap(), p99.unwrap());
+            assert_eq!(*items, 1, "{kind}");
+            assert!((5000.0..30_000.0).contains(&p50), "{kind} p50 {p50}");
+            assert!(p99 >= p50, "{kind}");
+        }
+
+        // A later identify of the same person changes the trait again; only that latest change
+        // counts for the record, so there is still one identify item and it is the newer 2 s one.
+        append(
+            &pool,
+            ws,
+            &trace,
+            &[identify("u1", "m-3", json!({"plan": "pro"}))],
+        )
+        .await;
+        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '2 seconds'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drain_batch(&pool, ws, &key(), 500).await.unwrap();
+
+        let rows = applied_latency(&pool).await;
+        let (kind, items, p50, _) = &rows[0];
+        assert_eq!((kind.as_str(), *items), ("identify", 1));
+        let p50 = p50.unwrap();
+        assert!((2000.0..5000.0).contains(&p50), "identify p50 {p50}");
+        assert_eq!((rows[1].0.as_str(), rows[1].1), ("track", 1));
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_takes_at_most_the_limit_oldest_rows_of_its_own_workspace(pool: PgPool) {
