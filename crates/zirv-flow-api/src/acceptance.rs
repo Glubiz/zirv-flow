@@ -1336,4 +1336,605 @@ mod tests {
             StatusCode::NOT_FOUND
         );
     }
+
+    const SETUP_PASSWORD: &str = "a first-run password";
+
+    /// A router over a migrated database, with its state, for tests that look inside it.
+    async fn app_with_state(pool: &PgPool) -> (Router, AppState) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let state = AppState::new(pool.clone(), Arc::new(String::new));
+        (router(state.clone()), state)
+    }
+
+    async fn post_setup(router: &Router, token: Option<&str>, email: &str) -> Reply {
+        let mut body = json!({"email": email, "password": SETUP_PASSWORD});
+        if let Some(token) = token {
+            body["token"] = json!(token);
+        }
+        call(router, "POST", "/api/v1/setup", Some(body), Auth::Anonymous).await
+    }
+
+    async fn user_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM users")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn setup_is_required_on_an_empty_database_and_not_once_an_owner_exists(pool: PgPool) {
+        let router = app(&pool).await;
+
+        let before = call(&router, "GET", "/api/v1/setup", None, Auth::Anonymous).await;
+        owner(&pool, &router).await;
+        let after = call(&router, "GET", "/api/v1/setup", None, Auth::Anonymous).await;
+
+        assert_eq!(before.status, StatusCode::OK);
+        assert_eq!(before.body, json!({"required": true}));
+        assert_eq!(after.status, StatusCode::OK);
+        assert_eq!(after.body, json!({"required": false}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_right_token_creates_the_owner_signs_them_in_clears_the_token_and_audits(
+        pool: PgPool,
+    ) {
+        let (router, state) = app_with_state(&pool).await;
+        let token = state.mint_setup_token().await.unwrap().unwrap();
+
+        let reply = post_setup(&router, Some(&token), "First@Example.com").await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["user"]["email"], "first@example.com");
+        assert_eq!(reply.body["user"]["is_owner"], true);
+        let csrf = reply.body["csrf_token"].as_str().unwrap().to_owned();
+        let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.starts_with("zf_session="), "{cookie}");
+        assert!(cookie.contains("HttpOnly"));
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+        assert!(state.setup_token().is_none(), "the token is spent");
+        let login = Login {
+            cookie: cookie.split(';').next().unwrap().to_owned(),
+            csrf,
+        };
+        let current = call(
+            &router,
+            "GET",
+            "/api/v1/session",
+            None,
+            Auth::Session(&login),
+        )
+        .await;
+        assert_eq!(current.status, StatusCode::OK);
+        let rows = zirv_flow_store::list_audit(&pool, 10).await.unwrap();
+        let created = rows
+            .iter()
+            .find(|row| row.action == "user.created")
+            .expect("the owner creation is audited");
+        assert_eq!(created.actor_kind, "anonymous");
+        assert_eq!(created.summary["via"], "first-run setup");
+        assert_eq!(created.request_id.as_deref(), Some("test-request"));
+        let serialised =
+            serde_json::to_string(&rows.iter().map(|r| &r.summary).collect::<Vec<_>>()).unwrap();
+        assert!(!serialised.contains(&token) && !serialised.contains(SETUP_PASSWORD));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wrong_missing_or_unminted_token_is_refused_and_creates_nothing(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let unminted = post_setup(&router, Some("anything"), "a@example.com").await;
+        let token = state.mint_setup_token().await.unwrap().unwrap();
+
+        let wrong = post_setup(&router, Some("not-the-token"), "a@example.com").await;
+        let missing = post_setup(&router, None, "a@example.com").await;
+        let empty = post_setup(&router, Some(""), "a@example.com").await;
+
+        for reply in [&unminted, &wrong, &missing, &empty] {
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{:?}", reply.body);
+            assert_eq!(reply.body["detail"], "invalid setup token");
+            assert!(!reply.headers.contains_key(header::SET_COOKIE));
+        }
+        assert_eq!(user_count(&pool).await, 0);
+        assert!(state.setup_token().is_some(), "a refusal keeps the token");
+        let right = post_setup(&router, Some(&token), "a@example.com").await;
+        assert_eq!(right.status, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn setup_with_an_existing_owner_is_a_conflict_whatever_the_token_says(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let token = state.mint_setup_token().await.unwrap().unwrap();
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+
+        let right = post_setup(&router, Some(&token), "b@example.com").await;
+        let wrong = post_setup(&router, Some("nope"), "b@example.com").await;
+
+        assert_eq!(right.status, StatusCode::CONFLICT);
+        assert_eq!(wrong.status, StatusCode::CONFLICT);
+        assert_eq!(user_count(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_concurrent_correct_setups_make_exactly_one_owner(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let token = state.mint_setup_token().await.unwrap().unwrap();
+
+        let (first, second) = tokio::join!(
+            post_setup(&router, Some(&token), "one@example.com"),
+            post_setup(&router, Some(&token), "two@example.com"),
+        );
+
+        let mut statuses = [first.status, second.status];
+        statuses.sort();
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+        let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE is_owner")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(owners, 1);
+        assert_eq!(user_count(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn setup_validates_the_email_and_password_only_after_the_token(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let token = state.mint_setup_token().await.unwrap().unwrap();
+
+        let bad_email = post_setup(&router, Some(&token), "nope").await;
+        let short = call(
+            &router,
+            "POST",
+            "/api/v1/setup",
+            Some(json!({"token": token, "email": "a@example.com", "password": "short"})),
+            Auth::Anonymous,
+        )
+        .await;
+        let unauthorised = post_setup(&router, Some("wrong"), "nope").await;
+
+        assert_eq!(bad_email.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(short.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unauthorised.status, StatusCode::FORBIDDEN);
+        assert!(state.setup_token().is_some());
+        assert_eq!(user_count(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_token_is_minted_when_an_owner_exists_and_each_mint_replaces_the_last(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let first = state.mint_setup_token().await.unwrap().unwrap();
+        let second = state.mint_setup_token().await.unwrap().unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            post_setup(&router, Some(&first), "a@example.com")
+                .await
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        assert_eq!(state.mint_setup_token().await.unwrap(), None);
+    }
+
+    /// Inserts a job directly, with a payload that must never be shown. Returns its id and trace.
+    async fn seed_job(
+        pool: &PgPool,
+        kind: &str,
+        state: &str,
+        workspace: Option<&str>,
+        unique_key: Option<&str>,
+        dead_at: Option<&str>,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let id = uuid::Uuid::new_v4();
+        let trace = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, state, attempts, max_attempts, \
+                last_error, unique_key, trace_id, cause_kind, cause_id, dead_at) \
+             VALUES ($1, $2::text::uuid, $3, '{\"secret\": \"hunter2\"}', $4, 5, 5, \
+                CASE WHEN $4 = 'dead' THEN 'boom' END, $5, $6, 'schedule', 'sched-1', \
+                $7::text::timestamptz)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(kind)
+        .bind(state)
+        .bind(unique_key)
+        .bind(trace)
+        .bind(dead_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        (id, trace)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_jobs_admin_endpoints_are_for_an_owner_session_only(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, member) = user(&pool, &router, "member@example.com").await;
+        let (_, key) = make_key(&router, &owner, &ws, &["read", "write", "admin"]).await;
+        let (dead, _) = seed_job(&pool, "a.kind", "dead", None, None, Some("2030-01-01")).await;
+        let retry_uri = format!("/api/v1/admin/jobs/{dead}/retry");
+        let endpoints = [
+            ("GET", "/api/v1/admin/jobs".to_owned()),
+            ("GET", "/api/v1/admin/jobs/dead".to_owned()),
+            ("POST", retry_uri),
+        ];
+
+        for (method, uri) in &endpoints[..2] {
+            let status = |auth| {
+                let router = router.clone();
+                async move { call(&router, method, uri, None, auth).await.status }
+            };
+            assert_eq!(status(Auth::Session(&owner)).await, StatusCode::OK, "{uri}");
+            assert_eq!(status(Auth::Session(&member)).await, StatusCode::FORBIDDEN);
+            assert_eq!(status(Auth::Anonymous).await, StatusCode::UNAUTHORIZED);
+            assert_eq!(status(Auth::Key(&key)).await, StatusCode::FORBIDDEN);
+        }
+        let (method, uri) = &endpoints[2];
+        let status = |auth| {
+            let router = router.clone();
+            async move { call(&router, method, uri, None, auth).await.status }
+        };
+        assert_eq!(status(Auth::Session(&member)).await, StatusCode::FORBIDDEN);
+        assert_eq!(status(Auth::Anonymous).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status(Auth::Key(&key)).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            status(Auth::SessionWithoutCsrf(&owner)).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(status(Auth::Session(&owner)).await, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_depth_endpoint_counts_states_per_kind_and_ages_the_oldest_ready_job(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        for _ in 0..2 {
+            seed_job(&pool, "b.kind", "ready", None, None, None).await;
+        }
+        seed_job(&pool, "b.kind", "running", None, None, None).await;
+        seed_job(&pool, "a.kind", "dead", None, None, Some("2030-01-01")).await;
+        sqlx::query(
+            "UPDATE jobs SET run_at = now() - interval '120 seconds' WHERE state = 'ready'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_job(&pool, "b.kind", "ready", None, None, None).await;
+        sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE id = (SELECT id FROM jobs WHERE state = 'ready' ORDER BY run_at DESC LIMIT 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "GET",
+            "/api/v1/admin/jobs",
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        let kinds = reply.body["kinds"].as_array().unwrap();
+        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds[0]["kind"], "a.kind");
+        assert_eq!(
+            (
+                kinds[0]["ready"].as_i64(),
+                kinds[0]["running"].as_i64(),
+                kinds[0]["dead"].as_i64()
+            ),
+            (Some(0), Some(0), Some(1))
+        );
+        assert!(kinds[0]["oldest_ready_seconds"].is_null());
+        assert_eq!(kinds[1]["kind"], "b.kind");
+        assert_eq!(
+            (
+                kinds[1]["ready"].as_i64(),
+                kinds[1]["running"].as_i64(),
+                kinds[1]["dead"].as_i64()
+            ),
+            (Some(3), Some(1), Some(0))
+        );
+        let oldest = kinds[1]["oldest_ready_seconds"].as_f64().unwrap();
+        assert!((120.0..180.0).contains(&oldest), "{oldest}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dead_list_is_newest_first_pages_by_cursor_and_never_shows_payloads(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mut expected = Vec::new();
+        for day in 1..=5 {
+            let at = format!("2030-01-0{day}");
+            let (id, trace) = seed_job(&pool, "a.kind", "dead", None, None, Some(&at)).await;
+            expected.push((id.to_string(), trace.simple().to_string()));
+        }
+        seed_job(&pool, "a.kind", "ready", None, None, None).await;
+        expected.reverse();
+        let get = |uri: String| {
+            let router = router.clone();
+            let owner = &owner;
+            async move { call(&router, "GET", &uri, None, Auth::Session(owner)).await }
+        };
+
+        let all = get("/api/v1/admin/jobs/dead".into()).await;
+        assert_eq!(all.status, StatusCode::OK);
+        assert!(all.body["next_before"].is_null());
+        let jobs = all.body["jobs"].as_array().unwrap();
+        let ids: Vec<&str> = jobs.iter().map(|job| job["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            expected
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(jobs[0]["trace_id"], expected[0].1.as_str());
+        assert_eq!(
+            jobs[0]["cause"],
+            json!({"kind": "schedule", "id": "sched-1"})
+        );
+        assert_eq!(jobs[0]["last_error"], "boom");
+        assert_eq!(jobs[0]["state"], "dead");
+        assert_eq!(
+            (
+                jobs[0]["attempts"].as_i64(),
+                jobs[0]["max_attempts"].as_i64()
+            ),
+            (Some(5), Some(5))
+        );
+        assert!(
+            jobs[0]["dead_at"]
+                .as_str()
+                .unwrap()
+                .starts_with("2030-01-05T00:00:00")
+        );
+        assert!(!all.body.to_string().contains("hunter2"));
+        assert!(jobs[0].get("payload").is_none());
+
+        let mut seen = Vec::new();
+        let mut uri = "/api/v1/admin/jobs/dead?limit=2".to_owned();
+        let mut pages = 0;
+        loop {
+            let page = get(uri.clone()).await;
+            assert_eq!(page.status, StatusCode::OK);
+            seen.extend(
+                page.body["jobs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|job| job["id"].as_str().unwrap().to_owned()),
+            );
+            pages += 1;
+            match page.body["next_before"].as_str() {
+                Some(cursor) => uri = format!("/api/v1/admin/jobs/dead?limit=2&before={cursor}"),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(
+            seen,
+            expected
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        );
+
+        for bad in ["limit=0", "limit=201", "limit=x", "before=garbage"] {
+            let reply = get(format!("/api/v1/admin/jobs/dead?{bad}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(
+            get("/api/v1/admin/jobs/dead?limit=200".into()).await.status,
+            StatusCode::OK
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_a_dead_workspace_job_requeues_it_under_its_trace_and_audits_and_records_it(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner_login = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner_login, "Alpha").await;
+        let (id, trace) = seed_job(
+            &pool,
+            "retry.kind",
+            "dead",
+            Some(&ws),
+            None,
+            Some("2030-01-01"),
+        )
+        .await;
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("/api/v1/admin/jobs/{id}/retry"),
+            None,
+            Auth::Session(&owner_login),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["id"], id.to_string());
+        assert_eq!(reply.body["state"], "ready");
+        assert_eq!(reply.body["attempts"], 0);
+        assert!(reply.body["last_error"].is_null());
+        assert!(reply.body["dead_at"].is_null());
+        assert_eq!(reply.body["trace_id"], trace.simple().to_string());
+        assert_eq!(
+            reply.body["cause"],
+            json!({"kind": "schedule", "id": "sched-1"})
+        );
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &["retry.kind"],
+            std::time::Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("a worker can claim the retried job");
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.trace.trace_id.as_uuid(), trace);
+        let audit = zirv_flow_store::list_audit(&pool, 5).await.unwrap();
+        let retried = audit
+            .iter()
+            .find(|row| row.action == "job.retried")
+            .unwrap();
+        assert_eq!(retried.object_kind.as_deref(), Some("job"));
+        assert_eq!(retried.object_id, Some(id));
+        assert_eq!(retried.summary, json!({"kind": "retry.kind"}));
+        assert_eq!(retried.actor_kind, "user");
+        assert_eq!(
+            retried.workspace_id.map(|w| w.to_string()),
+            Some(ws.clone())
+        );
+        let records = zirv_flow_store::list_trace(
+            &pool,
+            ws.parse().unwrap(),
+            zirv_flow_core::TraceId::from_uuid(trace),
+            10,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "job.retry");
+        assert_eq!(records[0].outcome, "requeued");
+        assert_eq!(records[0].job_id, Some(id));
+        assert_eq!(records[0].cause.kind.to_string(), "manual");
+        assert_eq!(
+            records[0].cause.id,
+            sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_an_instance_job_is_audited_but_records_no_decision(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let (id, _) = seed_job(&pool, "retry.kind", "dead", None, None, Some("2030-01-01")).await;
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("/api/v1/admin/jobs/{id}/retry"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        let audit = zirv_flow_store::list_audit(&pool, 5).await.unwrap();
+        assert!(audit.iter().any(|row| row.action == "job.retried"));
+        let decisions: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decisions, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_a_job_that_is_not_dead_or_unknown_is_a_404_and_changes_nothing(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let (ready, _) = seed_job(&pool, "a.kind", "ready", None, None, None).await;
+        let (running, _) = seed_job(&pool, "a.kind", "running", None, None, None).await;
+        let unknown = uuid::Uuid::new_v4();
+
+        for id in [
+            ready.to_string(),
+            running.to_string(),
+            unknown.to_string(),
+            "nope".into(),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &format!("/api/v1/admin/jobs/{id}/retry"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{id}");
+        }
+
+        let states: Vec<String> = sqlx::query_scalar("SELECT state FROM jobs ORDER BY state")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(states, ["ready", "running"]);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        assert!(audit.iter().all(|row| row.action != "job.retried"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn retrying_into_a_held_unique_key_is_a_409_and_changes_nothing(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (dead, _) = seed_job(
+            &pool,
+            "a.kind",
+            "dead",
+            Some(&ws),
+            Some("k"),
+            Some("2030-01-01"),
+        )
+        .await;
+        seed_job(&pool, "a.kind", "ready", Some(&ws), Some("k"), None).await;
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("/api/v1/admin/jobs/{dead}/retry"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["detail"], "an equivalent job is already queued");
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = $1")
+            .bind(dead)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "dead");
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        assert!(audit.iter().all(|row| row.action != "job.retried"));
+        let decisions: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decisions, 0);
+    }
 }

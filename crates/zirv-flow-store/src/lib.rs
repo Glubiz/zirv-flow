@@ -31,11 +31,12 @@ pub use identities::{
     take_oidc_login,
 };
 pub use jobs::{
-    ClaimedJob, DEFAULT_MAX_ATTEMPTS, FailOutcome, Job, JobListener, Leadership, NOTIFY_CHANNEL,
-    NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped, Schedule, advance_schedule, claim_job,
-    complete_job, create_schedule, database_now, disable_schedule, due_schedules, enqueue,
-    fail_job, find_job, heartbeat_job, listen_for_jobs, lock_lease, queue_counts, queue_depths,
-    reap_expired, try_lead,
+    ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
+    KindDepth, Leadership, NOTIFY_CHANNEL, NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped,
+    Schedule, advance_schedule, claim_job, complete_job, create_schedule, database_now,
+    disable_schedule, due_schedules, enqueue, fail_job, find_job, heartbeat_job, kind_depths,
+    list_dead_jobs, listen_for_jobs, lock_lease, queue_counts, queue_depths, reap_expired,
+    retry_dead_job, try_lead,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};

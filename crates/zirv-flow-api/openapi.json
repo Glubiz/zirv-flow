@@ -14,6 +14,209 @@
     "version": "1"
   },
   "paths": {
+    "/api/v1/admin/jobs": {
+      "get": {
+        "tags": [
+          "jobs-admin"
+        ],
+        "summary": "Job counts by kind and state, and how long the oldest runnable job has waited.",
+        "operationId": "depth",
+        "responses": {
+          "200": {
+            "description": "Queue depth per kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the instance owner, or an API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/jobs/dead": {
+      "get": {
+        "tags": [
+          "jobs-admin"
+        ],
+        "summary": "Dead jobs, newest first, without their payloads.",
+        "operationId": "dead",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Jobs per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of dead jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadJobsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the instance owner, or an API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/jobs/{id}/retry": {
+      "post": {
+        "tags": [
+          "jobs-admin"
+        ],
+        "summary": "Puts a dead job back in the queue, to run again now under its original trace.",
+        "description": "Resets its attempts and clears its error. Audited as `job.retried`; a workspace job also\ngets a `job.retry` decision record in its trace.",
+        "operationId": "retry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job, now ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the instance owner, an API key, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job, or it is not dead",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An equivalent job is already queued",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -241,6 +444,93 @@
           },
           "503": {
             "description": "The identity provider cannot be reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/v1/setup": {
+      "get": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Whether the instance still needs its first-run setup.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Whether setup is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      },
+      "post": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Creates the instance owner and signs them in.",
+        "description": "Needs the setup token that `serve` logs while no owner exists. Answers like sign-in:\nit sets the `zf_session` cookie and returns the user with the CSRF token. An existing\nowner is 409, checked before the token; a missing or wrong token is 403.",
+        "operationId": "complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The owner was created and signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing or wrong setup token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An owner already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed email or weak password",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1374,6 +1664,28 @@
           }
         ]
       },
+      "DeadJobsBody": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
       "DecisionBody": {
         "type": "object",
         "required": [
@@ -1427,6 +1739,120 @@
           "subject_ids": {
             "type": "object",
             "description": "Durable domain ids by name; never personal data."
+          }
+        }
+      },
+      "DepthBody": {
+        "type": "object",
+        "required": [
+          "kinds"
+        ],
+        "properties": {
+          "kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KindDepthBody"
+            },
+            "description": "Sorted by kind."
+          }
+        }
+      },
+      "JobBody": {
+        "type": "object",
+        "description": "A job without its payload.",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "attempts",
+          "max_attempts",
+          "trace_id",
+          "cause"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cause": {
+            "$ref": "#/components/schemas/CauseBody"
+          },
+          "dead_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the job went dead; null once retried."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "state": {
+            "type": "string",
+            "description": "`dead` in the list; `ready` after a retry.",
+            "example": "dead"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace the job belongs to: 32 lowercase hex characters."
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Null for instance-level work."
+          }
+        }
+      },
+      "KindDepthBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "ready",
+          "running",
+          "dead"
+        ],
+        "properties": {
+          "dead": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "example": "maintenance.noop"
+          },
+          "oldest_ready_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "How long the longest-waiting runnable job has waited; null when none is runnable."
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "running": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -1541,6 +1967,38 @@
           "role": {
             "type": "string",
             "description": "`admin` or `member`."
+          }
+        }
+      },
+      "SetupRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "owner@example.com"
+          },
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "The setup token the server logged at startup. Absent counts as wrong."
+          }
+        }
+      },
+      "SetupStatus": {
+        "type": "object",
+        "required": [
+          "required"
+        ],
+        "properties": {
+          "required": {
+            "type": "boolean",
+            "description": "True only while no owner exists."
           }
         }
       },
