@@ -14,6 +14,7 @@ mod oidc;
 mod openapi;
 mod ops;
 mod passwords;
+mod people;
 mod problem;
 mod request_id;
 mod session;
@@ -34,7 +35,7 @@ use std::io;
 
 use axum::Router;
 use axum::middleware::from_fn;
-use axum::routing::{get, put};
+use axum::routing::{get, patch, put};
 use tokio::net::TcpListener;
 
 pub use oidc::redirect_url as oidc_redirect_url;
@@ -90,6 +91,14 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/api-keys/{id}",
             axum::routing::delete(keys::revoke),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/traits",
+            get(people::list).post(people::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/traits/{key}",
+            patch(people::update),
         )
         .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",

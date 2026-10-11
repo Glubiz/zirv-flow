@@ -7,6 +7,7 @@ mod decisions;
 mod identities;
 mod jobs;
 mod migrations;
+mod people;
 mod pool;
 mod sessions;
 mod workspaces;
@@ -39,6 +40,13 @@ pub use jobs::{
     retry_dead_job, try_lead,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
+pub use people::{
+    DroppedTrait, IdentityConflict, NewTraitDefinition, Person, ProfileOutcome, ProfileRecord,
+    RECOMPUTE_BATCH, StoredIdentity, TraitDefinition, TraitDefinitionUpdate, apply_profile_batch,
+    create_trait_definition, find_person, find_person_by_identifier, find_trait_definition,
+    list_identities, list_identity_conflicts, list_trait_definitions, recompute_trait_batch,
+    remove_contribution, update_trait_definition,
+};
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
@@ -68,6 +76,7 @@ enum StoreErrorKind {
     ModifiedMigration(i64),
     Query,
     Conflict,
+    Retryable,
 }
 
 impl StoreError {
@@ -103,12 +112,31 @@ impl StoreError {
         let conflict = source
             .as_database_error()
             .is_some_and(|error| error.is_unique_violation());
+        let retryable = source
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "40P01" | "40001"));
         let kind = if conflict {
             StoreErrorKind::Conflict
+        } else if retryable {
+            StoreErrorKind::Retryable
         } else {
             StoreErrorKind::Query
         };
         Self::with_source(kind, source)
+    }
+
+    /// A transaction that lost a race it could not resolve: nothing was committed and the
+    /// whole unit of work can be run again.
+    pub(crate) fn retryable_race() -> Self {
+        Self::new(StoreErrorKind::Retryable)
+    }
+
+    /// Whether running the whole transaction again can succeed: PostgreSQL reported a
+    /// deadlock (40P01) or a serialization failure (40001), or a race could not be
+    /// resolved within its retries.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::Retryable)
     }
 
     /// Whether the write was refused because the value already exists.
@@ -169,6 +197,11 @@ impl fmt::Display for StoreError {
                 self.write_source(formatter)
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
+            StoreErrorKind::Retryable => {
+                formatter
+                    .write_str("the transaction conflicted with another and can be retried")?;
+                self.write_source(formatter)
+            }
             StoreErrorKind::NewerSchema(version) => write!(
                 formatter,
                 "database schema version {version} is newer than this binary supports"
@@ -237,6 +270,24 @@ mod tests {
 
         assert!(!error.is_conflict());
         assert!(error.to_string().starts_with("database query failed"));
+    }
+
+    #[test]
+    fn only_a_lost_race_or_a_database_conflict_is_retryable() {
+        assert!(StoreError::retryable_race().is_retryable());
+        assert!(!StoreError::query(sqlx::Error::RowNotFound).is_retryable());
+        assert!(!StoreError::new(StoreErrorKind::Conflict).is_retryable());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_postgres_serialization_failure_is_retryable(pool: PgPool) {
+        let error = sqlx::query("DO $$ BEGIN RAISE EXCEPTION 'x' USING ERRCODE = '40001'; END $$")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+
+        assert!(StoreError::query(error).is_retryable());
     }
 
     #[test]

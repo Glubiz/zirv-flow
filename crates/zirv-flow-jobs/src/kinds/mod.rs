@@ -3,5 +3,6 @@
 use crate::ErasedKind;
 
 mod noop;
+mod traits_recompute;
 
-pub(crate) static ALL: &[&dyn ErasedKind] = &[&noop::Noop];
+pub(crate) static ALL: &[&dyn ErasedKind] = &[&noop::Noop, &traits_recompute::TraitsRecompute];

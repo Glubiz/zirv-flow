@@ -101,10 +101,13 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_registry_ships_the_noop_kind() {
+    fn the_built_in_registry_ships_the_noop_and_recompute_kinds() {
         let registry = Registry::built_in();
 
-        assert_eq!(registry.kinds(), vec!["maintenance.noop"]);
+        assert_eq!(
+            registry.kinds(),
+            vec!["maintenance.noop", "traits.recompute"]
+        );
         assert!(registry.get("maintenance.noop").is_some());
         assert!(registry.get("sync.run").is_none());
     }
@@ -126,7 +129,12 @@ mod tests {
         assert_eq!(registry.get("test.second").unwrap().kind(), "test.second");
         assert_eq!(
             registry.kinds(),
-            vec!["maintenance.noop", "test.first", "test.second"]
+            vec![
+                "maintenance.noop",
+                "traits.recompute",
+                "test.first",
+                "test.second"
+            ]
         );
         assert!(registry.get("test.third").is_none());
     }

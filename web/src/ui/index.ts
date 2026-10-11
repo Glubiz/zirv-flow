@@ -2,7 +2,7 @@ export { Brand } from "./Brand";
 export { Button } from "./Button";
 export { CopyButton } from "./CopyButton";
 export { Dialog } from "./Dialog";
-export { TextField } from "./Field";
+export { SelectField, TextField } from "./Field";
 export { MenuButton } from "./Menu";
 export type { MenuEntry } from "./Menu";
 export { PageHeader, Panel } from "./Page";

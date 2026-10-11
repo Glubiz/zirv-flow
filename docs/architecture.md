@@ -406,6 +406,32 @@ Deterministic matching only, with rules per identifier kind:
 - **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution.
 - **Precedence:** each trait value is computed from all sources' contributions under the registry policy `latest` (by source observation time, default), `source_priority` (ordered sources) or `first`. Flow actions and the API write as sources (`flow:<id>`, `api`). The profile shows which source supplied each value.
 
+As built (people, identities and the field registry):
+
+- **Identifier kinds.** `email`, `phone`, `anonymous_id` and `external:<namespace>`
+  (namespace `[a-z0-9_.-]{1,64}`). Email reuses the `Email` rules; phone is international
+  format only (`+` and 8 to 15 digits after removing spaces, `-`, `.`, `(`, `)`, and a leading
+  `00` read as `+`), with no national-format guessing; anonymous and external ids are exact,
+  non-empty, at most 256 characters, with no control characters. Strength for an attach:
+  external, then email, phone, anonymous id. An invalid identifier rejects the record with a
+  typed reason; a record needs at least one valid identifier. Until merges exist, a match
+  across several people attaches to the strongest identifier's owner and writes an
+  `identity_conflicts` row (`merge_deferred`) per other person.
+- **Inference.** An unregistered key is registered on first sight with `inferred = true`,
+  `latest` precedence and `pii = false`: a string becomes `string`, a number `number`, a
+  boolean `boolean`, an array of strings `string_list`. Timestamp and date are never
+  inferred, and an object or a mixed array is dropped with a reason. Concurrent inference is
+  `ON CONFLICT DO NOTHING` followed by a re-read. A type is fixed at creation.
+- **Changing a rule.** Changing a trait's `precedence`, `source_order` or `archived` flag
+  enqueues a `traits.recompute` job (payload `{workspace_id, key}`) in the same transaction
+  as the registry change. The job recomputes that key for every person with a live
+  contribution, 500 people per run and transaction (each run enqueues the next with an
+  `after` person-id cursor), and appends a `trait.change` decision (ids only) and a dirty
+  mark where a value changed. An archived key is not materialized: its values leave
+  `people.traits` and `trait_sources` while the ledger keeps them, so unarchiving restores
+  them. Retry: `StoreError::is_retryable()` is true for deadlocks, serialization failures and
+  an identity race that outlasts three attempts; the caller retries the whole batch.
+
 ### 7.4 Deletion propagation
 
 Deletion is in the pipeline from M2. A source-side delete tombstones the ledger

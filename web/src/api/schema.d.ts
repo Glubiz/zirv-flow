@@ -328,6 +328,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/traits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's field registry, archived definitions included. */
+        get: operations["list_traits"];
+        put?: never;
+        /** Registers a trait. */
+        post: operations["create_trait"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/traits/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Changes the mutable fields of a trait. The type is not one of them. */
+        patch: operations["update_trait"];
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -408,6 +443,27 @@ export interface components {
              *     ]
              */
             scopes: string[];
+        };
+        CreateTraitRequest: {
+            channel_address?: boolean;
+            /** @description At most 500 characters. */
+            description?: string;
+            /**
+             * @description Lowercase letters, digits and underscores, starting with a letter; at most 64.
+             * @example plan_tier
+             */
+            key: string;
+            pii?: boolean;
+            /** @description One of `latest` (the default), `source_priority`, `first`. */
+            precedence?: string | null;
+            /** @description Source names in priority order, for `source_priority`. */
+            source_order?: string[];
+            /**
+             * @description One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`. It cannot
+             *     be changed later: archive the key and create a new one.
+             * @example string
+             */
+            type: string;
         };
         CreateUserRequest: {
             /** @example jane@example.com */
@@ -585,6 +641,39 @@ export interface components {
             trace_id: string;
             /** @description True when the trace has more records than this response carries. */
             truncated: boolean;
+        };
+        TraitBody: {
+            archived: boolean;
+            channel_address: boolean;
+            /** Format: date-time */
+            created_at: string;
+            description: string;
+            /** @description Registered automatically from an incoming record rather than created by a person. */
+            inferred: boolean;
+            key: string;
+            pii: boolean;
+            /**
+             * @description One of `latest`, `source_priority`, `first`.
+             * @example latest
+             */
+            precedence: string;
+            /** @description Source names in priority order; used by `source_priority`. */
+            source_order: string[];
+            /**
+             * @description One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`.
+             * @example string
+             */
+            type: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        UpdateTraitRequest: {
+            archived?: boolean | null;
+            channel_address?: boolean | null;
+            description?: string | null;
+            pii?: boolean | null;
+            precedence?: string | null;
+            source_order?: string[] | null;
         };
         /** @description A user as shown to API callers; never includes the password hash. */
         UserBody: {
@@ -1695,6 +1784,193 @@ export interface operations {
             };
             /** @description No such workspace, no access to it, or no records for the trace in it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_traits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The definitions, ordered by key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TraitBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_trait: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTraitRequest"];
+            };
+        };
+        responses: {
+            /** @description The new definition */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TraitBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The key already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid key, type, precedence or other field */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_trait: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Trait key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTraitRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated definition */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TraitBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or trait, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, no field at all, or an attempt to change the type */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

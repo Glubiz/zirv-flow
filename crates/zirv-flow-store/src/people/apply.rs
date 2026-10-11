@@ -1,0 +1,1521 @@
+//! The profile path of apply-batch (architecture sections 6 and 7.1): validate a record,
+//! resolve its person, upsert the ledger row, recompute the affected traits by precedence,
+//! mark the person dirty and append decisions.
+//!
+//! Decision records carry static strings and ids only, never trait keys or values and never
+//! identifiers.
+
+use std::collections::BTreeMap;
+
+use serde_json::{Map, Value};
+use sqlx::PgConnection;
+use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
+use uuid::Uuid;
+use zirv_flow_core::people::{
+    Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
+};
+use zirv_flow_core::token::sha256;
+use zirv_flow_core::{TraceContext, WorkspaceId};
+
+use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
+use super::resolve::resolve_person;
+use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
+
+/// One record from a source, as the profile path receives it.
+#[derive(Clone, Debug)]
+pub struct ProfileRecord {
+    pub source: String,
+    pub stream: String,
+    pub record_key: String,
+    /// `(kind, value)` pairs, not yet normalized.
+    pub identifiers: Vec<(String, String)>,
+    /// Trait key to value. A JSON `null` removes this source's contribution for the key.
+    pub traits: Map<String, Value>,
+    pub observed_at: OffsetDateTime,
+    pub trace: TraceContext,
+}
+
+/// A trait left out of a record, and why.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DroppedTrait {
+    pub key: String,
+    pub reason: &'static str,
+}
+
+/// What happened to one record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProfileOutcome {
+    /// The record was written. `created` is true when it made a new person; `changed` is
+    /// true when the person's materialized traits changed.
+    Applied {
+        person_id: Uuid,
+        created: bool,
+        changed: bool,
+        dropped: Vec<DroppedTrait>,
+    },
+    /// The record repeats what the ledger already holds: nothing was written.
+    Unchanged {
+        person_id: Uuid,
+        dropped: Vec<DroppedTrait>,
+    },
+    /// The record was refused; the rest of the batch is unaffected.
+    Rejected { reason: &'static str },
+}
+
+/// Applies `records` in one transaction. Callers chunk their input (500 by default).
+///
+/// When the error is [`StoreError::is_retryable`] (a deadlock, a serialization failure or an
+/// identity race that outlasted its retries) nothing was committed, and the caller retries
+/// the whole batch.
+pub async fn apply_profile_batch(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    records: &[ProfileRecord],
+) -> Result<Vec<ProfileOutcome>, StoreError> {
+    let mut tx = begin(pool).await?;
+    let mut outcomes = Vec::with_capacity(records.len());
+    for record in records {
+        outcomes.push(apply_record(&mut tx, workspace, record).await?);
+    }
+    commit(tx).await?;
+    Ok(outcomes)
+}
+
+/// Retracts one source record's contribution: the row is tombstoned and the person's traits
+/// are recomputed from what remains. Returns false when no live record matched. Identities
+/// and the orphan policy are untouched.
+pub async fn remove_contribution(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    source: &str,
+    stream: &str,
+    record_key: &str,
+    trace: &TraceContext,
+) -> Result<bool, StoreError> {
+    let mut tx = begin(pool).await?;
+    let row: Option<(Uuid, Uuid, Value)> = sqlx::query_as(
+        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+           AND deleted_at IS NULL \
+         RETURNING id, person_id, traits",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source)
+    .bind(stream)
+    .bind(record_key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let Some((record_id, person_id, traits)) = row else {
+        return Ok(false);
+    };
+    let keys: Vec<String> = traits
+        .as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    if recompute(&mut tx, workspace, person_id, &keys).await? {
+        mark_dirty(&mut tx, workspace, person_id).await?;
+        record_decision(
+            &mut tx,
+            workspace,
+            trace,
+            "trait.change",
+            "changed",
+            None,
+            vec![("person", person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
+    commit(tx).await?;
+    Ok(true)
+}
+
+async fn apply_record(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+) -> Result<ProfileOutcome, StoreError> {
+    let identifiers = match normalize_identifiers(&record.identifiers) {
+        Ok(identifiers) => identifiers,
+        Err(reason) => return Ok(ProfileOutcome::Rejected { reason }),
+    };
+    let (updates, dropped) = prepare_traits(connection, workspace, &record.traits).await?;
+    let hash = content_hash(&identifiers, &updates);
+
+    let existing = find_ledger_row(connection, workspace, record).await?;
+    if let Some(row) = &existing
+        && row.deleted_at.is_none()
+        && row.content_hash == hash
+    {
+        return Ok(ProfileOutcome::Unchanged {
+            person_id: row.person_id,
+            dropped,
+        });
+    }
+
+    let resolution = resolve_person(
+        connection,
+        workspace,
+        &identifiers,
+        existing.as_ref().map(|row| row.person_id),
+    )
+    .await?;
+    let person_id = resolution.person_id;
+    let (record_id, ledger_keys) = upsert_ledger_row(
+        connection,
+        workspace,
+        record,
+        existing.as_ref(),
+        person_id,
+        &Normalized {
+            identifiers: &identifiers,
+            updates: &updates,
+            hash: &hash,
+        },
+    )
+    .await?;
+
+    if resolution.created {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "person.created",
+            "created",
+            None,
+            vec![("person", person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
+    for conflict in &resolution.conflicts {
+        let inserted = sqlx::query(
+            "INSERT INTO identity_conflicts \
+                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
+             SELECT $1, $2, $3, $4, $5, $6, 'merge_deferred' \
+             WHERE NOT EXISTS (SELECT 1 FROM identity_conflicts \
+                               WHERE workspace_id = $2 AND person_id = $3 AND other_person_id = $4 \
+                                 AND source_record_id = $6 AND reason = 'merge_deferred' \
+                                 AND resolved_at IS NULL)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace.as_uuid())
+        .bind(person_id)
+        .bind(conflict.other_person_id)
+        .bind(&conflict.kind)
+        .bind(record_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        if inserted.rows_affected() == 1 {
+            record_decision(
+                connection,
+                workspace,
+                &record.trace,
+                "identity.conflict",
+                "recorded",
+                Some("merge_deferred"),
+                vec![
+                    ("person", person_id),
+                    ("other_person", conflict.other_person_id),
+                ],
+            )
+            .await?;
+        }
+    }
+
+    // A record that moved to another person takes its traits away from the previous one.
+    if let Some(row) = &existing
+        && row.person_id != person_id
+        && recompute(connection, workspace, row.person_id, &row.trait_keys()).await?
+    {
+        mark_dirty(connection, workspace, row.person_id).await?;
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "trait.change",
+            "changed",
+            None,
+            vec![("person", row.person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
+
+    // Every key the row now holds, plus the keys it just retracted. A record that moved
+    // brings all its keys to the new person.
+    let mut keys = ledger_keys;
+    keys.extend(updates.iter().map(|(key, _)| key.clone()));
+    keys.sort();
+    keys.dedup();
+    let changed = recompute(connection, workspace, person_id, &keys).await?;
+    if changed || resolution.created {
+        mark_dirty(connection, workspace, person_id).await?;
+    }
+    if changed {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "trait.change",
+            "changed",
+            None,
+            vec![("person", person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
+    Ok(ProfileOutcome::Applied {
+        person_id,
+        created: resolution.created,
+        changed,
+        dropped,
+    })
+}
+
+fn normalize_identifiers(raw: &[(String, String)]) -> Result<Vec<Identifier>, &'static str> {
+    let mut identifiers = Vec::with_capacity(raw.len());
+    for (kind, value) in raw {
+        identifiers.push(Identifier::parse(kind, value).map_err(|error| error.reason())?);
+    }
+    if identifiers.is_empty() {
+        return Err("no_identifier");
+    }
+    identifiers
+        .sort_by(|a, b| (a.kind().as_text(), a.value()).cmp(&(b.kind().as_text(), b.value())));
+    identifiers.dedup();
+    Ok(identifiers)
+}
+
+/// The accepted changes (`None` removes the key) and the dropped traits of a record.
+type Prepared = (Vec<(String, Option<Value>)>, Vec<DroppedTrait>);
+
+async fn prepare_traits(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    traits: &Map<String, Value>,
+) -> Result<Prepared, StoreError> {
+    let mut sorted: Vec<(&String, &Value)> = traits.iter().collect();
+    sorted.sort_by_key(|(key, _)| *key);
+    let mut updates = Vec::new();
+    let mut dropped = Vec::new();
+    for (key, value) in sorted {
+        let mut drop = |reason: DropReason| {
+            dropped.push(DroppedTrait {
+                key: key.clone(),
+                reason: reason.as_str(),
+            });
+        };
+        if validate_key(key).is_err() {
+            drop(DropReason::InvalidKey);
+            continue;
+        }
+        let mut definition = find_trait_definition(&mut *connection, workspace, key).await?;
+        if definition.as_ref().is_some_and(|d| d.archived) {
+            drop(DropReason::Archived);
+            continue;
+        }
+        if value.is_null() {
+            updates.push((key.clone(), None));
+            continue;
+        }
+        if definition.is_none() {
+            let inferred = match infer_type(value) {
+                Ok(inferred) => inferred,
+                Err(reason) => {
+                    drop(reason);
+                    continue;
+                }
+            };
+            insert_inferred_definition(connection, workspace, key, inferred).await?;
+            definition = find_trait_definition(&mut *connection, workspace, key).await?;
+        }
+        let Some(definition) = definition else {
+            drop(DropReason::NotInferable);
+            continue;
+        };
+        if definition.archived {
+            drop(DropReason::Archived);
+            continue;
+        }
+        match coerce(definition.trait_type, value) {
+            Ok(accepted) => updates.push((key.clone(), Some(to_json(&accepted)))),
+            Err(reason) => drop(reason),
+        }
+    }
+    Ok((updates, dropped))
+}
+
+fn to_json(value: &TraitValue) -> Value {
+    match value {
+        TraitValue::String(text) | TraitValue::Timestamp(text) | TraitValue::Date(text) => {
+            Value::String(text.clone())
+        }
+        TraitValue::Number(number) => Value::Number(number.clone()),
+        TraitValue::Boolean(flag) => Value::Bool(*flag),
+        TraitValue::StringList(items) => {
+            Value::Array(items.iter().cloned().map(Value::String).collect())
+        }
+    }
+}
+
+/// SHA-256 of the canonical JSON of the normalized identifiers and trait values. Times are
+/// left out so a replay with a new `observed_at` is still a no-op.
+fn content_hash(identifiers: &[Identifier], updates: &[(String, Option<Value>)]) -> Vec<u8> {
+    let identifiers: Vec<[String; 2]> = identifiers
+        .iter()
+        .map(|i| [i.kind().as_text(), i.value().to_owned()])
+        .collect();
+    let traits: BTreeMap<&str, &Option<Value>> = updates
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    let canonical = serde_json::json!({ "identifiers": identifiers, "traits": traits });
+    sha256(&canonical.to_string()).to_vec()
+}
+
+#[derive(sqlx::FromRow)]
+struct LedgerRow {
+    id: Uuid,
+    person_id: Uuid,
+    identifiers: Value,
+    traits: Value,
+    content_hash: Vec<u8>,
+    deleted_at: Option<OffsetDateTime>,
+}
+
+impl LedgerRow {
+    fn trait_keys(&self) -> Vec<String> {
+        self.traits
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+async fn find_ledger_row(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+) -> Result<Option<LedgerRow>, StoreError> {
+    sqlx::query_as(
+        "SELECT id, person_id, identifiers, traits, content_hash, deleted_at \
+         FROM source_records \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+         FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&record.source)
+    .bind(&record.stream)
+    .bind(&record.record_key)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
+fn decode_error(what: &'static str) -> StoreError {
+    StoreError::query(sqlx::Error::Decode(what.into()))
+}
+
+/// A record after validation: the normalized identifiers, the accepted trait changes and the
+/// content hash of both.
+struct Normalized<'a> {
+    identifiers: &'a [Identifier],
+    updates: &'a [(String, Option<Value>)],
+    hash: &'a [u8],
+}
+
+async fn upsert_ledger_row(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    existing: Option<&LedgerRow>,
+    person_id: Uuid,
+    normalized: &Normalized<'_>,
+) -> Result<(Uuid, Vec<String>), StoreError> {
+    let Normalized {
+        identifiers,
+        updates,
+        hash,
+    } = normalized;
+    let at = record
+        .observed_at
+        .to_offset(UtcOffset::UTC)
+        .format(&Rfc3339)
+        .map_err(|_| decode_error("observed_at cannot be formatted"))?;
+    // A revived tombstone starts empty, so what was deleted never comes back.
+    let live = existing.filter(|row| row.deleted_at.is_none());
+    let mut traits = live
+        .and_then(|row| row.traits.as_object().cloned())
+        .unwrap_or_default();
+    for (key, value) in *updates {
+        match value {
+            Some(value) => {
+                traits.insert(key.clone(), serde_json::json!({ "v": value, "at": at }));
+            }
+            None => {
+                traits.remove(key);
+            }
+        }
+    }
+    let mut union: Vec<(String, String)> = live
+        .and_then(|row| row.identifiers.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some((
+                entry.get("kind")?.as_str()?.to_owned(),
+                entry.get("value")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    union.extend(
+        identifiers
+            .iter()
+            .map(|i| (i.kind().as_text(), i.value().to_owned())),
+    );
+    union.sort();
+    union.dedup();
+    let stored: Vec<Value> = union
+        .into_iter()
+        .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
+        .collect();
+
+    let keys: Vec<String> = traits.keys().cloned().collect();
+    match existing {
+        Some(row) => {
+            sqlx::query(
+                "UPDATE source_records SET person_id = $3, identifiers = $4, traits = $5, \
+                    content_hash = $6, deleted_at = NULL, updated_at = now() \
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace.as_uuid())
+            .bind(row.id)
+            .bind(person_id)
+            .bind(Value::Array(stored))
+            .bind(Value::Object(traits))
+            .bind(hash)
+            .execute(connection)
+            .await
+            .map_err(StoreError::query)?;
+            Ok((row.id, keys))
+        }
+        None => {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO source_records \
+                    (id, workspace_id, source, stream, record_key, person_id, identifiers, \
+                     traits, content_hash) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(id)
+            .bind(workspace.as_uuid())
+            .bind(&record.source)
+            .bind(&record.stream)
+            .bind(&record.record_key)
+            .bind(person_id)
+            .bind(Value::Array(stored))
+            .bind(Value::Object(traits))
+            .bind(hash)
+            .execute(connection)
+            .await
+            .map_err(StoreError::query)?;
+            Ok((id, keys))
+        }
+    }
+}
+
+/// Recomputes `keys` of one person from the live ledger rows, and writes the person only if
+/// a value or its source changed. Returns whether a value changed.
+pub(super) async fn recompute(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person_id: Uuid,
+    keys: &[String],
+) -> Result<bool, StoreError> {
+    let person: Option<(Value, Value)> = sqlx::query_as(
+        "SELECT traits, trait_sources FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let Some((traits, sources)) = person else {
+        return Ok(false);
+    };
+    let (mut traits, mut sources) = (
+        traits.as_object().cloned().unwrap_or_default(),
+        sources.as_object().cloned().unwrap_or_default(),
+    );
+    let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(
+        "SELECT id, source, traits FROM source_records \
+         WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+
+    let (mut values_changed, mut sources_changed) = (false, false);
+    for key in keys {
+        let definition: Option<TraitDefinition> =
+            find_trait_definition(&mut *connection, workspace, key).await?;
+        let mut contributions = Vec::new();
+        // An archived key is not materialized; the ledger keeps its values for an unarchive.
+        let archived = definition.as_ref().is_some_and(|d| d.archived);
+        for (record_id, source, record_traits) in rows.iter().filter(|_| !archived) {
+            let Some(entry) = record_traits.get(key) else {
+                continue;
+            };
+            let (Some(value), Some(at)) = (entry.get("v"), entry.get("at").and_then(Value::as_str))
+            else {
+                return Err(decode_error("malformed ledger trait"));
+            };
+            contributions.push(Contribution {
+                source: source.clone(),
+                at: OffsetDateTime::parse(at, &Rfc3339)
+                    .map_err(|_| decode_error("malformed ledger time"))?,
+                record_id: *record_id,
+                value: value.clone(),
+            });
+        }
+        let (precedence, order) = definition.map_or_else(
+            || (zirv_flow_core::people::Precedence::Latest, Vec::new()),
+            |d| (d.precedence, d.source_order),
+        );
+        match resolve(precedence, &order, &contributions) {
+            Some(winner) => {
+                if !traits
+                    .get(key)
+                    .is_some_and(|current| same_value(current, &winner.value))
+                {
+                    traits.insert(key.clone(), winner.value.clone());
+                    values_changed = true;
+                }
+                let source = Value::String(winner.source.clone());
+                if sources.get(key) != Some(&source) {
+                    sources.insert(key.clone(), source);
+                    sources_changed = true;
+                }
+            }
+            None => {
+                values_changed |= traits.remove(key).is_some();
+                sources_changed |= sources.remove(key).is_some();
+            }
+        }
+    }
+    if values_changed || sources_changed {
+        sqlx::query(
+            "UPDATE people SET traits = $3, trait_sources = $4, updated_at = now() \
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(person_id)
+        .bind(Value::Object(traits))
+        .bind(Value::Object(sources))
+        .execute(connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
+    Ok(values_changed)
+}
+
+/// Whether two stored values are the same for change detection: numbers compare by numeric
+/// value (5 and 5.0 are equal; two integers compare exactly as integers), everything else
+/// exactly. Storage always keeps the number as sent.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if let (Some(i), Some(j)) = (x.as_i64(), y.as_i64()) {
+                i == j
+            } else if let (Some(i), Some(j)) = (x.as_u64(), y.as_u64()) {
+                i == j
+            } else {
+                x.as_f64() == y.as_f64()
+            }
+        }
+        _ => a == b,
+    }
+}
+
+pub(super) async fn mark_dirty(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO person_changes (workspace_id, person_id) VALUES ($1, $2) \
+         ON CONFLICT (workspace_id, person_id) DO UPDATE SET changed_at = now()",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
+pub(super) async fn record_decision(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    trace: &TraceContext,
+    action: &'static str,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+    subject_ids: Vec<(&'static str, Uuid)>,
+) -> Result<(), StoreError> {
+    append_decision(
+        connection,
+        &NewDecision {
+            workspace_id: workspace,
+            trace: trace.clone(),
+            action,
+            outcome,
+            reason,
+            subject_ids,
+            job: None,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::PgPool;
+    use time::macros::datetime;
+    use zirv_flow_core::people::Precedence;
+    use zirv_flow_core::{Cause, Slug, WorkspaceName};
+
+    use super::*;
+    use crate::people::registry::{
+        NewTraitDefinition, TraitDefinitionUpdate, create_trait_definition, update_trait_definition,
+    };
+    use crate::people::{find_person, list_identities, list_identity_conflicts};
+    use crate::{create_workspace, list_trace};
+
+    async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let name = WorkspaceName::parse(slug).unwrap();
+        let slug = Slug::parse(slug).unwrap();
+        create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    fn trace() -> TraceContext {
+        TraceContext::root(Cause::api("test"))
+    }
+
+    fn record(
+        source: &str,
+        key: &str,
+        email: &str,
+        traits: Value,
+        at: OffsetDateTime,
+    ) -> ProfileRecord {
+        ProfileRecord {
+            source: source.to_owned(),
+            stream: "contacts".to_owned(),
+            record_key: key.to_owned(),
+            identifiers: vec![("email".to_owned(), email.to_owned())],
+            traits: traits.as_object().cloned().unwrap(),
+            observed_at: at,
+            trace: trace(),
+        }
+    }
+
+    async fn define(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &str,
+        precedence: Precedence,
+        order: &[&str],
+    ) {
+        create_trait_definition(
+            pool,
+            ws,
+            &NewTraitDefinition {
+                key: key.to_owned(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence,
+                source_order: order.iter().map(|s| (*s).to_owned()).collect(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn person_of(outcome: &ProfileOutcome) -> Uuid {
+        match outcome {
+            ProfileOutcome::Applied { person_id, .. }
+            | ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+            ProfileOutcome::Rejected { reason } => panic!("rejected: {reason}"),
+        }
+    }
+
+    async fn trait_of(pool: &PgPool, ws: WorkspaceId, person: Uuid, key: &str) -> Option<Value> {
+        let person = find_person(pool, ws, person).await.unwrap().unwrap();
+        person.traits.get(key).cloned()
+    }
+
+    #[test]
+    fn identifiers_are_normalized_sorted_and_deduplicated() {
+        let raw = vec![
+            ("phone".to_owned(), "+45 1234 5678".to_owned()),
+            ("email".to_owned(), "A@Example.com".to_owned()),
+            ("email".to_owned(), "a@example.com".to_owned()),
+        ];
+
+        let identifiers = normalize_identifiers(&raw).unwrap();
+
+        assert_eq!(identifiers.len(), 2);
+        assert_eq!(identifiers[0].value(), "a@example.com");
+        assert_eq!(identifiers[1].value(), "+4512345678");
+    }
+
+    #[test]
+    fn a_bad_or_missing_identifier_is_a_typed_rejection() {
+        let bad = vec![("email".to_owned(), "nope".to_owned())];
+        let fax = vec![("fax".to_owned(), "1".to_owned())];
+
+        assert_eq!(normalize_identifiers(&bad).unwrap_err(), "invalid_email");
+        assert_eq!(
+            normalize_identifiers(&fax).unwrap_err(),
+            "unknown_identifier_kind"
+        );
+        assert_eq!(normalize_identifiers(&[]).unwrap_err(), "no_identifier");
+    }
+
+    #[test]
+    fn the_content_hash_ignores_times_and_key_order_but_not_values() {
+        let identifiers =
+            normalize_identifiers(&[("email".to_owned(), "a@b.co".to_owned())]).unwrap();
+        let one = vec![("a".to_owned(), Some(json!(1))), ("b".to_owned(), None)];
+        let swapped = vec![("b".to_owned(), None), ("a".to_owned(), Some(json!(1)))];
+        let other = vec![("a".to_owned(), Some(json!(2))), ("b".to_owned(), None)];
+
+        assert_eq!(
+            content_hash(&identifiers, &one),
+            content_hash(&identifiers, &swapped)
+        );
+        assert_ne!(
+            content_hash(&identifiers, &one),
+            content_hash(&identifiers, &other)
+        );
+    }
+
+    #[test]
+    fn whole_numbers_stay_integers_in_json() {
+        assert_eq!(to_json(&TraitValue::Number(5.into())), json!(5));
+        let big = 9_007_199_254_740_993_i64;
+        assert_eq!(to_json(&TraitValue::Number(big.into())), json!(big));
+        assert_eq!(
+            to_json(&TraitValue::Number(big.into())).to_string(),
+            "9007199254740993"
+        );
+        assert_eq!(
+            to_json(&TraitValue::Number(
+                serde_json::Number::from_f64(2.5).unwrap()
+            )),
+            json!(2.5)
+        );
+        assert_eq!(
+            to_json(&TraitValue::StringList(vec!["a".into()])),
+            json!(["a"])
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_first_record_creates_a_person_with_identities_traits_and_decisions(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-05-01 10:00 UTC);
+        let mut rec = record(
+            "crm",
+            "1",
+            "Ada@Example.com",
+            json!({"plan": "pro", "age": 36}),
+            at,
+        );
+        rec.identifiers
+            .push(("phone".into(), "+45 12345678".into()));
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec.clone()])
+            .await
+            .unwrap();
+
+        let person = person_of(&outcomes[0]);
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied {
+                created: true,
+                changed: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        assert_eq!(trait_of(&pool, ws, person, "age").await, Some(json!(36)));
+        let identities = list_identities(&pool, ws, person).await.unwrap();
+        assert_eq!(identities.len(), 2);
+        let dirty: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM person_changes WHERE person_id = $1")
+                .bind(person)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dirty, 1);
+        let (decisions, _) = list_trace(&pool, ws, rec.trace.trace_id, 10).await.unwrap();
+        // Records of one transaction share a time, so their order is not defined.
+        let mut actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
+        actions.sort_unstable();
+        assert_eq!(actions, ["person.created", "trait.change"]);
+        let text =
+            serde_json::to_string(&decisions.iter().map(|d| &d.subject_ids).collect::<Vec<_>>())
+                .unwrap();
+        assert!(!text.contains("pro") && !text.contains("example.com") && !text.contains("plan"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_sources_writing_one_trait_resolve_by_the_policy(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "latest_t", Precedence::Latest, &[]).await;
+        define(&pool, ws, "first_t", Precedence::First, &[]).await;
+        define(
+            &pool,
+            ws,
+            "prio_t",
+            Precedence::SourcePriority,
+            &["shop", "crm"],
+        )
+        .await;
+        let traits = |tag: &str| json!({"latest_t": tag, "first_t": tag, "prio_t": tag});
+        let old = record(
+            "crm",
+            "1",
+            "a@example.com",
+            traits("crm"),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let new = record(
+            "shop",
+            "9",
+            "a@example.com",
+            traits("shop"),
+            datetime!(2026-02-01 00:00 UTC),
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[new, old]).await.unwrap();
+
+        let person = person_of(&outcomes[0]);
+        assert_eq!(person, person_of(&outcomes[1]));
+        assert_eq!(
+            trait_of(&pool, ws, person, "latest_t").await,
+            Some(json!("shop"))
+        );
+        assert_eq!(
+            trait_of(&pool, ws, person, "first_t").await,
+            Some(json!("crm"))
+        );
+        assert_eq!(
+            trait_of(&pool, ws, person, "prio_t").await,
+            Some(json!("shop"))
+        );
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.trait_sources["latest_t"], json!("shop"));
+        assert_eq!(found.trait_sources["first_t"], json!("crm"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_a_contribution_restores_the_other_sources_value(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let crm = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "free"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let shop = record(
+            "shop",
+            "9",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            datetime!(2026-02-01 00:00 UTC),
+        );
+        let outcomes = apply_profile_batch(&pool, ws, &[crm, shop]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+
+        let removed = remove_contribution(&pool, ws, "shop", "contacts", "9", &trace())
+            .await
+            .unwrap();
+
+        assert!(removed);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+        assert!(
+            !remove_contribution(&pool, ws, "shop", "contacts", "9", &trace())
+                .await
+                .unwrap()
+        );
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert_eq!(trait_of(&pool, ws, person, "plan").await, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_null_removes_only_that_sources_contribution(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let crm = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "free"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let shop = record(
+            "shop",
+            "9",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            datetime!(2026-02-01 00:00 UTC),
+        );
+        let retract = record(
+            "shop",
+            "9",
+            "a@example.com",
+            json!({"plan": null}),
+            datetime!(2026-03-01 00:00 UTC),
+        );
+        let outcomes = apply_profile_batch(&pool, ws, &[crm, shop]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+
+        apply_profile_batch(&pool, ws, &[retract]).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+    }
+
+    async fn snapshot(pool: &PgPool) -> Vec<String> {
+        let mut rows: Vec<String> = Vec::new();
+        for query in [
+            "SELECT row_to_json(p)::text FROM people p ORDER BY id",
+            "SELECT row_to_json(i)::text FROM identities i ORDER BY id",
+            "SELECT row_to_json(s)::text FROM source_records s ORDER BY id",
+            "SELECT row_to_json(c)::text FROM person_changes c ORDER BY person_id",
+            "SELECT row_to_json(d)::text FROM decision_records d ORDER BY id",
+        ] {
+            rows.extend(
+                sqlx::query_scalar::<_, String>(query)
+                    .fetch_all(pool)
+                    .await
+                    .unwrap(),
+            );
+        }
+        rows
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_of_the_same_record_is_a_no_op(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let replay = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            datetime!(2026-06-01 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let before = snapshot(&pool).await;
+
+        let outcomes = apply_profile_batch(&pool, ws, &[replay]).await.unwrap();
+
+        assert!(matches!(outcomes[0], ProfileOutcome::Unchanged { .. }));
+        assert_eq!(snapshot(&pool).await, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wrongly_typed_value_is_dropped_with_its_reason_and_the_rest_applies(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "plan", Precedence::Latest, &[]).await;
+        let rec = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": 7, "city": "Aarhus", "Bad Key": 1, "meta": {"a": 1}}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec]).await.unwrap();
+
+        let ProfileOutcome::Applied {
+            person_id, dropped, ..
+        } = &outcomes[0]
+        else {
+            panic!("not applied: {outcomes:?}");
+        };
+        let reasons: Vec<(&str, &str)> =
+            dropped.iter().map(|d| (d.key.as_str(), d.reason)).collect();
+        assert_eq!(
+            reasons,
+            [
+                ("Bad Key", "invalid_key"),
+                ("meta", "not_inferable"),
+                ("plan", "wrong_type")
+            ]
+        );
+        assert_eq!(
+            trait_of(&pool, ws, *person_id, "city").await,
+            Some(json!("Aarhus"))
+        );
+        assert_eq!(trait_of(&pool, ws, *person_id, "plan").await, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn unregistered_keys_are_inferred_and_archived_keys_are_dropped(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"score": 4.5, "tags": ["a"]}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let definitions = crate::people::list_trait_definitions(&pool, ws)
+            .await
+            .unwrap();
+        assert!(
+            definitions
+                .iter()
+                .all(|d| d.inferred && d.precedence == Precedence::Latest && !d.pii)
+        );
+        assert_eq!(definitions.len(), 2);
+        update_trait_definition(
+            &pool,
+            ws,
+            "score",
+            &TraitDefinitionUpdate {
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let second = record(
+            "crm",
+            "2",
+            "b@example.com",
+            json!({"score": 1}),
+            datetime!(2026-01-02 00:00 UTC),
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[second]).await.unwrap();
+
+        let ProfileOutcome::Applied { dropped, .. } = &outcomes[0] else {
+            panic!("not applied");
+        };
+        assert_eq!(
+            dropped,
+            &[DroppedTrait {
+                key: "score".into(),
+                reason: "archived_key"
+            }]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rejected_record_does_not_abort_the_batch(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let bad = record(
+            "crm",
+            "1",
+            "not-an-email",
+            json!({"plan": "x"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let mut none = record(
+            "crm",
+            "2",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        none.identifiers.clear();
+        let good = record(
+            "crm",
+            "3",
+            "c@example.com",
+            json!({"plan": "x"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[bad, none, good])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcomes[0],
+            ProfileOutcome::Rejected {
+                reason: "invalid_email"
+            }
+        );
+        assert_eq!(
+            outcomes[1],
+            ProfileOutcome::Rejected {
+                reason: "no_identifier"
+            }
+        );
+        assert!(matches!(
+            outcomes[2],
+            ProfileOutcome::Applied { created: true, .. }
+        ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn identifiers_of_two_people_record_a_deferred_merge_conflict(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let a = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let mut b = record(
+            "crm",
+            "2",
+            "b@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        b.identifiers = vec![("phone".into(), "+4512345678".into())];
+        let outcomes = apply_profile_batch(&pool, ws, &[a, b]).await.unwrap();
+        let (email_person, phone_person) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert_ne!(email_person, phone_person);
+        let mut both = record(
+            "web",
+            "7",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-02 00:00 UTC),
+        );
+        both.identifiers
+            .push(("phone".into(), "+4512345678".into()));
+        both.identifiers
+            .push(("anonymous_id".into(), "anon-1".into()));
+
+        let outcomes = apply_profile_batch(&pool, ws, &[both.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), email_person);
+        let conflicts = list_identity_conflicts(&pool, ws, email_person)
+            .await
+            .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].other_person_id, phone_person);
+        assert_eq!(conflicts[0].reason, "merge_deferred");
+        assert!(conflicts[0].resolved_at.is_none());
+        let identities = list_identities(&pool, ws, email_person).await.unwrap();
+        let kinds: Vec<&str> = identities.iter().map(|i| i.kind.as_str()).collect();
+        assert_eq!(kinds, ["anonymous_id", "email"]);
+        let (decisions, _) = list_trace(&pool, ws, both.trace.trace_id, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| d.action == "identity.conflict" && d.outcome == "recorded")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_identity_race_between_batches_still_yields_one_identity_row(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let one = record(
+            "crm",
+            "1",
+            "race@example.com",
+            json!({"a": "x"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let two = record(
+            "shop",
+            "2",
+            "race@example.com",
+            json!({"b": "y"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        let (batch_one, batch_two) = ([one], [two]);
+        let (first, second) = tokio::join!(
+            apply_profile_batch(&pool, ws, &batch_one),
+            apply_profile_batch(&pool, ws, &batch_two),
+        );
+
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(person_of(&first[0]), person_of(&second[0]));
+        let identities: i64 = sqlx::query_scalar("SELECT count(*) FROM identities")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((identities, people), (1, 1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_new_identifier_twice_in_one_batch_makes_one_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let one = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let two = record(
+            "crm",
+            "2",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[one, two]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert!(matches!(
+            outcomes[1],
+            ProfileOutcome::Applied { created: false, .. }
+        ));
+    }
+
+    const T0: OffsetDateTime = datetime!(2026-01-01 00:00 UTC);
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_that_changes_its_identifier_keeps_its_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "old@example.com", json!({"plan": "pro"}), T0);
+        let renamed = record("crm", "1", "new@example.com", json!({"plan": "pro"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[renamed]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { created: false, .. }
+        ));
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 1);
+        assert_eq!(list_identities(&pool, ws, person).await.unwrap().len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_moving_between_people_takes_all_its_keys_with_it(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mine = record("crm", "1", "a@example.com", json!({"a": "1", "b": "2"}), T0);
+        let other = record("shop", "9", "b@example.com", json!({"c": "3"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[mine, other])
+            .await
+            .unwrap();
+        let (old, new) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert_ne!(old, new);
+        // The record now carries the other person's identifier, and touches only key `a`.
+        let moved = record("crm", "1", "b@example.com", json!({"a": "5"}), T0);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[moved]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), new);
+        let new = find_person(&pool, ws, new).await.unwrap().unwrap();
+        assert_eq!(new.traits, json!({"a": "5", "b": "2", "c": "3"}));
+        let old = find_person(&pool, ws, old).await.unwrap().unwrap();
+        assert_eq!(old.traits, json!({}));
+        assert_eq!(old.trait_sources, json!({}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_revived_tombstone_does_not_resurrect_deleted_traits(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "a@example.com", json!({"a": "1", "b": "2"}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert_eq!(
+            find_person(&pool, ws, person)
+                .await
+                .unwrap()
+                .unwrap()
+                .traits,
+            json!({})
+        );
+
+        let revived = record("crm", "1", "a@example.com", json!({"b": "3"}), T0);
+        apply_profile_batch(&pool, ws, &[revived]).await.unwrap();
+
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits, json!({"b": "3"}));
+        let ledger: Value =
+            sqlx::query_scalar("SELECT traits FROM source_records WHERE record_key = '1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(ledger.get("a").is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn null_for_an_unregistered_key_registers_nothing_and_drops_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let rec = record("crm", "1", "a@example.com", json!({"ghost": null}), T0);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec]).await.unwrap();
+
+        let ProfileOutcome::Applied { dropped, .. } = &outcomes[0] else {
+            panic!("not applied");
+        };
+        assert!(dropped.is_empty());
+        let definitions = crate::people::list_trait_definitions(&pool, ws)
+            .await
+            .unwrap();
+        assert!(definitions.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn numbers_keep_their_exact_value_through_the_ledger_and_the_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut rec = record("crm", "1", "a@example.com", json!({}), T0);
+        rec.traits = serde_json::from_str(r#"{"big": 9007199254740993, "small": 7}"#).unwrap();
+
+        let outcomes = apply_profile_batch(&pool, ws, &[rec]).await.unwrap();
+
+        let person = find_person(&pool, ws, person_of(&outcomes[0]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(person.traits["big"].to_string(), "9007199254740993");
+        assert_eq!(person.traits["small"].to_string(), "7");
+        let ledger: String = sqlx::query_scalar("SELECT traits::text FROM source_records LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ledger.contains("9007199254740993"), "{ledger}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_key_is_not_materialized_even_when_a_record_is_rewritten(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro", "x": "1"}),
+            T0,
+        );
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        update_trait_definition(
+            &pool,
+            ws,
+            "plan",
+            &TraitDefinitionUpdate {
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let again = record("crm", "1", "a@example.com", json!({"x": "2"}), T0);
+        apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits, json!({"x": "2"}));
+    }
+
+    #[test]
+    fn numbers_are_equal_by_value_but_big_integers_compare_exactly() {
+        assert!(same_value(&json!(5), &json!(5.0)));
+        assert!(!same_value(&json!(5), &json!(5.5)));
+        assert!(!same_value(
+            &json!(9_007_199_254_740_993_i64),
+            &json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(same_value(&json!(u64::MAX), &json!(u64::MAX)));
+        assert!(!same_value(&json!(5), &json!("5")));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_number_in_another_form_from_another_source_is_not_a_change(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "a@example.com", json!({"n": 5}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        let later = datetime!(2026-02-01 00:00 UTC);
+        let second = record("shop", "2", "a@example.com", json!({"n": 5.0}), later);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[second]).await.unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { changed: false, .. }
+        ));
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits["n"].to_string(), "5");
+        assert_eq!(found.trait_sources["n"], "shop");
+        let changes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'trait.change'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(changes, 1);
+    }
+}

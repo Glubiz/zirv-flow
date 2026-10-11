@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -386,6 +386,45 @@ reference. This runs Keycloak 26.8.0 locally on port 8081 and zirv-flow on 8080.
    shows the user. With `auto_create_users = false`, create the user first
    (`zirv-flow admin create-owner --email jane@example.com`, or
    `POST /api/v1/users`); the verified address links it on first sign-in.
+
+## People and fields
+
+The profile store holds the people of a workspace, the identifiers they are known by, and
+the fields (traits) sources fill in on them. Sources are not wired up yet, so for now the
+store is exercised through its Rust API and the field registry is the part you can use.
+
+**The field registry** lists every field a workspace knows: a key (`plan_tier`), a type, a
+precedence rule and a few flags. Admins manage it under **Fields** in the web UI or through
+`GET` and `POST /api/v1/workspaces/{ws}/traits` and `PATCH .../traits/{key}`; any member can
+read it. A key is lowercase letters, digits and underscores, starting with a letter. The type
+is one of `string`, `number`, `boolean`, `timestamp`, `date` or `string_list` and never
+changes: to use another type, archive the field and create a new key. A value that arrives
+for a key nobody registered registers it, with the type inferred from the value (never
+`timestamp` or `date`), `latest` precedence and `inferred` set. A value that does not fit
+the registered type, or that belongs to an archived field, is left out of the record with a
+reason; the rest of the record still applies.
+
+**Identifier kinds.** A person is recognised by `email` (trimmed, lowercased), `phone`
+(international format only: spaces, dashes, dots and brackets are removed, a leading `00`
+becomes `+`, then 8 to 15 digits), `anonymous_id`, or `external:<namespace>` for ids from
+another system. When a record's identifiers match different people, it attaches to the owner
+of the strongest kind (external, then email, phone, anonymous id) and a conflict is recorded
+for later review; people are not merged yet.
+
+**Precedence.** When several sources supply the same field for one person, the field's
+policy picks the value, and the person shows which source it came from:
+
+- `latest`: the most recently observed value wins (the default).
+- `source_priority`: the first source in the field's source order that has a value wins;
+  sources not listed rank after the list, by `latest`.
+- `first`: the earliest observed value wins.
+
+Sending `null` for a field removes that source's value, and the next source's value
+(if any) takes over.
+
+Changing a field's precedence, source order or archived flag also re-evaluates the people
+who already hold a value for it, through a background job. An archived field is no longer
+shown on people; unarchiving brings its values back.
 
 ## Web UI
 

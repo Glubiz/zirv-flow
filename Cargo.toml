@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -49,7 +49,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 tower = { version = "0.5.3", features = ["util"] }
 utoipa = { version = "5.5.0", features = ["uuid"] }
 url = "2.5.8"
-uuid = { version = "1.28.0", features = ["v4", "serde"] }
+uuid = { version = "1.28.0", features = ["v4", "v7", "serde"] }
 zirv-flow-api = { path = "crates/zirv-flow-api" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }

@@ -1481,6 +1481,279 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/traits": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "The workspace's field registry, archived definitions included.",
+        "operationId": "list_traits",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The definitions, ordered by key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TraitBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Registers a trait.",
+        "operationId": "create_trait",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTraitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraitBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid key, type, precedence or other field",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/traits/{key}": {
+      "patch": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Changes the mutable fields of a trait. The type is not one of them.",
+        "operationId": "update_trait",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Trait key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTraitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraitBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or trait, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, no field at all, or an attempt to change the type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1628,6 +1901,49 @@
             "example": [
               "read"
             ]
+          }
+        }
+      },
+      "CreateTraitRequest": {
+        "type": "object",
+        "required": [
+          "key",
+          "type"
+        ],
+        "properties": {
+          "channel_address": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string",
+            "description": "At most 500 characters."
+          },
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits and underscores, starting with a letter; at most 64.",
+            "example": "plan_tier"
+          },
+          "pii": {
+            "type": "boolean"
+          },
+          "precedence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One of `latest` (the default), `source_priority`, `first`."
+          },
+          "source_order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source names in priority order, for `source_priority`."
+          },
+          "type": {
+            "type": "string",
+            "description": "One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`. It cannot\nbe changed later: archive the key and create a new one.",
+            "example": "string"
           }
         }
       },
@@ -2093,6 +2409,112 @@
           "truncated": {
             "type": "boolean",
             "description": "True when the trace has more records than this response carries."
+          }
+        }
+      },
+      "TraitBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "precedence",
+          "source_order",
+          "pii",
+          "channel_address",
+          "inferred",
+          "archived",
+          "description",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "channel_address": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string"
+          },
+          "inferred": {
+            "type": "boolean",
+            "description": "Registered automatically from an incoming record rather than created by a person."
+          },
+          "key": {
+            "type": "string"
+          },
+          "pii": {
+            "type": "boolean"
+          },
+          "precedence": {
+            "type": "string",
+            "description": "One of `latest`, `source_priority`, `first`.",
+            "example": "latest"
+          },
+          "source_order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source names in priority order; used by `source_priority`."
+          },
+          "type": {
+            "type": "string",
+            "description": "One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`.",
+            "example": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UpdateTraitRequest": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "channel_address": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pii": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "precedence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_order": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
