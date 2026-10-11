@@ -401,8 +401,8 @@ Deterministic matching only, with rules per identifier kind:
 | `max_per_person` | Cap per kind, preventing chain merges through shared addresses | email 10, phone 10 |
 | Merge policy | Whether a match may merge two existing people | allowed unless a uniqueness rule would break |
 
-- **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case).
-- **Merge:** the older person survives. One transaction moves identities, contributions, list memberships and consent, recomputes traits and sets `merged_into`. Consent takes the most recent explicit decision per channel/topic (`unsubscribed` wins ties). A `person.merge.rewrite` job then re-points events, memberships, enrollments and messages in batches; meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Unmerge is OQ-3.
+- **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case). A review ends in one of two outcomes: keep the people separate, or move the identifier to one of them.
+- **Merge:** the older person survives. One transaction moves identities, contributions, list memberships and consent, recomputes traits and sets `merged_into`. Consent takes the most recent explicit decision per channel/topic (`unsubscribed` wins ties). A `person.merge.rewrite` job then re-points events, memberships, enrollments and messages in batches; meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
 - **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution.
 - **Precedence:** each trait value is computed from all sources' contributions under the registry policy `latest` (by source observation time, default), `source_priority` (ordered sources) or `first`. Flow actions and the API write as sources (`flow:<id>`, `api`). The profile shows which source supplied each value.
 
@@ -1278,7 +1278,6 @@ they were ruled as their capabilities were added to the plan.
 |----|----------|-----------|
 | OQ-1 | Trait storage: `jsonb` + expression indexes for hot traits, or promoted typed columns? | M2, by benchmark |
 | OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark |
-| OQ-3 | Is unmerge needed, and a review-and-split workflow for shared-identifier conflicts? | M2 |
 | OQ-4 | Custom object types (accounts, orders, subscriptions as entities, not events): v1 or post-1.0? | M3 |
 | OQ-5 | Is the bounded transform set enough, or is a small expression language needed for mapping? | M3 |
 | OQ-6 | Do membership changes from a definition edit trigger flows? (Proposed: no.) | M4 |
@@ -1293,7 +1292,6 @@ they were ruled as their capabilities were added to the plan.
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
 | OQ-19 | Suppression scope: per workspace only, or also organization-wide across brands? | M6 |
-| OQ-20 | Browser and mobile SDKs for identify/track, or HTTP API only in v1? | M2 |
 | OQ-21 | Asset limits: per-file size, per-workspace quota, and when object storage becomes required rather than optional | M7 |
 | OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
@@ -1311,6 +1309,18 @@ they were ruled as their capabilities were added to the plan.
 - **OQ-8:** A per-workspace running cap in the claim query
   (`worker.max_running_per_workspace`, default unlimited); weighted claiming is
   rejected for v1. M8 validates it under load (section 14).
+- **OQ-3:** No unmerge in v1. Per-kind identifier rules (7.3) prevent bad
+  merges. A blocked merge is reviewed as an identity conflict, and the review
+  either keeps the people separate or moves the identifier to one person. Every
+  merge records its provenance (moved ids in a merge record, plus a decision
+  record). Moving an identifier is not a person split: an unmerge would also
+  have to decide who owns contributions, events and memberships added after the
+  merge, so provenance alone does not make it deterministic. Unmerge is an M9
+  theme, promoted on evidence.
+- **OQ-20:** HTTP API only in v1. `identify`, `track` and `batch` are documented
+  with curl and `fetch` examples (write-only keys, limits, `messageId` reuse on
+  retries). Browser and mobile SDKs are an M9 theme, promoted when adoption
+  shows repeated integration friction.
 - **OQ-15:** PostgreSQL 16 is the minimum supported version. CI covers
   PostgreSQL 16 and 18. Reassess the minimum before v1.0 against the versions
   supported at that release date.
