@@ -208,6 +208,10 @@ pub async fn list_erasure_requests(
 /// the ids of the group and the status.
 type LedgerRow = (Uuid, Vec<Vec<u8>>, Vec<String>, Vec<Uuid>, String);
 
+/// A completed ledger row as the replay reads it: the person, the hashes with their kinds and
+/// the ids of the group.
+type ReplayRow = (Uuid, Vec<Vec<u8>>, Vec<String>, Vec<Uuid>);
+
 /// What [`erase_person`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EraseOutcome {
@@ -360,7 +364,7 @@ pub async fn replay_erasures(
     for id in workspaces {
         let ws = WorkspaceId::from_uuid(id);
         let mut tx = begin(pool).await?;
-        let entries: Vec<(Uuid, Vec<Vec<u8>>, Vec<String>, Vec<Uuid>)> = sqlx::query_as(
+        let entries: Vec<ReplayRow> = sqlx::query_as(
             "SELECT person_id, identifier_hashes, identifier_kinds, person_ids FROM erasure_requests \
              WHERE workspace_id = $1 AND status = 'completed' ORDER BY requested_at, id",
         )
