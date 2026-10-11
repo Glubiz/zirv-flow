@@ -7355,4 +7355,75 @@ email,b@example.com,
         assert_eq!(second.body["next_before"], Value::Null);
         assert!(!first.body.to_string().contains("a@example.com"));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rejects_csv_guards_the_header_names_and_columns_against_formulas(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (status, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Formulas",
+            "Email,=HYPERLINK(\"http://x\")\nnot-an-email,1\n",
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body:?}");
+        let id = body["id"].as_str().unwrap().to_owned();
+        call(
+            &router,
+            "PUT",
+            &imports_uri(&ws, &format!("/{id}/mapping")),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::start_import_run(&mut tx, ws.parse().unwrap(), id.parse().unwrap())
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let rejected = [zirv_flow_store::RejectedRow {
+            row_number: 2,
+            reasons: vec![zirv_flow_store::RejectReason {
+                column: "=HYPERLINK(\"http://x\")".into(),
+                reason: "wrong_type",
+            }],
+            raw: vec!["not-an-email".into(), "=1+1".into()],
+        }];
+        zirv_flow_store::commit_import_batch(
+            &pool,
+            &zirv_flow_store::ImportBatch {
+                import_id: id.parse().unwrap(),
+                workspace: ws.parse().unwrap(),
+                expected_done: 0,
+                records: &[],
+                details: &[],
+                rejected: &rejected,
+                trace: &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let csv = call_text(
+            &router,
+            "GET",
+            &imports_uri(&ws, &format!("/{id}/rejects.csv")),
+            None,
+            String::new(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            csv.text,
+            "row_number,column,reason,Email,\"'=HYPERLINK(\"\"http://x\"\")\"\n\
+             2,\"'=HYPERLINK(\"\"http://x\"\")\",wrong_type,not-an-email,'=1+1\n"
+        );
+    }
 }

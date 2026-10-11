@@ -179,7 +179,7 @@ fn download_header(file_header: &[String], with_cells: bool) -> String {
     if with_cells {
         for name in file_header {
             out.push(',');
-            write_field(&mut out, name, ',');
+            download_cell(&mut out, name);
         }
     }
     out.push('\n');
@@ -194,9 +194,9 @@ fn download_lines(rejects: &[ImportReject], with_cells: bool) -> String {
         for (position, error) in reject.errors.iter().enumerate() {
             out.push_str(&reject.row_number.to_string());
             out.push(',');
-            write_field(&mut out, &error.column, ',');
+            download_cell(&mut out, &error.column);
             out.push(',');
-            write_field(&mut out, &error.reason, ',');
+            download_cell(&mut out, &error.reason);
             if with_cells && position == 0 {
                 for cell in reject.raw.iter().flatten() {
                     out.push(',');
@@ -432,6 +432,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_field_of_the_download_is_guarded_against_formulas_not_only_the_cells() {
+        let file = vec!["=HYPERLINK(\"http://x\")".to_owned(), "+B".to_owned()];
+        let rejects = [reject(
+            5,
+            &[("=HYPERLINK(\"http://x\")", "-wrong")],
+            Some(&["a", "b"]),
+        )];
+
+        let header = download_header(&file, true);
+        let lines = download_lines(&rejects, true);
+
+        assert_eq!(
+            header,
+            "row_number,column,reason,\"'=HYPERLINK(\"\"http://x\"\")\",'+B\n"
+        );
+        assert_eq!(lines, "5,\"'=HYPERLINK(\"\"http://x\"\")\",'-wrong,a,b\n");
+    }
     #[test]
     fn the_download_header_names_the_files_columns_for_those_who_get_cells() {
         let file = vec!["Email".to_owned(), "Full, name".to_owned()];
