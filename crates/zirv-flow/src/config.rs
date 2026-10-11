@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 18] = [
+const CONFIG_KEYS: [&str; 19] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -32,6 +32,7 @@ const CONFIG_KEYS: [&str; 18] = [
     "worker.max_running_per_workspace",
     "log.filter",
     "log.format",
+    "log.otlp.endpoint",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,6 +53,17 @@ struct LogConfig {
     /// A `tracing` filter directive, such as `info` or `warn,zirv_flow_jobs=debug`.
     filter: String,
     format: LogFormat,
+    /// Trace export is off while this section is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    otlp: Option<OtlpConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OtlpConfig {
+    /// The collector's OTLP/HTTP base URL, such as `http://collector:4318`.
+    #[serde(deserialize_with = "any_secret_url")]
+    endpoint: SecretUrl,
 }
 
 /// How log lines are written.
@@ -240,6 +252,17 @@ impl<'de> Deserialize<'de> for SecretUrl {
     }
 }
 
+/// A [`SecretUrl`] of any scheme; the caller checks the scheme.
+fn any_secret_url<'de, D>(deserializer: D) -> Result<SecretUrl, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Url::parse(&value)
+        .map(SecretUrl)
+        .map_err(|_| serde::de::Error::custom("not a valid URL"))
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfigError {
     key: String,
@@ -343,6 +366,21 @@ impl Config {
                 "not a valid filter directive",
                 source_for("log.filter", path, &env_sources),
             ));
+        }
+
+        if let Some(otlp) = &config.log.otlp {
+            let url = &otlp.endpoint.0;
+            let valid = matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.query().is_none()
+                && url.fragment().is_none();
+            if !valid {
+                return Err(ConfigError::new(
+                    "log.otlp.endpoint",
+                    "must be an http or https URL without a query or fragment",
+                    source_for("log.otlp.endpoint", path, &env_sources),
+                ));
+            }
         }
 
         config.validate_auth(path, &env_sources)?;
@@ -458,6 +496,11 @@ impl Config {
     /// The `tracing` filter directive for the long-running commands' logs.
     pub(crate) fn log_filter(&self) -> &str {
         &self.log.filter
+    }
+
+    /// The collector's OTLP/HTTP base URL, when trace export is configured.
+    pub(crate) fn log_otlp_endpoint(&self) -> Option<&str> {
+        self.log.otlp.as_ref().map(|otlp| otlp.endpoint.0.as_str())
     }
 
     pub(crate) fn log_format(&self) -> LogFormat {
@@ -1109,5 +1152,74 @@ auto_create_users = true
             "log.filter: not a valid filter directive (from ZIRV_FLOW_LOG__FILTER)"
         );
         assert!(load("ZIRV_FLOW_LOG__FORMAT", "yaml").starts_with("log.format:"));
+    }
+
+    #[test]
+    fn otlp_export_is_off_unless_an_endpoint_is_set_from_a_file_or_the_environment() {
+        let dir = std::env::temp_dir().join(format!("zirv-flow-otlp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("zirv-flow.toml");
+        std::fs::write(
+            &file,
+            "[log.otlp]
+endpoint = \"http://collector:4318\"
+",
+        )
+        .unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_LOG__FORMAT".into(), "text".into()));
+        let from_file = Config::load(Some(&file), env).unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_LOG__OTLP__ENDPOINT".into(),
+            "https://otel.example.com".into(),
+        ));
+        let from_env = Config::load(None, env).unwrap();
+        let off = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            from_file.log_otlp_endpoint(),
+            Some("http://collector:4318/")
+        );
+        assert_eq!(
+            from_env.log_otlp_endpoint(),
+            Some("https://otel.example.com/")
+        );
+        assert_eq!(off.log_otlp_endpoint(), None);
+    }
+
+    #[test]
+    fn an_unusable_otlp_endpoint_is_a_config_error_naming_its_key() {
+        let load = |value: &str| {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_LOG__OTLP__ENDPOINT".into(), value.into()));
+            Config::load(None, env).unwrap_err().to_string()
+        };
+
+        assert_eq!(
+            load("grpc://collector:4317"),
+            "log.otlp.endpoint: must be an http or https URL without a query or fragment (from ZIRV_FLOW_LOG__OTLP__ENDPOINT)"
+        );
+        assert!(load("not a url").starts_with("log.otlp.endpoint:"));
+        assert!(load("http://h:4318?x=1").starts_with("log.otlp.endpoint:"));
+        assert!(load("http://h:4318/otlp#frag").starts_with("log.otlp.endpoint:"));
+    }
+
+    #[test]
+    fn an_endpoint_with_userinfo_is_redacted_in_the_dump_and_debug_but_kept_for_export() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_LOG__OTLP__ENDPOINT".into(),
+            "http://user:secret@host:4318".into(),
+        ));
+        let config = Config::load(None, env).unwrap();
+
+        let dump = toml::to_string_pretty(&config).unwrap();
+
+        assert!(!dump.contains("secret"), "{dump}");
+        assert!(dump.contains("http://user:***@host:4318"), "{dump}");
+        assert!(!format!("{config:?}").contains("secret"));
+        assert!(config.log_otlp_endpoint().unwrap().contains("secret"));
     }
 }

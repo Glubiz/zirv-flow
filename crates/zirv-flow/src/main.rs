@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod healthcheck;
 mod log;
+mod otlp;
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -97,15 +98,18 @@ async fn run(
     }
 
     if let Some(roles) = Roles::of(&command) {
-        log::install(&config);
+        let export = log::install(&config);
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
             Err(message) => {
                 error!(error = %message, "could not open the database");
+                flush_traces(export).await;
                 return 1;
             }
         };
-        return run_roles(roles, &config, pool, shutdown_signal()).await;
+        let code = run_roles(roles, &config, pool, shutdown_signal()).await;
+        flush_traces(export).await;
+        return code;
     }
 
     let _ = writeln!(
@@ -115,6 +119,17 @@ async fn run(
     );
     1
 }
+
+/// Flushes the trace exporter, if there is one, before the process exits.
+async fn flush_traces(export: Option<otlp::Otlp>) {
+    if let Some(export) = export {
+        export.shutdown(TRACE_FLUSH_TIMEOUT).await;
+    }
+}
+
+/// How long the exit waits for queued spans to reach the collector; well inside
+/// [`SHUTDOWN_GRACE`].
+const TRACE_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The long-running roles a command starts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -790,6 +805,47 @@ mod tests {
             output.contains("[log]\nfilter = \"warn\"\nformat = \"text\""),
             "{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn config_check_shows_the_otlp_endpoint_and_a_bad_one_exits_with_code_two() {
+        let check = |endpoint: &str| {
+            let cli = Cli {
+                config: None,
+                command: Some(Command::Config(ConfigCommand::Check)),
+            };
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_LOG__OTLP__ENDPOINT".into(), endpoint.into()));
+            (cli, env)
+        };
+        let (cli, env) = check("http://collector:4318");
+        let mut stdout = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut Vec::new()).await;
+
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(stdout).unwrap().contains(
+            "[log.otlp]
+endpoint = \"http://collector:4318/\""
+        ));
+        let (cli, env) = check("ftp://collector");
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
+
+        assert_eq!(code, 2);
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("log.otlp.endpoint")
+        );
+    }
+
+    #[tokio::test]
+    async fn flushing_without_an_exporter_returns_at_once() {
+        tokio::time::timeout(Duration::from_secs(1), flush_traces(None))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
