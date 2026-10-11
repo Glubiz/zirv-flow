@@ -95,14 +95,7 @@ pub async fn apply_event_retention(
     )
     .await?;
 
-    let longest_days: i32 = sqlx::query_scalar(
-        "SELECT GREATEST($1, COALESCE(MAX(retention_days), 0)) FROM event_schemas",
-    )
-    .bind(default_days)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let longest_cutoff = now - Duration::days(i64::from(longest_days));
+    let longest_cutoff = longest_cutoff(connection, default_days, now, false).await?;
 
     report.dedupe_deleted = delete_in_batches(
         connection,
@@ -115,7 +108,7 @@ pub async fn apply_event_retention(
     .await?;
 
     // Last, so the lock a drop takes is held briefly.
-    report.partitions_dropped = drop_old_partitions(connection, longest_cutoff).await?;
+    report.partitions_dropped = drop_old_partitions(connection, default_days, now).await?;
     Ok(report)
 }
 
@@ -140,25 +133,55 @@ async fn delete_in_batches<'q>(
     }
 }
 
-/// Drops the monthly partitions whose whole range ends at or before `cutoff`. The DEFAULT
-/// partition is never dropped.
+/// The instant before which no event is kept under any rule: `now` less the longest of the
+/// default and every override, read as it is now. With `share`, the overrides are locked
+/// `FOR SHARE` until the transaction ends, so an update cannot raise one meanwhile.
+async fn longest_cutoff(
+    connection: &mut PgConnection,
+    default_days: i32,
+    now: OffsetDateTime,
+    share: bool,
+) -> Result<OffsetDateTime, StoreError> {
+    // An aggregate cannot be locked, so the overrides are read as rows.
+    let statement = if share {
+        "SELECT retention_days FROM event_schemas WHERE retention_days IS NOT NULL FOR SHARE"
+    } else {
+        "SELECT retention_days FROM event_schemas WHERE retention_days IS NOT NULL"
+    };
+    let overrides: Vec<i32> = sqlx::query_scalar(statement)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    let longest = overrides.into_iter().fold(default_days, i32::max);
+    Ok(now - Duration::days(i64::from(longest)))
+}
+
+/// Drops the monthly partitions whose whole range ends at or before the longest retention
+/// cutoff. The DEFAULT partition is never dropped. The overrides are read again and locked
+/// for every drop, so an override raised since the run began keeps its partition.
 async fn drop_old_partitions(
     connection: &mut PgConnection,
-    cutoff: OffsetDateTime,
+    default_days: i32,
+    now: OffsetDateTime,
 ) -> Result<u64, StoreError> {
     let names: Vec<String> = sqlx::query_scalar(
-        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-         WHERE i.inhparent = 'events'::regclass",
+        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid          WHERE i.inhparent = 'events'::regclass",
     )
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    // Overrides only lengthen retention, so the default cutoff finds the candidates cheaply.
+    let default_cutoff = now - Duration::days(i64::from(default_days));
     let mut dropped = 0;
     for name in names {
         let Some(first) = month_of(&name) else {
             continue;
         };
-        if next_month(first).midnight().assume_utc() <= cutoff {
+        let end = next_month(first).midnight().assume_utc();
+        if end > default_cutoff {
+            continue;
+        }
+        if end <= longest_cutoff(connection, default_days, now, true).await? {
             // The name was parsed from digits only.
             sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
                 .execute(&mut *connection)
@@ -473,6 +496,42 @@ mod tests {
         let report = run(&pool).await;
 
         assert_eq!((report.events_deleted, report.partitions_dropped), (0, 0));
+        assert_eq!(remaining(&pool, "keeper").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_override_raised_after_the_cutoff_was_read_keeps_the_partition(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS events_y2025m12 PARTITION OF events              FOR VALUES FROM ('2025-12-01 00:00:00+00') TO ('2026-01-01 00:00:00+00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        store(&pool, ws, "keeper", 170, None).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let stale = longest_cutoff(&mut connection, 100, NOW, false)
+            .await
+            .unwrap();
+        assert!(datetime!(2026-01-01 00:00 UTC) <= stale);
+        update_event_schema(
+            &pool,
+            ws,
+            "keeper",
+            &EventSchemaUpdate {
+                retention_days: Some(Some(900)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let dropped = drop_old_partitions(&mut connection, 100, NOW)
+            .await
+            .unwrap();
+
+        assert_eq!(dropped, 0);
         assert_eq!(remaining(&pool, "keeper").await, 1);
     }
 
