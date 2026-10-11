@@ -255,7 +255,7 @@ describe("a person's lists and consent", () => {
     mount();
 
     const panel = await screen.findByRole("region", { name: "Consent" });
-    expect(await within(panel).findByText("All email")).toBeInTheDocument();
+    expect(await within(panel).findByText("All email", { selector: ".strong" })).toBeInTheDocument();
     expect(within(panel).getByText("Subscribed", { selector: ".pill" })).toBeInTheDocument();
     expect(within(panel).getByText("News")).toBeInTheDocument();
     expect(within(panel).getByText("Unsubscribed", { selector: ".pill" })).toBeInTheDocument();
@@ -274,7 +274,7 @@ describe("a person's lists and consent", () => {
     mount();
 
     const panel = await screen.findByRole("region", { name: "Consent" });
-    await within(panel).findByText("All email");
+    await within(panel).findByText("All email", { selector: ".strong" });
     await user.selectOptions(within(panel).getByLabelText("Choice"), "unsubscribed");
     await user.click(within(panel).getByRole("button", { name: "Record choice" }));
 
