@@ -1330,9 +1330,9 @@ As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs wit
 status, requester, trace); it is the one table the erasure scan skips on purpose.
 `POST /privacy/erasures` records the request and enqueues `privacy.erase` in one transaction;
 the job then runs in one transaction: it deletes the pending `ingest_inbox` rows whose
-identifiers match the person's identity values (locked `FOR UPDATE`, so a drain either applied
-them before or never sees them), upserts `erased` suppressions from the ledger hashes, calls
-`delete_person`, completes the ledger row and audits `privacy.erased` with the request id.
+identifiers, parsed and hashed, match any hash of the group (locked `FOR UPDATE`, so a drain either
+applied them before or never sees them), after folding the group's identities and ids into the ledger row,
+upserts `erased` suppressions from the ledger hashes, calls `delete_person` for each ledger id, completes the ledger row and audits `privacy.erased` with the request id.
 `admin replay-erasures` re-applies completed entries after a restore (suppressions, restored
 people, and pending inbox rows by hash with the master key). Exports are `privacy_exports`:
 `privacy.export` builds the gzip JSON `zirv-flow.person-export/v1`, the download is
