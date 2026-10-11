@@ -336,8 +336,9 @@ export interface paths {
         };
         /**
          * Watches the workspace's events as they are decided: one `item` frame per outcome
-         *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live only, with no
-         *     history. Each frame's `id` is a position that is safe to resume from: send it back as
+         *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no
+         *     history beyond the last few seconds before it connected (so a batch that was still
+         *     committing is not missed). Each frame's `id` is a position that is safe to resume from: send it back as
          *     `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
          *     client already has (their `seq` identifies them). A position beyond the feed (the feed is
          *     unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
