@@ -66,8 +66,9 @@ export function RunStep({ workspaceId, item, canWrite, onChanged }: RunStepProps
       ) : null}
       {item.status === "succeeded" ? (
         <p className="strong" role="status">
-          Imported {plural(item.rows_total, "row", "rows")}
-          {item.finished_at ? ` on ${formatDateTime(item.finished_at)}` : ""}.
+          Finished {plural(item.rows_total, "row", "rows")}
+          {item.finished_at ? ` on ${formatDateTime(item.finished_at)}` : ""}: {num(item.rows_applied)} applied,{" "}
+          {num(item.rows_unchanged)} unchanged, {num(item.rows_rejected)} rejected.
         </p>
       ) : null}
       {item.status === "failed" ? (

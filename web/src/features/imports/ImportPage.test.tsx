@@ -370,11 +370,44 @@ describe("the run step", () => {
       finished_at: "2026-10-01T10:02:00Z",
     };
 
-    expect(await screen.findByText(/Imported 4 rows/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByText(/Finished 4 rows.*: 3 applied, 1 unchanged, 0 rejected./, undefined, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     const facts = screen.getByText("Unchanged").closest("div")!;
     expect(within(facts).getByText("1")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Back to imports" })).toHaveAttribute("href", "/w/ws1/imports");
+  });
+
+  it("does not call a run with rejected rows a plain success: it counts them and links the rejects", async () => {
+    mockApi(
+      server({
+        status: "succeeded",
+        started_at: "2026-10-01T10:00:00Z",
+        finished_at: "2026-10-01T10:02:00Z",
+        rows_total: 1200,
+        rows_done: 1200,
+        rows_applied: 1100,
+        rows_unchanged: 50,
+        rows_rejected: 50,
+      }).routes,
+    );
+    mount();
+
+    expect(await screen.findByText(/Finished 1,200 rows.*: 1,100 applied, 50 unchanged, 50 rejected\./)).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "First rejected rows" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download all rejected rows" })).toHaveAttribute(
+      "href",
+      "/api/v1/workspaces/ws1/imports/imp-1/rejects.csv?phase=run",
+    );
+  });
+
+  it("offers no rejects link when nothing was rejected", async () => {
+    mockApi(
+      server({ status: "succeeded", started_at: "2026-10-01T10:00:00Z", rows_total: 3, rows_done: 3, rows_applied: 3 }).routes,
+    );
+    mount();
+
+    expect(await screen.findByText(/3 applied, 0 unchanged, 0 rejected\./)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Download all rejected rows" })).not.toBeInTheDocument();
   });
 
   it("can be cancelled while it runs and says the applied rows stay", async () => {
