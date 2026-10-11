@@ -54,3 +54,14 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
     }
     Ok(ImportRetention { chunks, rejects })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_files_go_after_a_week_and_the_rejects_after_a_month() {
+        assert_eq!(CHUNK_RETENTION_DAYS, 7);
+        assert_eq!(REJECT_RETENTION_DAYS, 30);
+    }
+}

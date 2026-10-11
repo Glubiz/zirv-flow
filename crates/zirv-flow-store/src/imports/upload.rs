@@ -151,3 +151,72 @@ pub async fn read_import_chunk<'e>(
         .await
         .map_err(StoreError::query)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use zirv_flow_core::{Cause, Slug, WorkspaceName};
+
+    use super::*;
+    use crate::create_workspace;
+
+    #[test]
+    fn a_chunk_is_a_mebibyte() {
+        assert_eq!(CHUNK_BYTES, 1_048_576);
+    }
+
+    async fn chunk_sizes(pool: &PgPool, bytes: &[u8], pieces: usize) -> Vec<usize> {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse(&format!("w{}", Uuid::now_v7().simple())).unwrap();
+        let ws = create_workspace(pool, &name, &slug).await.unwrap().id;
+        let header = vec!["a".to_owned()];
+        let trace = TraceContext::root(Cause::api("t"));
+        let mut upload = ImportUpload::begin(pool, ws).await.unwrap();
+        for piece in bytes.chunks(bytes.len().div_ceil(pieces).max(1)) {
+            upload.write(piece).await.unwrap();
+        }
+        let import = upload
+            .insert(&NewImport {
+                name: "n",
+                source: "csv",
+                stream: "n",
+                file_name: "n.csv",
+                delimiter: ',',
+                header: &header,
+                rows_total: 0,
+                created_by: None,
+                trace: &trace,
+            })
+            .await
+            .unwrap();
+        upload.commit().await.unwrap();
+        let sizes: Vec<i32> = sqlx::query_scalar(
+            "SELECT octet_length(data) FROM import_chunks WHERE import_id = $1 ORDER BY seq",
+        )
+        .bind(import.id)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        sizes.into_iter().map(|size| size as usize).collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn chunks_are_full_whatever_the_size_of_the_pieces_written(pool: PgPool) {
+        let data = vec![7_u8; CHUNK_BYTES * 2 + 5];
+
+        let one_piece = chunk_sizes(&pool, &data, 1).await;
+        let many = chunk_sizes(&pool, &data, 37).await;
+
+        assert_eq!(one_piece, [CHUNK_BYTES, CHUNK_BYTES, 5]);
+        assert_eq!(many, one_piece);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_of_exactly_one_chunk_makes_one_chunk(pool: PgPool) {
+        let sizes = chunk_sizes(&pool, &vec![1_u8; CHUNK_BYTES], 3).await;
+
+        assert_eq!(sizes, [CHUNK_BYTES]);
+    }
+}

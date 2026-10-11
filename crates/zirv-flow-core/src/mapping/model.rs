@@ -78,3 +78,61 @@ pub enum Transform {
         separator: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_target_is_tagged_by_type_and_a_transform_by_op() {
+        let list = Uuid::nil();
+
+        assert_eq!(
+            serde_json::to_value(Target::List { list_id: list }).unwrap(),
+            json!({"type": "list", "list_id": list.to_string()})
+        );
+        assert_eq!(
+            serde_json::to_value(Transform::ValueMap {
+                map: BTreeMap::from([("a".to_owned(), "b".to_owned())])
+            })
+            .unwrap(),
+            json!({"op": "value_map", "map": {"a": "b"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<Transform>(json!({"op": "cast", "to": "string_list"}))
+                .unwrap(),
+            Transform::Cast {
+                to: TraitType::StringList
+            }
+        );
+    }
+
+    #[test]
+    fn a_rule_without_transforms_and_a_mapping_without_a_key_column_are_valid() {
+        let mapping: Mapping = serde_json::from_value(json!({
+            "columns": [{"column": "a", "target": {"type": "ignore"}}]
+        }))
+        .unwrap();
+
+        assert_eq!(mapping.key_column, None);
+        assert!(mapping.columns[0].transforms.is_empty());
+    }
+
+    #[test]
+    fn unknown_fields_unknown_types_and_unknown_operations_are_refused() {
+        for bad in [
+            json!({"columns": [], "extra": 1}),
+            json!({"columns": [{"column": "a", "target": {"type": "ignore"}, "extra": 1}]}),
+            json!({"columns": [{"column": "a", "target": {"type": "eval"}}]}),
+            json!({"columns": [{"column": "a", "target": {"type": "ignore"},
+                                "transforms": [{"op": "cast", "to": "integer"}]}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<Mapping>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}
