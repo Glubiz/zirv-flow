@@ -11,4 +11,5 @@ export type { Tone } from "./Pill";
 export { ResourceView } from "./ResourceView";
 export { SkipLink } from "./SkipLink";
 export { EmptyState, ErrorState, InlineError, LoadingState } from "./States";
+export { kindLabel } from "./identityKinds";
 export { formatDate, formatDateTime, formatDuration, shortId } from "./format";

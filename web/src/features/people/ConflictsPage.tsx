@@ -7,6 +7,7 @@ import {
   EmptyState,
   formatDateTime,
   InlineError,
+  kindLabel,
   PageHeader,
   Panel,
   Pill,
@@ -15,7 +16,7 @@ import {
 } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { ConflictDialog } from "./ConflictDialog";
-import { kindLabel, reasonLabel, resolutionLabel } from "./identityKinds";
+import { reasonLabel, resolutionLabel } from "./identityKinds";
 import { useConflicts, type Conflict, type ConflictStatus } from "./useConflicts";
 
 export function ConflictsPage() {

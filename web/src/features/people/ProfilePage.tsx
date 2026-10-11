@@ -1,12 +1,11 @@
 import { Link, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type components } from "../../api";
-import { EmptyState, ErrorState, formatDateTime, LoadingState, PageHeader, Panel, shortId } from "../../ui";
+import { EmptyState, ErrorState, formatDateTime, kindLabel, LoadingState, PageHeader, Panel, shortId } from "../../ui";
 import { ConsentPanel } from "../consent";
 import { PersonListsPanel } from "../lists";
 import { useWorkspaceAccess } from "../members";
 import { HiddenValue } from "./HiddenValue";
-import { kindLabel } from "./identityKinds";
 import { Timeline } from "./Timeline";
 import { typeLabel } from "./TraitDialog";
 

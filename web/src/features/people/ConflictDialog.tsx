@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
-import { Button, Dialog, formatDateTime, InlineError, Pill, ResourceView, shortId } from "../../ui";
-import { kindLabel, reasonExplanation, resolutionLabel } from "./identityKinds";
+import { Button, Dialog, formatDateTime, InlineError, kindLabel, Pill, ResourceView, shortId } from "../../ui";
+import { reasonExplanation, resolutionLabel } from "./identityKinds";
 import type { Conflict } from "./useConflicts";
 
 type Person = components["schemas"]["PersonIdentitiesBody"];

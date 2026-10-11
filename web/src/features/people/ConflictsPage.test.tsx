@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { ConflictsPage } from "./ConflictsPage";
-import { kindLabel, reasonExplanation, reasonLabel, resolutionLabel } from "./identityKinds";
+import { kindLabel } from "../../ui";
+import { reasonExplanation, reasonLabel, resolutionLabel } from "./identityKinds";
 
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "bbbbbbbb-0000-4000-8000-000000000002";

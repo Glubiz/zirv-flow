@@ -8,6 +8,7 @@ import {
   ErrorState,
   formatDateTime,
   InlineError,
+  kindLabel,
   PageHeader,
   Panel,
   ResourceView,
@@ -16,7 +17,6 @@ import {
   TextField,
 } from "../../ui";
 import { HiddenValue } from "./HiddenValue";
-import { kindLabel } from "./identityKinds";
 import { typeLabel } from "./TraitDialog";
 import { operatorsFor, parseSearchValue, valueHint } from "./traitSearch";
 import { useSearch, type PersonHit, type SearchQuery } from "./useSearch";
