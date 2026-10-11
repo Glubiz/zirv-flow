@@ -89,9 +89,10 @@ impl Worker {
         let slots = u32::try_from(self.config.concurrency).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared {
             kinds: self.registry.kinds(),
-            pool: sized_like(&self.pool, slots.saturating_add(1), ACQUIRE_TIMEOUT),
-            // A failed beat is retried on the next one, well before the lease runs out.
-            heartbeat_pool: sized_like(&self.pool, slots, self.config.lease / 10),
+            pool: sized_like(&self.pool, slots.saturating_add(1), 0, ACQUIRE_TIMEOUT),
+            // Warm connections keep connecting off the heartbeat's path; a beat may wait
+            // one period, and a failed one is retried on the next, before the lease ends.
+            heartbeat_pool: sized_like(&self.pool, slots, slots, self.config.lease / 3),
             listener_pool: self.pool,
             registry: self.registry,
             config: self.config,
@@ -694,7 +695,7 @@ mod tests {
         job.max_attempts = 2;
         enqueue(&pool, &job).await.unwrap();
         let mut config = test_config(1);
-        config.lease = Duration::from_millis(300);
+        config.lease = Duration::from_secs(3);
         let (stop, handle) = start(&pool, config);
         // Wait for the handler to have written and be hanging, then take the lease away.
         wait_until(&pool, "the handler to be hanging", HANGING).await;
