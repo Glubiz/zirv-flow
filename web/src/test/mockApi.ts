@@ -21,6 +21,10 @@ export function problem(status: number, title: string, detail: string, traceId?:
   );
 }
 
+function parseBody(text: string, contentType: string | null): unknown {
+  return contentType?.includes("json") ? (JSON.parse(text) as unknown) : text;
+}
+
 export function mockApi(routes: Record<string, Handler>): Call[] {
   const calls: Call[] = [];
   vi.stubGlobal("fetch", async (input: Request | string | URL) => {
@@ -32,7 +36,7 @@ export function mockApi(routes: Record<string, Handler>): Call[] {
       path,
       search: new URL(request.url).search,
       headers: request.headers,
-      body: text === "" ? null : (JSON.parse(text) as unknown),
+      body: text === "" ? null : parseBody(text, request.headers.get("content-type")),
     });
     const handler = routes[`${request.method} ${path}`];
     if (!handler) {
