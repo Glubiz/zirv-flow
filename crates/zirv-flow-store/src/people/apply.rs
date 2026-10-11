@@ -12,6 +12,7 @@ use sqlx::PgConnection;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
+use zirv_flow_core::contacts;
 use zirv_flow_core::people::{
     Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
@@ -667,7 +668,7 @@ async fn upsert_ledger_row(
             }
         }
     }
-    let mut union: Vec<(String, String)> = live
+    let previous: Vec<(String, String)> = live
         .and_then(|row| row.identifiers.as_array())
         .into_iter()
         .flatten()
@@ -678,14 +679,31 @@ async fn upsert_ledger_row(
             ))
         })
         .collect();
-    union.extend(
+    // A source's record only ever adds identifiers, except a native contact's, which lists
+    // exactly the identifiers its fields name now.
+    let replaces = record.source == contacts::SOURCE && record.stream == contacts::STREAM;
+    let mut current: Vec<(String, String)> = if replaces {
+        Vec::new()
+    } else {
+        previous.clone()
+    };
+    current.extend(
         identifiers
             .iter()
             .map(|i| (i.kind().as_text(), i.value().to_owned())),
     );
-    union.sort();
-    union.dedup();
-    let stored: Vec<Value> = union
+    current.sort();
+    current.dedup();
+    let released: Vec<Value> = if replaces {
+        previous
+            .iter()
+            .filter(|pair| !current.contains(pair))
+            .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let stored: Vec<Value> = current
         .into_iter()
         .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
         .collect();
@@ -704,9 +722,21 @@ async fn upsert_ledger_row(
             .bind(Value::Array(stored))
             .bind(Value::Object(traits))
             .bind(hash)
-            .execute(connection)
+            .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
+            // An identity this record no longer lists goes, unless another live record of
+            // the person lists it.
+            if !released.is_empty() {
+                remove_unshared_identities(
+                    connection,
+                    workspace,
+                    person_id,
+                    row.id,
+                    &Value::Array(released),
+                )
+                .await?;
+            }
             Ok((row.id, keys))
         }
         None => {

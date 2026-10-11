@@ -1008,4 +1008,112 @@ mod tests {
 
         assert!(matches!(again, Err(WriteError::Exists)));
     }
+
+    async fn person_of_email(pool: &PgPool, ws: WorkspaceId, email: &str) -> Option<Uuid> {
+        find_person_by_identifier(pool, ws, &Identifier::parse("email", email).unwrap())
+            .await
+            .unwrap()
+            .map(|found| found.id)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_identifier_field_releases_the_old_identity_by_put_and_by_bulk(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let created = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "old@example.test"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = created.contact.unwrap().person_id;
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"email": "new@example.test"}))),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(person_of_email(&pool, ws, "old@example.test").await, None);
+        assert_eq!(
+            person_of_email(&pool, ws, "new@example.test").await,
+            Some(person)
+        );
+
+        append_bulk(&pool, ws, "c-1", json!({"email": "third@example.test"})).await;
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        drain_batch(&pool, ws, &key, 100).await.unwrap();
+
+        assert_eq!(person_of_email(&pool, ws, "new@example.test").await, None);
+        assert_eq!(
+            person_of_email(&pool, ws, "third@example.test").await,
+            Some(person)
+        );
+        assert_eq!(
+            find_person_by_identifier(&pool, ws, &Identifier::parse(KEY_KIND, "c-1").unwrap())
+                .await
+                .unwrap()
+                .map(|found| found.id),
+            Some(person)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_identity_another_source_lists_stays_when_the_contact_changes_its_field(
+        pool: PgPool,
+    ) {
+        let ws = defined(&pool, "one").await;
+        let created = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "shared@example.test"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = created.contact.unwrap().person_id;
+        apply_profile_batch(
+            &pool,
+            ws,
+            &[ProfileRecord {
+                source: "crm".into(),
+                stream: "people".into(),
+                record_key: "9".into(),
+                identifiers: vec![("email".into(), "shared@example.test".into())],
+                traits: Map::new(),
+                observed_at: time::macros::datetime!(2026-01-01 00:00 UTC),
+                trace: trace(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"email": "other@example.test"}))),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            person_of_email(&pool, ws, "shared@example.test").await,
+            Some(person)
+        );
+        assert_eq!(
+            person_of_email(&pool, ws, "other@example.test").await,
+            Some(person)
+        );
+    }
 }

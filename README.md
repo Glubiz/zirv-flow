@@ -727,8 +727,9 @@ A missing required field, a wrong type or a field the definition does not list i
 whose `errors` name the field and a reason code (`missing_required`, `wrong_type`,
 `unplanned_property`, `invalid_email`, ...) and never echo a value. Removing a required
 field with a patch is refused the same way. The key is also kept as the contact's first
-identifier; changing the value of an identifier field adds the new identity and keeps the
-old one on the person, as every source record does.
+identifier; changing the value of an identifier field (by `PUT`, `PATCH` or a bulk upsert)
+replaces the identity: the old one leaves the person unless another source's record of the
+person also lists it, so it is no longer found by search and can no longer merge people.
 
 **Search.** `GET .../contacts/search?q=` matches a contact key by prefix and an email address
 or phone number exactly, after normalisation. The value is then in the URL and the access
