@@ -239,6 +239,9 @@ pub(crate) async fn update_trait(
     }
 
     let mut tx = zirv_flow_store::begin(pool).await?;
+    let before = zirv_flow_store::find_trait_definition(&mut *tx, workspace, key)
+        .await?
+        .ok_or(AdminError::NotFound("trait"))?;
     let definition = zirv_flow_store::update_trait_definition(&mut *tx, workspace, key, &update)
         .await?
         .ok_or(AdminError::NotFound("trait"))?;
@@ -253,9 +256,10 @@ pub(crate) async fn update_trait(
     .await?;
     // Materialized values follow the registry: a rule change reaches existing people through
     // a job that commits with this change.
-    if fields
-        .iter()
-        .any(|field| matches!(*field, "precedence" | "source_order" | "archived"))
+    // Only a change of what is stored needs the materialized values recomputed.
+    if before.precedence != definition.precedence
+        || before.source_order != definition.source_order
+        || before.archived != definition.archived
     {
         let trace = crate::trace::current().unwrap_or_else(|| {
             TraceContext::root(Cause::api(crate::request_id::current().unwrap_or_default()))

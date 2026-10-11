@@ -2301,4 +2301,38 @@ mod tests {
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(queued(pool).await, 2);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn re_sending_the_current_rule_enqueues_no_recompute(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "age", "type": "number", "source_order": ["crm"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let uri = format!("{}/age", traits_uri(&ws));
+
+        let reply = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"precedence": "latest", "source_order": ["crm"], "archived": false})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'traits.recompute'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0);
+    }
 }

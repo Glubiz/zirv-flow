@@ -586,7 +586,10 @@ pub(super) async fn recompute(
         );
         match resolve(precedence, &order, &contributions) {
             Some(winner) => {
-                if traits.get(key) != Some(&winner.value) {
+                if !traits
+                    .get(key)
+                    .is_some_and(|current| same_value(current, &winner.value))
+                {
                     traits.insert(key.clone(), winner.value.clone());
                     values_changed = true;
                 }
@@ -616,6 +619,24 @@ pub(super) async fn recompute(
         .map_err(StoreError::query)?;
     }
     Ok(values_changed)
+}
+
+/// Whether two stored values are the same for change detection: numbers compare by numeric
+/// value (5 and 5.0 are equal; two integers compare exactly as integers), everything else
+/// exactly. Storage always keeps the number as sent.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if let (Some(i), Some(j)) = (x.as_i64(), y.as_i64()) {
+                i == j
+            } else if let (Some(i), Some(j)) = (x.as_u64(), y.as_u64()) {
+                i == j
+            } else {
+                x.as_f64() == y.as_f64()
+            }
+        }
+        _ => a == b,
+    }
 }
 
 pub(super) async fn mark_dirty(
@@ -1456,5 +1477,45 @@ mod tests {
 
         let found = find_person(&pool, ws, person).await.unwrap().unwrap();
         assert_eq!(found.traits, json!({"x": "2"}));
+    }
+
+    #[test]
+    fn numbers_are_equal_by_value_but_big_integers_compare_exactly() {
+        assert!(same_value(&json!(5), &json!(5.0)));
+        assert!(!same_value(&json!(5), &json!(5.5)));
+        assert!(!same_value(
+            &json!(9_007_199_254_740_993_i64),
+            &json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(same_value(&json!(u64::MAX), &json!(u64::MAX)));
+        assert!(!same_value(&json!(5), &json!("5")));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_number_in_another_form_from_another_source_is_not_a_change(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record("crm", "1", "a@example.com", json!({"n": 5}), T0);
+        let outcomes = apply_profile_batch(&pool, ws, &[first]).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        let later = datetime!(2026-02-01 00:00 UTC);
+        let second = record("shop", "2", "a@example.com", json!({"n": 5.0}), later);
+
+        let outcomes = apply_profile_batch(&pool, ws, &[second]).await.unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { changed: false, .. }
+        ));
+        let found = find_person(&pool, ws, person).await.unwrap().unwrap();
+        assert_eq!(found.traits["n"].to_string(), "5");
+        assert_eq!(found.trait_sources["n"], "shop");
+        let changes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'trait.change'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(changes, 1);
     }
 }
