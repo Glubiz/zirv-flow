@@ -280,15 +280,16 @@ systems, and feed delivery and engagement back as events.
 - **Email.** SMTP destination; email-provider HTTP API destinations (built in or manifest); sender identities (from name, from and reply-to addresses) bound to verified sending domains.
 - **Sender authentication.** Sending domains with verification: Zirv Flow generates the DKIM key and the SPF, DKIM and DMARC records to publish, checks them in DNS and shows their status; SMTP mail from a verified domain is DKIM-signed (key stored under the M3 secrets encryption); provider destinations show the provider's domain status where its API exposes it. Sends from an unverified domain are blocked. A guide covers DNS setup at common hosts.
 - **Templates (code mode).** The pure `zirv-flow-templates` renderer with MiniJinja HTML and text parts: sandbox, versions, preview with a real or sample person through the send renderer, test sends, required unsubscribe link for the marketing category. M7 builds the block builder on it.
-- **Send pipeline.** Consent under the topic policy, suppression, frequency caps, quiet hours, render, rate limit, deliver; a `messages` log with skip reasons.
+- **Consent policies.** Workspace consent dimensions beyond the channel (topic, product vertical, purpose; one value per dimension or "all"), and versioned effective-consent rules built in the UI on the M4 condition AST over recorded consent, traits, events, lists and message history (for example cooldowns and account state). They are evaluated at the send gate, with the deciding rule recorded (architecture 10.1, OQ-32).
+- **Send pipeline.** Effective consent under the workspace consent policy, suppression, frequency caps, quiet hours, render, rate limit, deliver; a `messages` log with skip reasons.
 - **Tracking.** Open pixel, click redirect with recorded-link allowlist, unsubscribe page, RFC 8058 one-click, topic preference center.
 - **Feedback.** Provider webhooks become `email.delivered`/`bounced`/`complained` events; hard bounces and complaints suppress automatically.
 - **Causality.** Send, every gate skip, destination attempt and delivery feedback append decision records under the originating trace, with message and destination ids but no address values.
 - **Event forwarding.** Destination filters and typed mappings; at-least-once delivery with stable idempotency keys, visible retries and dead letters, manual re-drive, per-destination lag metrics, and erase calls where declared. Forwarding replay never triggers flows.
 - **Flow nodes.** `action.send`, `action.sync`; the webhook action moves onto the destination runtime.
 - **Deletion and erasure.** Messages, test-send log entries, forwarding payloads and person-scoped decision records erased; delivery and forwarding destination `erase` called where declared; suppression hashes retained.
-- **UI.** Destination and forwarding setup, code template editor with preview, topics and consent policy, frequency caps and quiet hours, per-person message log ("why was this not sent"), trace links, forwarding lag/dead letters and per-node delivery stats.
-- **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope).
+- **UI.** Destination and forwarding setup, code template editor with preview, consent dimensions and the consent policy builder, frequency caps and quiet hours, per-person message log ("why was this not sent"), trace links, forwarding lag/dead letters and per-node delivery stats.
+- **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope), OQ-32 (consent dimensions and policies).
 
 **Out of scope.** SMS, push, ad audiences, running an MTA, deliverability tools
 (seed tests, warm-up), a transactional API unless OQ-11 decides otherwise, the
@@ -298,6 +299,7 @@ block builder (M7).
 - [ ] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
 - [ ] A sending domain stays unverified until its SPF, DKIM and DMARC records resolve (fixture resolver); SMTP mail from a verified domain carries a DKIM signature that verifies against the published key, and a send from an unverified domain is refused.
 - [ ] A hard-bounce webhook adds a suppression; later sends are skipped with `suppressed`.
+- [ ] A consent policy built in the UI decides sends. It combines recorded consent with a cooldown since the last message and an account-state trait, and an unsubscribe scoped to one product vertical blocks only that vertical. Each skipped send names the deciding rule.
 - [ ] Concurrent sends from two flows to one person never exceed the frequency cap (concurrency test).
 - [ ] Quiet hours defer a send to the next allowed local time, including across a DST change (injected clock test).
 - [ ] N workers together stay within the configured destination rate, within a stated tolerance.
