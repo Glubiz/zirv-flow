@@ -23,8 +23,8 @@ pub use conflicts::{
 };
 pub use merge::{REWRITE_BATCH, REWRITE_JOB_KIND, current_person, rewrite_merged_person};
 pub use profiles::{
-    IdentityConflict, Person, StoredIdentity, find_person, find_person_by_identifier,
-    list_identities, list_identity_conflicts,
+    IdentityConflict, Person, StoredIdentity, find_people_by_identifiers, find_person,
+    find_person_by_identifier, list_identities, list_identity_conflicts,
 };
 pub use recompute::{RECOMPUTE_BATCH, recompute_trait_batch};
 pub use registry::{

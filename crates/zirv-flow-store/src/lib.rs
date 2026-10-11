@@ -7,6 +7,7 @@ mod decisions;
 mod events;
 mod identities;
 mod jobs;
+mod lists;
 mod migrations;
 mod people;
 mod pool;
@@ -26,7 +27,8 @@ pub use api_keys::{
 };
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
 pub use decisions::{
-    Decision, NewDecision, append_decision, ensure_decision_partitions, list_trace,
+    Decision, NewDecision, append_decision, append_decisions, ensure_decision_partitions,
+    list_trace,
 };
 pub use events::{
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
@@ -48,15 +50,21 @@ pub use jobs::{
     list_dead_jobs, listen_for_jobs, lock_lease, queue_counts, queue_depths, reap_expired,
     retry_dead_job, try_lead,
 };
+pub use lists::{
+    List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,
+    MembershipError, MembershipOutcome, PersonList, add_members, create_list, delete_list,
+    find_list, list_lists, lists_for, members, membership_history, remove_members, update_list,
+};
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
     ConflictResolution, DroppedTrait, IdentityConflict, NewTraitDefinition, Person, ProfileOutcome,
     ProfileRecord, RECOMPUTE_BATCH, REWRITE_BATCH, REWRITE_JOB_KIND, ResolveError, StoredIdentity,
     TraitDefinition, TraitDefinitionUpdate, apply_profile_batch, create_trait_definition,
-    current_person, find_conflict, find_person, find_person_by_identifier, find_trait_definition,
-    find_trait_definition_for_update, list_conflicts, list_identities, list_identity_conflicts,
-    list_trait_definitions, recompute_trait_batch, remove_contribution, resolve_conflict,
-    rewrite_merged_person, update_trait_definition,
+    current_person, find_conflict, find_people_by_identifiers, find_person,
+    find_person_by_identifier, find_trait_definition, find_trait_definition_for_update,
+    list_conflicts, list_identities, list_identity_conflicts, list_trait_definitions,
+    recompute_trait_batch, remove_contribution, resolve_conflict, rewrite_merged_person,
+    update_trait_definition,
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use sessions::{

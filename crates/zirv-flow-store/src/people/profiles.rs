@@ -128,6 +128,38 @@ pub async fn find_person_by_identifier<'e>(
     .map_err(StoreError::query)
 }
 
+/// The people that own `identifiers`, aligned with the input: `None` where no person does.
+/// Never creates a person.
+pub async fn find_people_by_identifiers<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    identifiers: &[Identifier],
+) -> Result<Vec<Option<Uuid>>, StoreError> {
+    let kinds: Vec<String> = identifiers
+        .iter()
+        .map(|identifier| identifier.kind().as_text())
+        .collect();
+    let values: Vec<&str> = identifiers.iter().map(Identifier::value).collect();
+    let owners: Vec<(String, String, Uuid)> = sqlx::query_as(
+        "SELECT i.kind, i.value, i.person_id FROM identities i          JOIN unnest($2::text[], $3::text[]) AS wanted(kind, value)            ON i.kind = wanted.kind AND i.value = wanted.value          WHERE i.workspace_id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&kinds)
+    .bind(&values)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    let by_identity: std::collections::HashMap<(&str, &str), Uuid> = owners
+        .iter()
+        .map(|(kind, value, person)| ((kind.as_str(), value.as_str()), *person))
+        .collect();
+    Ok(kinds
+        .iter()
+        .zip(&values)
+        .map(|(kind, value)| by_identity.get(&(kind.as_str(), *value)).copied())
+        .collect())
+}
+
 /// The identities of a person (of its survivor when it was merged), ordered by kind then
 /// value.
 pub async fn list_identities<'e>(
@@ -222,5 +254,58 @@ mod tests {
 
         assert_eq!(identity.clone(), identity);
         assert!(!format!("{identity:?}").contains("a@b.c"));
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn identifiers_resolve_to_their_owners_in_input_order_and_never_cross_workspaces(
+        pool: PgPool,
+    ) {
+        use serde_json::json;
+        use time::macros::datetime;
+        use zirv_flow_core::{Cause, TraceContext};
+
+        use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_batch};
+
+        let one = {
+            let name = WorkspaceName::parse("one").unwrap();
+            create_workspace(&pool, &name, &Slug::parse("one").unwrap())
+                .await
+                .unwrap()
+                .id
+        };
+        let two = {
+            let name = WorkspaceName::parse("two").unwrap();
+            create_workspace(&pool, &name, &Slug::parse("two").unwrap())
+                .await
+                .unwrap()
+                .id
+        };
+        let record = ProfileRecord {
+            source: "crm".into(),
+            stream: "s".into(),
+            record_key: "1".into(),
+            identifiers: vec![("email".into(), "ada@example.com".into())],
+            traits: json!({}).as_object().cloned().unwrap(),
+            observed_at: datetime!(2026-01-01 00:00 UTC),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        let outcomes = apply_profile_batch(&pool, one, &[record]).await.unwrap();
+        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        let known = Identifier::parse("email", "ada@example.com").unwrap();
+        let unknown = Identifier::parse("email", "nobody@example.com").unwrap();
+
+        let found = find_people_by_identifiers(&pool, one, &[unknown.clone(), known.clone()])
+            .await
+            .unwrap();
+        let elsewhere = find_people_by_identifiers(&pool, two, &[known])
+            .await
+            .unwrap();
+        let none = find_people_by_identifiers(&pool, one, &[]).await.unwrap();
+
+        assert_eq!(found, [None, Some(person_id)]);
+        assert_eq!(elsewhere, [None]);
+        assert!(none.is_empty());
     }
 }
