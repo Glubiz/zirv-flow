@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use figment::Figment;
 use figment::error::Kind;
@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 19] = [
+const CONFIG_KEYS: [&str; 21] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -24,6 +24,8 @@ const CONFIG_KEYS: [&str; 19] = [
     "auth.oidc.client_secret",
     "auth.oidc.scopes",
     "auth.oidc.auto_create_users",
+    "secrets.master_key_file",
+    "secrets.master_key",
     "database.url",
     "database.max_connections",
     "database.migrate_on_start",
@@ -42,6 +44,13 @@ pub(crate) struct Config {
     #[serde(default)]
     ops: OpsConfig,
     auth: AuthConfig,
+    /// Shown by `config check` only while a master key is configured.
+    #[serde(
+        default,
+        rename = "secrets",
+        skip_serializing_if = "MasterKeyConfig::is_unset"
+    )]
+    master_key: MasterKeyConfig,
     database: DatabaseConfig,
     worker: WorkerConfig,
     log: LogConfig,
@@ -156,6 +165,43 @@ impl<'de> Deserialize<'de> for SecretValue {
         }
         Ok(Self(value))
     }
+}
+
+/// Where the operator master key comes from. At most one of the two is set.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MasterKeyConfig {
+    /// A file holding the base64 key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    master_key_file: Option<PathBuf>,
+    /// The base64 key itself.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_redacted"
+    )]
+    master_key: Option<SecretValue>,
+}
+
+impl MasterKeyConfig {
+    fn is_unset(&self) -> bool {
+        self.master_key_file.is_none() && self.master_key.is_none()
+    }
+}
+
+fn serialize_redacted<S>(_: &Option<SecretValue>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str("<redacted>")
+}
+
+/// Where the master key is to be read from.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum MasterKeySource<'a> {
+    File(&'a Path),
+    Inline(&'a str),
+    Unset,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -383,6 +429,15 @@ impl Config {
             }
         }
 
+        if config.master_key.master_key_file.is_some() && config.master_key.master_key.is_some() {
+            let reason = "is set together with secrets.master_key_file; set only one";
+            return Err(ConfigError::new(
+                "secrets.master_key",
+                reason,
+                source_for("secrets.master_key", path, &env_sources),
+            ));
+        }
+
         config.validate_auth(path, &env_sources)?;
         Ok(config)
     }
@@ -479,6 +534,18 @@ impl Config {
             redirect_url: zirv_flow_api::oidc_redirect_url(public_url),
         };
         Some((settings, oidc.auto_create_users))
+    }
+
+    /// Where the operator master key is read from.
+    pub(crate) fn master_key_source(&self) -> MasterKeySource<'_> {
+        match (
+            &self.master_key.master_key_file,
+            &self.master_key.master_key,
+        ) {
+            (Some(path), _) => MasterKeySource::File(path),
+            (None, Some(key)) => MasterKeySource::Inline(&key.0),
+            (None, None) => MasterKeySource::Unset,
+        }
     }
 
     pub(crate) fn database_url(&self) -> &str {
@@ -703,6 +770,78 @@ mod tests {
 
         assert!(error.contains("server.port"));
         assert!(error.contains(&file.0.display().to_string()));
+    }
+
+    #[test]
+    fn the_master_key_is_unset_by_default_and_read_from_the_environment_or_a_file() {
+        let none = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert_eq!(none.master_key_source(), MasterKeySource::Unset);
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SECRETS__MASTER_KEY".into(), "abc".into()));
+        let inline = Config::load(None, env).unwrap();
+        assert_eq!(inline.master_key_source(), MasterKeySource::Inline("abc"));
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__MASTER_KEY_FILE".into(),
+            "/k/master.key".into(),
+        ));
+        let file = Config::load(None, env).unwrap();
+        assert_eq!(
+            file.master_key_source(),
+            MasterKeySource::File(Path::new("/k/master.key"))
+        );
+    }
+
+    #[test]
+    fn setting_both_master_key_keys_is_an_error_naming_the_key() {
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[secrets]
+master_key_file = \"/k\"
+",
+        );
+        let env = vec![("ZIRV_FLOW_SECRETS__MASTER_KEY".into(), "abc".into())];
+
+        let error = Config::load(Some(&file.0), env).unwrap_err().to_string();
+
+        assert!(
+            error.starts_with("secrets.master_key: is set together with secrets.master_key_file"),
+            "{error}"
+        );
+        assert!(error.contains("ZIRV_FLOW_SECRETS__MASTER_KEY"), "{error}");
+        assert!(!error.contains("abc"));
+    }
+
+    #[test]
+    fn the_master_key_is_redacted_in_debug_and_serialised_output() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__MASTER_KEY".into(),
+            "super-secret-key".into(),
+        ));
+        let config = Config::load(None, env).unwrap();
+
+        let output = format!(
+            "{config:?}
+{}",
+            toml::to_string(&config).unwrap()
+        );
+
+        assert!(!output.contains("super-secret-key"), "{output}");
+        assert!(output.contains("master_key = \"<redacted>\""), "{output}");
+    }
+
+    #[test]
+    fn an_unknown_secrets_key_is_refused() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SECRETS__PEPPER".into(), "x".into()));
+
+        let error = Config::load(None, env).unwrap_err().to_string();
+
+        assert!(error.starts_with("secrets.pepper: unknown key"), "{error}");
     }
 
     #[test]

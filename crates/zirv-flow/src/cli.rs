@@ -65,6 +65,16 @@ pub(crate) enum AdminCommand {
         #[arg(long)]
         email: String,
     },
+    /// Write a new random master key to a file, readable only by the owner. Needs no
+    /// configuration or database.
+    GenerateMasterKey {
+        /// The file to create, with its parent directories.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// When the file exists and holds a valid key, keep it and succeed.
+        #[arg(long)]
+        if_missing: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -119,6 +129,34 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["zirv-flow", "admin", "create-owner"]).is_err());
+    }
+
+    #[test]
+    fn generate_master_key_takes_an_output_path_and_an_optional_if_missing_flag() {
+        let parse = |args: &[&str]| {
+            let mut full = vec!["zirv-flow", "admin", "generate-master-key"];
+            full.extend(args);
+            Cli::try_parse_from(full)
+        };
+
+        let plain = parse(&["--out", "k"]).unwrap();
+        let keep = parse(&["--out", "k", "--if-missing"]).unwrap();
+
+        assert!(matches!(
+            plain.command,
+            Some(Command::Admin(AdminCommand::GenerateMasterKey {
+                if_missing: false,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            keep.command,
+            Some(Command::Admin(AdminCommand::GenerateMasterKey {
+                if_missing: true,
+                ..
+            }))
+        ));
+        assert!(parse(&[]).is_err());
     }
 
     #[test]

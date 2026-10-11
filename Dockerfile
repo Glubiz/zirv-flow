@@ -85,9 +85,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --target "$triple" -p zirv-flow; \
     install -D "target/$triple/release/zirv-flow" /out/zirv-flow
 
+# An empty directory owned by the non-root user, so a named volume mounted
+# here is writable by it (the compose quickstart keeps the master key here).
+RUN install -d /out/secrets
+
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=builder /out/zirv-flow /usr/local/bin/zirv-flow
+COPY --from=builder --chown=65532:65532 /out/secrets /var/lib/zirv-flow/secrets
 
 ENV ZIRV_FLOW_SERVER__BIND=0.0.0.0:8080
 EXPOSE 8080
