@@ -117,7 +117,7 @@ export function ReplayDialog({ workspaceId, target, onClose, onQueued }: ReplayD
         {preview.status === "error" ? (
           <InlineError {...describeError(preview.error)} />
         ) : null}
-        {preview.status === "ready" ? <Preview rejects={preview.data.rejects} totals={preview.data.totals} selected={preview.data.selected} /> : null}
+        {preview.status === "ready" ? <Preview rejects={preview.data.rejects} totals={preview.data.totals} selected={preview.data.selected} truncated={preview.data.truncated} /> : null}
         <SelectField label="Why are you replaying?" value={cause} onChange={(event) => setCause(event.target.value === "manual" ? "manual" : "definition_change")}>
           {CAUSES.map((option) => (
             <option key={option.value} value={option.value}>
@@ -152,10 +152,12 @@ function Preview({
   rejects,
   totals,
   selected,
+  truncated,
 }: {
   rejects: Prediction[];
   totals: components["schemas"]["TotalsBody"];
   selected: number;
+  truncated: boolean;
 }) {
   if (selected === 0) {
     return <EmptyState title="No rejects to replay">Nothing open matches. Rejects that were replayed already are left out.</EmptyState>;
@@ -166,6 +168,11 @@ function Preview({
         {selected} {selected === 1 ? "reject" : "rejects"}: {totals.accept} will be stored, {totals.flag} stored and flagged, {totals.still_rejected} still rejected,{" "}
         {totals.duplicate} already stored, {totals.already_replayed} replayed before.
       </p>
+      {truncated ? (
+        <p className="muted">
+          The table lists the first {rejects.length} of {selected} rejects. The totals above cover all of them.
+        </p>
+      ) : null}
       <div className="table-scroll">
         <table className="table">
           <caption>Predicted outcome of each reject</caption>

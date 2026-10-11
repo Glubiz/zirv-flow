@@ -8545,4 +8545,82 @@ email,b@example.com,
                 .all(|row| row.action != "ingest_rejects.replayed")
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_preview_lists_at_most_200_rejects_but_totals_all_of_them(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        sqlx::query(
+            "INSERT INTO ingest_rejects \
+                (id, workspace_id, received_at, source, kind, name, reason, trace_id) \
+             SELECT gen_random_uuid(), $1::uuid, now() - make_interval(secs => n), 'web', 'event', \
+                    'order', 'validation_failed', gen_random_uuid() \
+             FROM generate_series(1, 250) AS n",
+        )
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let uri = format!("/api/v1/workspaces/{ws}/ingest-rejects/replay");
+
+        let preview = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"filter": {}, "cause": "manual", "dry_run": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["selected"], 250);
+        assert_eq!(preview.body["rejects"].as_array().unwrap().len(), 200);
+        assert_eq!(preview.body["truncated"], true);
+        assert_eq!(preview.body["totals"]["still_rejected"], 250);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_preview_past_its_timeout_is_a_503_query_timeout(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let hurried = app_limits(crate::ExplorerLimits {
+            export_timeout: std::time::Duration::from_millis(1),
+            ..crate::ExplorerLimits::default()
+        })(&pool);
+        let owner = owner(&pool, &hurried).await;
+        let ws = workspace(&hurried, &owner, "Alpha").await;
+        sqlx::query(
+            "INSERT INTO ingest_rejects \
+                (id, workspace_id, received_at, source, kind, name, reason, payload, trace_id) \
+             SELECT gen_random_uuid(), $1::uuid, now() - make_interval(secs => n), 'web', 'event', \
+                    'order', 'validation_failed', \
+                    jsonb_build_object('properties', jsonb_build_object('blob', repeat('x', 2000))), \
+                    gen_random_uuid() \
+             FROM generate_series(1, 9000) AS n",
+        )
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let uri = format!("/api/v1/workspaces/{ws}/ingest-rejects/replay");
+
+        let preview = call(
+            &hurried,
+            "POST",
+            &uri,
+            Some(json!({"filter": {}, "cause": "manual", "dry_run": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            preview.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            preview.body
+        );
+        assert_eq!(preview.body["code"], "query_timeout");
+    }
 }

@@ -209,6 +209,28 @@ impl StoreError {
         }
     }
 
+    /// Reclassifies a query cancelled at its statement timeout (SQLSTATE 57014) as a timeout.
+    /// For the errors of a bounded read that goes through helpers which report plain query
+    /// failures; any other error is returned as it was.
+    pub(crate) fn into_bounded(self) -> Self {
+        let cancelled = matches!(self.kind, StoreErrorKind::Query)
+            && self
+                .source
+                .as_deref()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code())
+                .is_some_and(|code| code.as_ref() == "57014");
+        if cancelled {
+            Self {
+                kind: StoreErrorKind::Timeout,
+                source: self.source,
+            }
+        } else {
+            self
+        }
+    }
+
     /// A transaction that lost a race it could not resolve: nothing was committed and the
     /// whole unit of work can be run again.
     pub(crate) fn retryable_race() -> Self {

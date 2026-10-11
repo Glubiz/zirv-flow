@@ -4188,6 +4188,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The dry run ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -11397,7 +11407,8 @@
           "dry_run",
           "selected",
           "rejects",
-          "totals"
+          "totals",
+          "truncated"
         ],
         "properties": {
           "dry_run": {
@@ -11425,6 +11436,10 @@
               "null"
             ],
             "description": "The trace of a real run: its `event.replayed` decisions are on it. Null for a dry run."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "A dry run lists at most 200 predictions, the first in the order of the rejects; the\ntotals always cover all of them."
           }
         }
       },

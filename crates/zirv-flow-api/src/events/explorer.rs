@@ -70,6 +70,11 @@ impl ExplorerLimits {
         }
     }
 
+    /// How long one page query of an export, or a replay dry run, may run.
+    pub(crate) fn export_timeout(&self) -> Duration {
+        self.export_timeout
+    }
+
     fn export(&self) -> ExploreLimits {
         ExploreLimits {
             timeout: self.export_timeout,

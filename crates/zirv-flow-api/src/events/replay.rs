@@ -37,6 +37,9 @@ pub(crate) struct ReplayFilter {
     to: Option<OffsetDateTime>,
 }
 
+/// The most predictions a dry run lists.
+const PREVIEW_ROWS: usize = 200;
+
 fn no() -> bool {
     false
 }
@@ -108,6 +111,9 @@ pub(crate) struct ReplayBody {
     rejects: Vec<PredictionBody>,
     /// The predicted totals of a dry run; zero for a real run.
     totals: TotalsBody,
+    /// A dry run lists at most 200 predictions, the first in the order of the rejects; the
+    /// totals always cover all of them.
+    truncated: bool,
     /// The trace of a real run: its `event.replayed` decisions are on it. Null for a dry run.
     trace_id: Option<String>,
 }
@@ -148,6 +154,7 @@ fn totals(predictions: &[PredictionBody]) -> TotalsBody {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The dry run ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -213,19 +220,33 @@ pub(crate) async fn replay(
                 selected: 0,
                 rejects: Vec::new(),
                 totals: TotalsBody::default(),
+                truncated: false,
                 trace_id: None,
             }),
         ));
     }
 
     if request.dry_run {
-        let rejects: Vec<PredictionBody> =
-            zirv_flow_store::preview_replay(&state.pool, workspace.id, &ids)
-                .await?
-                .into_iter()
-                .map(PredictionBody::from)
-                .collect();
+        let mut rejects: Vec<PredictionBody> = zirv_flow_store::preview_replay(
+            &state.pool,
+            workspace.id,
+            &ids,
+            state.explorer.export_timeout(),
+        )
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                ApiError::query_timeout()
+            } else {
+                error.into()
+            }
+        })?
+        .into_iter()
+        .map(PredictionBody::from)
+        .collect();
         let totals = totals(&rejects);
+        let truncated = rejects.len() > PREVIEW_ROWS;
+        rejects.truncate(PREVIEW_ROWS);
         return Ok((
             StatusCode::OK,
             Json(ReplayBody {
@@ -233,6 +254,7 @@ pub(crate) async fn replay(
                 selected: ids.len(),
                 rejects,
                 totals,
+                truncated,
                 trace_id: None,
             }),
         ));
@@ -263,6 +285,7 @@ pub(crate) async fn replay(
             selected: ids.len(),
             rejects: Vec::new(),
             totals: TotalsBody::default(),
+            truncated: false,
             trace_id: Some(trace.trace_id.to_string()),
         }),
     ))

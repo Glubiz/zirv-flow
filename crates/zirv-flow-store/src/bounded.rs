@@ -169,4 +169,26 @@ mod tests {
 
         assert_eq!(level, "read committed");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cancelled_plain_query_error_is_reclassified_as_a_timeout_only_when_asked(
+        pool: PgPool,
+    ) {
+        let mut tx = begin_snapshot_for(&pool, Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        let plain = sqlx::query("SELECT pg_sleep(2)")
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::query)
+            .unwrap_err();
+        let plain_is_timeout = plain.is_timeout();
+        let reclassified = plain.into_bounded();
+
+        assert!(!plain_is_timeout);
+        assert!(reclassified.is_timeout());
+        assert!(!StoreError::retryable_race().into_bounded().is_timeout());
+    }
 }

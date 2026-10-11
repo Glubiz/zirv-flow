@@ -2747,6 +2747,11 @@ export interface components {
             totals: components["schemas"]["TotalsBody"];
             /** @description The trace of a real run: its `event.replayed` decisions are on it. Null for a dry run. */
             trace_id?: string | null;
+            /**
+             * @description A dry run lists at most 200 predictions, the first in the order of the rejects; the
+             *     totals always cover all of them.
+             */
+            truncated: boolean;
         };
         /** @description Which rejects, other than by id. */
         ReplayFilter: {
@@ -6084,6 +6089,15 @@ export interface operations {
             };
             /** @description Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The dry run ran past its time limit (`code` is `query_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

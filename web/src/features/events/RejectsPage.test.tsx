@@ -130,6 +130,7 @@ describe("replay", () => {
       },
     ],
     totals: { accept: 1, flag: 0, still_rejected: 1, duplicate: 0, already_replayed: 0 },
+    truncated: false,
     trace_id: null,
   };
 
@@ -213,5 +214,15 @@ describe("replay", () => {
     const body = calls.filter((call) => call.path === REPLAY_URI).at(-1)?.body as Record<string, unknown>;
     expect(body).toMatchObject({ filter: { name: "order" }, dry_run: true });
   });
-});
 
+  it("says when the table lists only the first rejects of a large replay", async () => {
+    admin(OWNER, "admin", () => json({ ...PREVIEW, selected: 5000, truncated: true }));
+    const user = userEvent.setup();
+    open();
+
+    await user.click(await screen.findByRole("button", { name: "Replay all open rejects" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Replay rejected events" });
+    expect(await within(dialog).findByText(/lists the first 2 of 5000 rejects/)).toBeInTheDocument();
+  });
+});

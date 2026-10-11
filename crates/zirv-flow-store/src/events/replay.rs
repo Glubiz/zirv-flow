@@ -11,6 +11,7 @@
 //! logs or returns a name, an identifier or a value.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 use sqlx::PgConnection;
@@ -26,6 +27,7 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{NewEvent, insert_event};
 use super::schemas::{EventPolicy, PublishedSchema, find_published_schema, get_event_policy};
+use crate::bounded::begin_snapshot_for;
 use crate::{NewDecision, NewJob, PgPool, StoreError, append_decision, begin, commit, enqueue};
 
 /// The most rejects one replay request may cover.
@@ -207,71 +209,88 @@ impl Judge {
         workspace: WorkspaceId,
         reject: &RejectRow,
     ) -> Result<Verdict, StoreError> {
-        let still = |reason| {
-            Ok(Verdict::StillRejected {
-                reason,
-                reasons: Vec::new(),
-            })
-        };
-        if reject.replayed_at.is_some() {
-            return Ok(Verdict::AlreadyReplayed);
-        }
-        let Some(name) = reject.name.as_deref().filter(|_| reject.kind == "event") else {
-            return still("not_replayable");
-        };
-        let Some(person) = reject.person_id else {
-            return still("no_person");
-        };
-        let person: Option<Uuid> = sqlx::query_scalar(
-            "SELECT COALESCE(merged_into, id) FROM people WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(person)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-        let Some(person_id) = person else {
-            return still("no_person");
-        };
-        if let Some(message_id) = &reject.message_id {
-            let original: Option<Uuid> = sqlx::query_scalar(
-                "SELECT event_id FROM event_dedupe WHERE workspace_id = $1 AND message_id = $2",
+        let mut person = None;
+        let mut original = None;
+        let mut schema = None;
+        let policy = self.policy(connection, workspace).await?;
+        if let (Some(known), Some(name), true) = (
+            reject.person_id,
+            reject.name.as_deref(),
+            reject.replayed_at.is_none(),
+        ) {
+            person = sqlx::query_scalar(
+                "SELECT COALESCE(merged_into, id) FROM people WHERE workspace_id = $1 AND id = $2",
             )
             .bind(workspace.as_uuid())
-            .bind(message_id)
+            .bind(known)
             .fetch_optional(&mut *connection)
             .await
             .map_err(StoreError::query)?;
-            if let Some(original) = original {
-                return Ok(Verdict::Duplicate { original });
+            if let (Some(_), Some(message_id)) = (person, &reject.message_id) {
+                original = sqlx::query_scalar(
+                    "SELECT event_id FROM event_dedupe WHERE workspace_id = $1 AND message_id = $2",
+                )
+                .bind(workspace.as_uuid())
+                .bind(message_id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
             }
+            schema = self.schema(connection, workspace, name).await?;
         }
-        let policy = self.policy(connection, workspace).await?;
-        let properties = payload_properties(&reject.payload);
-        match self.schema(connection, workspace, name).await? {
-            None => match policy.unplanned {
-                UnplannedPolicy::Reject => still("unplanned_event"),
-                UnplannedPolicy::Draft => Ok(Verdict::Accept {
-                    person_id,
-                    state: ValidationState::Unplanned,
-                    schema_version: None,
-                    reasons: Vec::new(),
-                }),
+        Ok(decide(reject, person, original, &policy, schema.as_ref()))
+    }
+}
+
+/// What judging `reject` finds, given what the database says about its person, its
+/// `messageId` and its schema. Pure.
+fn decide(
+    reject: &RejectRow,
+    person: Option<Uuid>,
+    original: Option<Uuid>,
+    policy: &EventPolicy,
+    schema: Option<&PublishedSchema>,
+) -> Verdict {
+    let still = |reason| Verdict::StillRejected {
+        reason,
+        reasons: Vec::new(),
+    };
+    if reject.replayed_at.is_some() {
+        return Verdict::AlreadyReplayed;
+    }
+    if reject.name.is_none() || reject.kind != "event" {
+        return still("not_replayable");
+    }
+    let (Some(_), Some(person_id)) = (reject.person_id, person) else {
+        return still("no_person");
+    };
+    if let Some(original) = original {
+        return Verdict::Duplicate { original };
+    }
+    let properties = payload_properties(&reject.payload);
+    match schema {
+        None => match policy.unplanned {
+            UnplannedPolicy::Reject => still("unplanned_event"),
+            UnplannedPolicy::Draft => Verdict::Accept {
+                person_id,
+                state: ValidationState::Unplanned,
+                schema_version: None,
+                reasons: Vec::new(),
             },
-            Some(schema) => {
-                let reasons = check_properties(&properties, &schema.properties);
-                match evaluate(schema.mode, &reasons) {
-                    None => Ok(Verdict::StillRejected {
-                        reason: "validation_failed",
-                        reasons,
-                    }),
-                    Some(state) => Ok(Verdict::Accept {
-                        person_id,
-                        state,
-                        schema_version: Some(schema.version),
-                        reasons,
-                    }),
-                }
+        },
+        Some(schema) => {
+            let reasons = check_properties(&properties, &schema.properties);
+            match evaluate(schema.mode, &reasons) {
+                None => Verdict::StillRejected {
+                    reason: "validation_failed",
+                    reasons,
+                },
+                Some(state) => Verdict::Accept {
+                    person_id,
+                    state,
+                    schema_version: Some(schema.version),
+                    reasons,
+                },
             }
         }
     }
@@ -314,27 +333,87 @@ async fn load_reject(
 
 /// Predicts what replaying each of `ids` would do, in the order given. Writes nothing. An id
 /// that names no reject of the workspace is left out.
+///
+/// It reads in one snapshot, under a statement `timeout`, with a fixed number of statements
+/// (the rejects, their people and their message ids in bulk), so the whole prediction is
+/// bounded; an overrun is [`StoreError::is_timeout`].
 pub async fn preview_replay(
     pool: &PgPool,
     workspace: WorkspaceId,
     ids: &[Uuid],
+    timeout: Duration,
 ) -> Result<Vec<ReplayPrediction>, StoreError> {
-    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    let mut tx = begin_snapshot_for(pool, timeout).await?;
+    preview_in(&mut tx, workspace, ids)
+        .await
+        .map_err(StoreError::into_bounded)
+}
+
+async fn preview_in(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<ReplayPrediction>, StoreError> {
+    let mut rejects: Vec<RejectRow> = sqlx::query_as(
+        "SELECT id, kind, source, name, payload, person_id, message_id, received_at, trace_id, \
+                replayed_at FROM ingest_rejects WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let position: HashMap<Uuid, usize> = ids.iter().enumerate().map(|(n, id)| (*id, n)).collect();
+    rejects.sort_by_key(|reject| position.get(&reject.id).copied());
+
+    let people: Vec<Uuid> = rejects
+        .iter()
+        .filter_map(|reject| reject.person_id)
+        .collect();
+    let survivors: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT id, COALESCE(merged_into, id) FROM people \
+         WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&people)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?
+    .into_iter()
+    .collect();
+    let messages: Vec<&str> = rejects
+        .iter()
+        .filter_map(|reject| reject.message_id.as_deref())
+        .collect();
+    let stored: HashMap<String, Uuid> = sqlx::query_as::<_, (String, Uuid)>(
+        "SELECT message_id, event_id FROM event_dedupe \
+         WHERE workspace_id = $1 AND message_id = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&messages)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?
+    .into_iter()
+    .collect();
+
     let mut judge = Judge::new();
-    let mut predictions = Vec::with_capacity(ids.len());
-    for id in ids {
-        let Some(reject) = load_reject(&mut connection, workspace, *id, false).await? else {
-            continue;
+    let policy = judge.policy(connection, workspace).await?;
+    let mut predictions = Vec::with_capacity(rejects.len());
+    for reject in rejects {
+        let schema = match reject.name.as_deref() {
+            Some(name) => judge.schema(connection, workspace, name).await?,
+            None => None,
         };
-        let verdict = judge.judge(&mut connection, workspace, &reject).await?;
-        let changed = match reject.name.as_deref() {
-            Some(name) => {
-                let policy = judge.policy(&mut connection, workspace).await?;
-                let schema = judge.schema(&mut connection, workspace, name).await?;
-                redacted_type_changed(&policy, schema.as_ref(), &reject.payload)
-            }
-            None => Vec::new(),
-        };
+        let person = reject
+            .person_id
+            .and_then(|person| survivors.get(&person).copied());
+        let original = reject
+            .message_id
+            .as_ref()
+            .and_then(|message| stored.get(message).copied());
+        let verdict = decide(&reject, person, original, &policy, schema.as_ref());
+        let changed = redacted_type_changed(&policy, schema.as_ref(), &reject.payload);
         let (outcome, reason, reasons) = match verdict {
             Verdict::AlreadyReplayed => ("already_replayed", None, Vec::new()),
             Verdict::Duplicate { .. } => ("duplicate", None, Vec::new()),
@@ -594,6 +673,7 @@ mod tests {
     use crate::{create_workspace, list_trace};
 
     const NOW: OffsetDateTime = datetime!(2026-06-01 12:00 UTC);
+    const LONG: Duration = Duration::from_secs(30);
 
     fn property(name: &str, property_type: PropertyType, required: bool) -> SchemaProperty {
         SchemaProperty {
@@ -705,9 +785,9 @@ mod tests {
         let events = count(&pool, "events").await;
         let decisions = count(&pool, "decision_records").await;
 
-        let before = preview_replay(&pool, ws, &[reject]).await.unwrap();
+        let before = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
         fix_the_schema(&pool, ws).await;
-        let after = preview_replay(&pool, ws, &[reject, Uuid::now_v7()])
+        let after = preview_replay(&pool, ws, &[reject, Uuid::now_v7()], LONG)
             .await
             .unwrap();
 
@@ -858,7 +938,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let preview = preview_replay(&pool, ws, &[reject]).await.unwrap();
+        let preview = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
         let totals = replay_rejects(&pool, ws, &[reject], &manual_trace(), true)
             .await
             .unwrap();
@@ -952,7 +1032,7 @@ mod tests {
         .await
         .unwrap();
 
-        let prediction = preview_replay(&pool, ws, &[reject]).await.unwrap();
+        let prediction = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
 
         assert_eq!(prediction[0].redacted_type_changed, ["total"]);
     }
