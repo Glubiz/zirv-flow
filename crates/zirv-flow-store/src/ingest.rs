@@ -172,7 +172,7 @@ pub async fn enqueue_drain<'e>(
 ) -> Result<bool, StoreError> {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
-    job.payload = serde_json::json!({ "workspace_id": workspace.as_uuid() });
+    job.payload = json!({ "workspace_id": workspace.as_uuid() });
     job.unique_key = Some(format!("{DRAIN_JOB_KIND}:{}", workspace.as_uuid()));
     enqueue(executor, &job).await
 }
@@ -245,6 +245,15 @@ struct InboxRow {
     trace_id: Uuid,
 }
 
+impl InboxRow {
+    fn trace(&self) -> TraceContext {
+        TraceContext {
+            trace_id: TraceId::from_uuid(self.trace_id),
+            cause: Cause::api(self.api_key_id.to_string()),
+        }
+    }
+}
+
 enum Mapped {
     Profile(ProfileRecord),
     Event(EventRecord),
@@ -253,14 +262,12 @@ enum Mapped {
 /// Maps a row to the record the apply path takes. A row that cannot be mapped is poison.
 fn map_row(row: &InboxRow) -> Option<Mapped> {
     let stored = StoredItem::parse(&row.item)?;
-    let timestamp = match &stored.timestamp {
-        Some(text) => Some(OffsetDateTime::parse(text, &Rfc3339).ok()?),
-        None => None,
-    };
-    let trace = TraceContext {
-        trace_id: TraceId::from_uuid(row.trace_id),
-        cause: Cause::api(row.api_key_id.to_string()),
-    };
+    let timestamp = stored
+        .timestamp
+        .map(|text| OffsetDateTime::parse(&text, &Rfc3339))
+        .transpose()
+        .ok()?;
+    let trace = row.trace();
     match row.kind.as_str() {
         "identify" => Some(Mapped::Profile(ProfileRecord {
             source: SOURCE.to_owned(),
@@ -430,14 +437,12 @@ pub async fn drain_batch_singly(
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;
                 reject_row(&mut tx, workspace, key, row, mapped.as_ref()).await?;
-                outcome.count(
-                    if row.kind == "identify" {
-                        "identify"
-                    } else {
-                        "track"
-                    },
-                    "apply_failed",
-                );
+                let kind = if row.kind == "identify" {
+                    "identify"
+                } else {
+                    "track"
+                };
+                outcome.count(kind, "apply_failed");
             }
         }
     }
@@ -454,10 +459,7 @@ async fn reject_row(
     mapped: Option<&Mapped>,
 ) -> Result<(), StoreError> {
     let empty = Map::new();
-    let trace = TraceContext {
-        trace_id: TraceId::from_uuid(row.trace_id),
-        cause: Cause::api(row.api_key_id.to_string()),
-    };
+    let trace = row.trace();
     let item = match mapped {
         Some(Mapped::Profile(record)) => FailedItem {
             kind: "record",

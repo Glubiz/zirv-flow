@@ -292,8 +292,7 @@ async fn run(
     principal: Result<Principal, ApiError>,
     request: Request,
 ) -> Response {
-    let outcome = accept(endpoint, state, principal, request).await;
-    let (status, response) = match outcome {
+    let response = match accept(endpoint, state, principal, request).await {
         Ok(accepted) => {
             for (kind, count) in [("identify", accepted.identify), ("track", accepted.track)] {
                 if count > 0 {
@@ -301,23 +300,17 @@ async fn run(
                         .increment(count as u64);
                 }
             }
-            (
-                StatusCode::ACCEPTED,
-                (
-                    StatusCode::ACCEPTED,
-                    Json(AcceptedBody {
-                        accepted: accepted.identify + accepted.track,
-                    }),
-                )
-                    .into_response(),
-            )
+            let body = AcceptedBody {
+                accepted: accepted.identify + accepted.track,
+            };
+            (StatusCode::ACCEPTED, Json(body)).into_response()
         }
-        Err(error) => (error.status_code(), error.into_response()),
+        Err(error) => error.into_response(),
     };
     metrics::counter!(
         "zirv_flow_ingest_requests_total",
         "endpoint" => endpoint.label(),
-        "status" => status.as_u16().to_string(),
+        "status" => response.status().as_u16().to_string(),
     )
     .increment(1);
     response
