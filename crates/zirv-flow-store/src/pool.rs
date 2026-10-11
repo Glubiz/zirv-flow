@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -24,9 +26,43 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, StoreErr
         .map_err(StoreError::connect)
 }
 
+/// A separate pool to the same database, with its own `max_connections` and
+/// `acquire_timeout`. It connects lazily, so building it cannot fail, and what it holds
+/// never counts against `pool`.
+pub fn sized_like(pool: &PgPool, max_connections: u32, acquire_timeout: Duration) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(acquire_timeout)
+        .connect_lazy_with((*pool.connect_options()).clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sized_pool_is_independent_of_the_pool_it_copies(pool: PgPool) {
+        let mut held = Vec::new();
+        for _ in 0..pool.options().get_max_connections() {
+            held.push(pool.acquire().await.unwrap());
+        }
+        let sibling = sized_like(&pool, 2, Duration::from_secs(5));
+
+        // Every connection of the original is held; the sibling still answers.
+        let one: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&sibling)
+            .await
+            .unwrap();
+
+        assert_eq!(one, 1);
+        drop(held);
+        assert_eq!(sibling.options().get_max_connections(), 2);
+        assert_eq!(
+            sibling.options().get_acquire_timeout(),
+            Duration::from_secs(5)
+        );
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

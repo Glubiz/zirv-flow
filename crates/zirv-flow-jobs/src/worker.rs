@@ -9,12 +9,15 @@ use tokio::task::{JoinHandle, JoinSet};
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     ClaimedJob, FailOutcome, PgPool, begin, claim_job, complete_job, fail_job, heartbeat_job,
-    listen_for_jobs, lock_lease,
+    listen_for_jobs, lock_lease, sized_like,
 };
 
 use crate::context::JobContext;
 use crate::metrics::{self, Outcome};
 use crate::registry::Registry;
+
+/// How long a claim or a handler transaction waits for a connection of the worker's own.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a worker pool behaves.
 #[derive(Clone, Debug)]
@@ -46,7 +49,10 @@ impl WorkerConfig {
     }
 }
 
-/// A pool of workers over one database.
+/// A pool of workers over one database. It runs on pools of its own, so neither the HTTP
+/// server nor running handlers can starve a claim, a handler transaction or a heartbeat:
+/// `concurrency + 1` connections for claims, handler transactions and failures, and
+/// `concurrency` for heartbeats only.
 pub struct Worker {
     pool: PgPool,
     registry: Registry,
@@ -54,7 +60,12 @@ pub struct Worker {
 }
 
 struct Shared {
+    /// For claims, handler transactions and failures.
     pool: PgPool,
+    /// For heartbeats only.
+    heartbeat_pool: PgPool,
+    /// The pool the worker was given, for the listener.
+    listener_pool: PgPool,
     registry: Registry,
     config: WorkerConfig,
     kinds: Vec<&'static str>,
@@ -75,9 +86,13 @@ impl Worker {
     /// finish. The caller bounds the wait; a handler still running when this future is
     /// dropped is cancelled and left to the reaper.
     pub async fn run(self, stop: watch::Receiver<bool>) {
+        let slots = u32::try_from(self.config.concurrency).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared {
             kinds: self.registry.kinds(),
-            pool: self.pool,
+            pool: sized_like(&self.pool, slots.saturating_add(1), ACQUIRE_TIMEOUT),
+            // A failed beat is retried on the next one, well before the lease runs out.
+            heartbeat_pool: sized_like(&self.pool, slots, self.config.lease / 10),
+            listener_pool: self.pool,
             registry: self.registry,
             config: self.config,
             wake: Notify::new(),
@@ -110,7 +125,7 @@ async fn listen(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
             return;
         }
         let Some(connected) = listener.as_mut() else {
-            match listen_for_jobs(&shared.pool).await {
+            match listen_for_jobs(&shared.listener_pool).await {
                 Ok(connected) => listener = Some(connected),
                 Err(error) => {
                     warn!("could not listen for new jobs, polling instead: {error}");
@@ -279,7 +294,14 @@ async fn heartbeat(shared: Arc<Shared>, job: ClaimedJob, lost: oneshot::Sender<(
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     loop {
         ticker.tick().await;
-        match heartbeat_job(&shared.pool, job.id, job.lease_token, shared.config.lease).await {
+        match heartbeat_job(
+            &shared.heartbeat_pool,
+            job.id,
+            job.lease_token,
+            shared.config.lease,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 let _ = lost.send(());
@@ -355,15 +377,54 @@ mod tests {
         }
     }
 
+    /// Writes an effect, takes a transaction-scoped advisory lock to say so, and never ends.
     struct Hangs;
 
     impl JobKind for Hangs {
         const KIND: &'static str = "test.hangs";
 
-        async fn run(&self, _ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
+        async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
+            sqlx::query("INSERT INTO effects (index) VALUES (99)")
+                .execute(ctx.conn())
+                .await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(4242)")
+                .execute(ctx.conn())
+                .await?;
             std::future::pending().await
         }
     }
+
+    /// Waits for the `gate` table to hold a row, then records the job's index.
+    struct Gated;
+
+    impl JobKind for Gated {
+        const KIND: &'static str = "test.gated";
+
+        async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
+            loop {
+                let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM gate)")
+                    .fetch_one(ctx.conn())
+                    .await?;
+                if open {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            sqlx::query("INSERT INTO effects (index) VALUES ($1)")
+                .bind(payload["index"].as_i64().unwrap())
+                .execute(ctx.conn())
+                .await?;
+            Ok(())
+        }
+    }
+
+    /// True once some connection of this database is listening.
+    const LISTENING: &str = "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query ILIKE 'LISTEN%')";
+
+    /// True while `Hangs` holds its advisory lock, and once it has let go.
+    const HANGING: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = 4242 AND granted)";
+    const NOT_HANGING: &str =
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = 4242)";
 
     fn registry() -> Registry {
         Registry::built_in()
@@ -371,6 +432,7 @@ mod tests {
             .with(&AlwaysFails)
             .with(&Panics)
             .with(&Hangs)
+            .with(&Gated)
     }
 
     fn test_config(concurrency: usize) -> WorkerConfig {
@@ -398,14 +460,36 @@ mod tests {
         (stop, tokio::spawn(worker.run(stopped)))
     }
 
-    /// Polls until the queue holds no jobs at all, or `done` is true of its counts.
-    async fn wait_for(pool: &PgPool, done: impl Fn(QueueCounts) -> bool) {
-        loop {
-            if done(queue_counts(pool).await.unwrap()) {
-                return;
-            }
+    /// The longest any test waits on a condition before it fails instead of hanging.
+    const WAIT_LIMIT: Duration = Duration::from_secs(60);
+
+    /// Polls `check` until it is true, and panics saying `what` if that takes too long.
+    async fn eventually<F: Future<Output = bool>>(what: &str, mut check: impl FnMut() -> F) {
+        let deadline = Instant::now() + WAIT_LIMIT;
+        while !check().await {
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {}s waiting for {what}",
+                WAIT_LIMIT.as_secs()
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Polls until `done` is true of the queue's counts.
+    async fn wait_for(pool: &PgPool, done: impl Fn(QueueCounts) -> bool) {
+        eventually("the queue to reach the expected counts", || async {
+            done(queue_counts(pool).await.unwrap())
+        })
+        .await;
+    }
+
+    /// Polls until the single-boolean `query` is true.
+    async fn wait_until(pool: &PgPool, what: &str, query: &'static str) {
+        eventually(what, || async {
+            sqlx::query_scalar(query).fetch_one(pool).await.unwrap()
+        })
+        .await;
     }
 
     async fn stop_and_join(stop: watch::Sender<bool>, handle: JoinHandle<()>) {
@@ -421,9 +505,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        while zirv_flow_store::reap_expired(pool).await.unwrap().requeued != 1 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        eventually("the reaper to requeue the expired job", || async {
+            zirv_flow_store::reap_expired(pool).await.unwrap().requeued == 1
+        })
+        .await;
         doomed
     }
 
@@ -611,8 +696,8 @@ mod tests {
         let mut config = test_config(1);
         config.lease = Duration::from_millis(300);
         let (stop, handle) = start(&pool, config);
-        // Wait for the handler to be running, then take the lease away from it.
-        wait_for(&pool, |counts| counts.running == 1).await;
+        // Wait for the handler to have written and be hanging, then take the lease away.
+        wait_until(&pool, "the handler to be hanging", HANGING).await;
         sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid()")
             .execute(&pool)
             .await
@@ -629,6 +714,109 @@ mod tests {
         // The job is still the other owner's: nothing was completed or failed.
         let counts = queue_counts(&pool).await.unwrap();
         assert_eq!(counts.running, 1);
+        // The attempt's transaction ended, and its write went with it.
+        wait_until(&pool, "the attempt's transaction to end", NOT_HANGING).await;
+        assert_eq!(effect_count(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_late_worker_cannot_complete_or_fail_a_job_another_worker_holds(pool: PgPool) {
+        migrated(&pool).await;
+        let mut job = NewJob::new("test.effect");
+        job.payload = json!({"index": 1});
+        enqueue(&pool, &job).await.unwrap();
+        // Worker A's lease expires and the reaper requeues the job; worker B claims it.
+        let stale = claim_and_reap(&pool, Duration::from_millis(300)).await;
+        let current = claim_job(
+            &pool,
+            "current",
+            &["test.effect"],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.id, stale.id);
+        assert_ne!(current.lease_token, stale.lease_token);
+        let before = find_job(&pool, current.id).await.unwrap().unwrap();
+
+        // A wakes up and tries to settle the job with its old token.
+        assert!(
+            !complete_job(&pool, stale.id, stale.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            fail_job(&pool, stale.id, stale.lease_token, Duration::ZERO, "late")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // B still owns the live row, untouched.
+        let after = find_job(&pool, current.id).await.unwrap().unwrap();
+        assert_eq!(after.state, "running");
+        assert_eq!(after.lease_token, Some(current.lease_token));
+        assert_eq!(after.attempts, before.attempts);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.lease_expires_at, before.lease_expires_at);
+        assert!(
+            complete_job(&pool, current.id, current.lease_token)
+                .await
+                .unwrap()
+        );
+        assert_eq!(queue_counts(&pool).await.unwrap(), QueueCounts::default());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_job_keeps_its_lease_while_the_pool_the_worker_was_given_is_saturated(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        sqlx::query("CREATE TABLE gate (open boolean)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut job = NewJob::new("test.gated");
+        job.payload = json!({"index": 7});
+        enqueue(&pool, &job).await.unwrap();
+        // The given pool has one connection and the worker's listener holds it, so
+        // nothing else can use it: heartbeats and the handler's transaction must not.
+        let given = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with((*pool.connect_options()).clone());
+        let mut config = test_config(1);
+        config.lease = Duration::from_secs(2);
+        let (stop, stopped) = watch::channel(false);
+        let handle = tokio::spawn(Worker::new(given, registry(), config).run(stopped));
+        wait_until(&pool, "the listener to subscribe", LISTENING).await;
+        wait_for(&pool, |counts| counts.running == 1).await;
+        sqlx::query("CREATE TABLE first_lease AS SELECT lease_expires_at AS at FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Once the database's clock passes the lease as first granted, only heartbeats can
+        // be keeping the job from the reaper.
+        wait_until(
+            &pool,
+            "the first lease to pass",
+            "SELECT now() > at FROM first_lease",
+        )
+        .await;
+        let reaped = zirv_flow_store::reap_expired(&pool).await.unwrap();
+        assert_eq!((reaped.requeued, reaped.dead), (0, 0));
+
+        sqlx::query("INSERT INTO gate VALUES (true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+        assert_eq!(effect_count(&pool).await, 1);
     }
 
     #[sqlx::test]
@@ -660,18 +848,7 @@ mod tests {
         config.poll_interval = Duration::from_secs(3600);
         let (stop, handle) = start(&pool, config);
         // Wait until the listener is subscribed, so the notification cannot be missed.
-        loop {
-            let listening: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query ILIKE 'LISTEN%')",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if listening {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_until(&pool, "the listener to subscribe", LISTENING).await;
 
         enqueue(&pool, &NewJob::new("maintenance.noop"))
             .await

@@ -102,9 +102,12 @@ database must be idempotent: a crash can run a job again. A workspace is limited
 to `worker.max_running_per_workspace` running jobs when that is set, so one busy
 workspace cannot take every worker.
 
-Each running job holds a database connection, and each role keeps one more for
-`LISTEN` or the leader lock, so set `database.max_connections` above
-`worker.concurrency` times two plus a few.
+The worker runs on pools of its own, so HTTP traffic and running jobs cannot
+starve a heartbeat: it opens up to `2 * worker.concurrency + 1` connections (one
+pool for claims and job transactions, one for heartbeats), in addition to
+`database.max_connections`. The `LISTEN` connection and the scheduler's leader
+lock each take one connection from `database.max_connections`, as does all HTTP
+and admin work, so keep it above a few.
 
 On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
 running jobs; any still running are left to lease expiry. `/metrics` carries

@@ -128,8 +128,8 @@ impl Roles {
 
 /// Runs the roles in one process until `shutdown` completes, then drains them: the server
 /// finishes its requests, workers stop claiming and finish running jobs, and the scheduler
-/// gives up its lock. Whatever is still running after [`SHUTDOWN_GRACE`] is left to its
-/// lease to expire.
+/// gives up its lock. Every role stops at once and shares one deadline, [`SHUTDOWN_GRACE`]
+/// after the shutdown began; whatever is still running then is left to its lease to expire.
 async fn run_roles(
     roles: Roles,
     config: &Config,
@@ -139,10 +139,13 @@ async fn run_roles(
 ) -> u8 {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let stop = Arc::new(stop);
+    let deadline = Arc::new(ShutdownDeadline::default());
     tokio::spawn({
         let stop = Arc::clone(&stop);
+        let deadline = Arc::clone(&deadline);
         async move {
             shutdown.await;
+            deadline.start();
             let _ = stop.send(true);
         }
     });
@@ -194,12 +197,14 @@ async fn run_roles(
             config.server_bind(),
             config.server_cookie_secure(),
             stderr,
+            &deadline,
             async move {
                 let _ = draining.wait_for(|stopped| *stopped).await;
             },
         )
         .await;
         // A server that failed to start or stopped on its own takes the other roles down.
+        deadline.start();
         let _ = stop.send(true);
         code
     } else {
@@ -208,10 +213,32 @@ async fn run_roles(
         0
     };
 
+    drain(background, deadline.start(), stderr).await;
+    code
+}
+
+/// The one deadline of a shutdown, shared by every role: it starts when the shutdown does.
+#[derive(Default)]
+struct ShutdownDeadline(std::sync::OnceLock<tokio::time::Instant>);
+
+impl ShutdownDeadline {
+    /// Starts the clock if it is not running yet, and returns the instant it ends.
+    fn start(&self) -> tokio::time::Instant {
+        *self
+            .0
+            .get_or_init(|| tokio::time::Instant::now() + SHUTDOWN_GRACE)
+    }
+}
+
+/// Waits for the background roles to finish, until `deadline`.
+async fn drain(
+    mut background: tokio::task::JoinSet<()>,
+    deadline: tokio::time::Instant,
+    stderr: &mut impl Write,
+) {
     let drained = async { while background.join_next().await.is_some() {} };
-    let timeout = tokio::time::timeout(SHUTDOWN_GRACE, drained);
     tokio::select! {
-        result = timeout => {
+        result = tokio::time::timeout_at(deadline, drained) => {
             if result.is_err() {
                 let _ = writeln!(
                     stderr,
@@ -224,7 +251,6 @@ async fn run_roles(
             let _ = writeln!(stderr, "warning: interrupted while draining jobs");
         }
     }
-    code
 }
 
 /// Binds `addr` and serves the API until `shutdown` completes.
@@ -234,6 +260,7 @@ async fn serve_http(
     addr: SocketAddr,
     cookie_secure: bool,
     stderr: &mut impl Write,
+    deadline: &ShutdownDeadline,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
     let listener = match TcpListener::bind(addr).await {
@@ -262,7 +289,7 @@ async fn serve_http(
             // In-flight requests get a grace period; a second Ctrl-C or the
             // deadline ends the process without waiting for them.
             tokio::select! {
-                result = tokio::time::timeout(SHUTDOWN_GRACE, &mut server) => match result {
+                result = tokio::time::timeout_at(deadline.start(), &mut server) => match result {
                     Ok(result) => result,
                     Err(_) => {
                         let _ = writeln!(stderr, "error: server: requests still running after {}s; exiting", SHUTDOWN_GRACE.as_secs());
@@ -719,6 +746,7 @@ mod tests {
             addr,
             true,
             &mut stderr,
+            &ShutdownDeadline::default(),
             std::future::ready(()),
         )
         .await;
@@ -741,6 +769,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             true,
             &mut stderr,
+            &ShutdownDeadline::default(),
             std::future::ready(()),
         )
         .await;
@@ -750,6 +779,31 @@ mod tests {
             String::from_utf8(stderr)
                 .unwrap()
                 .contains("listening on 127.0.0.1:")
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_the_background_roles_stops_at_the_shared_deadline() {
+        let deadline = ShutdownDeadline::default();
+        // The shutdown began; the server used up most of the grace before this point.
+        let ends = deadline.start();
+        assert_eq!(deadline.start(), ends, "the deadline starts only once");
+        let mut background = tokio::task::JoinSet::new();
+        background.spawn(std::future::pending());
+        let mut stderr = Vec::new();
+
+        let soon = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drain(background, soon, &mut stderr),
+        )
+        .await
+        .expect("the drain ends at its deadline, not a fresh grace period");
+
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(
+            message.contains("jobs still running after 30s"),
+            "{message}"
         );
     }
 
@@ -807,7 +861,12 @@ mod tests {
 
         // The scheduler fires the due slot (moving the schedule into the future) and the
         // worker runs both jobs.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "timed out after 60s waiting for the scheduler and worker to finish"
+            );
             let done: bool = sqlx::query_scalar(
                 "SELECT (SELECT next_run_at > now() FROM schedules) \
                     AND NOT EXISTS (SELECT 1 FROM jobs)",

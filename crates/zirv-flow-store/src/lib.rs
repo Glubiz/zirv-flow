@@ -28,7 +28,7 @@ pub use jobs::{
     heartbeat_job, listen_for_jobs, lock_lease, queue_counts, reap_expired, try_lead,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
-pub use pool::{PgPool, Tx, begin, commit, connect};
+pub use pool::{PgPool, Tx, begin, commit, connect, sized_like};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,
