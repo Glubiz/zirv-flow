@@ -353,8 +353,10 @@ As built (consent, topics and suppressions):
   unique with `NULLS NOT DISTINCT`), `consent_changes` (the history: from and to status,
   source, evidence up to 4 KiB, actor, trace) and `suppressions` (primary key
   `(workspace_id, identifier_hash)`). A trigger refuses any update of `consent_changes` other
-  than re-pointing `person_id`, which a merge needs; deletes stay possible for erasure.
-  `suppressions` has no `person_id` and survives erasure by design; the other three are
+  than moving `person_id` to the person its owner was merged into, which a merge needs;
+  deletes stay possible for erasure. `suppressions` carries an opaque `id` for paging, so a
+  cursor never holds a hash.
+  It has no `person_id` and survives erasure by design; the other three are
   covered by the isolation tests and the erasure scan.
 - **Writes.** `store::set_consent` locks the person row, follows `merged_into`, treats a write of
   the status already held as a no-op (no history row, no decision), and otherwise upserts the

@@ -1,18 +1,29 @@
 //! The little CSV the suppression import and export need: RFC 4180 records with quoted
 //! fields, `""` as an escaped quote, and LF or CRLF line ends.
 
+/// One record and the line of the file it starts on, the first line being 1.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct Record {
+    pub(super) line: usize,
+    pub(super) fields: Vec<String>,
+}
+
 /// Splits `text` into records of fields. A byte order mark at the start is ignored, blank
 /// lines are skipped, and a quote that never closes ends the last field at the end of the
-/// text.
-pub(super) fn parse(text: &str) -> Vec<Vec<String>> {
+/// text. Lines are counted by LF, by CRLF once, and by a CR on its own; a line break inside
+/// quotes counts too.
+pub(super) fn parse(text: &str) -> Vec<Record> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut records = Vec::new();
     let mut record: Vec<String> = Vec::new();
     let mut field = String::new();
     let mut quoted = false;
     let mut in_record = false;
+    let mut line = 1;
+    let mut start = 1;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
+        let breaks = c == '\n' || (c == '\r' && chars.peek() != Some(&'\n'));
         if quoted {
             match c {
                 '"' if chars.peek() == Some(&'"') => {
@@ -22,34 +33,42 @@ pub(super) fn parse(text: &str) -> Vec<Vec<String>> {
                 '"' => quoted = false,
                 _ => field.push(c),
             }
+            if breaks {
+                line += 1;
+            }
             continue;
         }
-        match c {
-            '"' if field.is_empty() => {
-                quoted = true;
-                in_record = true;
-            }
-            ',' => {
+        if breaks {
+            if in_record {
                 record.push(std::mem::take(&mut field));
-                in_record = true;
+                records.push(Record {
+                    line: start,
+                    fields: std::mem::take(&mut record),
+                });
             }
-            '\r' => {}
-            '\n' => {
-                if in_record {
-                    record.push(std::mem::take(&mut field));
-                    records.push(std::mem::take(&mut record));
-                }
-                in_record = false;
-            }
-            _ => {
-                field.push(c);
-                in_record = true;
-            }
+            in_record = false;
+            line += 1;
+            continue;
+        }
+        if c == '\r' {
+            continue;
+        }
+        if !in_record {
+            in_record = true;
+            start = line;
+        }
+        match c {
+            '"' if field.is_empty() => quoted = true,
+            ',' => record.push(std::mem::take(&mut field)),
+            _ => field.push(c),
         }
     }
     if in_record {
         record.push(field);
-        records.push(record);
+        records.push(Record {
+            line: start,
+            fields: record,
+        });
     }
     records
 }
@@ -69,6 +88,13 @@ mod tests {
 
     fn rows(text: &str) -> Vec<Vec<String>> {
         parse(text)
+            .into_iter()
+            .map(|record| record.fields)
+            .collect()
+    }
+
+    fn lines(text: &str) -> Vec<usize> {
+        parse(text).into_iter().map(|record| record.line).collect()
     }
 
     fn record(fields: &[&str]) -> Vec<String> {
@@ -114,12 +140,23 @@ mod tests {
     }
 
     #[test]
+    fn a_record_reports_the_line_it_starts_on() {
+        assert_eq!(lines("a\nb\nc"), [1, 2, 3]);
+        assert_eq!(lines("a\n\n\nb"), [1, 4]);
+        assert_eq!(lines("\u{feff}a\r\nb\r\n\r\nc"), [1, 2, 4]);
+        assert_eq!(lines("a\rb\r\rc"), [1, 2, 4]);
+        assert_eq!(lines("a,\"x\ny\nz\"\nb"), [1, 4]);
+        assert_eq!(lines("a,\"x\r\ny\"\nb\r"), [1, 3]);
+        assert_eq!(lines("a,\"x\ry\"\nb"), [1, 3]);
+    }
+
+    #[test]
     fn an_exported_field_is_quoted_only_when_it_needs_to_be() {
         assert_eq!(field("plain"), "plain");
         assert_eq!(field("a,b"), "\"a,b\"");
         assert_eq!(field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(
-            parse(&format!("{},x", field("a\"b,c"))),
+            rows(&format!("{},x", field("a\"b,c"))),
             [record(&["a\"b,c", "x"])]
         );
     }

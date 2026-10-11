@@ -653,6 +653,11 @@ mod tests {
         let repoint = sqlx::query("UPDATE consent_changes SET person_id = person_id")
             .execute(&pool)
             .await;
+        let stranger = person(&pool, ws, "stranger@example.com").await;
+        let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
+            .bind(stranger)
+            .execute(&pool)
+            .await;
         sqlx::query("DELETE FROM consent_changes")
             .execute(&pool)
             .await
@@ -661,26 +666,57 @@ mod tests {
         assert!(rewrite.unwrap_err().to_string().contains("append-only"));
         assert!(evidence.is_err());
         assert!(repoint.is_ok());
+        assert!(to_stranger.unwrap_err().to_string().contains("survivor"));
         assert_eq!(count(&pool, "consent_changes").await, 0);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn evidence_over_four_kib_or_not_an_object_is_refused_by_the_database(pool: PgPool) {
+    async fn history_moves_only_to_the_survivor_of_a_merge(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let loser = person(&pool, ws, "ada@example.com").await;
+        let survivor = person(&pool, ws, "ada2@example.com").await;
+        let stranger = person(&pool, ws, "bob@example.com").await;
+        let trace = TraceContext::root(Cause::api("test"));
+        set(
+            &pool,
+            ws,
+            &change(loser, None, ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(loser)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
+            .bind(stranger)
+            .execute(&pool)
+            .await;
+        let to_survivor = sqlx::query("UPDATE consent_changes SET person_id = $1")
+            .bind(survivor)
+            .execute(&pool)
+            .await;
+
+        assert!(to_stranger.is_err());
+        assert_eq!(to_survivor.unwrap().rows_affected(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn evidence_that_is_not_an_object_is_refused_by_the_database(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let ada = person(&pool, ws, "ada@example.com").await;
         let trace = TraceContext::root(Cause::api("test"));
         let mut tx = begin(&pool).await.unwrap();
-        let mut big = change(ada, None, ConsentStatus::Subscribed, T1);
-        big.evidence = json!({"text": "x".repeat(5000)});
+        let mut array = change(ada, None, ConsentStatus::Subscribed, T1);
+        array.evidence = json!(["x"]);
 
-        let too_big = set_consent(&mut tx, ws, &big, &trace).await;
-        drop(tx);
-        let mut tx = begin(&pool).await.unwrap();
-        big.evidence = json!(["x"]);
-        let not_object = set_consent(&mut tx, ws, &big, &trace).await;
+        let not_object = set_consent(&mut tx, ws, &array, &trace).await;
 
-        assert!(too_big.is_err());
         assert!(not_object.is_err());
     }
 }

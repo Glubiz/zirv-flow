@@ -17,6 +17,8 @@ pub const SUPPRESSION_KINDS: [&str; 2] = ["email", "phone"];
 /// A suppression as stored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Suppression {
+    /// An opaque handle for paging; unlike the hash it is safe to hand out.
+    pub id: Uuid,
     pub identifier_hash: [u8; 32],
     pub kind: String,
     pub reason: SuppressionReason,
@@ -67,6 +69,7 @@ pub enum RemoveOutcome {
 
 #[derive(FromRow)]
 struct SuppressionRow {
+    id: Uuid,
     identifier_hash: Vec<u8>,
     kind: String,
     reason: String,
@@ -83,6 +86,7 @@ fn corrupt(what: &'static str) -> StoreError {
 impl SuppressionRow {
     fn into_suppression(self) -> Result<Suppression, StoreError> {
         Ok(Suppression {
+            id: self.id,
             identifier_hash: self
                 .identifier_hash
                 .try_into()
@@ -111,8 +115,8 @@ pub async fn add_suppression<'e>(
             SELECT reason FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2), \
          written AS (\
             INSERT INTO suppressions \
-                (workspace_id, identifier_hash, kind, reason, source, note, created_by) \
-            VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                (workspace_id, identifier_hash, kind, reason, source, note, created_by, id) \
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
             ON CONFLICT (workspace_id, identifier_hash) DO UPDATE \
                 SET reason = EXCLUDED.reason, source = EXCLUDED.source \
                 WHERE EXCLUDED.reason = 'erased' AND suppressions.reason <> 'erased' \
@@ -127,6 +131,7 @@ pub async fn add_suppression<'e>(
     .bind(new.source)
     .bind(new.note)
     .bind(new.created_by)
+    .bind(Uuid::now_v7())
     .fetch_one(executor)
     .await
     .map_err(StoreError::query)?;
@@ -156,11 +161,12 @@ pub async fn add_suppressions<'e>(
         .collect();
     let kinds: Vec<&str> = entries.iter().map(|entry| entry.kind).collect();
     let notes: Vec<Option<&str>> = entries.iter().map(|entry| entry.note).collect();
+    let ids: Vec<Uuid> = entries.iter().map(|_| Uuid::now_v7()).collect();
     let added = sqlx::query(
         "INSERT INTO suppressions \
-            (workspace_id, identifier_hash, kind, reason, source, note, created_by) \
-         SELECT $1, hash, kind, $4, $5, note, $6 \
-         FROM unnest($2::bytea[], $3::text[], $7::text[]) AS t(hash, kind, note) \
+            (workspace_id, identifier_hash, kind, reason, source, note, created_by, id) \
+         SELECT $1, hash, kind, $4, $5, note, $6, id \
+         FROM unnest($2::bytea[], $3::text[], $7::text[], $8::uuid[]) AS t(hash, kind, note, id) \
          ON CONFLICT (workspace_id, identifier_hash) DO NOTHING",
     )
     .bind(workspace.as_uuid())
@@ -170,6 +176,7 @@ pub async fn add_suppressions<'e>(
     .bind(source)
     .bind(created_by)
     .bind(notes)
+    .bind(ids)
     .execute(executor)
     .await
     .map_err(StoreError::query)?
@@ -229,7 +236,7 @@ pub async fn find_suppression<'e>(
     identifier_hash: &[u8; 32],
 ) -> Result<Option<Suppression>, StoreError> {
     let row: Option<SuppressionRow> = sqlx::query_as(
-        "SELECT identifier_hash, kind, reason, source, note, created_at, created_by \
+        "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
          FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2",
     )
     .bind(workspace.as_uuid())
@@ -258,10 +265,10 @@ pub async fn is_suppressed<'e>(
     Ok(found)
 }
 
-/// The position after a listed suppression: its time and hash.
-pub type SuppressionCursor = (OffsetDateTime, [u8; 32]);
+/// The position after a listed suppression: its time and id.
+pub type SuppressionCursor = (OffsetDateTime, Uuid);
 
-/// A page of suppressions, newest first by `(created_at, hash)`, at most `limit`, after the
+/// A page of suppressions, newest first by `(created_at, id)`, at most `limit`, after the
 /// `before` cursor and optionally of one reason. The flag is true when more existed.
 pub async fn list_suppressions<'e>(
     executor: impl PgExecutor<'e>,
@@ -271,23 +278,23 @@ pub async fn list_suppressions<'e>(
     reason: Option<SuppressionReason>,
 ) -> Result<(Vec<Suppression>, bool), StoreError> {
     let mut query = QueryBuilder::new(
-        "SELECT identifier_hash, kind, reason, source, note, created_at, created_by \
+        "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
          FROM suppressions WHERE workspace_id = ",
     );
     query.push_bind(workspace.as_uuid());
     if let Some(reason) = reason {
         query.push(" AND reason = ").push_bind(reason.as_str());
     }
-    if let Some((created_at, hash)) = before {
+    if let Some((created_at, id)) = before {
         query
-            .push(" AND (created_at, identifier_hash) < (")
+            .push(" AND (created_at, id) < (")
             .push_bind(created_at)
             .push(", ")
-            .push_bind(hash.to_vec())
+            .push_bind(id)
             .push(")");
     }
     query
-        .push(" ORDER BY created_at DESC, identifier_hash DESC LIMIT ")
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
         .push_bind(i64::from(limit) + 1);
     let rows: Vec<SuppressionRow> = query
         .build_query_as()
@@ -549,15 +556,10 @@ mod tests {
 
         let (first, more) = list_suppressions(&pool, ws, 2, None, None).await.unwrap();
         let last = first.last().unwrap();
-        let (second, more_after) = list_suppressions(
-            &pool,
-            ws,
-            2,
-            Some((last.created_at, last.identifier_hash)),
-            None,
-        )
-        .await
-        .unwrap();
+        let (second, more_after) =
+            list_suppressions(&pool, ws, 2, Some((last.created_at, last.id)), None)
+                .await
+                .unwrap();
         let (bounces, _) =
             list_suppressions(&pool, ws, 10, None, Some(SuppressionReason::HardBounce))
                 .await

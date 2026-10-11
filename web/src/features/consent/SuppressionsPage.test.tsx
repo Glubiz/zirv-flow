@@ -231,7 +231,7 @@ describe("suppressions", () => {
     await user.click(form.getByRole("button", { name: "Preview" }));
 
     expect(await form.findByText(/1 address would be suppressed, 2 already suppressed/)).toBeInTheDocument();
-    expect(form.getByText(/Row 3: Not a valid email address/)).toBeInTheDocument();
+    expect(form.getByText(/Line 3: Not a valid email address/)).toBeInTheDocument();
     expect(calls.filter((call) => call.path.endsWith("/import"))).toHaveLength(1);
     await user.click(form.getByRole("button", { name: "Import" }));
 

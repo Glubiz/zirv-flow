@@ -18,8 +18,9 @@ CREATE TABLE topics (
     UNIQUE (workspace_id, key)
 );
 
--- The append-only history of consent decisions. Only person_id may change, because a merge
--- moves the history to the surviving person; DELETE stays allowed for erasure.
+-- The append-only history of consent decisions. Only person_id may change, and only to the
+-- person its owner was merged into, because a merge moves the history to the survivor; DELETE
+-- stays allowed for erasure.
 CREATE TABLE consent_changes (
     id            uuid PRIMARY KEY,
     workspace_id  uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
@@ -34,9 +35,9 @@ CREATE TABLE consent_changes (
         ('subscribed', 'unsubscribed', 'pending_confirmation', 'unknown')),
     source        text NOT NULL CHECK (source IN
         ('api', 'ui', 'import', 'merge', 'unsubscribe_link', 'ingest')),
-    -- Free keys such as ip, user_agent, form or text; at most 4 KiB.
+    -- Free keys such as ip, user_agent, form or text. The API limits the size.
     evidence      jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(evidence) = 'object' AND octet_length(evidence::text) <= 4096),
+        CHECK (jsonb_typeof(evidence) = 'object'),
     occurred_at   timestamptz NOT NULL,
     actor_user_id uuid,
     trace_id      uuid NOT NULL,
@@ -57,6 +58,12 @@ BEGIN
            OLD.trace_id, OLD.recorded_at)
     THEN
         RAISE EXCEPTION 'consent_changes is append-only';
+    END IF;
+    IF NEW.person_id IS DISTINCT FROM OLD.person_id
+       AND NEW.person_id IS DISTINCT FROM
+           (SELECT merged_into FROM people WHERE id = OLD.person_id)
+    THEN
+        RAISE EXCEPTION 'consent_changes can only move to the survivor of a merge';
     END IF;
     RETURN NEW;
 END;
@@ -82,6 +89,8 @@ CREATE TABLE consent (
 );
 
 CREATE TABLE suppressions (
+    -- Opaque handle for paging, so a cursor never carries the hash.
+    id              uuid NOT NULL,
     workspace_id    uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     -- HMAC-SHA256 of "<kind>:<normalized value>"; the value itself is never stored.
     identifier_hash bytea NOT NULL CHECK (octet_length(identifier_hash) = 32),
@@ -96,5 +105,6 @@ CREATE TABLE suppressions (
     PRIMARY KEY (workspace_id, identifier_hash)
 );
 
+CREATE UNIQUE INDEX suppressions_id_idx ON suppressions (workspace_id, id);
 CREATE INDEX suppressions_listing_idx
-    ON suppressions (workspace_id, created_at DESC, identifier_hash DESC);
+    ON suppressions (workspace_id, created_at DESC, id DESC);

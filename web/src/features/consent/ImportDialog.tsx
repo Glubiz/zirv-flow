@@ -104,7 +104,7 @@ export function ImportDialog({ workspaceId, onClose, onImported }: ImportDialogP
                 <ul className="list-plain">
                   {current.invalid.slice(0, 20).map((row) => (
                     <li key={row.row}>
-                      Row {row.row}: {rowProblemLabel(row.reason)}
+                      Line {row.row}: {rowProblemLabel(row.reason)}
                     </li>
                   ))}
                 </ul>

@@ -520,7 +520,7 @@ topic. Otherwise a topic's own state is read through its policy: an `opt_in` top
 
 Every change is appended to a history with its source (`api`, `ui`, `import`, `merge`,
 `unsubscribe_link` or `ingest`), the user behind it, when it happened and free-form evidence
-(for example `ip`, `user_agent`, `form` or `text`; a JSON object of at most 4 KiB). Writing
+(for example `ip`, `user_agent`, `form` or `text`; a JSON object of at most 4096 bytes written compactly). Writing
 the status a person already has changes nothing and leaves no history. History rows cannot be
 edited. Read and write a person's consent with
 `GET` and `PUT /api/v1/workspaces/{ws}/people/{id}/consent` (`{"channel": "email",
@@ -558,8 +558,9 @@ suppression endpoints answer 503.
   of the hash, never the full hash or the value.
 - `POST .../suppressions/import` takes `text/csv` (at most 10 MiB and 100,000 rows) with the
   header `kind,value` or `kind,value,note`. Add `?dry_run=true` to preview. The answer is
-  `{added, existing, invalid: [{row, reason}]}`, where `row` is the record number in the file
-  (the header is 1) and `reason` a code such as `invalid_email`; values are never echoed.
+  `{added, existing, invalid: [{row, reason}]}`, where `row` is the line of the file the row
+  starts on (the header is line 1; blank lines are skipped but counted, and a line break inside
+  a quoted value counts) and `reason` a code such as `invalid_email`; values are never echoed.
 - `GET .../suppressions/export` (admin) streams `hash,kind,reason,source,created_at`. Because
   values are not stored, the export holds hashes only.
 

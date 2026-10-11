@@ -10,8 +10,6 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,7 +29,7 @@ use super::{bool_param, csv, hex, origin};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT};
+use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -123,7 +121,8 @@ pub(crate) struct CheckBody {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct InvalidRowBody {
-    /// The 1-based record number in the file, the header being record 1.
+    /// The 1-based line of the file the row starts on, the header being line 1. Blank lines are
+    /// skipped but counted, and a line break inside a quoted value counts as a line.
     row: usize,
     /// A stable code, never the value: `malformed_row`, `unsupported_kind`,
     /// `invalid_email`, `invalid_phone`, `note_too_long` or `note_contains_value`.
@@ -289,11 +288,12 @@ impl ParsedImport {
 }
 
 /// Reads the CSV: a header `kind,value` or `kind,value,note`, then one record per
-/// identifier. Bad rows are listed by number and code; the rest are hashed.
+/// identifier. Bad rows are listed by line number and code; the rest are hashed.
 fn parse_import(text: &str, key: &HmacKey) -> Result<ParsedImport, AdminError> {
     let mut records = csv::parse(text).into_iter();
     let header: Vec<String> = records
         .next()
+        .map(|record| record.fields)
         .unwrap_or_default()
         .into_iter()
         .map(|name| name.trim().to_lowercase())
@@ -301,7 +301,7 @@ fn parse_import(text: &str, key: &HmacKey) -> Result<ParsedImport, AdminError> {
     if header != ["kind", "value"] && header != ["kind", "value", "note"] {
         return Err(refused("header", "must be kind,value or kind,value,note"));
     }
-    let records: Vec<Vec<String>> = records.collect();
+    let records: Vec<csv::Record> = records.collect();
     if records.len() > MAX_IMPORT_ROWS {
         return Err(refused("rows", "must be at most 100000 rows"));
     }
@@ -311,8 +311,11 @@ fn parse_import(text: &str, key: &HmacKey) -> Result<ParsedImport, AdminError> {
         invalid: Vec::new(),
     };
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
-    for (index, record) in records.into_iter().enumerate() {
-        let row = index + 2;
+    for csv::Record {
+        line: row,
+        fields: record,
+    } in records
+    {
         if record.len() < 2 || record.len() > header.len() {
             parsed.reject(row, "malformed_row");
             continue;
@@ -413,27 +416,6 @@ pub(crate) async fn import(
     })
 }
 
-fn encode_cursor((created_at, hash): SuppressionCursor) -> String {
-    let micros = created_at.unix_timestamp_nanos() / 1000;
-    URL_SAFE_NO_PAD.encode(format!("{micros}:{}", hex(&hash)))
-}
-
-fn decode_cursor(cursor: &str) -> Option<SuppressionCursor> {
-    let text = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor).ok()?).ok()?;
-    let (micros, hash) = text.split_once(':')?;
-    let created_at =
-        OffsetDateTime::from_unix_timestamp_nanos(micros.parse::<i128>().ok()?.checked_mul(1000)?)
-            .ok()?;
-    if hash.len() != 64 || !hash.is_ascii() {
-        return None;
-    }
-    let mut bytes = [0_u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some((created_at, bytes))
-}
-
 type ListQuery = (u32, Option<SuppressionCursor>, Option<SuppressionReason>);
 
 fn parse_list_query(query: &str) -> Result<ListQuery, ApiError> {
@@ -500,7 +482,7 @@ pub(crate) async fn list(
         zirv_flow_store::list_suppressions(&state.pool, workspace.id, limit, before, reason)
             .await?;
     let next_before = match page.last() {
-        Some(last) if more => Some(encode_cursor((last.created_at, last.identifier_hash))),
+        Some(last) if more => Some(encode_cursor((last.created_at, last.id))),
         _ => None,
     };
     Ok(Json(SuppressionsBody {
@@ -625,7 +607,7 @@ pub(crate) async fn remove_handler(
 
 /// Imports suppressions from a CSV body (`text/csv`, at most 10 MiB and 100,000 rows) with
 /// the header `kind,value` or `kind,value,note`. With `dry_run=true` nothing is written and
-/// the answer says what a commit would do. Invalid rows are reported by record number and
+/// the answer says what a commit would do. Invalid rows are reported by line number and
 /// code, never by value. Audited as `suppression.imported` with counts only.
 #[utoipa::path(
     post,
@@ -757,7 +739,7 @@ pub(crate) async fn export(
                         Ok((page, more)) => {
                             let next = match page.last() {
                                 Some(last) if more => {
-                                    Export::Page(Some((last.created_at, last.identifier_hash)))
+                                    Export::Page(Some((last.created_at, last.id)))
                                 }
                                 _ => Export::Done,
                             };
@@ -788,6 +770,8 @@ pub(crate) async fn export(
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use zirv_flow_core::HmacPurpose;
     use zirv_flow_core::MasterKey;
 
@@ -928,19 +912,47 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_cursor_round_trips_and_refuses_garbage() {
+    fn the_listing_cursor_carries_the_id_and_never_the_hash() {
         let at = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_001_000).unwrap();
+        let id = Uuid::now_v7();
         let hash = hash_of("ada@example.com");
 
-        assert_eq!(decode_cursor(&encode_cursor((at, hash))), Some((at, hash)));
-        for bad in [
-            "",
-            "!!",
-            &URL_SAFE_NO_PAD.encode("1:zz"),
-            &URL_SAFE_NO_PAD.encode("x"),
-        ] {
-            assert_eq!(decode_cursor(bad), None, "{bad}");
-        }
+        let cursor = encode_cursor((at, id));
+
+        assert_eq!(decode_cursor(&cursor), Some((at, id)));
+        let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(&cursor).unwrap()).unwrap();
+        assert!(!decoded.contains(&hex(&hash)) && !cursor.contains(&hex(&hash)));
+        assert!(decoded.contains(&id.to_string()));
+        assert_eq!(decode_cursor("!!"), None);
+    }
+
+    #[test]
+    fn rows_are_reported_by_the_line_they_start_on() {
+        let text = "kind,value,note
+
+email,nope,
+\"email\",\"b@example.com\",\"two
+lines\"
+email,bad2
+fax,1
+";
+
+        let parsed = parse_import(text, &key()).unwrap();
+
+        let lines: Vec<(usize, &str)> = parsed
+            .invalid
+            .iter()
+            .map(|row| (row.row, row.reason.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (3, "invalid_email"),
+                (6, "invalid_email"),
+                (7, "unsupported_kind")
+            ]
+        );
+        assert_eq!(parsed.entries.len(), 1);
     }
 
     #[test]
@@ -969,6 +981,7 @@ mod tests {
     #[test]
     fn a_listed_suppression_shows_a_four_byte_prefix_and_never_the_whole_hash() {
         let suppression = Suppression {
+            id: Uuid::now_v7(),
             identifier_hash: hash_of("ada@example.com"),
             kind: "email".into(),
             reason: SuppressionReason::Manual,
@@ -988,6 +1001,7 @@ mod tests {
     #[test]
     fn an_export_line_holds_the_hash_and_no_value() {
         let suppression = Suppression {
+            id: Uuid::now_v7(),
             identifier_hash: [0xab; 32],
             kind: "email".into(),
             reason: SuppressionReason::Erased,

@@ -75,7 +75,7 @@ pub(crate) struct SetConsentRequest {
     #[schema(example = "unsubscribed")]
     status: String,
     /// What proves the decision, such as `ip`, `user_agent`, `form` or `text`. A JSON object
-    /// of at most 4 KiB.
+    /// of at most 4 KiB as compact JSON.
     #[serde(default)]
     #[schema(value_type = Option<Object>)]
     evidence: Option<Value>,

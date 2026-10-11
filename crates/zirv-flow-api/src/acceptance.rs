@@ -5257,4 +5257,135 @@ mod tests {
             assert_eq!(entry["masked"], false);
         }
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn evidence_at_the_size_limit_is_stored_and_one_byte_over_is_a_422(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let mut evidence = serde_json::Map::new();
+        let mut index = 0;
+        while serde_json::Value::Object(evidence.clone())
+            .to_string()
+            .len()
+            <= 4096
+        {
+            evidence.insert(format!("k{index:04}"), json!("v"));
+            index += 1;
+        }
+        let over = evidence.clone();
+        evidence.remove(&format!("k{:04}", index - 1));
+        let mut at_limit = evidence;
+        // Pad one value so the compact form is exactly 4096 bytes.
+        let short = serde_json::Value::Object(at_limit.clone())
+            .to_string()
+            .len();
+        at_limit.insert(
+            "k0000".into(),
+            json!(format!("v{}", "x".repeat(4096 - short))),
+        );
+        assert_eq!(
+            serde_json::Value::Object(at_limit.clone())
+                .to_string()
+                .len(),
+            4096
+        );
+        let put = |evidence: serde_json::Map<String, serde_json::Value>, status: &'static str| {
+            let router = router.clone();
+            let uri = consent_uri(&ws, &person);
+            let owner = &owner;
+            async move {
+                call(
+                    &router,
+                    "PUT",
+                    &uri,
+                    Some(json!({"channel": "email", "status": status, "evidence": evidence})),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+
+        let accepted = put(at_limit.clone(), "subscribed").await;
+        let refused = put(over, "unsubscribed").await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let stored: serde_json::Value = sqlx::query_scalar("SELECT evidence FROM consent_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, serde_json::Value::Object(at_limit));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_suppression_cursor_is_opaque_and_import_errors_name_the_line(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let csv = "kind,value,note
+
+email,a@example.com,\"two
+lines\"
+email,nope,
+email,b@example.com,
+";
+
+        let imported = call_text(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/import"),
+            Some("text/csv"),
+            csv.to_owned(),
+            Auth::Session(&owner),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&imported.text).unwrap();
+        assert_eq!(
+            body["invalid"],
+            json!([{"row": 5, "reason": "invalid_email"}])
+        );
+        assert_eq!(body["added"], 2);
+
+        let page = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "?limit=1"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = page.body["next_before"].as_str().unwrap();
+        let decoded = {
+            use base64::Engine;
+            String::from_utf8(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(cursor)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let hashes: Vec<Vec<u8>> = sqlx::query_scalar("SELECT identifier_hash FROM suppressions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(hashes.len(), 2);
+        for hash in hashes {
+            let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert!(!decoded.contains(&hex) && !cursor.contains(&hex));
+        }
+        let next = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, &format!("?limit=1&before={cursor}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(next.body["suppressions"].as_array().unwrap().len(), 1);
+        assert_eq!(next.body["next_before"], serde_json::Value::Null);
+    }
 }
