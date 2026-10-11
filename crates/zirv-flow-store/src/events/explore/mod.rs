@@ -998,6 +998,27 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_rfc_3339_timestamps_parse_in_a_timestamp_filter(pool: PgPool) {
+        let parsed: Vec<(String, Option<OffsetDateTime>)> = sqlx::query_as(
+            "SELECT v, zf_try_timestamptz(v) FROM unnest(ARRAY[                'now', 'today', 'infinity', 'epoch', '2026-06-01 12:00:00',                 '2026-06-01T12:00:00', '2026-06-01T12:00:00+0200', '2026-13-01T12:00:00Z',                 '2026-06-01T12:00:00Z', '2026-06-01T12:00:00.25+02:00']) AS v",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let accepted: Vec<&str> = parsed
+            .iter()
+            .filter(|(_, at)| at.is_some())
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert_eq!(
+            accepted,
+            ["2026-06-01T12:00:00Z", "2026-06-01T12:00:00.25+02:00"]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_undeclared_property_is_compared_as_text_across_names(pool: PgPool) {
         let ws = fixture(&pool).await;
         let filters = [eq("path", json!("/home"))];

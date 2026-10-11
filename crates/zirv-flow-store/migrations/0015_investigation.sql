@@ -41,10 +41,15 @@ CREATE INDEX debugger_feed_at_idx ON debugger_feed (at);
 CREATE INDEX events_time_idx ON events (workspace_id, occurred_at DESC);
 
 -- A timestamp filter of the explorer reads a stored property that a flagged event may hold in
--- the wrong shape: an unparsable value compares as absent instead of failing the query.
+-- the wrong shape: a value that is not an RFC 3339 timestamp compares as absent instead of
+-- failing the query. PostgreSQL's own special strings (now, today, infinity) and values
+-- without a zone are not RFC 3339 and are refused before the cast.
 CREATE FUNCTION zf_try_timestamptz(value text) RETURNS timestamptz
 LANGUAGE plpgsql STABLE AS $$
 BEGIN
+    IF value !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$' THEN
+        RETURN NULL;
+    END IF;
     RETURN value::timestamptz;
 EXCEPTION WHEN others THEN
     RETURN NULL;
