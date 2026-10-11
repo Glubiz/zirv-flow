@@ -341,6 +341,32 @@ session) and CSRF. Identifier values on the member page use the same masking as 
 review. The CSV import resolves identifiers to existing people and never creates one; its
 dry run runs the real transaction and rolls it back, so its counts are exact.
 
+As built (consent, topics and suppressions):
+
+- **Rules.** `core::consent` holds the pure rules: `Channel` (only `email`), `ConsentStatus`,
+  `TopicPolicy`, `allowed(channel_wide, topic, policy)` for the M5 send gate and `merge` for
+  two people's states. `core::people::identifier_hash` is the `Identifier`-purpose HMAC of
+  `<kind>:<normalized value>`; the workspace is left out so organization-wide suppression
+  (OQ-19, still open) and the erasure ledger can reuse a hash.
+- **Tables** (migration `0008_consent.sql`). `topics` (unique `(workspace_id, key)`),
+  `consent` (one row per person, channel and topic, `topic_id` null for the whole channel,
+  unique with `NULLS NOT DISTINCT`), `consent_changes` (the history: from and to status,
+  source, evidence up to 4 KiB, actor, trace) and `suppressions` (primary key
+  `(workspace_id, identifier_hash)`). A trigger refuses any update of `consent_changes` other
+  than re-pointing `person_id`, which a merge needs; deletes stay possible for erasure.
+  `suppressions` has no `person_id` and survives erasure by design; the other three are
+  covered by the isolation tests and the erasure scan.
+- **Writes.** `store::set_consent` locks the person row, follows `merged_into`, treats a write of
+  the status already held as a no-op (no history row, no decision), and otherwise upserts the
+  state, appends the history row and a `consent.change` decision (reason is the source code,
+  subjects are the person and the change). `store::consent::move_on_merge` runs inside the merge
+  transaction: per channel and topic of the loser it applies `core::consent::merge` against the
+  survivor, records a `merge` history row when the status changes, deletes the loser's states
+  and re-points its history.
+- **Suppressions.** `add_suppression` keeps the first reason, `erased` overwrites; `erased`
+  rows are never deleted by `remove_suppression`. Import and export hash and stream in the API
+  crate; the store sees hashes only.
+
 ## 7. Data sources and ingestion
 
 ### 7.1 Paths and the common write path
