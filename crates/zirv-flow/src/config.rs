@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 30] = [
+const CONFIG_KEYS: [&str; 31] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -41,6 +41,7 @@ const CONFIG_KEYS: [&str; 30] = [
     "ingest.rate_per_key",
     "ingest.burst_per_key",
     "ingest.drain_batch_size",
+    "imports.max_file_bytes",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -64,6 +65,7 @@ pub(crate) struct Config {
     worker: WorkerConfig,
     events: EventsConfig,
     ingest: IngestConfig,
+    imports: ImportsConfig,
     log: LogConfig,
 }
 
@@ -262,6 +264,14 @@ struct IngestConfig {
     drain_batch_size: u32,
 }
 
+/// What a CSV upload may be.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportsConfig {
+    /// The largest uploaded file, in bytes.
+    max_file_bytes: u64,
+}
+
 struct SecretUrl(Url);
 
 impl SecretUrl {
@@ -403,6 +413,10 @@ impl Config {
             .merge(Serialized::default("ingest.rate_per_key", 10_000_u32))
             .merge(Serialized::default("ingest.burst_per_key", 20_000_u32))
             .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
+            .merge(Serialized::default(
+                "imports.max_file_bytes",
+                536_870_912_u64,
+            ))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -477,6 +491,13 @@ impl Config {
 
         config.validate_events(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
+        if config.imports.max_file_bytes == 0 {
+            return Err(ConfigError::new(
+                "imports.max_file_bytes",
+                "must be at least 1",
+                source_for("imports.max_file_bytes", path, &env_sources),
+            ));
+        }
 
         if !crate::log::is_valid_filter(&config.log.filter) {
             return Err(ConfigError::new(
@@ -721,6 +742,13 @@ impl Config {
             max_batch_items: self.ingest.max_batch_items as usize,
             rate_per_key: self.ingest.rate_per_key,
             burst_per_key: self.ingest.burst_per_key,
+        }
+    }
+
+    /// What a CSV upload may be.
+    pub(crate) fn import_limits(&self) -> zirv_flow_api::ImportLimits {
+        zirv_flow_api::ImportLimits {
+            max_file_bytes: self.imports.max_file_bytes,
         }
     }
 
@@ -1611,6 +1639,33 @@ endpoint = \"http://collector:4318\"
             (2048, 10, 5, 50)
         );
         assert_eq!(config.ingest_drain_batch_size(), 25);
+    }
+
+    #[test]
+    fn the_import_upload_limit_defaults_to_512_mib_and_can_be_set() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_IMPORTS__MAX_FILE_BYTES".into(), "2048".into()));
+        let set = Config::load(None, env).unwrap();
+
+        assert_eq!(
+            defaults.import_limits(),
+            zirv_flow_api::ImportLimits::default()
+        );
+        assert_eq!(defaults.import_limits().max_file_bytes, 536_870_912);
+        assert_eq!(set.import_limits().max_file_bytes, 2048);
+        assert!(toml::to_string(&defaults).unwrap().contains("[imports]"));
+    }
+
+    #[test]
+    fn the_import_upload_limit_must_be_positive() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_IMPORTS__MAX_FILE_BYTES".into(), "0".into()));
+
+        let error = Config::load(None, env).unwrap_err().to_string();
+
+        assert!(error.contains("imports.max_file_bytes"), "{error}");
+        assert!(error.contains("must be at least 1"), "{error}");
     }
 
     #[test]

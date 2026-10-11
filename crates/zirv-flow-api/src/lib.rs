@@ -7,6 +7,7 @@ mod cookies;
 mod credentials;
 mod events;
 mod health;
+mod imports;
 mod ingest;
 mod jobs_admin;
 mod json;
@@ -44,6 +45,7 @@ use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use imports::ImportLimits;
 pub use ingest::IngestLimits;
 pub use oidc::redirect_url as oidc_redirect_url;
 pub use openapi::openapi;
@@ -243,6 +245,40 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/privacy/settings",
             get(privacy::settings::get).put(privacy::settings::put),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports",
+            get(imports::crud::list)
+                .post(imports::upload::upload)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}",
+            get(imports::crud::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/mapping",
+            put(imports::crud::put_mapping),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/dry-run",
+            post(imports::crud::dry_run),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/run",
+            post(imports::crud::run),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/cancel",
+            post(imports::crud::cancel),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/rejects",
+            get(imports::rejects::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv",
+            get(imports::rejects::download),
         )
         .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",
