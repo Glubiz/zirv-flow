@@ -329,6 +329,8 @@ jobs:
   container-smoke-test:
     name: Container Smoke Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - name: Checkout Code

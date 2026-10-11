@@ -44,12 +44,13 @@ docker compose exec -T zirv-flow zirv-flow admin create-owner --email you@exampl
 
 Run it from an interactive terminal and type the password, or pipe it in from a
 file or a secret store. The compose file's database credentials are local-use
-defaults (`POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` override them);
-change them before exposing the stack anywhere else. The stack serves plain
-HTTP on port 8080 and applies migrations on start. Session cookies are `Secure`,
-which browsers accept over plain HTTP only on `localhost`; to sign in from
-another host, put TLS in front or set `ZIRV_FLOW_SERVER__COOKIE_SECURE=false`
-for development. Stop it with `docker compose down`, add `-v` to delete the
+defaults (`POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` override them;
+the password goes into a URL, so keep `@ : / # ?` out of it); change them
+before exposing the stack anywhere else. The stack serves plain HTTP on
+`127.0.0.1:8080` and applies migrations on start. Session cookies are `Secure`,
+which browsers accept over plain HTTP only on `localhost`; to serve another
+host, change the published port and put TLS in front, or set
+`ZIRV_FLOW_SERVER__COOKIE_SECURE=false` for development. Stop it with `docker compose down`, add `-v` to delete the
 database volume as well.
 
 The image is published to GHCR on each release as

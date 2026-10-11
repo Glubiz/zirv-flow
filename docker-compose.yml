@@ -28,7 +28,7 @@ services:
       ZIRV_FLOW_DATABASE__URL: postgres://${POSTGRES_USER:-zirv}:${POSTGRES_PASSWORD:-zirv-quickstart}@postgres:5432/${POSTGRES_DB:-zirv_flow}
       ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "true"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
 
 volumes:
   postgres-data:
