@@ -29,7 +29,7 @@ use super::{bool_param, csv, hex, origin};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
+use crate::jobs_admin::{DEFAULT_LIMIT, decode_cursor, encode_cursor, parse_limit};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -423,13 +423,7 @@ fn parse_list_query(query: &str) -> Result<ListQuery, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => {
-                limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
+                limit = parse_limit(&value)?;
             }
             "before" => {
                 before = Some(

@@ -9,10 +9,10 @@ use sqlx::PgConnection;
 use crate::{StoreError, Tx, begin};
 
 /// How long a search or timeline read may run before PostgreSQL cancels it.
-pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sets the statement timeout for the rest of the transaction.
-pub(crate) async fn limit_statements(
+async fn limit_statements(
     connection: &mut PgConnection,
     timeout: Duration,
 ) -> Result<(), StoreError> {

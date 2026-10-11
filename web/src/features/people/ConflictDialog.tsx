@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, formatDateTime, InlineError, kindLabel, Pill, ResourceView, shortId } from "../../ui";
-import { reasonExplanation, resolutionLabel } from "./identityKinds";
+import { reasonExplanation, resolutionLabel } from "./conflictLabels";
 import type { Conflict } from "./useConflicts";
 
 type Person = components["schemas"]["PersonIdentitiesBody"];

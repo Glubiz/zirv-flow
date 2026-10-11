@@ -19,7 +19,7 @@ use zirv_flow_store::{
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::consent::bool_param;
-use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT};
+use crate::jobs_admin::{DEFAULT_LIMIT, parse_limit};
 use crate::problem::{ApiError, Problem};
 
 #[derive(Serialize, ToSchema)]
@@ -172,13 +172,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => {
-                limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
+                limit = parse_limit(&value)?;
             }
             "before" => {
                 before = Some(

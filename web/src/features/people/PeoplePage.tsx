@@ -165,7 +165,7 @@ function TraitForm({ workspaceId, onSearch }: { workspaceId: string; onSearch: (
   if (!chosen) {
     return null;
   }
-  const type = chosen.type;
+  const { key: chosenKey, type } = chosen;
   const operators = operatorsFor(type);
   const active = operators.some((option) => option.value === operator) ? operator : "eq";
 
@@ -177,7 +177,7 @@ function TraitForm({ workspaceId, onSearch }: { workspaceId: string; onSearch: (
       return;
     }
     setProblem(null);
-    onSearch({ trait: { key: chosen?.key ?? key, op: active, value: parsed.value } });
+    onSearch({ trait: { key: chosenKey, op: active, value: parsed.value } });
   }
 
   return (
@@ -185,7 +185,7 @@ function TraitForm({ workspaceId, onSearch }: { workspaceId: string; onSearch: (
       <div className="row">
         <SelectField
           label="Field"
-          value={chosen.key}
+          value={chosenKey}
           onChange={(event) => {
             setKey(event.target.value);
             setOperator("eq");

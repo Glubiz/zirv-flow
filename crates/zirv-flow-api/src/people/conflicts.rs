@@ -15,7 +15,7 @@ use zirv_flow_store::{ConflictResolution, IdentityConflict, PgPool, ResolveError
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
-use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
+use crate::jobs_admin::{DEFAULT_LIMIT, decode_cursor, encode_cursor, parse_limit};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -116,13 +116,7 @@ fn parse_page(query: &str) -> Result<PageQuery, ApiError> {
                 };
             }
             "limit" => {
-                limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
+                limit = parse_limit(&value)?;
             }
             "before" => {
                 before = Some(

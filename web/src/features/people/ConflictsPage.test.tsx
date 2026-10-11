@@ -6,7 +6,7 @@ import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockA
 import { renderRoute } from "../../test/renderFeature";
 import { ConflictsPage } from "./ConflictsPage";
 import { kindLabel } from "../../ui";
-import { reasonExplanation, reasonLabel, resolutionLabel } from "./identityKinds";
+import { reasonExplanation, reasonLabel, resolutionLabel } from "./conflictLabels";
 
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "bbbbbbbb-0000-4000-8000-000000000002";

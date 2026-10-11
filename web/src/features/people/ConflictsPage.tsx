@@ -16,7 +16,7 @@ import {
 } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { ConflictDialog } from "./ConflictDialog";
-import { reasonLabel, resolutionLabel } from "./identityKinds";
+import { reasonLabel, resolutionLabel } from "./conflictLabels";
 import { useConflicts, type Conflict, type ConflictStatus } from "./useConflicts";
 
 export function ConflictsPage() {

@@ -229,19 +229,22 @@ pub(crate) async fn retry(
     Ok(Json(JobBody::from(job)))
 }
 
+/// The `limit` query parameter of a paged list: 1 to [`MAX_LIMIT`].
+pub(crate) fn parse_limit(value: &str) -> Result<u32, ApiError> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|limit| (1..=MAX_LIMIT).contains(limit))
+        .ok_or_else(|| ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}")))
+}
+
 pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiError> {
     let mut limit = DEFAULT_LIMIT;
     let mut before = None;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => {
-                limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
+                limit = parse_limit(&value)?;
             }
             "before" => {
                 before = Some(
