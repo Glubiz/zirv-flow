@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_registry_ships_the_noop_merge_rewrite_recompute_retention_and_drain_kinds() {
+    fn the_built_in_registry_ships_every_built_in_kind() {
         let registry = Registry::built_in();
 
         assert_eq!(
@@ -111,7 +111,9 @@ mod tests {
                 "person.merge.rewrite",
                 "traits.recompute",
                 "events.retention",
-                "ingest.drain"
+                "ingest.drain",
+                "privacy.erase",
+                "privacy.export"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -141,6 +143,8 @@ mod tests {
                 "traits.recompute",
                 "events.retention",
                 "ingest.drain",
+                "privacy.erase",
+                "privacy.export",
                 "test.first",
                 "test.second"
             ]
