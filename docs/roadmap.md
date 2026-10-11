@@ -137,7 +137,7 @@ and erasure working from the start.
 **Scope.**
 - **Schema.** People, identities, source-record ledger, field registry (types, precedence); events in monthly partitions with a default partition and maintenance; versioned event schema registry; ingest rejects; lists; consent with history; topics; suppressions (HMAC); the `person_changes` dirty set.
 - **Apply-batch.** Normalization, identity resolution with per-kind rules and recorded conflicts, merges (survivor rules and re-point job), trait precedence, client-`messageId` event dedupe, late-event and future-timestamp handling, ingest redaction, dirty marks.
-- **Ingestion API.** `identify`, `track`, `batch` with ingestion keys, size and per-key rate limits, `ingest_inbox` and drain workers.
+- **Ingestion API.** `identify`, `track`, `batch` with ingestion keys, size and per-key rate limits, `ingest_inbox` and drain workers. HTTP only in v1 (OQ-20): the README and OpenAPI document each endpoint with curl and `fetch` examples.
 - **Event governance.** Immutable schema versions with typed properties, required fields, enums, descriptions and per-property PII flags; per-event `allow`/`warn`/`block`; workspace policy for draft-schema or reject on unplanned names; visible flagged events and rejects with masked samples; replay after a schema fix; per-name retention overrides. PII properties are masked without `view_pii`; until M8, only owners and admins can view them.
 - **Event investigation.** Workspace/source SSE debugger with filters, validation results and PII masking; explorer filters by name, typed properties, time and person, with counts, breakdowns, CSV and statement timeouts; unified person timeline.
 - **Causality.** Decision records for event acceptance/rejection, merge, consent and trait change, with propagated trace ids and typed causes; API and timeline links to trace trees.
@@ -145,11 +145,11 @@ and erasure working from the start.
 - **Native contacts.** For companies without an external customer store (architecture 7.6): a workspace contact definition on the field registry (typed, required and identifier fields); contacts API (create, read, list, search, replace, partial update, delete by contact key, bulk upsert) through the inbox with idempotency keys; contacts list, detail and edit UI. Contacts are people contributed by the built-in `native` source.
 - **Deletion and privacy.** Person delete and contribution removal with the orphan policy; erasure v1 across all M2 tables with the erasure ledger; export v1.
 - **Consent and suppression.** API and UI for consent and topics; suppression list import and export.
-- **UI.** People search; profile (identities by source, traits with provenance, unified event/decision timeline, consent, lists); event schema registry, rejects/replay, live debugger and explorer; field registry editor; identity conflict review; lists; CSV import wizard; ingestion keys.
-- **Decisions.** OQ-1 (trait storage), OQ-3 (unmerge), OQ-20 (SDKs).
+- **UI.** People search; profile (identities by source, traits with provenance, unified event/decision timeline, consent, lists); event schema registry, rejects/replay, live debugger and explorer; field registry editor; identity conflict review (keep separate, or move the identifier to one person); lists; CSV import wizard; ingestion keys.
+- **Decisions.** OQ-1 (trait storage), by benchmark. OQ-3 (no unmerge in v1) and OQ-20 (HTTP API only in v1) are decided in architecture section 21.1.
 
 **Out of scope.** Pull connectors (M3), segments (M4), custom objects (OQ-4),
-unmerge (unless OQ-3 decides otherwise).
+unmerge (OQ-3), client SDKs (OQ-20).
 
 **Exit criteria.**
 - [ ] Replaying the same `batch` payload twice leaves the database in an identical state (row-level comparison test).
@@ -396,6 +396,8 @@ milestone (M10, M11, ...) with full scope and exit criteria, before work starts.
 | Event analytics store | Optional add-on for the explorer, high-volume traces, event-heavy segments and reporting (ADR-003, OQ-29) | M8 event/explorer benchmarks miss targets after measured Postgres tuning |
 | Reporting and attribution | Flow and campaign performance, conversion attribution | v1.0 users needing more than per-node counters |
 | Identity and access | OIDC role and group mapping (sign-in itself shipped in M1), SCIM provisioning | Team deployments asking for it |
+| Client SDKs | Browser and mobile SDKs for identify and track (anonymous id, batching, `messageId`, retries) over the v1 HTTP API (OQ-20) | Adoption shows repeated integration friction with the HTTP API |
+| Unmerge | Splitting a merged person back apart, using the merge provenance recorded since M2 (OQ-3) | Conflict reviews or support cases that keep-separate and move-identifier cannot resolve |
 | Assistant interoperability | MCP server exposing the same workspace-scoped, RBAC-checked read-and-draft tool layer (OQ-30) | External clients need supported draft tooling and the authentication model is decided |
 | Further assistant capabilities | Additional read, draft or explanation tools; never autonomous product actions | Golden-prompt and usage evidence for a specific user task |
 | Platform | Custom objects (OQ-4), rolling upgrades (OQ-17), flow version migration (OQ-7), transactional API (OQ-11) | Each open question's decision |
