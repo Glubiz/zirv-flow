@@ -63,6 +63,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
         ) : null}
       </Panel>
       <Panel title="Erasure requests" flush>
+        {requests.refreshError ? <InlineError {...describeError(requests.refreshError)} /> : null}
         <ResourceView
           resource={requests.resource}
           loadingLabel="Loading erasure requests"

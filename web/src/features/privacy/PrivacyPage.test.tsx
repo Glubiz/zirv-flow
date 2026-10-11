@@ -306,6 +306,34 @@ describe("privacy", () => {
       expect(settled).toEqual({ erasures: 2, exports: 3 });
     });
 
+    it("keeps polling after one failed refresh, shows the error inline and recovers", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let erasures = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: () => {
+            erasures += 1;
+            if (erasures === 2) return problem(500, "Internal Server Error", "internal error");
+            return json({
+              erasures: [erasures > 2 ? DONE : { ...DONE, status: "pending", completed_at: null }],
+              next_before: null,
+            });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      expect(await screen.findByText("Waiting to run")).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await screen.findByText("Internal Server Error")).toBeInTheDocument();
+      expect(screen.getByText("Waiting to run")).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await screen.findByText("Erased")).toBeInTheDocument();
+      expect(screen.queryByText("Internal Server Error")).not.toBeInTheDocument();
+      expect(erasures).toBe(3);
+    });
+
     it("does not poll while the tab is hidden", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       let erasures = 0;

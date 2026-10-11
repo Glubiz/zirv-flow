@@ -88,6 +88,7 @@ export function ExportSection({ workspaceId }: { workspaceId: string }) {
         ) : null}
       </Panel>
       <Panel title="Exports" flush>
+        {exports.refreshError ? <InlineError {...describeError(exports.refreshError)} /> : null}
         <ResourceView
           resource={exports.resource}
           loadingLabel="Loading exports"
