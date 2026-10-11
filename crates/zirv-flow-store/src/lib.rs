@@ -3,6 +3,7 @@
 mod accounts;
 mod api_keys;
 mod audit;
+mod consent;
 mod decisions;
 mod events;
 mod identities;
@@ -12,6 +13,7 @@ mod migrations;
 mod people;
 mod pool;
 mod sessions;
+mod suppressions;
 mod workspaces;
 
 use std::error::Error;
@@ -26,6 +28,11 @@ pub use api_keys::{
     touch_api_key,
 };
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
+pub use consent::{
+    ConsentChange, ConsentEntry, ConsentHistoryEntry, ConsentOutcome, NewTopic, Topic, TopicUpdate,
+    consent_for, consent_history, create_topic, find_topic, find_topic_by_key, list_topics,
+    set_consent, update_topic,
+};
 pub use decisions::{
     Decision, NewDecision, append_decision, append_decisions, ensure_decision_partitions,
     list_trace,
@@ -72,6 +79,11 @@ pub use sessions::{
     delete_sessions_for_user, find_active_session, touch_session,
 };
 pub use sqlx::PgConnection;
+pub use suppressions::{
+    AddOutcome, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression, SuppressionCursor,
+    add_suppression, add_suppressions, count_suppressed, find_suppression, is_suppressed,
+    list_suppressions, remove_suppression,
+};
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, list_members,
     list_workspaces_for_user, membership_role, remove_membership, set_membership,

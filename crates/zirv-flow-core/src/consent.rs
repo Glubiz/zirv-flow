@@ -128,6 +128,89 @@ impl fmt::Display for TopicPolicy {
     }
 }
 
+/// Where a consent change came from.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ChangeSource {
+    Api,
+    Ui,
+    Import,
+    Merge,
+    UnsubscribeLink,
+    Ingest,
+}
+
+impl ChangeSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Ui => "ui",
+            Self::Import => "import",
+            Self::Merge => "merge",
+            Self::UnsubscribeLink => "unsubscribe_link",
+            Self::Ingest => "ingest",
+        }
+    }
+}
+
+impl FromStr for ChangeSource {
+    type Err = ValidationError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [
+            Self::Api,
+            Self::Ui,
+            Self::Import,
+            Self::Merge,
+            Self::UnsubscribeLink,
+            Self::Ingest,
+        ]
+        .into_iter()
+        .find(|source| source.as_str() == text)
+        .ok_or(ValidationError::new(
+            "source",
+            "is not a known change source",
+        ))
+    }
+}
+
+/// Why an identifier is suppressed.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SuppressionReason {
+    HardBounce,
+    Complaint,
+    Manual,
+    /// The person was erased. Permanent: it can never be removed.
+    Erased,
+}
+
+impl SuppressionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HardBounce => "hard_bounce",
+            Self::Complaint => "complaint",
+            Self::Manual => "manual",
+            Self::Erased => "erased",
+        }
+    }
+}
+
+impl FromStr for SuppressionReason {
+    type Err = ValidationError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "hard_bounce" => Ok(Self::HardBounce),
+            "complaint" => Ok(Self::Complaint),
+            "manual" => Ok(Self::Manual),
+            "erased" => Ok(Self::Erased),
+            _ => Err(ValidationError::new(
+                "reason",
+                "must be hard_bounce, complaint, manual or erased",
+            )),
+        }
+    }
+}
+
 /// A consent status and when it was set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct State {
@@ -308,6 +391,21 @@ mod tests {
         assert!("sms".parse::<Channel>().is_err());
         assert!("maybe".parse::<ConsentStatus>().is_err());
         assert!("opt_sideways".parse::<TopicPolicy>().is_err());
+    }
+
+    #[test]
+    fn sources_and_reasons_round_trip_and_unknown_names_are_refused() {
+        for source in ["api", "ui", "import", "merge", "unsubscribe_link", "ingest"] {
+            assert_eq!(source.parse::<ChangeSource>().unwrap().as_str(), source);
+        }
+        for reason in ["hard_bounce", "complaint", "manual", "erased"] {
+            assert_eq!(
+                reason.parse::<SuppressionReason>().unwrap().as_str(),
+                reason
+            );
+        }
+        assert!("carrier_pigeon".parse::<ChangeSource>().is_err());
+        assert!("rude".parse::<SuppressionReason>().is_err());
     }
 
     #[test]
