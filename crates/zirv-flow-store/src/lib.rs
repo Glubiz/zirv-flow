@@ -3,6 +3,7 @@
 mod accounts;
 mod api_keys;
 mod audit;
+mod bounded;
 mod consent;
 mod decisions;
 mod events;

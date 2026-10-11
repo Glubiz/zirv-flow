@@ -16,8 +16,8 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::events::SchemaProperty;
 
-use super::bounded::begin_bounded;
 use crate::StoreError;
+use crate::bounded::begin_bounded;
 
 /// The action of the decision that duplicates an event entry.
 const EVENT_ACCEPTED: &str = "event.accepted";

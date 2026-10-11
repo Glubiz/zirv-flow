@@ -2,7 +2,6 @@
 //! identities, the profile path of apply-batch, identity merges and conflict review.
 
 mod apply;
-mod bounded;
 mod conflicts;
 mod merge;
 mod profile;

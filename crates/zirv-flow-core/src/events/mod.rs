@@ -7,7 +7,7 @@ mod redact;
 mod time_rules;
 mod validate;
 
-pub use mask::{Masked, mask, mask_sample};
+pub use mask::{Masked, mask, mask_event, mask_sample};
 pub use property::{
     EventMode, PropertyType, SchemaProperty, UnplannedPolicy, validate_event_name,
     validate_properties,

@@ -1,4 +1,4 @@
-//! Reads that must not run unbounded: the people search and the timeline run in a
+//! Reads that must not run unbounded: the people search, the timeline and the event explorer run in a
 //! transaction with a statement timeout, so a slow scan is cancelled rather than left to hog
 //! the pool.
 
@@ -32,6 +32,7 @@ pub(crate) async fn begin_bounded(pool: &sqlx::PgPool) -> Result<Tx, StoreError>
     begin_bounded_for(pool, QUERY_TIMEOUT).await
 }
 
+/// Starts a read-only transaction that PostgreSQL cancels a statement of after `timeout`.
 pub(crate) async fn begin_bounded_for(
     pool: &sqlx::PgPool,
     timeout: Duration,

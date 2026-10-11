@@ -74,6 +74,52 @@ pub fn mask_sample(
     }
 }
 
+/// The properties of a stored event as one viewer may see them. A viewer who `reveal`s sees
+/// them as stored (they were redacted at ingest). Any other viewer sees only the properties
+/// the published `schema` declares non-PII; every other value, including a property the
+/// schema does not declare and every property of an event without a schema, becomes `null`
+/// and is listed in `masked`.
+pub fn mask_event(
+    properties: &Map<String, Value>,
+    schema: Option<&[SchemaProperty]>,
+    reveal: bool,
+) -> Masked {
+    if reveal {
+        return Masked {
+            properties: properties.clone(),
+            masked: Vec::new(),
+        };
+    }
+    let plain = |name: &str| {
+        schema.is_some_and(|declared| {
+            declared
+                .iter()
+                .any(|property| property.name == name && !property.pii)
+        })
+    };
+    let mut masked: Vec<String> = properties
+        .keys()
+        .filter(|name| !plain(name))
+        .cloned()
+        .collect();
+    masked.sort();
+    let shown = properties
+        .iter()
+        .map(|(name, value)| {
+            let value = if masked.contains(name) {
+                Value::Null
+            } else {
+                value.clone()
+            };
+            (name.clone(), value)
+        })
+        .collect();
+    Masked {
+        properties: shown,
+        masked,
+    }
+}
+
 fn shorten(value: &Value) -> Value {
     match value {
         Value::String(text) => Value::String(text.chars().take(SAMPLE_STRING_CHARS).collect()),
@@ -126,6 +172,37 @@ mod tests {
         assert_eq!(hidden.masked, ["email"]);
         assert_eq!(shown.properties, properties);
         assert!(shown.masked.is_empty());
+    }
+
+    #[test]
+    fn an_event_shows_a_viewer_only_what_the_schema_calls_non_pii() {
+        let schema = [
+            declared("email", PropertyType::String, true),
+            declared("plan", PropertyType::String, false),
+        ];
+        let properties = map(json!({"email": "a@b.co", "plan": "pro", "ssn": "1"}));
+
+        let hidden = mask_event(&properties, Some(&schema), false);
+        let shown = mask_event(&properties, Some(&schema), true);
+
+        assert_eq!(
+            Value::Object(hidden.properties),
+            json!({"email": null, "plan": "pro", "ssn": null})
+        );
+        assert_eq!(hidden.masked, ["email", "ssn"]);
+        assert_eq!(shown.properties, properties);
+        assert!(shown.masked.is_empty());
+    }
+
+    #[test]
+    fn an_event_without_a_schema_is_fully_masked_unless_revealed() {
+        let properties = map(json!({"a": 1, "b": "x"}));
+
+        let hidden = mask_event(&properties, None, false);
+
+        assert!(hidden.properties.values().all(Value::is_null));
+        assert_eq!(hidden.masked, ["a", "b"]);
+        assert_eq!(mask_event(&properties, None, true).properties, properties);
     }
 
     #[test]
