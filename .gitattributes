@@ -19,3 +19,7 @@
 /Dockerfile text eol=lf
 /.dockerignore text eol=lf
 /docker-compose.yml text eol=lf
+
+# Benchmark scripts are run with bash on any platform.
+/scripts/bench/** text eol=lf
+/scripts/check-bench-features.sh text eol=lf
