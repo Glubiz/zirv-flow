@@ -15,7 +15,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 
 use report::{Latency, PhaseReport, Report, StatusCounts, achieved_rate};
-use runner::{Config, Mode, Phase, run_phase};
+use runner::{Config, Mode, Phase, PhaseOutcome, run_phase};
+
+/// Latency samples of a whole run, in microseconds.
+#[derive(Default)]
+struct Samples {
+    schedule_us: Vec<u64>,
+    service_us: Vec<u64>,
+    lag_us: Vec<u64>,
+}
+
+const LATENCY_NOTE: &str = "latency_from_schedule runs from each request's scheduled due time to its final \nresponse, retry waits and dispatch lag included: judge API latency targets on it. service_latency \nis the send-to-response time of the last attempt only. Both cover 202 responses.";
 
 /// The largest batch the server accepts by default (`ingest.max_batch_items`).
 const MAX_BATCH: u32 = 500;
@@ -49,9 +59,10 @@ struct Args {
     /// Items per request in batch mode (1 to 500); ignored by identify and track.
     #[arg(long, default_value_t = 100)]
     batch_size: u32,
-    /// Most requests in flight at once.
-    #[arg(long, default_value_t = 64)]
-    concurrency: u32,
+    /// Safety cap on requests in flight. Pacing never waits on it unless it is reached, and then
+    /// the request goes out as soon as a slot frees and counts as `late_dispatch`.
+    #[arg(long, alias = "concurrency", default_value_t = 10_000)]
+    max_in_flight: u32,
     /// Seed of the payloads. The same seed and run id give the same items.
     #[arg(long, default_value_t = 1)]
     seed: u64,
@@ -87,13 +98,13 @@ fn validate(args: &Args) -> Result<(), String> {
     if !(1..=MAX_BATCH).contains(&args.batch_size) {
         return Err(format!("--batch-size must be 1 to {MAX_BATCH}"));
     }
-    if args.concurrency == 0 || args.people == 0 {
-        return Err("--concurrency and --people must be at least 1".into());
+    if args.max_in_flight == 0 || args.people == 0 {
+        return Err("--max-in-flight and --people must be at least 1".into());
     }
     Ok(())
 }
 
-fn merge(phases: &[PhaseReport], latencies: Vec<u64>) -> PhaseReport {
+fn merge(phases: &[PhaseReport], samples: Samples) -> PhaseReport {
     let mut total = PhaseReport {
         name: "total".to_owned(),
         ..PhaseReport::default()
@@ -106,6 +117,8 @@ fn merge(phases: &[PhaseReport], latencies: Vec<u64>) -> PhaseReport {
         total.items_offered += phase.items_offered;
         total.items_accepted += phase.items_accepted;
         total.retries_after_429 += phase.retries_after_429;
+        total.late_dispatch += phase.late_dispatch;
+        total.abandoned_requests += phase.abandoned_requests;
         status.add(&phase.status);
     }
     total.target_rate = phases
@@ -115,7 +128,9 @@ fn merge(phases: &[PhaseReport], latencies: Vec<u64>) -> PhaseReport {
         .unwrap_or(0);
     total.achieved_rate = achieved_rate(total.items_accepted, total.elapsed_s);
     total.status = status;
-    total.latency = Latency::from_micros(latencies);
+    total.latency_from_schedule = Latency::from_micros(samples.schedule_us);
+    total.service_latency = Latency::from_micros(samples.service_us);
+    total.dispatch_lag = Latency::from_micros(samples.lag_us);
     total
 }
 
@@ -137,7 +152,7 @@ async fn run(args: Args) -> Result<(), String> {
         .unwrap_or_else(|| format!("{:x}", started.as_millis()));
     init_tls();
     let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(args.concurrency as usize)
+        .pool_max_idle_per_host(args.max_in_flight.min(1024) as usize)
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
@@ -149,11 +164,11 @@ async fn run(args: Args) -> Result<(), String> {
         run_id: run_id.clone(),
         people: args.people,
         batch_size: args.batch_size,
-        concurrency: args.concurrency,
+        max_in_flight: args.max_in_flight,
     });
 
     let mut phases = Vec::new();
-    let mut all_latencies = Vec::new();
+    let mut samples = Samples::default();
     let mut seq = 0;
     for phase in [
         Phase {
@@ -170,17 +185,27 @@ async fn run(args: Args) -> Result<(), String> {
         if phase.duration_s == 0.0 {
             continue;
         }
-        let (report, latencies, next) = run_phase(&client, &config, &phase, seq).await;
+        let PhaseOutcome {
+            report,
+            schedule_us,
+            service_us,
+            lag_us,
+            next_seq: next,
+        } = run_phase(&client, &config, &phase, seq).await;
         eprintln!(
-            "{}: {:.0} items/s achieved of {} target, {} accepted, p99 {:.1} ms",
+            "{}: {:.0} items/s achieved of {} target, {} accepted, p99 {:.1} ms from schedule, {:.1} ms service, {} late",
             report.name,
             report.achieved_rate,
             report.target_rate,
             report.items_accepted,
-            report.latency.p99_ms
+            report.latency_from_schedule.p99_ms,
+            report.service_latency.p99_ms,
+            report.late_dispatch
         );
         seq = next;
-        all_latencies.extend(latencies);
+        samples.schedule_us.extend(schedule_us);
+        samples.service_us.extend(service_us);
+        samples.lag_us.extend(lag_us);
         phases.push(report);
     }
 
@@ -195,9 +220,10 @@ async fn run(args: Args) -> Result<(), String> {
         } else {
             1
         },
-        concurrency: args.concurrency,
+        max_in_flight: args.max_in_flight,
         people: args.people,
-        total: merge(&phases, all_latencies),
+        latency_note: LATENCY_NOTE,
+        total: merge(&phases, samples),
         phases,
     };
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;

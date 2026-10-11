@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-/// Latency in milliseconds over the accepted (202) responses of a phase or a run.
+/// A latency distribution in milliseconds over the accepted (202) requests of a phase or a run.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Latency {
     pub count: u64,
@@ -86,7 +86,17 @@ pub struct PhaseReport {
     pub achieved_rate: f64,
     pub retries_after_429: u64,
     pub status: StatusCounts,
-    pub latency: Latency,
+    /// PRIMARY: from each request's scheduled due time to its final response, retry waits and
+    /// dispatch lag included. The API latency targets are judged on this block.
+    pub latency_from_schedule: Latency,
+    /// From the send of the last attempt to its response: the server's own service time.
+    pub service_latency: Latency,
+    /// How long after its due time each request was actually sent.
+    pub dispatch_lag: Latency,
+    /// Requests that had to wait for a free in-flight slot (`--max-in-flight` reached).
+    pub late_dispatch: u64,
+    /// Requests given up on because the phase hit its wall-time limit.
+    pub abandoned_requests: u64,
 }
 
 pub fn achieved_rate(items_accepted: u64, elapsed_s: f64) -> f64 {
@@ -105,7 +115,8 @@ pub struct Report {
     pub run_id: String,
     pub started_unix_s: u64,
     pub batch_size: u32,
-    pub concurrency: u32,
+    pub max_in_flight: u32,
+    pub latency_note: &'static str,
     pub people: u64,
     pub total: PhaseReport,
     pub phases: Vec<PhaseReport>,

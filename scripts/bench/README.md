@@ -65,22 +65,30 @@ exercised against a real server for this runbook). Ingestion needs no CSRF token
 ```
 loadgen --url http://localhost:8080 --key-file bench.key --mode identify|track|batch
         --rate <items/s> --duration <s> [--burst-rate <items/s> --burst-duration <s>]
-        [--people <n>] [--batch-size <n>] [--concurrency <n>] [--seed <n>] [--run-id <s>]
+        [--people <n>] [--batch-size <n>] [--max-in-flight <n>] [--seed <n>] [--run-id <s>]
         [--out <report.json>]
 ```
 
 - The base phase (`--rate`, `--duration`) runs first, then the burst phase. Either may be omitted.
-- Pacing is open loop at `--rate` items per second; `--concurrency` caps requests in flight. Latency
-  is measured from the send to the end of the response, over the 202 responses only.
-- A 429 pauses the whole schedule for `Retry-After` seconds (1 to 60) and the refused body is resent
-  unchanged, up to 8 times; the pause is not made up afterwards, so there is no stampede.
+- Pacing is open loop at `--rate` items per second: each request is sent at its scheduled time,
+  never held back waiting for earlier responses. `--max-in-flight` (default 10,000, alias
+  `--concurrency`) is only a safety cap; when it is reached the request goes out as soon as a slot
+  frees and counts in `late_dispatch`.
+- **Which latency is which.** `latency_from_schedule` runs from each request's scheduled due time
+  to its final response, so dispatch lag and `Retry-After` waits are included and a stalled server
+  cannot under-report. The API target (p99 under 100 ms at the sustained rate) is judged on this
+  figure. `service_latency` is the send-to-response time of the last attempt only, and `dispatch_lag`
+  is how late requests were sent; report them beside it, never instead of it. All cover 202s.
+- A 429 sets one shared pause (the largest `Retry-After` seen, 1 to 60 s). The refused requests go
+  back to the dispatcher, which resends them after the pause, ahead of new ones and paced at the
+  target rate (up to 8 sends each); the pause is not made up afterwards, so there is no stampede.
 - Payloads depend on `--seed` and the item number alone. Every `messageId` is `lg-<run-id>-<n>`;
   `--run-id` defaults to the start time, so a rerun does not dedupe against an earlier run (pass
   the same one to repeat a run exactly). Items carry no `timestamp`: the server stamps arrival,
   which `applied-latency.sql` relies on for identify.
 - The report has `total` and one entry per phase with `achieved_rate`, `status`
   (`accepted_202`, `rate_limited_429`, `server_5xx`, `other`, `transport_errors`), `retries_after_429`
-  and `latency` (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
+  `late_dispatch` and the three latency blocks above (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
 
 ## 4. Applied latency and backlog drain
 
@@ -115,7 +123,7 @@ Run the applied-latency script after each and save its output beside the report.
 | 1 | identify, 2,000/s for 10 min | `loadgen --url http://localhost:8080 --key-file bench.key --mode identify --rate 2000 --duration 600 --people 2000000 --out docs/benchmarks/data/identify-2000.json` |
 | 2 | track, 2,000/s for 10 min | `loadgen ... --mode track --rate 2000 --duration 600 --people 100000 --out docs/benchmarks/data/track-2000.json` |
 | 3 | batch of 500 at 2,000/s | `loadgen ... --mode batch --batch-size 500 --rate 2000 --duration 600 --people 1000000 --out docs/benchmarks/data/batch-2000.json` |
-| 4 | burst 10,000/s for 10 min, drain time | `loadgen ... --mode batch --batch-size 100 --burst-rate 10000 --burst-duration 600 --concurrency 128 --people 1000000 --out docs/benchmarks/data/burst-10000.json`, with the raised key limit; then time the drain (section 4) |
+| 4 | burst 10,000/s for 10 min, drain time | `loadgen ... --mode batch --batch-size 100 --burst-rate 10000 --burst-duration 600 --people 1000000 --out docs/benchmarks/data/burst-10000.json`, with the raised key limit; then time the drain (section 4) |
 | 5 | decision overhead A/B | section 6 |
 | 6 | OQ-1 | section 7 |
 
