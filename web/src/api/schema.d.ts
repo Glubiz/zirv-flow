@@ -327,6 +327,139 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/contact-definition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's contact definition. */
+        get: operations["get_contact_definition"];
+        /**
+         * Saves the contact definition, replacing the previous one. Every key must be a live registry
+         *     key, and an identifier field must be a `string` field. Needs the workspace admin role.
+         *     Audited as `contact_definition.updated`.
+         */
+        put: operations["put_contact_definition"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's contacts in key order, keyset-paginated. For a lookup by key prefix, email
+         *     or phone use the search endpoints.
+         */
+        get: operations["list_contacts"];
+        put?: never;
+        /**
+         * Creates a contact. The write applies in this request: the answer is the stored contact.
+         *     Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe: the same key
+         *     with the same request replays the first status and the contact as stored now, and writes
+         *     nothing; the same key with another request is refused with `422` and the code
+         *     `idempotency_key_reused`. Keys are remembered for 24 hours. Without the header, an
+         *     identical repeat is a no-op because a write that changes nothing stores nothing, but a
+         *     repeated create is answered `409`.
+         */
+        post: operations["create_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/contacts/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upserts many contacts through the ingestion inbox: all are validated against the contact
+         *     definition, then appended, and `202` is returned once the append has committed. The drain
+         *     applies them like an identify, replacing the fields of an existing contact. Use the
+         *     single-contact endpoints when the answer must be the stored contact. Needs the write scope;
+         *     a session may use it too, with the CSRF token. Sending is limited per API key (per user for
+         *     a session) at the ingestion rate, and the body at the ingestion size.
+         */
+        post: operations["bulk_upsert_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/contacts/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Finds contacts by key prefix, or by an exact email or phone number. The value is in the URL
+         *     and so in access logs: prefer the POST for addresses and numbers.
+         */
+        get: operations["search_contacts_get"];
+        put?: never;
+        /**
+         * Finds contacts by an identifier matched exactly after normalisation, or by `q` like the GET.
+         *     A POST so the value stays out of URLs and access logs.
+         */
+        post: operations["search_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/contacts/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One contact. Values of identifier fields and PII-flagged fields are masked for members and
+         *     `read` keys.
+         */
+        get: operations["get_contact"];
+        /**
+         * Replaces all the fields of a contact. Required fields must be present. Supports the
+         *     `Idempotency-Key` header like `POST`.
+         */
+        put: operations["replace_contact"];
+        post?: never;
+        /**
+         * Deletes a contact: its native record is retracted, and the workspace's orphan policy decides
+         *     whether the person goes too. Another source's data on the person stays. A repeat with the
+         *     same `Idempotency-Key` answers `204` again.
+         */
+        delete: operations["delete_contact"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes some fields of a contact with a JSON merge patch over `fields`: a field set to
+         *     `null` is removed, and removing a required field is refused with 422. Supports the
+         *     `Idempotency-Key` header like `POST`.
+         */
+        patch: operations["patch_contact"];
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/debugger/stream": {
         parameters: {
             query?: never;
@@ -1525,6 +1658,30 @@ export interface components {
             /** Format: int64 */
             count: number;
         };
+        BulkAcceptedBody: {
+            /** @description Contacts appended to the inbox: durable, not yet applied. */
+            accepted: number;
+        };
+        /** @description One contact of a bulk upsert. */
+        BulkContactItem: {
+            /** @description All the contact's fields: an upsert replaces the fields of an existing contact. */
+            fields: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description The contact key.
+             * @example c-1001
+             */
+            key: string;
+        };
+        /** @description The body of `POST /contacts/bulk`. */
+        BulkContactsRequest: {
+            /**
+             * @description At least one contact, at most `ingest.max_batch_items`. All are validated before any is
+             *     appended; a key listed twice is applied in order.
+             */
+            contacts: components["schemas"]["BulkContactItem"][];
+        };
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
             id: string;
@@ -1620,6 +1777,88 @@ export interface components {
             topic_key?: string | null;
             topic_name?: string | null;
         };
+        /**
+         * @description A contact. Values of identifier fields and PII-flagged fields are `null` and listed in
+         *     `masked_fields` for a caller who may not see values: members and `read` keys.
+         */
+        ContactBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description The fields as written, by registry key. */
+            fields: {
+                [key: string]: unknown;
+            };
+            /** @description The contact key: the identifier `external:contact_key`. */
+            key: string;
+            /** @description The keys of `fields` whose value is hidden from this caller. */
+            masked_fields: string[];
+            /**
+             * Format: uuid
+             * @description The person the contact belongs to; the merged profile is at `/people/{person_id}`.
+             */
+            person_id: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ContactDefinitionBody: {
+            /**
+             * @description False while the workspace has saved no definition: contacts then need only a key, and
+             *     any registry key is accepted as a field. A saved definition, even an empty one,
+             *     allows only its fields.
+             */
+            defined: boolean;
+            /** @description In display order. The contact key is implicit and not listed. */
+            fields: components["schemas"]["ContactFieldBody"][];
+            /** Format: date-time */
+            updated_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The user who saved it; null when an API key did, or when none is saved.
+             */
+            updated_by?: string | null;
+        };
+        /** @description One field of the definition. */
+        ContactFieldBody: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<name>`: the value also becomes an
+             *     identity of the contact's person. The field must be a `string` field. Null for an
+             *     ordinary field.
+             * @example email
+             */
+            identifier?: string | null;
+            /**
+             * @description A key of the field registry; the registry supplies the type.
+             * @example email
+             */
+            key: string;
+            /** @description A contact without this field is refused with 422. */
+            required?: boolean;
+        };
+        /** @description The body of `PUT` and `PATCH` `/contacts/{key}`. */
+        ContactFieldsRequest: {
+            /**
+             * @description For `PUT`, all the contact's fields. For `PATCH`, a JSON merge patch: a field set to
+             *     `null` is removed, and removing a required field is refused with 422.
+             */
+            fields: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description An identifier to find: the value is normalised for the kind, then matched exactly. */
+        ContactIdentifierQuery: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<name>`.
+             * @example email
+             */
+            kind: string;
+            value: string;
+        };
+        ContactsBody: {
+            /** @description In key order. */
+            contacts: components["schemas"]["ContactBody"][];
+            /** @description Pass as `after` for the next page; null on the last page. */
+            next_after?: string | null;
+        };
         CreateApiKeyRequest: {
             /**
              * @description 1 to 100 characters.
@@ -1633,6 +1872,19 @@ export interface components {
              *     ]
              */
             scopes: string[];
+        };
+        /** @description The body of `POST /contacts`. */
+        CreateContactRequest: {
+            /** @description The fields by registry key, checked against the contact definition. */
+            fields?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description 1 to 256 characters without control characters; not `search` or `bulk`. It becomes the
+             *     identifier `external:contact_key` and addresses the contact in URLs.
+             * @example c-1001
+             */
+            key: string;
         };
         CreateEventSchemaRequest: {
             description?: string;
@@ -2709,6 +2961,10 @@ export interface components {
              */
             type: string;
         };
+        PutContactDefinitionRequest: {
+            /** @description At most 100 fields, each registry key once, each identifier kind once. */
+            fields: components["schemas"]["ContactFieldBody"][];
+        };
         ReasonBody: {
             /** @description The property that failed; never its value. */
             property: string;
@@ -2838,6 +3094,24 @@ export interface components {
             next_after?: string | null;
             /** @description By person id. */
             people: components["schemas"]["PersonHitBody"][];
+        };
+        SearchContactsBody: {
+            /** @description In key order; at most `limit`. */
+            contacts: components["schemas"]["ContactBody"][];
+        };
+        /** @description Exactly one of `identifier` and `q`. */
+        SearchContactsRequest: {
+            identifier?: null | components["schemas"]["ContactIdentifierQuery"];
+            /**
+             * Format: int32
+             * @description Contacts to return, 1 to 200; default 50.
+             */
+            limit?: number | null;
+            /**
+             * @description As the `q` of the GET: contacts whose key starts with it, and the contacts of the
+             *     person with that email or phone.
+             */
+            q?: string | null;
         };
         /**
          * @description Exactly one of `identifier` and `trait`. It is a POST so the values stay out of URLs and
@@ -4305,6 +4579,781 @@ export interface operations {
             };
             /** @description No such workspace or live key, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_contact_definition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The definition */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDefinitionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_contact_definition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutContactDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description The saved definition */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDefinitionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A malformed list, or fields the registry cannot back; errors lists them by position, key and reason (`unknown_key`, `archived_key`, `identifier_needs_string`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_contacts: {
+        parameters: {
+            query?: {
+                /** @description Contacts per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_after of the previous page */
+                after?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of contacts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactsBody"];
+                };
+            };
+            /** @description limit is out of range, or after is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_contact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateContactRequest"];
+            };
+        };
+        responses: {
+            /** @description The new contact */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it; or, on a replay, the contact has since been deleted */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A contact with that key exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The fields break the contact definition or the field registry (errors lists field and reason, never values), or the Idempotency-Key is invalid or reused (`idempotency_key_reused`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The contact changed at the same moment; try again */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    bulk_upsert_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkContactsRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended to the inbox: durable, not yet applied */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkAcceptedBody"];
+                };
+            };
+            /** @description The body is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_request_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No contacts, too many, or an invalid one; errors lists each by index, field and reason (never values), and nothing is appended */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Over the rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until the request's contacts fit */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database is unavailable; nothing was stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    search_contacts_get: {
+        parameters: {
+            query: {
+                /** @description A contact key prefix, an email or a phone number; 1 to 256 characters */
+                q: string;
+                /** @description Contacts to return, 1 to 200; default 50 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The matching contacts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchContactsBody"];
+                };
+            };
+            /** @description limit is out of range */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description q is missing or too long */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    search_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchContactsRequest"];
+            };
+        };
+        responses: {
+            /** @description The matching contacts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchContactsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not exactly one of identifier and q, an invalid identifier, or a limit out of range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Contact key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The contact */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or contact, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    replace_contact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Contact key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactFieldsRequest"];
+            };
+        };
+        responses: {
+            /** @description The contact as stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or contact, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The fields break the contact definition or the field registry, or the Idempotency-Key is invalid or reused */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The contact changed at the same moment; try again */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_contact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Contact key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or contact, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is invalid or reused */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The contact changed at the same moment; try again */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_contact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Contact key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactFieldsRequest"];
+            };
+        };
+        responses: {
+            /** @description The contact as stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or contact, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The result breaks the contact definition or the field registry, or the Idempotency-Key is invalid or reused */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The contact changed at the same moment; try again */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
