@@ -38,8 +38,9 @@ fn is_chatty(route: &str) -> bool {
     matches!(route, "/healthz" | "/readyz" | "/metrics")
 }
 
-/// The caller's span in a W3C `traceparent` header (`00-<trace>-<span>-<flags>`, lowercase
-/// hex, ids not all zero), or none if the header is absent or not exactly that.
+/// The caller's span in a W3C `traceparent` header (`<version>-<trace>-<span>-<flags>`,
+/// lowercase hex, ids not all zero), or none if it is not that. Version `00` allows no
+/// further fields, `ff` is invalid, and a later version has its extra fields ignored.
 fn parse_traceparent(value: &str) -> Option<SpanContext> {
     let mut parts = value.split('-');
     let (version, trace, span, flags) =
@@ -47,8 +48,9 @@ fn parse_traceparent(value: &str) -> Option<SpanContext> {
     let lowercase_hex = |text: &str, len: usize| {
         text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     };
-    if parts.next().is_some()
-        || version != "00"
+    let version_ok =
+        lowercase_hex(version, 2) && version != "ff" && (version != "00" || parts.next().is_none());
+    if !version_ok
         || !lowercase_hex(trace, 32)
         || !lowercase_hex(span, 16)
         || !lowercase_hex(flags, 2)
@@ -260,10 +262,15 @@ mod tests {
         assert_eq!(caller.span_id().to_string(), CALLER_SPAN);
         assert!(caller.is_remote() && caller.is_sampled());
 
+        let future = parse_traceparent(&format!("01-{CALLER_TRACE}-{CALLER_SPAN}-01-extra-more"));
+        assert_eq!(future.unwrap().span_id().to_string(), CALLER_SPAN);
+
         let zero_trace = format!("00-{}-{CALLER_SPAN}-01", "0".repeat(32));
         let zero_span = format!("00-{CALLER_TRACE}-{}-01", "0".repeat(16));
         for invalid in [
-            format!("01-{CALLER_TRACE}-{CALLER_SPAN}-01"),
+            format!("ff-{CALLER_TRACE}-{CALLER_SPAN}-01"),
+            format!("0g-{CALLER_TRACE}-{CALLER_SPAN}-01"),
+            format!("01-{}-{CALLER_SPAN}-01", &CALLER_TRACE[1..]),
             format!("00-{}-{CALLER_SPAN}-01", CALLER_TRACE.to_uppercase()),
             format!("00-{CALLER_TRACE}-{CALLER_SPAN}"),
             format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01-extra"),

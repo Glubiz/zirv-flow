@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(String::from_utf8(stdout).unwrap().contains(
             "[log.otlp]
-endpoint = \"http://collector:4318\""
+endpoint = \"http://collector:4318/\""
         ));
         let (cli, env) = check("ftp://collector");
         let mut stderr = Vec::new();

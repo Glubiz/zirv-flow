@@ -37,7 +37,7 @@ impl Otlp {
         };
         // reqwest takes the process-wide rustls provider; another install is fine.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let url = format!("{}/{TRACES_PATH}", endpoint.trim_end_matches('/'));
+        let url = traces_url(endpoint);
         let exporter = SpanExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
@@ -71,6 +71,11 @@ impl Otlp {
     pub(crate) fn with_provider(provider: SdkTracerProvider) -> Self {
         Self { provider }
     }
+}
+
+/// The collector's trace path below the base URL, which may itself have a path.
+fn traces_url(endpoint: &str) -> String {
+    format!("{}/{TRACES_PATH}", endpoint.trim_end_matches('/'))
 }
 
 /// A provider builder with the zirv resource and id generator, before any exporter.
@@ -148,6 +153,19 @@ mod tests {
         let exporter = InMemorySpanExporter::default();
         let provider = provider().with_simple_exporter(exporter.clone()).build();
         (Otlp::with_provider(provider), exporter)
+    }
+
+    #[test]
+    fn the_trace_path_goes_below_the_base_url_path() {
+        assert_eq!(traces_url("http://h:4318/"), "http://h:4318/v1/traces");
+        assert_eq!(
+            traces_url("http://h:4318/otlp"),
+            "http://h:4318/otlp/v1/traces"
+        );
+        assert_eq!(
+            traces_url("http://h:4318/otlp/"),
+            "http://h:4318/otlp/v1/traces"
+        );
     }
 
     #[test]

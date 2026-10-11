@@ -131,7 +131,8 @@ attached to its span as a link and never becomes its parent or changes the
 trace id. Without the setting nothing is created or sent. Export failures never
 fail a request or job; spans are batched, a full queue drops spans, and the
 process flushes what is queued (up to 5 seconds) when it shuts down. The log
-output is the same with or without export.
+output is the same with or without export. `log.filter` also decides which
+spans are exported, so a filter such as `warn` exports none.
 
 ## Requirements and database migrations
 
