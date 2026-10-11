@@ -59,6 +59,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ingest/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sends identify and track items together. All items are validated before any is
+         *     appended, and they are applied in order. Needs an API key with the `ingest` scope.
+         */
+        post: operations["ingest_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ingest/identify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sends one profile update. Needs an API key with the `ingest` scope. */
+        post: operations["ingest_identify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ingest/track": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sends one event. Needs an API key with the `ingest` scope. */
+        post: operations["ingest_track"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session": {
         parameters: {
             query?: never;
@@ -897,6 +951,10 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptedBody: {
+            /** @description Items appended to the inbox. They are durable, not yet applied. */
+            accepted: number;
+        };
         AddMembersBody: {
             /** @description People newly added. */
             added: number;
@@ -947,6 +1005,32 @@ export interface components {
              *     ]
              */
             scopes: string[];
+        };
+        /** @description One item of a batch: an identify or a track, named in `type`. */
+        BatchItemRequest: {
+            anonymousId?: string | null;
+            /** @description For a `track`: required. */
+            event?: string | null;
+            identifiers?: {
+                [key: string]: string;
+            } | null;
+            messageId?: string | null;
+            /** @description For a `track`. */
+            properties?: Record<string, never> | null;
+            timestamp?: string | null;
+            /** @description For an `identify`. */
+            traits?: Record<string, never> | null;
+            /** @description `identify` or `track`. */
+            type: string;
+            userId?: string | null;
+        };
+        /** @description The body of `POST /api/v1/ingest/batch`. */
+        BatchRequest: {
+            /**
+             * @description At least one item, at most `ingest.max_batch_items`. All are validated before any is
+             *     appended.
+             */
+            batch: components["schemas"]["BatchItemRequest"][];
         };
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
@@ -1268,6 +1352,29 @@ export interface components {
             /** @description The address or number. It is hashed and not stored. */
             value: string;
         };
+        /** @description The body of `POST /api/v1/ingest/identify`: one profile update. */
+        IdentifyRequest: {
+            /** @description Maps to the identifier `anonymous_id`. */
+            anonymousId?: string | null;
+            /**
+             * @description Identifier kind to value: `email`, `phone`, `anonymous_id` or `external:<namespace>`.
+             *     At least one of `userId`, `anonymousId` and `identifiers` is required.
+             */
+            identifiers?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * @description 1 to 200 characters. Resending the same `messageId` is safe; without one, a retry can
+             *     be applied twice.
+             */
+            messageId?: string | null;
+            /** @description RFC 3339 time the update was observed; the arrival time when absent. */
+            timestamp?: string | null;
+            /** @description Trait key to value. A `null` value removes the trait this source set. */
+            traits?: Record<string, never> | null;
+            /** @description Maps to the identifier `external:user_id`. */
+            userId?: string | null;
+        };
         IdentityBody: {
             /** @example email */
             kind: string;
@@ -1332,6 +1439,18 @@ export interface components {
              *     skipped but counted, and a line break inside a quoted value counts as a line.
              */
             row: number;
+        };
+        /** @description One invalid field of one item of an ingestion request. */
+        ItemProblem: {
+            /** @description The field, or empty when the item itself is the wrong type. */
+            field: string;
+            /**
+             * Format: int32
+             * @description Position of the item in the request; 0 for a single-item endpoint.
+             */
+            index: number;
+            /** @description A stable code such as `unknown_field`, `required` or `invalid_email`. */
+            reason: string;
         };
         /** @description A job without its payload. */
         JobBody: {
@@ -1502,6 +1621,8 @@ export interface components {
         /** @description An RFC 9457 problem document. */
         Problem: {
             detail: string;
+            /** @description The invalid fields of an ingestion request: field names and reason codes, never values. */
+            errors?: components["schemas"]["ItemProblem"][] | null;
             /** @description The `x-request-id` of the failed request. */
             request_id?: string | null;
             /** Format: int32 */
@@ -1727,6 +1848,27 @@ export interface components {
             trace_id: string;
             /** @description True when the trace has more records than this response carries. */
             truncated: boolean;
+        };
+        /** @description The body of `POST /api/v1/ingest/track`: one event. */
+        TrackRequest: {
+            /** @description Maps to the identifier `anonymous_id`. */
+            anonymousId?: string | null;
+            /** @description The event name, 1 to 128 characters. */
+            event: string;
+            /**
+             * @description Identifier kind to value. At least one of `userId`, `anonymousId` and `identifiers`
+             *     is required.
+             */
+            identifiers?: {
+                [key: string]: string;
+            } | null;
+            /** @description 1 to 200 characters. Resending the same `messageId` stores the event once. */
+            messageId?: string | null;
+            properties?: Record<string, never> | null;
+            /** @description RFC 3339 time the event occurred; the arrival time when absent. */
+            timestamp?: string | null;
+            /** @description Maps to the identifier `external:user_id`. */
+            userId?: string | null;
         };
         TraitBody: {
             archived: boolean;
@@ -1961,6 +2103,246 @@ export interface operations {
             };
             /** @description An equivalent job is already queued */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    ingest_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended to the inbox: durable, not yet applied */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description An invalid item or too many items; errors lists them by index, field name and reason code */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A session, or a key without the ingest scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_request_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The key is over its rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until the request's items fit */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database is unavailable; nothing was stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    ingest_identify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended to the inbox: durable, not yet applied */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description An invalid field; errors lists them by index, field name and reason code */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A session, or a key without the ingest scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_request_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The key is over its rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until the request's items fit */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database is unavailable; nothing was stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    ingest_track: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TrackRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended to the inbox: durable, not yet applied */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description An invalid field; errors lists them by index, field name and reason code */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing or invalid API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A session, or a key without the ingest scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_request_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The key is over its rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until the request's items fit */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database is unavailable; nothing was stored */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

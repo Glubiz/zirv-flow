@@ -20,6 +20,20 @@ pub struct Problem {
     /// The `x-trace-id` of the failed request; look it up with
     /// `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
     pub trace_id: Option<String>,
+    /// The invalid fields of an ingestion request: field names and reason codes, never values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<ItemProblem>>,
+}
+
+/// One invalid field of one item of an ingestion request.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ItemProblem {
+    /// Position of the item in the request; 0 for a single-item endpoint.
+    pub index: u32,
+    /// The field, or empty when the item itself is the wrong type.
+    pub field: String,
+    /// A stable code such as `unknown_field`, `required` or `invalid_email`.
+    pub reason: String,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -27,6 +41,8 @@ pub struct Problem {
 pub(crate) struct ApiError {
     status: StatusCode,
     detail: String,
+    errors: Option<Vec<ItemProblem>>,
+    retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -34,11 +50,29 @@ impl ApiError {
         Self {
             status,
             detail: detail.into(),
+            errors: None,
+            retry_after: None,
         }
+    }
+
+    /// Lists the invalid fields in the body.
+    pub(crate) fn with_errors(mut self, errors: Vec<ItemProblem>) -> Self {
+        self.errors = Some(errors);
+        self
+    }
+
+    /// Adds `Retry-After`, in whole seconds.
+    pub(crate) fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
     }
 
     #[cfg(test)]
     pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub(crate) fn status_code(&self) -> StatusCode {
         self.status
     }
 
@@ -111,14 +145,21 @@ impl IntoResponse for ApiError {
             detail: self.detail,
             request_id: request_id::current(),
             trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
+            errors: self.errors,
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
-        (
+        let mut response = (
             self.status,
             [(header::CONTENT_TYPE, "application/problem+json")],
             body,
         )
-            .into_response()
+            .into_response();
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -210,5 +251,29 @@ mod tests {
                 "trace_id": null
             })
         );
+    }
+
+    #[tokio::test]
+    async fn errors_and_retry_after_are_rendered_and_absent_otherwise() {
+        let response = ApiError::new(StatusCode::TOO_MANY_REQUESTS, "slow down")
+            .with_retry_after(3)
+            .with_errors(vec![ItemProblem {
+                index: 2,
+                field: "email".into(),
+                reason: "invalid_email".into(),
+            }])
+            .into_response();
+
+        assert_eq!(response.headers()[header::RETRY_AFTER], "3");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            problem["errors"],
+            serde_json::json!([{"index": 2, "field": "email", "reason": "invalid_email"}])
+        );
+        let plain = ApiError::not_found().into_response();
+        assert!(plain.headers().get(header::RETRY_AFTER).is_none());
     }
 }

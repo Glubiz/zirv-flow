@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 25] = [
+const CONFIG_KEYS: [&str; 30] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -36,6 +36,11 @@ const CONFIG_KEYS: [&str; 25] = [
     "events.min_retention_days",
     "events.max_retention_days",
     "events.reject_retention_days",
+    "ingest.max_request_bytes",
+    "ingest.max_batch_items",
+    "ingest.rate_per_key",
+    "ingest.burst_per_key",
+    "ingest.drain_batch_size",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -58,6 +63,7 @@ pub(crate) struct Config {
     database: DatabaseConfig,
     worker: WorkerConfig,
     events: EventsConfig,
+    ingest: IngestConfig,
     log: LogConfig,
 }
 
@@ -240,6 +246,22 @@ struct EventsConfig {
     reject_retention_days: u32,
 }
 
+/// What the ingestion API accepts and how fast the drain applies it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngestConfig {
+    /// The largest request body, in bytes.
+    max_request_bytes: u64,
+    /// The most items in one `batch` request.
+    max_batch_items: u32,
+    /// Items per second each API key may send, per `serve` process.
+    rate_per_key: u32,
+    /// Items a key may send at once after a quiet period, per `serve` process.
+    burst_per_key: u32,
+    /// Inbox rows applied per transaction by `ingest.drain`.
+    drain_batch_size: u32,
+}
+
 struct SecretUrl(Url);
 
 impl SecretUrl {
@@ -373,6 +395,14 @@ impl Config {
             .merge(Serialized::default("events.min_retention_days", 30_u32))
             .merge(Serialized::default("events.max_retention_days", 1095_u32))
             .merge(Serialized::default("events.reject_retention_days", 30_u32))
+            .merge(Serialized::default(
+                "ingest.max_request_bytes",
+                1_048_576_u64,
+            ))
+            .merge(Serialized::default("ingest.max_batch_items", 500_u32))
+            .merge(Serialized::default("ingest.rate_per_key", 10_000_u32))
+            .merge(Serialized::default("ingest.burst_per_key", 20_000_u32))
+            .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -424,6 +454,10 @@ impl Config {
                 "events.reject_retention_days",
                 config.events.reject_retention_days,
             ),
+            ("ingest.max_batch_items", config.ingest.max_batch_items),
+            ("ingest.rate_per_key", config.ingest.rate_per_key),
+            ("ingest.burst_per_key", config.ingest.burst_per_key),
+            ("ingest.drain_batch_size", config.ingest.drain_batch_size),
         ]
         .into_iter()
         .chain(
@@ -442,6 +476,7 @@ impl Config {
         }
 
         config.validate_events(path, &env_sources)?;
+        config.validate_ingest(path, &env_sources)?;
 
         if !crate::log::is_valid_filter(&config.log.filter) {
             return Err(ConfigError::new(
@@ -500,6 +535,28 @@ impl Config {
             return Err(fail(
                 "events.retention_days",
                 "must lie between events.min_retention_days and events.max_retention_days",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The body limit must be positive, and the burst must let a full batch through.
+    fn validate_ingest(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        let ingest = &self.ingest;
+        let fail = |key: &str, reason: &str| {
+            ConfigError::new(key, reason, source_for(key, path, env_sources))
+        };
+        if ingest.max_request_bytes == 0 {
+            return Err(fail("ingest.max_request_bytes", "must be at least 1"));
+        }
+        if ingest.burst_per_key < ingest.max_batch_items {
+            return Err(fail(
+                "ingest.burst_per_key",
+                "must be at least ingest.max_batch_items, or a full batch could never pass",
             ));
         }
         Ok(())
@@ -655,6 +712,21 @@ impl Config {
             max_days: self.events.max_retention_days,
             reject_days: self.events.reject_retention_days,
         }
+    }
+
+    /// What the ingestion API accepts and how fast a key may send.
+    pub(crate) fn ingest_limits(&self) -> zirv_flow_api::IngestLimits {
+        zirv_flow_api::IngestLimits {
+            max_request_bytes: usize::try_from(self.ingest.max_request_bytes).unwrap_or(usize::MAX),
+            max_batch_items: self.ingest.max_batch_items as usize,
+            rate_per_key: self.ingest.rate_per_key,
+            burst_per_key: self.ingest.burst_per_key,
+        }
+    }
+
+    /// Inbox rows `ingest.drain` applies per transaction.
+    pub(crate) fn ingest_drain_batch_size(&self) -> u32 {
+        self.ingest.drain_batch_size
     }
 
     /// The most jobs of one workspace that run at once; none means unlimited.
@@ -1500,5 +1572,80 @@ endpoint = \"http://collector:4318\"
         assert!(dump.contains("http://user:***@host:4318"), "{dump}");
         assert!(!format!("{config:?}").contains("secret"));
         assert!(config.log_otlp_endpoint().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn the_ingest_defaults_are_one_mib_500_items_10k_per_second_and_a_20k_burst() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        let limits = config.ingest_limits();
+
+        assert_eq!(limits, zirv_flow_api::IngestLimits::default());
+        assert_eq!(config.ingest_drain_batch_size(), 500);
+        assert!(toml::to_string(&config).unwrap().contains("[ingest]"));
+    }
+
+    #[test]
+    fn the_ingest_settings_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        for (key, value) in [
+            ("MAX_REQUEST_BYTES", "2048"),
+            ("MAX_BATCH_ITEMS", "10"),
+            ("RATE_PER_KEY", "5"),
+            ("BURST_PER_KEY", "50"),
+            ("DRAIN_BATCH_SIZE", "25"),
+        ] {
+            env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), value.into()));
+        }
+
+        let config = Config::load(None, env).unwrap();
+
+        let limits = config.ingest_limits();
+        assert_eq!(
+            (
+                limits.max_request_bytes,
+                limits.max_batch_items,
+                limits.rate_per_key,
+                limits.burst_per_key
+            ),
+            (2048, 10, 5, 50)
+        );
+        assert_eq!(config.ingest_drain_batch_size(), 25);
+    }
+
+    #[test]
+    fn the_ingest_settings_must_be_positive_and_the_burst_must_fit_a_full_batch() {
+        let cases = [
+            (
+                "ZIRV_FLOW_INGEST__MAX_REQUEST_BYTES",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__MAX_BATCH_ITEMS",
+                "0",
+                "must be at least 1",
+            ),
+            ("ZIRV_FLOW_INGEST__RATE_PER_KEY", "0", "must be at least 1"),
+            ("ZIRV_FLOW_INGEST__BURST_PER_KEY", "0", "must be at least 1"),
+            (
+                "ZIRV_FLOW_INGEST__DRAIN_BATCH_SIZE",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__BURST_PER_KEY",
+                "499",
+                "must be at least ingest.max_batch_items",
+            ),
+        ];
+        for (key, value, expected) in cases {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{key}: {error}");
+        }
     }
 }

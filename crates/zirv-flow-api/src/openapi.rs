@@ -8,13 +8,16 @@ use crate::events::{
     SchemaVersionBody, UpdateEventSchemaRequest,
 };
 use crate::health::{self, StatusBody};
+use crate::ingest::{
+    self, AcceptedBody, BatchItemRequest, BatchRequest, IdentifyRequest, TrackRequest,
+};
 use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
 use crate::lists;
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
-use crate::problem::Problem;
+use crate::problem::{ItemProblem, Problem};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
@@ -90,6 +93,9 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         suppressions::remove_handler,
         suppressions::import_handler,
         suppressions::export,
+        ingest::identify,
+        ingest::track,
+        ingest::batch,
         traces::get,
         setup::status,
         setup::complete,
@@ -99,6 +105,12 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
     ),
     components(schemas(
         Problem,
+        ItemProblem,
+        AcceptedBody,
+        IdentifyRequest,
+        TrackRequest,
+        BatchRequest,
+        BatchItemRequest,
         StatusBody,
         VersionBody,
         SignInRequest,

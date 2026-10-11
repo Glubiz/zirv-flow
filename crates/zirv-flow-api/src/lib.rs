@@ -7,6 +7,7 @@ mod cookies;
 mod credentials;
 mod events;
 mod health;
+mod ingest;
 mod jobs_admin;
 mod json;
 mod keys;
@@ -42,6 +43,7 @@ use axum::middleware::from_fn;
 use axum::routing::{get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use ingest::IngestLimits;
 pub use oidc::redirect_url as oidc_redirect_url;
 pub use openapi::openapi;
 pub use ops::{OpsState, ops_router, serve_ops};
@@ -61,6 +63,9 @@ fn routes() -> Router<AppState> {
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(metrics::render))
         .route("/api/v1/version", get(version::version))
+        .route("/api/v1/ingest/identify", post(ingest::identify))
+        .route("/api/v1/ingest/track", post(ingest::track))
+        .route("/api/v1/ingest/batch", post(ingest::batch))
         .route("/api/v1/setup", get(setup::status).post(setup::complete))
         .route("/api/v1/admin/jobs", get(jobs_admin::depth))
         .route("/api/v1/admin/jobs/dead", get(jobs_admin::dead))

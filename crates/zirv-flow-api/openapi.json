@@ -217,6 +217,324 @@
         ]
       }
     },
+    "/api/v1/ingest/batch": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Sends identify and track items together. All items are validated before any is\nappended, and they are applied in order. Needs an API key with the `ingest` scope.",
+        "operationId": "ingest_batch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Appended to the inbox: durable, not yet applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid item or too many items; errors lists them by index, field name and reason code",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A session, or a key without the ingest scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over ingest.max_request_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The key is over its rate limit",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds until the request's items fit"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is unavailable; nothing was stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ingest/identify": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Sends one profile update. Needs an API key with the `ingest` scope.",
+        "operationId": "ingest_identify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Appended to the inbox: durable, not yet applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid field; errors lists them by index, field name and reason code",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A session, or a key without the ingest scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over ingest.max_request_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The key is over its rate limit",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds until the request's items fit"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is unavailable; nothing was stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ingest/track": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Sends one event. Needs an API key with the `ingest` scope.",
+        "operationId": "ingest_track",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Appended to the inbox: durable, not yet applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid field; errors lists them by index, field name and reason code",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A session, or a key without the ingest scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over ingest.max_request_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The key is over its rate limit",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds until the request's items fit"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is unavailable; nothing was stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -5253,6 +5571,19 @@
   },
   "components": {
     "schemas": {
+      "AcceptedBody": {
+        "type": "object",
+        "required": [
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "description": "Items appended to the inbox. They are durable, not yet applied.",
+            "minimum": 0
+          }
+        }
+      },
       "AddMembersBody": {
         "type": "object",
         "required": [
@@ -5393,6 +5724,92 @@
             "example": [
               "read"
             ]
+          }
+        }
+      },
+      "BatchItemRequest": {
+        "type": "object",
+        "description": "One item of a batch: an identify or a track, named in `type`.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "anonymousId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a `track`: required."
+          },
+          "identifiers": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "messageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "properties": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "For a `track`."
+          },
+          "timestamp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "traits": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "For an `identify`."
+          },
+          "type": {
+            "type": "string",
+            "description": "`identify` or `track`."
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BatchRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/ingest/batch`.",
+        "required": [
+          "batch"
+        ],
+        "properties": {
+          "batch": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchItemRequest"
+            },
+            "description": "At least one item, at most `ingest.max_batch_items`. All are validated before any is\nappended."
           }
         }
       },
@@ -6125,6 +6542,60 @@
           }
         }
       },
+      "IdentifyRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/ingest/identify`: one profile update.",
+        "properties": {
+          "anonymousId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maps to the identifier `anonymous_id`."
+          },
+          "identifiers": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Identifier kind to value: `email`, `phone`, `anonymous_id` or `external:<namespace>`.\nAt least one of `userId`, `anonymousId` and `identifiers` is required.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "messageId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1 to 200 characters. Resending the same `messageId` is safe; without one, a retry can\nbe applied twice."
+          },
+          "timestamp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 time the update was observed; the arrival time when absent."
+          },
+          "traits": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Trait key to value. A `null` value removes the trait this source set."
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maps to the identifier `external:user_id`."
+          }
+        }
+      },
       "IdentityBody": {
         "type": "object",
         "required": [
@@ -6304,6 +6775,31 @@
             "type": "integer",
             "description": "The 1-based line of the file the row starts on, the header being line 1. Blank lines are\nskipped but counted, and a line break inside a quoted value counts as a line.",
             "minimum": 0
+          }
+        }
+      },
+      "ItemProblem": {
+        "type": "object",
+        "description": "One invalid field of one item of an ingestion request.",
+        "required": [
+          "index",
+          "field",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The field, or empty when the item itself is the wrong type."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Position of the item in the request; 0 for a single-item endpoint.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "A stable code such as `unknown_field`, `required` or `invalid_email`."
           }
         }
       },
@@ -6729,6 +7225,16 @@
         "properties": {
           "detail": {
             "type": "string"
+          },
+          "errors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ItemProblem"
+            },
+            "description": "The invalid fields of an ingestion request: field names and reason codes, never values."
           },
           "request_id": {
             "type": [
@@ -7293,6 +7799,66 @@
           "truncated": {
             "type": "boolean",
             "description": "True when the trace has more records than this response carries."
+          }
+        }
+      },
+      "TrackRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/ingest/track`: one event.",
+        "required": [
+          "event"
+        ],
+        "properties": {
+          "anonymousId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maps to the identifier `anonymous_id`."
+          },
+          "event": {
+            "type": "string",
+            "description": "The event name, 1 to 128 characters."
+          },
+          "identifiers": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Identifier kind to value. At least one of `userId`, `anonymousId` and `identifiers`\nis required.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "messageId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1 to 200 characters. Resending the same `messageId` stores the event once."
+          },
+          "properties": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 time the event occurred; the arrival time when absent."
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maps to the identifier `external:user_id`."
           }
         }
       },
