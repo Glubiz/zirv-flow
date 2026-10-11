@@ -109,6 +109,7 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM debugger_feed WHERE workspace_id = $1 AND (event_id IN         (SELECT id FROM events WHERE workspace_id = $1 AND person_id = ANY($2))         OR reject_id IN         (SELECT id FROM ingest_rejects WHERE workspace_id = $1 AND person_id = ANY($2)))",
     "DELETE FROM events WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM event_dedupe WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM ingest_rejects WHERE workspace_id = $1 AND person_id = ANY($2)",

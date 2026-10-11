@@ -833,6 +833,45 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erased_person_is_never_brought_back_by_a_replay(pool: PgPool) {
+        let (ws, reject) = rejected(&pool).await;
+        fix_the_schema(&pool, ws).await;
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM ingest_rejects WHERE id = $1")
+            .bind(reject)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        let deleted = crate::delete_person(
+            &mut tx,
+            ws,
+            person,
+            crate::DeleteReason::Erasure,
+            &manual_trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        assert!(deleted);
+
+        let selected = select_rejects(&pool, ws, ReplaySelection::Ids(&[reject]))
+            .await
+            .unwrap()
+            .unwrap();
+        let preview = preview_replay(&pool, ws, &[reject]).await.unwrap();
+        let totals = replay_rejects(&pool, ws, &[reject], &manual_trace(), true)
+            .await
+            .unwrap();
+
+        assert!(selected.is_empty() && preview.is_empty());
+        assert_eq!((totals.stored(), totals.skipped), (0, 1));
+        assert_eq!(count(&pool, "events").await, 0);
+        assert_eq!(count(&pool, "people").await, 0);
+        assert_eq!(count(&pool, "ingest_rejects").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn without_a_fix_nothing_is_stored_and_the_reject_stays_open(pool: PgPool) {
         let (ws, reject) = rejected(&pool).await;
 

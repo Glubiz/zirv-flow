@@ -140,7 +140,9 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         .expect("the third record merged one of the first two people into the survivor");
     let bystander = person_of(&outcomes[3]);
 
-    // Events in two months, one with a message id each, then a reject.
+    // Events in two months, one with a message id each, then a reject. The debugger watches,
+    // so each outcome also leaves a feed row.
+    crate::touch_debugger_watch(pool, ws).await.unwrap();
     let key = master_key().hmac_key(HmacPurpose::Redaction);
     let now = OffsetDateTime::now_utc();
     let accepted = apply_event_batch(
@@ -318,6 +320,10 @@ mod tests {
             .map(|(place, _)| place)
             .collect();
 
+        // The debugger feed names no person; the scan reaches it through events and rejects.
+        for place in ["debugger_feed.event_id", "debugger_feed.reject_id"] {
+            assert!(places.contains(&place.to_owned()), "{place}: {places:?}");
+        }
         // Every table the scan knows holds a person is represented in the seed.
         let known: Vec<(String,)> = sqlx::query_as(
             "SELECT table_name::text || '.' || column_name::text \
