@@ -20,6 +20,7 @@ use zirv_flow_core::events::{
 };
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
+use super::debugger::{FeedEntry, is_watched, notify_feed, write_feed};
 use super::schemas::{
     EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
 };
@@ -93,6 +94,7 @@ pub(crate) async fn apply_event_records(
     for record in records {
         outcomes.push(apply_event_record(connection, workspace, key, &mut batch, record).await?);
     }
+    batch.finish(connection, workspace).await?;
     Ok(outcomes)
 }
 
@@ -102,9 +104,39 @@ pub(crate) struct EventBatch {
     policy: Option<EventPolicy>,
     schemas: HashMap<String, Option<PublishedSchema>>,
     drafted: HashSet<String>,
+    /// Whether anyone watches the workspace; asked once per batch.
+    watched: Option<bool>,
+    /// Feed rows were written, so [`EventBatch::finish`] must notify.
+    fed: bool,
 }
 
 impl EventBatch {
+    /// Ends the batch: one notification for the debugger if it wrote feed rows. Call it once
+    /// after the last record, in the transaction that holds them.
+    pub(crate) async fn finish(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<(), StoreError> {
+        if std::mem::take(&mut self.fed) {
+            notify_feed(connection, workspace).await?;
+        }
+        Ok(())
+    }
+
+    async fn watched(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<bool, StoreError> {
+        if let Some(watched) = self.watched {
+            return Ok(watched);
+        }
+        let watched = is_watched(connection, workspace).await?;
+        self.watched = Some(watched);
+        Ok(watched)
+    }
+
     async fn policy(
         &mut self,
         connection: &mut PgConnection,
@@ -141,7 +173,95 @@ struct Refusal<'a> {
     person_id: Option<Uuid>,
 }
 
+/// Applies one event. While the workspace is watched, also writes its debugger feed row; the
+/// caller ends the batch with [`EventBatch::finish`].
 pub(crate) async fn apply_event_record(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut EventBatch,
+    record: &EventRecord,
+) -> Result<EventOutcome, StoreError> {
+    let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
+    if batch.watched(connection, workspace).await? {
+        feed_outcome(connection, workspace, key, batch, record, &outcome).await?;
+        batch.fed = true;
+    }
+    Ok(outcome)
+}
+
+/// Writes the debugger feed row of one outcome: the redacted properties, never the raw ones.
+async fn feed_outcome(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut EventBatch,
+    record: &EventRecord,
+    outcome: &EventOutcome,
+) -> Result<(), StoreError> {
+    let name = validate_event_name(&record.name)
+        .is_ok()
+        .then_some(record.name.as_str());
+    let policy = batch.policy(connection, workspace).await?;
+    let published = match name {
+        Some(name) => batch.schema(connection, workspace, name).await?,
+        None => None,
+    };
+    let mut properties = record.properties.clone();
+    redact(&mut properties, &policy.redaction, workspace, key);
+    let reasons = || {
+        published
+            .as_ref()
+            .map(|schema| check_properties(&record.properties, &schema.properties))
+            .unwrap_or_default()
+    };
+    let (label, reasons, reason, event_id, reject_id) = match outcome {
+        EventOutcome::Accepted {
+            event_id, state, ..
+        } => match state {
+            ValidationState::Valid => ("accepted", reasons(), None, Some(*event_id), None),
+            ValidationState::Flagged => ("flagged", reasons(), None, Some(*event_id), None),
+            ValidationState::Unplanned => ("unplanned", Vec::new(), None, Some(*event_id), None),
+        },
+        EventOutcome::Duplicate { original_event_id } => (
+            "duplicate",
+            Vec::new(),
+            None,
+            Some(*original_event_id),
+            None,
+        ),
+        EventOutcome::Rejected { reject_id, reason } => (
+            "rejected",
+            if *reason == "validation_failed" {
+                reasons()
+            } else {
+                Vec::new()
+            },
+            Some(*reason),
+            None,
+            Some(*reject_id),
+        ),
+    };
+    write_feed(
+        connection,
+        workspace,
+        &FeedEntry {
+            source: &record.source,
+            name,
+            outcome: label,
+            reasons: &reasons,
+            reason,
+            properties: &properties,
+            schema_version: published.as_ref().map(|schema| schema.version),
+            event_id,
+            reject_id,
+            trace_id: record.trace.trace_id.as_uuid(),
+        },
+    )
+    .await
+}
+
+async fn judge_event_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &HmacKey,
@@ -1432,5 +1552,127 @@ mod tests {
         for leaked in ["hunter2", "order", "anything", "ada@example.com"] {
             assert!(!everything.contains(leaked), "{leaked}");
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_feed_is_written_only_while_the_workspace_is_watched(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+
+        apply_one(&pool, ws, event("seen", json!({}))).await;
+        assert_eq!(count(&pool, "debugger_feed").await, 0);
+
+        crate::touch_debugger_watch(&pool, other).await.unwrap();
+        apply_one(&pool, ws, event("seen", json!({}))).await;
+        assert_eq!(count(&pool, "debugger_feed").await, 0);
+
+        crate::touch_debugger_watch(&pool, ws).await.unwrap();
+        apply_one(&pool, ws, event("seen", json!({}))).await;
+        assert_eq!(count(&pool, "debugger_feed").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_feed_holds_redacted_values_and_one_row_per_outcome(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![
+                property("total", PropertyType::Number, true, false),
+                property("email", PropertyType::String, false, true),
+                property("card", PropertyType::String, false, true),
+            ],
+        )
+        .await;
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                redaction: RedactionRules {
+                    drop: vec!["card".into()],
+                    hash: vec!["email".into()],
+                    truncate_ip: Vec::new(),
+                },
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::touch_debugger_watch(&pool, ws).await.unwrap();
+        let mut accepted = event(
+            "order",
+            json!({"total": 5, "email": "ada@example.com", "card": "4111"}),
+        );
+        accepted.message_id = Some("m-1".into());
+        let mut repeat = accepted.clone();
+        repeat.trace = TraceContext::root(Cause::api("again"));
+        let mut rejected = event(
+            "order",
+            json!({"total": "free", "email": "ada@example.com", "card": "4111"}),
+        );
+        rejected.message_id = Some("m-2".into());
+        let unplanned = event("surprise", json!({"note": "plain"}));
+
+        let outcomes =
+            apply_event_batch(&pool, ws, &key(), &[accepted, repeat, rejected, unplanned])
+                .await
+                .unwrap();
+
+        assert_eq!(outcomes.len(), 4);
+        let rows: Vec<(String, Option<String>, Value, Value, Option<i32>, Option<Uuid>, Option<Uuid>)> =
+            sqlx::query_as(
+                "SELECT outcome, reason, reasons, properties, schema_version, event_id, reject_id                  FROM debugger_feed ORDER BY seq",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let labels: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(labels, ["accepted", "duplicate", "rejected", "unplanned"]);
+        assert_eq!(rows[2].1.as_deref(), Some("validation_failed"));
+        assert_eq!(
+            rows[2].2,
+            json!([{"property": "total", "reason": "wrong_type"}])
+        );
+        assert_eq!(rows[0].4, Some(1));
+        assert!(rows[0].5.is_some() && rows[1].5 == rows[0].5);
+        assert!(rows[2].6.is_some());
+        let everything =
+            serde_json::to_string(&rows.iter().map(|row| &row.3).collect::<Vec<_>>()).unwrap();
+        assert!(!everything.contains("ada@example.com"));
+        assert!(!everything.contains("4111"));
+        assert_eq!(rows[0].3["email"].as_str().unwrap().len(), 64);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_watched_batch_notifies_once(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        crate::touch_debugger_watch(&pool, ws).await.unwrap();
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .unwrap();
+        listener.listen(crate::DEBUGGER_CHANNEL).await.unwrap();
+
+        apply_event_batch(
+            &pool,
+            ws,
+            &key(),
+            &[event("a", json!({})), event("b", json!({}))],
+        )
+        .await
+        .unwrap();
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.payload(), ws.as_uuid().to_string());
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.recv()).await;
+        assert!(second.is_err(), "one notification per batch");
     }
 }

@@ -9,6 +9,14 @@ pub enum EventFlag {
     Clamped,
     /// The event is older than the lateness window.
     Late,
+    /// The event was stored by replaying an ingest reject, not on first arrival.
+    Replayed,
+    /// Event triggers must skip this event: a replay stored it with `emit_triggers` off.
+    ///
+    /// The event-trigger path that M5 adds MUST skip an event carrying this flag, so
+    /// replaying a backlog of rejects never starts flows for events that are long past. No
+    /// flow reads events yet, so nothing consumes the flag today.
+    NoTriggers,
 }
 
 impl EventFlag {
@@ -16,6 +24,8 @@ impl EventFlag {
         match self {
             Self::Clamped => "clamped",
             Self::Late => "late",
+            Self::Replayed => "replayed",
+            Self::NoTriggers => "no_triggers",
         }
     }
 }

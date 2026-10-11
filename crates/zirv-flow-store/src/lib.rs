@@ -42,12 +42,14 @@ pub use decisions::{
     list_trace,
 };
 pub use events::{
-    EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
-    IngestReject, NewEventSchema, PublishOutcome, RETENTION_BATCH, RejectCursor, RejectFilter,
-    RetentionReport, SchemaVersion, apply_event_batch, apply_event_retention, create_event_schema,
-    ensure_event_partitions, find_event_schema, get_event_policy, list_event_schemas,
-    list_ingest_rejects, list_schema_versions, publish_schema_draft, save_schema_draft,
-    set_event_policy, update_event_schema,
+    DEBUGGER_CHANNEL, EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema,
+    EventSchemaUpdate, FEED_RETENTION_MINUTES, FeedFilter, FeedItem, IngestReject, NewEventSchema,
+    PublishOutcome, RETENTION_BATCH, RejectCursor, RejectFilter, RetentionReport, SchemaVersion,
+    WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
+    debugger_feed_head, ensure_event_partitions, find_event_schema, get_event_policy,
+    list_event_schemas, list_ingest_rejects, list_schema_versions, prune_debugger_feed,
+    publish_schema_draft, read_debugger_feed, save_schema_draft, set_event_policy,
+    touch_debugger_watch, update_event_schema,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
