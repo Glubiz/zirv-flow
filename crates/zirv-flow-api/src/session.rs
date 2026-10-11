@@ -61,6 +61,7 @@ pub(crate) struct SessionBody {
 /// account for a growing time, up to 15 minutes.
 #[utoipa::path(
     post,
+    operation_id = "sign_in",
     path = "/api/v1/session",
     tag = "session",
     request_body = SignInRequest,
@@ -210,9 +211,39 @@ async fn record_failure(
     Ok(())
 }
 
+#[derive(Serialize, ToSchema)]
+pub(crate) struct MethodsBody {
+    /// True when e-mail and password sign-in is accepted.
+    local: bool,
+    /// True when sign-in through the identity provider is configured.
+    oidc: bool,
+}
+
+/// Which sign-in methods this instance accepts, for the sign-in screen.
+#[utoipa::path(
+    get,
+    operation_id = "get_sign_in_methods",
+    path = "/api/v1/session/methods",
+    tag = "session",
+    responses(
+        (status = 200, description = "The enabled sign-in methods", body = MethodsBody)
+    ),
+    security(())
+)]
+pub(crate) async fn methods(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(MethodsBody {
+            local: state.local_sign_in,
+            oidc: state.oidc.is_some(),
+        }),
+    )
+}
+
 /// The signed-in user and their CSRF token.
 #[utoipa::path(
     get,
+    operation_id = "get_session",
     path = "/api/v1/session",
     tag = "session",
     responses(
@@ -236,6 +267,7 @@ pub(crate) async fn current(principal: Principal) -> Result<impl IntoResponse, A
 /// Signs out: ends the session and clears the cookie. Needs the CSRF token.
 #[utoipa::path(
     delete,
+    operation_id = "sign_out",
     path = "/api/v1/session",
     tag = "session",
     responses(
@@ -272,6 +304,29 @@ pub(crate) async fn sign_out(
 mod tests {
     use super::*;
     use time::OffsetDateTime;
+
+    #[tokio::test]
+    async fn methods_reports_local_on_and_oidc_off_by_default() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let state = AppState::new(pool, std::sync::Arc::new(String::new));
+
+        let on = methods(State(state.clone())).await.into_response();
+        let off = methods(State(state.with_local_sign_in(false)))
+            .await
+            .into_response();
+
+        assert_eq!(on.headers()[header::CACHE_CONTROL], "no-store");
+        let body = |r: Response| async move {
+            let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        assert_eq!(body(on).await, json!({"local": true, "oidc": false}));
+        assert_eq!(body(off).await, json!({"local": false, "oidc": false}));
+    }
 
     #[test]
     fn the_user_body_has_no_password_hash() {

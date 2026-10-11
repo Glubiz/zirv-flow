@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
+# The web UI is built once on the build machine's architecture; its static
+# files are architecture independent and are embedded into the binary below.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 # The builder always runs on the build machine's own architecture and
 # cross-compiles with zig as the C compiler and linker, so a multi-arch image
 # never runs rustc under emulation.
@@ -58,6 +68,7 @@ RUN set -eux; \
 
 WORKDIR /src
 COPY . .
+COPY --from=web /web/dist /src/web/dist
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

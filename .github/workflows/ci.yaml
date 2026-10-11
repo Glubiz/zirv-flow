@@ -145,6 +145,42 @@ jobs:
       - name: Run Clippy Lint (Windows target)
         run: cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type Check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Generated API Client Is Current
+        run: npm run gen:api:check
+
+      - name: Build
+        run: npm run build
+
   postgres:
     name: PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-latest
@@ -356,6 +392,62 @@ jobs:
 
       - name: Check Readiness
         run: curl -fsS http://localhost:8080/readyz
+
+      - name: Check The Web UI Is Served
+        run: curl -fsS http://localhost:8080/ | grep -q 'id="root"'
+
+      # The M1 exit flow through /api/v1 alone: claim the instance with the
+      # setup token from the log, create a workspace and a read-only API key,
+      # then read the workspace with only that key. Secrets stay in shell
+      # variables and are masked; nothing is echoed.
+      - name: Check The API Flow
+        run: |
+          set -euo pipefail
+          base=http://localhost:8080/api/v1
+
+          token=$(docker compose logs --no-color zirv-flow \
+            | sed -nE 's/.*setup token ([^ ,"]+).*/\1/p' | head -n1)
+          test -n "$token"
+          password=$(openssl rand -hex 16)
+          echo "::add-mask::$token"
+          echo "::add-mask::$password"
+
+          test "$(curl -fsS "$base/setup" | jq -r .required)" = true
+
+          # The session cookie is Secure by default, and curl's cookie jar may
+          # refuse it over plain http, so it is read from the response headers.
+          headers=$(mktemp)
+          csrf=$(jq -n --arg token "$token" --arg password "$password" \
+              '{token: $token, email: "owner@example.com", password: $password}' \
+            | curl -fsS -D "$headers" -X POST "$base/setup" \
+                -H 'content-type: application/json' --data-binary @- \
+            | jq -r .csrf_token)
+          session=$(tr -d '\r' < "$headers" \
+            | sed -nE 's/^[Ss]et-[Cc]ookie: (zf_session=[^;]+).*/\1/p' | head -n1)
+          test -n "$csrf" && test -n "$session"
+          echo "::add-mask::$csrf"
+          echo "::add-mask::$session"
+
+          test "$(curl -fsS "$base/setup" | jq -r .required)" = false
+
+          workspace=$(curl -fsS -X POST "$base/workspaces" \
+              -H "cookie: $session" -H "x-csrf-token: $csrf" \
+              -H 'content-type: application/json' \
+              -d '{"name": "Smoke test"}' \
+            | jq -r .id)
+          test -n "$workspace"
+
+          key=$(curl -fsS -X POST "$base/workspaces/$workspace/api-keys" \
+              -H "cookie: $session" -H "x-csrf-token: $csrf" \
+              -H 'content-type: application/json' \
+              -d '{"name": "smoke test", "scopes": ["read"]}' \
+            | jq -r .key)
+          echo "::add-mask::$key"
+
+          # No cookie and no CSRF token: only the key authenticates this read.
+          test "$(curl -fsS "$base/workspaces/$workspace" \
+              -H "authorization: Bearer $key" | jq -r .id)" = "$workspace"
+          echo "API flow passed"
 
       - name: Print Logs On Failure
         if: failure()

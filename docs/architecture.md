@@ -253,8 +253,8 @@ The engine evaluates branch conditions through an injected
 reference evaluator). The renderer never evaluates conditions itself: it lists
 a template's block conditions, the handler evaluates them in one
 `ConditionEvaluator` call, and the results go into the render as plain inputs
-(section 11.4). CI builds `web/` before the release build; a placeholder
-`web/dist` keeps `cargo build` working without Node. The OpenAPI document
+(section 11.4). CI builds `web/` before the release build; `build.rs` embeds `web/dist`, or a
+placeholder page in the api crate when it is absent, so `cargo build` works without Node. The OpenAPI document
 (utoipa) is committed, drift-checked and feeds the SPA client.
 
 ## 6. Domain model

@@ -1172,6 +1172,67 @@ endpoint = \"http://collector:4318/\""
         assert!(logs.text().is_empty(), "{}", logs.text());
     }
 
+    /// The URL of the database `sqlx::test` created for `pool`, on the server `DATABASE_URL` names.
+    fn test_database_url(pool: &PgPool) -> String {
+        let base = std::env::var("DATABASE_URL").expect("DATABASE_URL is set for PostgreSQL tests");
+        let (server, _) = base.rsplit_once('/').unwrap();
+        let database = pool.connect_options().get_database().unwrap().to_owned();
+        format!("{server}/{database}")
+    }
+
+    async fn serve_against(pool: &PgPool, migrate_on_start: bool) -> (u8, String) {
+        let mut env = database_env(&test_database_url(pool));
+        env.push((
+            "ZIRV_FLOW_DATABASE__MIGRATE_ON_START".into(),
+            migrate_on_start.to_string().into(),
+        ));
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Serve),
+        };
+        let (logs, _guard) = capture_logs();
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut io::sink(), &mut stderr).await;
+
+        let output = format!("{}{}", logs.text(), String::from_utf8(stderr).unwrap());
+        (code, output)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn serve_refuses_a_schema_newer_than_the_binary(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (999999, 'future', true, '\\x00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (code, output) = serve_against(&pool, false).await;
+
+        assert_eq!(code, 1, "{output}");
+        assert!(
+            output.contains(
+                "database schema version 999999 is newer than this binary supports; upgrade zirv-flow"
+            ),
+            "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn serve_refuses_pending_migrations_when_migrating_on_start_is_off(pool: PgPool) {
+        let (code, output) = serve_against(&pool, false).await;
+
+        assert_eq!(code, 1, "{output}");
+        assert!(output.contains("pending migration(s)"), "{output}");
+        assert!(output.contains("zirv-flow migrate"), "{output}");
+    }
+
     #[tokio::test]
     async fn an_unreachable_database_stops_the_announcement_with_exit_code_one() {
         let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();

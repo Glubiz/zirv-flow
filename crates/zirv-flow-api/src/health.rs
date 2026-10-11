@@ -22,6 +22,7 @@ pub(crate) struct StatusBody {
 /// Liveness: the process is serving requests. Never touches the database.
 #[utoipa::path(
     get,
+    operation_id = "get_healthz",
     path = "/healthz",
     tag = "health",
     responses((status = 200, description = "The process is alive", body = StatusBody))
@@ -33,6 +34,7 @@ pub(crate) async fn healthz() -> Json<StatusBody> {
 /// Readiness: the database is reachable and its schema is up to date.
 #[utoipa::path(
     get,
+    operation_id = "get_readyz",
     path = "/readyz",
     tag = "health",
     responses(

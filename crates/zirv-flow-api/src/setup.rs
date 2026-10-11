@@ -63,6 +63,7 @@ pub(crate) struct SetupRequest {
 /// Whether the instance still needs its first-run setup.
 #[utoipa::path(
     get,
+    operation_id = "get_setup_status",
     path = "/api/v1/setup",
     tag = "setup",
     responses(
@@ -86,6 +87,7 @@ pub(crate) async fn status(State(state): State<AppState>) -> Result<Response, Ap
 /// owner is 409, checked before the token; a missing or wrong token is 403.
 #[utoipa::path(
     post,
+    operation_id = "complete_setup",
     path = "/api/v1/setup",
     tag = "setup",
     request_body = SetupRequest,

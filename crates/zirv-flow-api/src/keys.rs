@@ -73,6 +73,7 @@ pub(crate) struct CreateApiKeyRequest {
 /// `admin` keys only.
 #[utoipa::path(
     get,
+    operation_id = "list_api_keys",
     path = "/api/v1/workspaces/{ws}/api-keys",
     tag = "api-keys",
     params(("ws" = Uuid, Path, description = "Workspace id")),
@@ -97,6 +98,7 @@ pub(crate) async fn list(
 /// Creates a key and returns its secret, once.
 #[utoipa::path(
     post,
+    operation_id = "create_api_key",
     path = "/api/v1/workspaces/{ws}/api-keys",
     tag = "api-keys",
     params(("ws" = Uuid, Path, description = "Workspace id")),
@@ -143,6 +145,7 @@ pub(crate) async fn create(
 /// Revokes a key. Revoked keys are refused with 401 from then on.
 #[utoipa::path(
     delete,
+    operation_id = "revoke_api_key",
     path = "/api/v1/workspaces/{ws}/api-keys/{id}",
     tag = "api-keys",
     params(

@@ -100,6 +100,7 @@ pub(crate) struct DeadJobsBody {
 /// Job counts by kind and state, and how long the oldest runnable job has waited.
 #[utoipa::path(
     get,
+    operation_id = "get_job_depth",
     path = "/api/v1/admin/jobs",
     tag = "jobs-admin",
     responses(
@@ -123,6 +124,7 @@ pub(crate) async fn depth(
 /// Dead jobs, newest first, without their payloads.
 #[utoipa::path(
     get,
+    operation_id = "list_dead_jobs",
     path = "/api/v1/admin/jobs/dead",
     tag = "jobs-admin",
     params(
@@ -163,6 +165,7 @@ pub(crate) async fn dead(
 /// gets a `job.retry` decision record in its trace.
 #[utoipa::path(
     post,
+    operation_id = "retry_job",
     path = "/api/v1/admin/jobs/{id}/retry",
     tag = "jobs-admin",
     params(("id" = Uuid, Path, description = "Job id")),

@@ -101,6 +101,7 @@ impl Callback {
 /// Sets the `zf_oidc_state` cookie (HttpOnly, SameSite=Lax) that the callback needs.
 #[utoipa::path(
     get,
+    operation_id = "start_oidc_sign_in",
     path = "/api/v1/session/oidc/start",
     tag = "session",
     responses(
@@ -152,6 +153,7 @@ pub(crate) async fn start(State(state): State<AppState>) -> Result<Response, Api
 /// failure is the same 401, and clears the `zf_oidc_state` cookie.
 #[utoipa::path(
     get,
+    operation_id = "finish_oidc_sign_in",
     path = "/api/v1/session/oidc/callback",
     tag = "session",
     params(

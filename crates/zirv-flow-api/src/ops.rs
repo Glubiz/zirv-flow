@@ -56,7 +56,7 @@ pub fn ops_router(state: OpsState) -> Router {
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .fallback(problem::not_found)
+        .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(from_fn(request_id::assign))
         .with_state(state)

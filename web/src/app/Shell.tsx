@@ -1,0 +1,81 @@
+import { useEffect, useRef } from "react";
+import { Link, NavLink, Outlet, useLocation } from "react-router";
+
+import { AccountMenu, useSignedInUser } from "../features/session";
+import { useCurrentWorkspace, WorkspaceSwitcher } from "../features/workspaces";
+import { Brand } from "../ui";
+
+const TITLES: Record<string, string> = {
+  w: "Workspaces",
+  members: "Members",
+  "api-keys": "API keys",
+  traces: "Traces",
+  jobs: "Jobs",
+  health: "Health",
+};
+
+function titleFor(pathname: string): string {
+  const parts = pathname.split("/").filter(Boolean);
+  const key = parts[0] === "w" && parts.length > 2 ? (parts[2] ?? "w") : (parts[0] ?? "w");
+  return TITLES[key] ?? "zirv flow";
+}
+
+function WorkspaceItem({ base, segment, children }: { base: string | null; segment: string; children: string }) {
+  if (base === null) {
+    return (
+      <span className="nav-disabled" aria-disabled="true" title="Pick a workspace first">
+        {children}
+        <span className="visually-hidden"> (pick a workspace first)</span>
+      </span>
+    );
+  }
+  return <NavLink to={`${base}/${segment}`}>{children}</NavLink>;
+}
+
+export function Shell() {
+  const user = useSignedInUser();
+  const current = useCurrentWorkspace();
+  const location = useLocation();
+  const main = useRef<HTMLElement>(null);
+  const first = useRef(true);
+
+  useEffect(() => {
+    document.title = `${titleFor(location.pathname)} · zirv flow`;
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    main.current?.focus();
+  }, [location.pathname]);
+
+  const base = current ? `/w/${current.id}` : null;
+
+  return (
+    <>
+      <header className="header">
+        <div className="header-inner">
+          <Link to="/w" className="brand-link">
+            <Brand />
+          </Link>
+          <nav aria-label="Main" className="nav">
+            <NavLink to="/w" end>
+              Workspaces
+            </NavLink>
+            <WorkspaceItem base={base} segment="members">Members</WorkspaceItem>
+            <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
+            <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
+            {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}
+            <NavLink to="/health">Health</NavLink>
+          </nav>
+          <div className="header-tools">
+            <WorkspaceSwitcher />
+            <AccountMenu />
+          </div>
+        </div>
+      </header>
+      <main id="main" ref={main} tabIndex={-1}>
+        <Outlet />
+      </main>
+    </>
+  );
+}
