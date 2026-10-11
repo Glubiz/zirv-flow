@@ -21,8 +21,10 @@ CREATE TABLE imports (
     -- The column names, in file order.
     header           jsonb NOT NULL,
     mapping          jsonb,
+    -- `uploading` while the file streams in: the row exists first, its file facts are
+    -- placeholders until the upload finishes, and a failed upload deletes it.
     status           text NOT NULL DEFAULT 'uploaded' CHECK (status IN
-        ('uploaded', 'mapped', 'dry_running', 'dry_run_done', 'running', 'succeeded', 'failed',
+        ('uploading', 'uploaded', 'mapped', 'dry_running', 'dry_run_done', 'running', 'succeeded', 'failed',
          'cancelled')),
     -- Data rows, the header not counted.
     rows_total       bigint NOT NULL CHECK (rows_total >= 0),
@@ -48,10 +50,10 @@ CREATE TABLE imports (
 CREATE INDEX imports_workspace_idx ON imports (workspace_id, id DESC);
 
 -- The file, 1 MiB per chunk, so separate `serve` and `worker` processes need no shared disk.
--- The upload writes the chunks before the import row in one transaction.
+-- The upload inserts the import row first, then each chunk in a statement of its own, so no
+-- transaction stays open while the body streams in.
 CREATE TABLE import_chunks (
-    import_id    uuid NOT NULL REFERENCES imports (id) ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED,
+    import_id    uuid NOT NULL REFERENCES imports (id) ON DELETE CASCADE,
     seq          integer NOT NULL CHECK (seq >= 0),
     workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     data         bytea NOT NULL,

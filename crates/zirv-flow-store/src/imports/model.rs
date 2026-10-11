@@ -17,6 +17,8 @@ use crate::{PgConnection, StoreError};
 /// Where an import is in its life.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportStatus {
+    /// The file is still streaming in; the import is hidden from the history.
+    Uploading,
     /// Uploaded; no mapping yet.
     Uploaded,
     Mapped,
@@ -31,6 +33,7 @@ pub enum ImportStatus {
 impl ImportStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Uploading => "uploading",
             Self::Uploaded => "uploaded",
             Self::Mapped => "mapped",
             Self::DryRunning => "dry_running",
@@ -44,6 +47,7 @@ impl ImportStatus {
 
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
+            "uploading" => Self::Uploading,
             "uploaded" => Self::Uploaded,
             "mapped" => Self::Mapped,
             "dry_running" => Self::DryRunning,
@@ -223,7 +227,8 @@ pub async fn list_imports<'e>(
     let rows: Vec<ImportRow> = sqlx::query_as(concat!(
         "SELECT ",
         import_columns!(),
-        " FROM imports WHERE workspace_id = $1 AND ($2::uuid IS NULL OR id < $2) \
+        " FROM imports WHERE workspace_id = $1 AND status <> 'uploading' \
+           AND ($2::uuid IS NULL OR id < $2) \
          ORDER BY id DESC LIMIT $3"
     ))
     .bind(workspace.as_uuid())

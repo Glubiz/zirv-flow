@@ -25,7 +25,7 @@ pub use rejects::{
 pub use retention::{
     CHUNK_RETENTION_DAYS, ImportRetention, REJECT_RETENTION_DAYS, delete_expired_import_data,
 };
-pub use upload::{CHUNK_BYTES, ImportUpload, NewImport, read_import_chunk};
+pub use upload::{CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, read_import_chunk};
 
 #[cfg(test)]
 mod tests {
@@ -68,24 +68,26 @@ mod tests {
     async fn upload(pool: &PgPool, ws: WorkspaceId, bytes: &[u8], rows: i64) -> Import {
         let header = vec!["email".to_owned()];
         let trace = trace();
-        let mut upload = ImportUpload::begin(pool, ws).await.unwrap();
-        upload.write(bytes).await.unwrap();
-        let import = upload
-            .insert(&NewImport {
+        ImportUpload::store(
+            pool,
+            ws,
+            &UploadStart {
                 name: "people",
                 source: "csv",
                 stream: "people",
                 file_name: "people.csv",
+                created_by: None,
+                trace: &trace,
+            },
+            bytes,
+            &UploadScan {
                 delimiter: ',',
                 header: &header,
                 rows_total: rows,
-                created_by: None,
-                trace: &trace,
-            })
-            .await
-            .unwrap();
-        upload.commit().await.unwrap();
-        import
+            },
+        )
+        .await
+        .unwrap()
     }
 
     async fn mapped(pool: &PgPool, ws: WorkspaceId, bytes: &[u8], rows: i64) -> Import {
@@ -215,12 +217,93 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_upload_that_is_dropped_leaves_nothing_behind(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
-        let mut upload = ImportUpload::begin(&pool, ws).await.unwrap();
+        let trace = trace();
+        let mut upload = ImportUpload::begin(&pool, ws, &start(&trace))
+            .await
+            .unwrap();
         upload.write(&vec![b'a'; CHUNK_BYTES + 5]).await.unwrap();
-        drop(upload);
+        assert_eq!(count(&pool, "import_chunks").await, 1);
+
+        upload.abort().await;
 
         assert_eq!(count(&pool, "import_chunks").await, 0);
         assert_eq!(count(&pool, "imports").await, 0);
+    }
+
+    fn start(trace: &TraceContext) -> UploadStart<'_> {
+        UploadStart {
+            name: "people",
+            source: "csv",
+            stream: "people",
+            file_name: "people.csv",
+            created_by: None,
+            trace,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_that_is_dropped_mid_body_deletes_its_import_and_chunks(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let trace = trace();
+        let mut upload = ImportUpload::begin(&pool, ws, &start(&trace))
+            .await
+            .unwrap();
+        upload.write(&vec![b'a'; CHUNK_BYTES * 2]).await.unwrap();
+        assert_eq!(count(&pool, "import_chunks").await, 2);
+
+        drop(upload);
+
+        for _ in 0..50 {
+            if count(&pool, "imports").await == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(count(&pool, "imports").await, 0);
+        assert_eq!(count(&pool, "import_chunks").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn mid_upload_the_import_is_visible_as_uploading_hidden_from_the_history_with_no_open_transaction(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let trace = trace();
+        let mut upload = ImportUpload::begin(&pool, ws, &start(&trace))
+            .await
+            .unwrap();
+        upload.write(&vec![b'a'; CHUNK_BYTES + 10]).await.unwrap();
+
+        // Seen from other connections, between two chunks.
+        let seen = find_import(&pool, ws, upload.id()).await.unwrap().unwrap();
+        let history = list_imports(&pool, ws, None, 10).await.unwrap().0;
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid() \
+               AND state IN ('idle in transaction', 'idle in transaction (aborted)')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(seen.status, ImportStatus::Uploading);
+        assert!(history.is_empty());
+        assert_eq!(open, 0, "no transaction stays open between chunks");
+        assert_eq!(count(&pool, "import_chunks").await, 1);
+        let header = vec!["email".to_owned()];
+        let (finished, tx) = upload
+            .finish(&UploadScan {
+                delimiter: ',',
+                header: &header,
+                rows_total: 0,
+            })
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        assert_eq!(finished.status, ImportStatus::Uploaded);
+        assert_eq!(list_imports(&pool, ws, None, 10).await.unwrap().0.len(), 1);
     }
 
     #[sqlx::test]

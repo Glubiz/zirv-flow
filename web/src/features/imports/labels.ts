@@ -6,6 +6,8 @@ export type CsvImportDetail = components["schemas"]["CsvImportDetailBody"];
 
 export function statusLabel(status: string): string {
   switch (status) {
+    case "uploading":
+      return "Uploading";
     case "uploaded":
       return "Uploaded";
     case "mapped":

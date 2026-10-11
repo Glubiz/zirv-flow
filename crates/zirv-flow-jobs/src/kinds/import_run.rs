@@ -224,8 +224,8 @@ mod tests {
     use zirv_flow_core::people::TraitType;
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceId, WorkspaceName};
     use zirv_flow_store::{
-        Import, ImportUpload, NewImport, NewTraitDefinition, cancel_import, create_list,
-        create_trait_definition, find_import, list_import_rejects, set_import_mapping,
+        Import, ImportUpload, NewTraitDefinition, UploadScan, UploadStart, cancel_import,
+        create_list, create_trait_definition, find_import, list_import_rejects, set_import_mapping,
         start_import_run,
     };
 
@@ -325,25 +325,26 @@ mod tests {
     ) -> Import {
         let header = vec!["email".to_owned(), "age".to_owned(), "news".to_owned()];
         let trace = TraceContext::root(Cause::api("t"));
-        let mut upload = ImportUpload::begin(pool, ws).await.unwrap();
-        for piece in bytes.chunks(64 * 1024) {
-            upload.write(piece).await.unwrap();
-        }
-        let import = upload
-            .insert(&NewImport {
+        let import = ImportUpload::store(
+            pool,
+            ws,
+            &UploadStart {
                 name: "people",
                 source: "csv",
                 stream: "people",
                 file_name: "people.csv",
+                created_by: None,
+                trace: &trace,
+            },
+            bytes,
+            &UploadScan {
                 delimiter: ',',
                 header: &header,
                 rows_total: i64::try_from(rows).unwrap(),
-                created_by: None,
-                trace: &trace,
-            })
-            .await
-            .unwrap();
-        upload.commit().await.unwrap();
+            },
+        )
+        .await
+        .unwrap();
         let mut tx = zirv_flow_store::begin(pool).await.unwrap();
         set_import_mapping(&mut tx, ws, import.id, &mapping(list))
             .await

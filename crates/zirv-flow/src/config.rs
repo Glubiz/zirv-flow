@@ -749,6 +749,7 @@ impl Config {
     pub(crate) fn import_limits(&self) -> zirv_flow_api::ImportLimits {
         zirv_flow_api::ImportLimits {
             max_file_bytes: self.imports.max_file_bytes,
+            ..zirv_flow_api::ImportLimits::default()
         }
     }
 

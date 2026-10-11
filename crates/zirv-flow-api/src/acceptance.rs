@@ -6609,8 +6609,12 @@ email,b@example.com,
     ) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let router = router(
-            AppState::new(pool.clone(), Arc::new(String::new))
-                .with_import_limits(crate::ImportLimits { max_file_bytes: 64 }),
+            AppState::new(pool.clone(), Arc::new(String::new)).with_import_limits(
+                crate::ImportLimits {
+                    max_file_bytes: 64,
+                    ..crate::ImportLimits::default()
+                },
+            ),
         );
         admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
             .await
@@ -7456,5 +7460,61 @@ email,b@example.com,
             .await
             .unwrap();
         assert_eq!(imports, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_that_stalls_or_breaks_off_mid_body_leaves_no_import_and_no_chunks(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new)).with_import_limits(
+                crate::ImportLimits {
+                    idle_timeout: std::time::Duration::from_millis(200),
+                    ..crate::ImportLimits::default()
+                },
+            ),
+        );
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        let owner = login(&router, OWNER_EMAIL).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let first = format!("Email\n{}", "ada@example.com\n".repeat(150_000)).into_bytes();
+        let send = |body: Body| {
+            let request = Request::builder()
+                .method("POST")
+                .uri(imports_uri(&ws, "?name=x"))
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header(header::COOKIE, &owner.cookie)
+                .header("x-csrf-token", &owner.csrf)
+                .body(body)
+                .unwrap();
+            let router = router.clone();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+
+        let stalled = send(Body::from_stream(futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok::<_, std::io::Error>(first.clone())]),
+            futures_util::stream::pending(),
+        )))
+        .await;
+        let broken = send(Body::from_stream(futures_util::stream::iter([
+            Ok(first.clone()),
+            Err(std::io::Error::other("connection reset")),
+        ])))
+        .await;
+
+        assert_eq!(stalled, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(broken, StatusCode::BAD_REQUEST);
+        for table in ["imports", "import_chunks"] {
+            let rows: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
     }
 }

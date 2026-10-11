@@ -55,11 +55,11 @@ pub use identities::{
 pub use imports::{
     BatchOutcome, BatchProgress, CHUNK_BYTES, CHUNK_RETENTION_DAYS, DRY_RUN_JOB_KIND, DryRunBatch,
     Import, ImportBatch, ImportPhase, ImportReject, ImportRetention, ImportStatus, ImportUpload,
-    NewImport, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS, RUN_JOB_KIND, RejectReason,
-    RejectedRow, RowDetail, StoredReason, TransitionError, cancel_import, commit_dry_run_batch,
-    commit_import_batch, delete_expired_import_data, enqueue_import_job, fail_import, find_import,
-    finish_import_dry_run, finish_import_run, list_import_rejects, list_imports, read_import_chunk,
-    set_import_mapping, start_import_dry_run, start_import_run,
+    REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS, RUN_JOB_KIND, RejectReason, RejectedRow,
+    RowDetail, StoredReason, TransitionError, UploadScan, UploadStart, cancel_import,
+    commit_dry_run_batch, commit_import_batch, delete_expired_import_data, enqueue_import_job,
+    fail_import, find_import, finish_import_dry_run, finish_import_run, list_import_rejects,
+    list_imports, read_import_chunk, set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, append_inbox, drain_batch,

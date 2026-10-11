@@ -11,9 +11,9 @@ use futures_util::StreamExt;
 use serde_json::json;
 use zirv_flow_core::csv_file::{CsvError, CsvParser, detect_delimiter};
 use zirv_flow_core::mapping::{Header, HeaderError};
-use zirv_flow_store::{ImportUpload, NewImport};
+use zirv_flow_store::{ImportUpload, UploadScan, UploadStart};
 
-use super::{CsvImportDetailBody, SAMPLE_ROWS};
+use super::{CsvImportDetailBody, ImportLimits, SAMPLE_ROWS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
@@ -248,11 +248,52 @@ fn is_csv(headers: &HeaderMap) -> bool {
         .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/csv"))
 }
 
+/// Reads the body into `upload` and the scan, refusing a file that is too large, stalls for
+/// `idle`, breaks off or is not a usable CSV. The caller deletes the upload on an error.
+async fn receive(
+    upload: &mut ImportUpload,
+    body: axum::body::Body,
+    limits: ImportLimits,
+    delimiter: Option<u8>,
+) -> Result<(Scan, Vec<String>, Vec<Vec<String>>), ApiError> {
+    let mut scan = FileScan::new(delimiter);
+    let mut stream = body.into_data_stream();
+    let mut total = 0_u64;
+    loop {
+        let next = tokio::time::timeout(limits.idle_timeout, stream.next())
+            .await
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "no data arrived for too long; the upload was abandoned",
+                )
+            })?;
+        let Some(piece) = next else { break };
+        let piece = piece.map_err(|_| ApiError::bad_request("the upload was interrupted"))?;
+        total += piece.len() as u64;
+        if total > limits.max_file_bytes {
+            return Err(too_large());
+        }
+        upload.write(&piece).await?;
+        scan.push(&piece).map_err(csv_problem)?;
+    }
+    let mut scanned = scan.finish().map_err(csv_problem)?;
+    let names = scanned
+        .header
+        .take()
+        .ok_or_else(|| ApiError::unprocessable("body: the file is empty"))?;
+    Header::new(names.clone()).map_err(header_problem)?;
+    let samples = std::mem::take(&mut scanned.samples);
+    Ok((scanned, names, samples))
+}
+
 /// Uploads a CSV file as a new import. The body is the raw `text/csv` file, streamed into the
 /// database in 1 MiB chunks; it must be UTF-8 (a byte order mark is ignored) with a header row
 /// of unique names. The delimiter is detected from `,`, `;` and tab unless one is given. The
 /// answer holds the import, its header and the first 20 rows, masked for callers who may not
-/// see values. A refused upload keeps nothing. Audited as `import.created`.
+/// see values. The import exists as `uploading` (hidden from the history) while the body
+/// arrives, each 1 MiB chunk is stored on its own, and an upload that is refused, breaks off
+/// or stalls for 60 seconds is deleted with its chunks. Audited as `import.created`.
 #[utoipa::path(
     post,
     operation_id = "upload_import",
@@ -273,6 +314,7 @@ fn is_csv(headers: &HeaderMap) -> bool {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 408, description = "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The file is over imports.max_file_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "The content type is not text/csv", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Not UTF-8, empty, or a header with blank or repeated names", body = Problem, content_type = "application/problem+json")
@@ -294,51 +336,47 @@ pub(crate) async fn upload(
             "expected a CSV body (content-type: text/csv)",
         ));
     }
-    let max = state.imports.max_file_bytes;
+    let limits = state.imports;
     let declared = request
         .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
-    if declared.is_some_and(|length| length > max) {
+    if declared.is_some_and(|length| length > limits.max_file_bytes) {
         return Err(too_large());
     }
 
-    let mut upload = ImportUpload::begin(&state.pool, workspace.id).await?;
-    let mut scan = FileScan::new(params.delimiter);
-    let mut body = request.into_body().into_data_stream();
-    let mut total = 0_u64;
-    while let Some(piece) = body.next().await {
-        let piece = piece.map_err(|_| ApiError::bad_request("the upload was interrupted"))?;
-        total += piece.len() as u64;
-        if total > max {
-            return Err(too_large());
-        }
-        upload.write(&piece).await?;
-        scan.push(&piece).map_err(csv_problem)?;
-    }
-    let scanned = scan.finish().map_err(csv_problem)?;
-    let names = scanned
-        .header
-        .ok_or_else(|| ApiError::unprocessable("body: the file is empty"))?;
-    Header::new(names.clone()).map_err(header_problem)?;
-
     let trace = request_trace();
-    let import = upload
-        .insert(&NewImport {
+    let mut upload = ImportUpload::begin(
+        &state.pool,
+        workspace.id,
+        &UploadStart {
             name: &params.name,
             source: &params.source,
             stream: &params.stream,
             file_name: &params.file_name,
+            created_by: principal.user_id(),
+            trace: &trace,
+        },
+    )
+    .await?;
+    let received = receive(&mut upload, request.into_body(), limits, params.delimiter).await;
+    let (scanned, names, samples) = match received {
+        Ok(received) => received,
+        Err(error) => {
+            upload.abort().await;
+            return Err(error);
+        }
+    };
+    let (import, mut tx) = upload
+        .finish(&UploadScan {
             delimiter: char::from(scanned.delimiter),
             header: &names,
             rows_total: scanned.rows,
-            created_by: principal.user_id(),
-            trace: &trace,
         })
         .await?;
     admin::audit(
-        upload.tx(),
+        &mut tx,
         &principal.context(),
         Some(workspace.id),
         "import.created",
@@ -346,11 +384,11 @@ pub(crate) async fn upload(
         json!({ "rows": import.rows_total, "bytes": import.size_bytes }),
     )
     .await?;
-    upload.commit().await?;
+    zirv_flow_store::commit(tx).await?;
     let may_see = may_see_values(&state, &principal, workspace.id).await;
     Ok((
         StatusCode::CREATED,
-        Json(CsvImportDetailBody::new(&import, scanned.samples, may_see)),
+        Json(CsvImportDetailBody::new(&import, samples, may_see)),
     ))
 }
 

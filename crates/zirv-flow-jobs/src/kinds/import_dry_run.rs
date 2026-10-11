@@ -145,8 +145,8 @@ mod tests {
     use zirv_flow_core::mapping::{ColumnRule, Mapping, Target, Transform};
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceId, WorkspaceName};
     use zirv_flow_store::{
-        Import, ImportPhase, ImportUpload, NewImport, list_import_rejects, set_import_mapping,
-        start_import_dry_run,
+        Import, ImportPhase, ImportUpload, UploadScan, UploadStart, list_import_rejects,
+        set_import_mapping, start_import_dry_run,
     };
 
     use super::*;
@@ -180,23 +180,26 @@ mod tests {
             .id;
         let header = vec!["email".to_owned()];
         let trace = TraceContext::root(Cause::api("t"));
-        let mut upload = ImportUpload::begin(pool, ws).await.unwrap();
-        upload.write(text.as_bytes()).await.unwrap();
-        let import = upload
-            .insert(&NewImport {
+        let import = ImportUpload::store(
+            pool,
+            ws,
+            &UploadStart {
                 name: "people",
                 source: "csv",
                 stream: "people",
                 file_name: "people.csv",
+                created_by: None,
+                trace: &trace,
+            },
+            text.as_bytes(),
+            &UploadScan {
                 delimiter: ',',
                 header: &header,
                 rows_total: i64::try_from(rows).unwrap(),
-                created_by: None,
-                trace: &trace,
-            })
-            .await
-            .unwrap();
-        upload.commit().await.unwrap();
+            },
+        )
+        .await
+        .unwrap();
         let mapping = Mapping {
             key_column: None,
             columns: vec![ColumnRule {

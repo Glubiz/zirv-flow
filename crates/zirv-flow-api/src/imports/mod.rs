@@ -27,12 +27,15 @@ use crate::problem::ApiError;
 pub struct ImportLimits {
     /// The largest file, in bytes.
     pub max_file_bytes: u64,
+    /// How long an upload may go without a byte arriving before it is abandoned.
+    pub idle_timeout: std::time::Duration,
 }
 
 impl Default for ImportLimits {
     fn default() -> Self {
         Self {
             max_file_bytes: 512 * 1024 * 1024,
+            idle_timeout: std::time::Duration::from_secs(60),
         }
     }
 }

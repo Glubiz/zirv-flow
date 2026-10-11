@@ -860,7 +860,7 @@ The body is streamed, never held whole: it goes into PostgreSQL in 1 MiB chunks 
 SHA-256 and row count are taken, so separate `serve` and `worker` processes need no shared
 disk. A file over `imports.max_file_bytes` (512 MiB by default) is a 413, a header with a
 blank or repeated name or a file that is not UTF-8 is a 422, and a refused or interrupted
-upload keeps nothing. `serve` holds one database connection for the length of an upload. The
+upload keeps nothing: the import exists as `uploading` (hidden from the history) while the body arrives, each chunk is a statement of its own so no transaction stays open, and an upload that breaks off, is refused or sends no byte for 60 seconds (408) is deleted with its chunks. The
 answer is the import with its header and the first 20 rows; the cells of those rows are null
 and `samples_masked` is true for callers who may not see values (members and `read` keys).
 Row numbers are the ones a spreadsheet shows: the header is row 1, every blank line counts as a row, and a quoted value over several lines is one row.
