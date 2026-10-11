@@ -15,6 +15,7 @@ import { exportStatus, secondsLeft } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
 import { ShowMore } from "./ShowMore";
 import { usePaged } from "./usePaged";
+import { usePolling } from "./usePolling";
 
 type Export = components["schemas"]["ExportBody"];
 
@@ -44,6 +45,10 @@ export function ExportSection({ workspaceId }: { workspaceId: string }) {
     [workspaceId],
   );
   const exports = usePaged(fetchPage, [workspaceId]);
+  usePolling(
+    exports.resource.status === "ready" && exports.resource.data.some((item) => item.status === "pending"),
+    exports.resource.reload,
+  );
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);

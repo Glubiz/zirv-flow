@@ -17,6 +17,7 @@ import { CONFIRM_PHRASE, erasureStatus } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
 import { ShowMore } from "./ShowMore";
 import { usePaged } from "./usePaged";
+import { usePolling } from "./usePolling";
 
 const PAGE_SIZE = 50;
 
@@ -33,6 +34,10 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
     [workspaceId],
   );
   const requests = usePaged(fetchPage, [workspaceId]);
+  usePolling(
+    requests.resource.status === "ready" && requests.resource.data.some((request) => request.status === "pending"),
+    requests.resource.reload,
+  );
   const [pending, setPending] = useState<PersonTarget | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 

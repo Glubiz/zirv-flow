@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
@@ -262,5 +262,68 @@ describe("privacy", () => {
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyNav workspaceId="ws1" />);
     await waitFor(() => expect(screen.queryByText("Waiting for the session")).not.toBeInTheDocument());
     expect(screen.queryByRole("link", { name: "Privacy" })).not.toBeInTheDocument();
+  });
+
+  describe("polling", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    });
+
+    it("refreshes pending erasures and exports every few seconds and stops when none is pending", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let erasures = 0;
+      let exports = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: () => {
+            erasures += 1;
+            return json({ erasures: [erasures > 1 ? DONE : { ...DONE, status: "pending", completed_at: null }], next_before: null });
+          },
+          [`GET ${BASE}/exports`]: () => {
+            exports += 1;
+            return json({
+              exports: [exportBody(exports > 2 ? {} : { status: "pending", ready_at: null, expires_at: null })],
+              next_before: null,
+            });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      expect(await screen.findByText("Waiting to run")).toBeInTheDocument();
+      expect(await screen.findByText("Preparing")).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await screen.findByText("Erased")).toBeInTheDocument();
+      expect(await screen.findByText("Preparing")).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await screen.findByText("Ready")).toBeInTheDocument();
+      const settled = { erasures, exports };
+
+      await vi.advanceTimersByTimeAsync(30000);
+
+      expect({ erasures, exports }).toEqual(settled);
+      expect(settled).toEqual({ erasures: 2, exports: 3 });
+    });
+
+    it("does not poll while the tab is hidden", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let erasures = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: () => {
+            erasures += 1;
+            return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_before: null });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      expect(await screen.findByText("Waiting to run")).toBeInTheDocument();
+      Object.defineProperty(document, "hidden", { value: true, configurable: true });
+
+      await vi.advanceTimersByTimeAsync(20000);
+
+      expect(erasures).toBe(1);
+    });
   });
 });
