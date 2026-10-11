@@ -1,0 +1,51 @@
+@import "@fontsource-variable/schibsted-grotesk/wght.css";
+@import "@fontsource-variable/schibsted-grotesk/wght-italic.css";
+@import "@fontsource/fragment-mono/latin-400.css";
+@import "@fontsource/fragment-mono/latin-ext-400.css";
+
+:root {
+  color-scheme: light;
+
+  --ground: #eef1f5;
+  --paper: #f6f8fa;
+  --paper-3: #e3e8ed;
+  --line: #d8dde2;
+  --line-2: #bdc3ca;
+
+  --ink: #0f1621;
+  --ink-2: #48505c;
+  --ink-3: #626a73;
+
+  --night: #0b1729;
+  --night-hover: #1e2f44;
+  --night-ink: #ecf1f5;
+
+  --link: #006a94;
+  --focus: #007cbb;
+  --cyan: #27e3fd;
+
+  --attention-dot: #cd8800;
+  --attention-text: #8f5300;
+  --error-dot: #d02c2a;
+  --error-text: #ac1a1c;
+
+  --sans: "Schibsted Grotesk Variable", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "Fragment Mono", "SF Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --radius-input: 8px;
+  --radius-control: 12px;
+  --radius-panel: 18px;
+  --radius-pill: 999px;
+
+  --shadow-popover: 0 2px 4px rgb(23 32 48 / 0.06), 0 28px 56px -24px rgb(23 32 48 / 0.35);
+
+  --dur-hover: 120ms;
+  --dur-instant: 60ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-hover: 1ms;
+    --dur-instant: 1ms;
+  }
+}
