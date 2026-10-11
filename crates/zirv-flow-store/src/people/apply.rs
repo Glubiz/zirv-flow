@@ -194,6 +194,18 @@ async fn apply_record(
         )
         .await?;
     }
+    if resolution.skipped > 0 {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "identity.limit",
+            "skipped",
+            Some("max_per_person"),
+            vec![("person", person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
     for conflict in &resolution.conflicts {
         let inserted = sqlx::query(
             "INSERT INTO identity_conflicts \
@@ -1301,6 +1313,149 @@ mod tests {
         assert!(decisions.iter().any(|d| d.action == "identity.conflict"
             && d.outcome == "recorded"
             && d.reason.as_deref() == Some("unique_kind")));
+    }
+
+    fn with_identifiers(mut record: ProfileRecord, identifiers: &[(&str, &str)]) -> ProfileRecord {
+        record.identifiers = identifiers
+            .iter()
+            .map(|(kind, value)| ((*kind).into(), (*value).into()))
+            .collect();
+        record
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_value_of_a_unique_kind_makes_the_record_a_different_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("email", "a@example.com"), ("external:crm", "1")],
+        );
+        let owner = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let second = with_identifiers(
+            record("web", "2", "a@example.com", json!({"plan": "pro"}), at),
+            &[("email", "a@example.com"), ("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, std::slice::from_ref(&second))
+            .await
+            .unwrap();
+
+        let newcomer = person_of(&outcomes[0]);
+        assert_ne!(newcomer, owner);
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { created: true, .. }
+        ));
+        let kinds = |identities: Vec<crate::StoredIdentity>| {
+            identities.into_iter().map(|i| i.kind).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(list_identities(&pool, ws, owner).await.unwrap()),
+            ["email", "external:crm"]
+        );
+        assert_eq!(
+            kinds(list_identities(&pool, ws, newcomer).await.unwrap()),
+            ["external:crm"]
+        );
+        assert_eq!(
+            trait_of(&pool, ws, newcomer, "plan").await,
+            Some(json!("pro"))
+        );
+        assert_eq!(trait_of(&pool, ws, owner, "plan").await, None);
+        let conflicts = list_identity_conflicts(&pool, ws, newcomer).await.unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].other_person_id, owner);
+        assert_eq!(conflicts[0].reason, "unique_kind");
+        assert_eq!(conflicts[0].kind, "email");
+        let email_identity: Uuid =
+            sqlx::query_scalar("SELECT id FROM identities WHERE kind = 'email'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(conflicts[0].identity_id, Some(email_identity));
+        let (decisions, _) = list_trace(&pool, ws, second.trace.trace_id, 10)
+            .await
+            .unwrap();
+        assert!(decisions.iter().any(|d| d.action == "identity.conflict"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn identifiers_beyond_the_maximum_of_a_kind_are_skipped_and_the_rest_applies(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let emails: Vec<(String, String)> = (0..10)
+            .map(|n| ("email".to_owned(), format!("e{n}@example.com")))
+            .collect();
+        let mut full = record("crm", "1", "e0@example.com", json!({}), at);
+        full.identifiers = emails;
+        let person = person_of(&apply_profile_batch(&pool, ws, &[full]).await.unwrap()[0]);
+        let mut more = record("web", "2", "e0@example.com", json!({"plan": "pro"}), at);
+        more.identifiers = vec![
+            ("email".into(), "e0@example.com".into()),
+            ("email".into(), "extra@example.com".into()),
+            ("phone".into(), "+4512345678".into()),
+        ];
+
+        let outcomes = apply_profile_batch(&pool, ws, &[more.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        let identities = list_identities(&pool, ws, person).await.unwrap();
+        assert_eq!(identities.len(), 11);
+        assert!(identities.iter().any(|i| i.kind == "phone"));
+        assert!(identities.iter().all(|i| i.value != "extra@example.com"));
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        let (decisions, _) = list_trace(&pool, ws, more.trace.trace_id, 10)
+            .await
+            .unwrap();
+        let skipped = decisions
+            .iter()
+            .find(|d| d.action == "identity.limit")
+            .expect("an identity.limit decision");
+        assert_eq!(skipped.outcome, "skipped");
+        assert_eq!(skipped.reason.as_deref(), Some("max_per_person"));
+        assert_eq!(skipped.subject_ids["person"], person.to_string());
+        assert!(skipped.subject_ids["source_record"].is_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_allowed_new_identifier_still_attaches_to_the_one_matching_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let person = person_of(
+            &apply_profile_batch(
+                &pool,
+                ws,
+                &[record("crm", "1", "a@example.com", json!({}), at)],
+            )
+            .await
+            .unwrap()[0],
+        );
+        let both = with_identifiers(
+            record("web", "2", "a@example.com", json!({}), at),
+            &[("email", "a@example.com"), ("email", "b@example.com")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[both]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert_eq!(list_identities(&pool, ws, person).await.unwrap().len(), 2);
+        assert!(
+            list_identity_conflicts(&pool, ws, person)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[sqlx::test]

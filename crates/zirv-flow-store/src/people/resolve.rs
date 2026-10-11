@@ -11,7 +11,7 @@
 use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::people::{Identifier, IdentifierKind, merge_allowed};
+use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::merge::merge_people;
@@ -38,6 +38,8 @@ pub(crate) struct Resolution {
     pub conflicts: Vec<Conflict>,
     /// The people merged into `person_id` by this resolution.
     pub merged: Vec<Uuid>,
+    /// Identifiers left off the person because it holds the most of their kind it may.
+    pub skipped: usize,
 }
 
 struct Owned {
@@ -92,22 +94,40 @@ pub(crate) async fn resolve_person(
                 Err(reason) => blocked = Some(reason.as_str()),
             }
         }
-        let (person_id, created) = match &merge {
+        let (mut person_id, mut created) = match &merge {
             Some((survivor, _)) => (*survivor, false),
             None => match choose(identifiers, &owners, existing).or(existing) {
                 Some(person_id) => (person_id, false),
                 None => (create_person(connection, workspace).await?, true),
             },
         };
-        let conflicts = blocked.map_or_else(Vec::new, |reason| {
-            conflicts(identifiers, &owners, person_id, reason)
-        });
-        let missing: Vec<&Identifier> = identifiers
+        let mut missing: Vec<&Identifier> = identifiers
             .iter()
             .enumerate()
             .filter(|(index, _)| owners.iter().all(|owned| owned.identifier_index != *index))
             .map(|(_, identifier)| identifier)
             .collect();
+        let mut skipped = 0;
+        if merge.is_none() && !created {
+            // What the record would add must fit the person it attaches to.
+            let held = load_identities(connection, workspace, &[person_id]).await?;
+            match fit(&held, &missing) {
+                Fit::Keep(keep) => {
+                    skipped = missing.len() - keep.len();
+                    missing = keep;
+                }
+                Fit::OtherPerson => {
+                    // The record is not this person: it starts its own, and what it shares
+                    // stays with its owners.
+                    person_id = create_person(connection, workspace).await?;
+                    created = true;
+                    blocked = Some(BlockReason::UniqueKind.as_str());
+                }
+            }
+        }
+        let conflicts = blocked.map_or_else(Vec::new, |reason| {
+            conflicts(identifiers, &owners, person_id, reason)
+        });
         let inserted = insert_identities(connection, workspace, person_id, &missing).await?;
         if inserted < missing.len() {
             attempt += 1;
@@ -133,6 +153,7 @@ pub(crate) async fn resolve_person(
             created,
             conflicts,
             merged,
+            skipped,
         });
     }
 }
@@ -215,6 +236,35 @@ async fn load_identities(
             Ok(Identifier::from_stored(kind, value))
         })
         .collect()
+}
+
+enum Fit<'a> {
+    /// The identifiers that may be added; any others would exceed a maximum.
+    Keep(Vec<&'a Identifier>),
+    /// An added identifier would give the person a second value of a kind it holds once.
+    OtherPerson,
+}
+
+/// Which of `missing` a person holding `held` may take on.
+fn fit<'a>(held: &[Identifier], missing: &[&'a Identifier]) -> Fit<'a> {
+    let mut union: Vec<&Identifier> = held.iter().collect();
+    union.extend(missing.iter().copied());
+    match merge_allowed(union.iter().copied()) {
+        Ok(()) => return Fit::Keep(missing.to_vec()),
+        Err(BlockReason::UniqueKind) => return Fit::OtherPerson,
+        Err(BlockReason::MaxPerPerson) => {}
+    }
+    let mut taken: Vec<&Identifier> = held.iter().collect();
+    let mut keep = Vec::new();
+    for candidate in missing {
+        taken.push(candidate);
+        if merge_allowed(taken.iter().copied()).is_ok() {
+            keep.push(*candidate);
+        } else {
+            taken.pop();
+        }
+    }
+    Fit::Keep(keep)
 }
 
 /// The survivor of a merge, the oldest of `people` by creation time then id, and the rest.
@@ -358,6 +408,25 @@ mod tests {
 
     fn trace() -> TraceContext {
         TraceContext::root(Cause::api("test"))
+    }
+
+    #[test]
+    fn a_second_value_of_a_unique_kind_means_another_person_and_the_excess_of_a_kind_is_skipped() {
+        let held = [
+            identifier("email", "a@example.com"),
+            identifier("external:crm", "1"),
+        ];
+        let second_crm = identifier("external:crm", "2");
+        let second_email = identifier("email", "b@example.com");
+        let full: Vec<Identifier> = (0..10)
+            .map(|n| identifier("email", &format!("e{n}@example.com")))
+            .collect();
+        let extra = identifier("email", "extra@example.com");
+        let phone = identifier("phone", "+4512345678");
+
+        assert!(matches!(fit(&held, &[&second_crm]), Fit::OtherPerson));
+        assert!(matches!(fit(&held, &[&second_email]), Fit::Keep(keep) if keep.len() == 1));
+        assert!(matches!(fit(&full, &[&extra, &phone]), Fit::Keep(keep) if keep == [&phone]));
     }
 
     #[test]

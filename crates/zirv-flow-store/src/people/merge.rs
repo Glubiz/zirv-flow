@@ -181,7 +181,8 @@ pub(super) async fn merge_people(
 
 /// Re-points what still names `merged` to the person it was merged into, in batches of
 /// [`REWRITE_BATCH`] rows per statement, on `connection`. Returns how many rows moved; a
-/// second run moves none. Appends a `person.merge.rewrite` decision once the person is
+/// second run moves none. Conflicts that end up between the survivor and itself are closed
+/// as merged. Appends a `person.merge.rewrite` decision once the person is
 /// merged and every batch is done; a person that was not merged is left alone.
 pub async fn rewrite_merged_person(
     connection: &mut PgConnection,
@@ -222,6 +223,18 @@ pub async fn rewrite_merged_person(
             }
         }
     }
+    // A conflict between two people that have both been merged into the survivor is now
+    // between one person and itself.
+    sqlx::query(
+        "UPDATE identity_conflicts SET resolved_at = now(), resolution = 'merged' \
+         WHERE workspace_id = $1 AND resolved_at IS NULL \
+           AND person_id = $2 AND other_person_id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(survivor)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     append_decision(
         connection,
         &NewDecision {
@@ -769,5 +782,84 @@ mod tests {
         assert_eq!((moved, unknown), (0, 0));
         let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
         assert!(decisions.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_conflict_that_becomes_a_person_with_itself_is_closed_by_the_rewrite(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:crm", "1")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("crm", "2", &[("email", "l@example.com")], json!({})),
+        )
+        .await;
+        let other = apply_one(
+            &pool,
+            ws,
+            record("crm", "3", &[("email", "x@example.com")], json!({})),
+        )
+        .await;
+        let source_record: Uuid =
+            sqlx::query_scalar("SELECT id FROM source_records WHERE record_key = '3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO identity_conflicts \
+                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
+             VALUES ($1, $2, $3, $4, 'email', $5, 'unique_kind')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(loser)
+        .bind(other)
+        .bind(source_record)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Both merge into the survivor before either rewrite job has run.
+        for (key, email) in [("4", "l@example.com"), ("5", "x@example.com")] {
+            apply_one(
+                &pool,
+                ws,
+                record(
+                    "web",
+                    key,
+                    &[("external:crm", "1"), ("email", email)],
+                    json!({}),
+                ),
+            )
+            .await;
+        }
+        assert_eq!(merged_into(&pool, other).await, Some(survivor));
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        rewrite_merged_person(&mut tx, ws, other, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (person, other_person, resolution, resolved): (Uuid, Uuid, Option<String>, bool) =
+            sqlx::query_as(
+                "SELECT person_id, other_person_id, resolution, resolved_at IS NOT NULL \
+                 FROM identity_conflicts",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((person, other_person), (survivor, survivor));
+        assert!(resolved);
+        assert_eq!(resolution.as_deref(), Some("merged"));
     }
 }
