@@ -4902,7 +4902,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope, or a missing CSRF token */
+            /** @description A key without the read scope, a missing CSRF token, or a prefix or range search on a PII-flagged trait by a caller who may not see values (`code` is `pii_trait_not_searchable`) */
             403: {
                 headers: {
                     [name: string]: unknown;

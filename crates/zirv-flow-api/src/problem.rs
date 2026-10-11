@@ -116,6 +116,17 @@ impl ApiError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
 
+    /// A caller without access to values asked for an order or prefix search on a PII trait.
+    pub(crate) fn pii_trait_not_searchable() -> Self {
+        Self {
+            code: Some("pii_trait_not_searchable"),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "trait.op: only eq and exists can search a PII trait without access to values",
+            )
+        }
+    }
+
     /// A bounded read that ran past its time limit and was cancelled.
     pub(crate) fn search_timeout() -> Self {
         Self {

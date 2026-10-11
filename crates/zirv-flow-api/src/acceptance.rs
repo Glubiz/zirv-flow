@@ -5855,4 +5855,53 @@ email,b@example.com,
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
         }
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pii_trait_cannot_be_searched_by_prefix_or_range_without_access_to_values(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (survivor, _) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, "/search");
+        let prefix = json!({"trait": {"key": "city", "op": "prefix", "value": "Aa"}});
+        let eq = json!({"trait": {"key": "city", "op": "eq", "value": "Aarhus"}});
+
+        let as_owner = call(
+            &router,
+            "POST",
+            &uri,
+            Some(prefix.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let as_member = call(
+            &router,
+            "POST",
+            &uri,
+            Some(prefix.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let as_key = call(&router, "POST", &uri, Some(prefix), Auth::Key(&read_key)).await;
+        let member_eq = call(&router, "POST", &uri, Some(eq), Auth::Session(&member)).await;
+
+        assert_eq!(as_owner.status, StatusCode::OK, "{:?}", as_owner.body);
+        assert_eq!(as_owner.body["people"][0]["id"], survivor.as_str());
+        for refused in [&as_member, &as_key] {
+            assert_eq!(refused.status, StatusCode::FORBIDDEN, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "pii_trait_not_searchable");
+            assert_eq!(
+                refused.headers[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+        }
+        assert_eq!(member_eq.status, StatusCode::OK);
+        assert_eq!(member_eq.body["people"][0]["id"], survivor.as_str());
+    }
 }

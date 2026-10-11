@@ -118,6 +118,9 @@ pub enum SearchError {
         field: &'static str,
         reason: &'static str,
     },
+    /// The trait is PII-flagged and the caller may not see values, so only `eq` and `exists`
+    /// are allowed.
+    PiiTraitNotSearchable,
     Store(StoreError),
 }
 
@@ -131,6 +134,9 @@ impl fmt::Display for SearchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid { field, reason } => write!(formatter, "{field}: {reason}"),
+            Self::PiiTraitNotSearchable => formatter.write_str(
+                "trait.op: only eq and exists apply to a PII trait without access to values",
+            ),
             Self::Store(error) => error.fmt(formatter),
         }
     }
@@ -236,13 +242,16 @@ const fn ordered_as(kind: TraitType) -> (&'static str, &'static str) {
 }
 
 /// Searches `workspace` for people. At most `limit` hits, ordered by person id and after
-/// `after`; an identifier search finds at most one person.
+/// `after`; an identifier search finds at most one person. A caller who may not see values can
+/// compare a PII-flagged trait only with `eq` and `exists`: the other operators would let them
+/// read the value out of the order or the prefix.
 pub async fn search_people(
     pool: &PgPool,
     workspace: WorkspaceId,
     search: &PersonSearch,
     limit: u32,
     after: Option<Uuid>,
+    may_see_values: bool,
 ) -> Result<SearchPage, SearchError> {
     let limit = i64::from(limit.max(1));
     match search {
@@ -270,6 +279,9 @@ pub async fn search_people(
             let definition = find_trait_definition(pool, workspace, key)
                 .await?
                 .ok_or_else(|| invalid("trait.key", "is not a registered trait"))?;
+            if definition.pii && !may_see_values && !matches!(op, TraitOp::Eq | TraitOp::Exists) {
+                return Err(SearchError::PiiTraitNotSearchable);
+            }
             let needle = needle(*op, definition.trait_type, value.as_ref())?;
             let condition = match op {
                 TraitOp::Exists => "traits ? $2 AND $3::text IS NULL".to_owned(),
@@ -452,7 +464,7 @@ mod tests {
     }
 
     async fn ids(pool: &PgPool, ws: WorkspaceId, search: PersonSearch) -> Vec<Uuid> {
-        let mut found: Vec<Uuid> = search_people(pool, ws, &search, 50, None)
+        let mut found: Vec<Uuid> = search_people(pool, ws, &search, 50, None, true)
             .await
             .unwrap()
             .hits
@@ -492,7 +504,7 @@ mod tests {
                 value: value.into(),
             };
             let pool = pool.clone();
-            async move { search_people(&pool, ws, &search, 10, None).await }
+            async move { search_people(&pool, ws, &search, 10, None, true).await }
         };
 
         let by_email = find("email", " ADA@Example.com ").await.unwrap();
@@ -552,6 +564,7 @@ mod tests {
             },
             10,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -687,7 +700,7 @@ mod tests {
         let refused = |search| {
             let pool = pool.clone();
             async move {
-                search_people(&pool, ws, &search, 10, None)
+                search_people(&pool, ws, &search, 10, None, true)
                     .await
                     .unwrap_err()
             }
@@ -743,7 +756,9 @@ mod tests {
         let mut after = None;
         let mut pages = 0;
         loop {
-            let page = search_people(&pool, ws, &search, 2, after).await.unwrap();
+            let page = search_people(&pool, ws, &search, 2, after, true)
+                .await
+                .unwrap();
             assert!(page.hits.len() <= 2);
             seen.extend(page.hits.iter().map(|hit| hit.id));
             pages += 1;
@@ -779,7 +794,7 @@ mod tests {
         };
 
         for ws in [one, two] {
-            let hits = search_people(&pool, ws, &by_identifier, 10, None)
+            let hits = search_people(&pool, ws, &by_identifier, 10, None, true)
                 .await
                 .unwrap()
                 .hits;
@@ -791,6 +806,64 @@ mod tests {
             ids(&pool, one, by_trait("plan", TraitOp::Exists, None)).await,
             ids(&pool, two, by_trait("plan", TraitOp::Exists, None)).await
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pii_trait_without_access_to_values_allows_only_eq_and_exists(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        create_trait_definition(
+            &pool,
+            ws,
+            &NewTraitDefinition {
+                key: "city".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let aarhus = person(
+            &pool,
+            ws,
+            "1",
+            &[("email", "a@example.com")],
+            json!({"city": "Aarhus"}),
+        )
+        .await;
+        let run = |op, value: Option<Value>, access| {
+            let pool = pool.clone();
+            let search = by_trait("city", op, value);
+            async move { search_people(&pool, ws, &search, 10, None, access).await }
+        };
+
+        for op in [
+            TraitOp::Prefix,
+            TraitOp::Gt,
+            TraitOp::Gte,
+            TraitOp::Lt,
+            TraitOp::Lte,
+        ] {
+            let refused = run(op, Some(json!("A")), false).await.unwrap_err();
+            assert!(
+                matches!(refused, SearchError::PiiTraitNotSearchable),
+                "{op:?}"
+            );
+        }
+        let eq = run(TraitOp::Eq, Some(json!("Aarhus")), false)
+            .await
+            .unwrap();
+        let exists = run(TraitOp::Exists, None, false).await.unwrap();
+        let prefix = run(TraitOp::Prefix, Some(json!("Aa")), true).await.unwrap();
+        assert_eq!(eq.hits[0].id, aarhus);
+        assert_eq!(exists.hits[0].id, aarhus);
+        assert_eq!(prefix.hits[0].id, aarhus);
+        assert!(run(TraitOp::Gt, Some(json!("A")), true).await.is_err());
     }
 
     #[test]

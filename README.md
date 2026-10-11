@@ -744,7 +744,7 @@ default 50) and `after` (the `next_after` of the previous page). It is a POST so
 stay out of URLs and access logs. Results are `{id, display, updated_at}`, paged by person
 id, where `display` is the person's strongest identifier. Searches run under a 5 second
 limit; one that takes longer is answered `503` with the problem code `search_timeout`, so
-narrow it rather than retry it unchanged. Equality on a field uses an index; the other
+narrow it rather than retry it unchanged. A caller who may not see values (see Masking) can search a PII-flagged field only with `eq` and `exists`; `prefix` and the range conditions on it are refused with `403` and the code `pii_trait_not_searchable`. Equality on a field uses an index; the other
 conditions scan the workspace's people until the indexing question (OQ-1) is decided.
 
 **Profile.** `GET /api/v1/workspaces/{ws}/people/{id}` returns the identities grouped by the

@@ -623,10 +623,14 @@ mod tests {
         };
 
         for (ws, own, foreign) in [(one, person_one, person_two), (two, person_two, person_one)] {
-            let found = search_people(&pool, ws, &email, 10, None).await.unwrap();
+            let found = search_people(&pool, ws, &email, 10, None, true)
+                .await
+                .unwrap();
             assert_eq!(found.hits.len(), 1);
             assert_eq!(found.hits[0].id, own);
-            let by_trait = search_people(&pool, ws, &plan, 50, None).await.unwrap();
+            let by_trait = search_people(&pool, ws, &plan, 50, None, true)
+                .await
+                .unwrap();
             assert!(by_trait.hits.iter().all(|hit| hit.id != foreign));
             assert!(load_profile(&pool, ws, foreign).await.unwrap().is_none());
             assert!(load_profile(&pool, ws, own).await.unwrap().is_some());

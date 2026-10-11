@@ -151,7 +151,7 @@ fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiEr
     responses(
         (status = 200, description = "A page of people", body = SearchBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope, a missing CSRF token, or a prefix or range search on a PII-flagged trait by a caller who may not see values (`code` is `pii_trait_not_searchable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Not exactly one of identifier and trait, an invalid identifier, an unknown trait or operator, an operator that does not fit the trait's type, or a value that does not fit it", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The search ran past its time limit (`code` is `search_timeout`)", body = Problem, content_type = "application/problem+json")
@@ -166,15 +166,17 @@ pub(crate) async fn search(
 ) -> Result<Json<SearchBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let (search, limit, after) = parse(body)?;
-    let page = zirv_flow_store::search_people(&state.pool, workspace.id, &search, limit, after)
-        .await
-        .map_err(|error| match error {
-            SearchError::Invalid { field, reason } => {
-                ApiError::unprocessable(format!("{field}: {reason}"))
-            }
-            SearchError::Store(error) => error.into(),
-        })?;
     let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let page =
+        zirv_flow_store::search_people(&state.pool, workspace.id, &search, limit, after, reveal)
+            .await
+            .map_err(|error| match error {
+                SearchError::Invalid { field, reason } => {
+                    ApiError::unprocessable(format!("{field}: {reason}"))
+                }
+                SearchError::PiiTraitNotSearchable => ApiError::pii_trait_not_searchable(),
+                SearchError::Store(error) => error.into(),
+            })?;
     Ok(Json(SearchBody {
         people: page
             .hits
