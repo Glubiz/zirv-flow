@@ -1937,4 +1937,269 @@ mod tests {
             .unwrap();
         assert_eq!(decisions, 0);
     }
+
+    fn traits_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/traits")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_field_registry_is_created_listed_updated_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let created = call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(
+                json!({"key": "plan", "type": "string", "precedence": "source_priority",
+                        "source_order": ["crm", "shop"], "pii": true,
+                        "description": "secret plan text"}),
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(created.body["type"], "string");
+        assert_eq!(created.body["precedence"], "source_priority");
+        assert_eq!(created.body["source_order"], json!(["crm", "shop"]));
+        assert_eq!(created.body["inferred"], false);
+        let duplicate = call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "plan", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        for bad in [
+            json!({"key": "Plan", "type": "string"}),
+            json!({"key": "ok", "type": "integer"}),
+            json!({"key": "ok", "type": "string", "precedence": "newest"}),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &traits_uri(&ws),
+                Some(bad),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+        }
+
+        let patched = call(
+            &router,
+            "PATCH",
+            &format!("{}/plan", traits_uri(&ws)),
+            Some(json!({"archived": true, "description": "retired"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        assert_eq!(patched.body["archived"], true);
+        assert_eq!(patched.body["precedence"], "source_priority");
+        let listed = call(
+            &router,
+            "GET",
+            &traits_uri(&ws),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK);
+        assert_eq!(listed.body.as_array().unwrap().len(), 1);
+        assert_eq!(listed.body[0]["archived"], true);
+
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let created_row = audit
+            .iter()
+            .find(|row| row.action == "trait.created")
+            .unwrap();
+        assert_eq!(created_row.summary, json!({"key": "plan"}));
+        let updated_row = audit
+            .iter()
+            .find(|row| row.action == "trait.updated")
+            .unwrap();
+        assert_eq!(
+            updated_row.summary,
+            json!({"key": "plan", "fields": ["description", "archived"]})
+        );
+        let text = serde_json::to_string(&audit.iter().map(|row| &row.summary).collect::<Vec<_>>())
+            .unwrap();
+        assert!(!text.contains("retired") && !text.contains("secret plan text"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_type_of_a_trait_cannot_be_changed_and_an_empty_patch_is_refused(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "age", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let uri = format!("{}/age", traits_uri(&ws));
+
+        let retyped = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"type": "string"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let empty = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let missing = call(
+            &router,
+            "PATCH",
+            &format!("{}/nope", traits_uri(&ws)),
+            Some(json!({"pii": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(retyped.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(retyped.body["detail"], "type: cannot be changed");
+        assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        let listed = call(
+            &router,
+            "GET",
+            &traits_uri(&ws),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(listed.body[0]["type"], "number");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_who_is_not_an_admin_reads_but_cannot_change_the_registry(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "age", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let read = call(
+            &router,
+            "GET",
+            &traits_uri(&ws),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let create = call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "city", "type": "string"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let patch = call(
+            &router,
+            "PATCH",
+            &format!("{}/age", traits_uri(&ws)),
+            Some(json!({"pii": true})),
+            Auth::Session(&member),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "city", "type": "string"})),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+
+        assert_eq!(read.status, StatusCode::OK);
+        assert_eq!(read.body.as_array().unwrap().len(), 1);
+        assert_eq!(create.status, StatusCode::FORBIDDEN);
+        assert_eq!(patch.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_registry_of_another_workspace_is_a_404(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let (admin_id, admin) = user(&pool, &router, "admin@example.com").await;
+        add_member(&router, &owner, &mine, admin_id, "admin").await;
+        let (_, key) = make_key(&router, &owner, &mine, &["admin"]).await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&theirs),
+            Some(json!({"key": "age", "type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let list = call(
+            &router,
+            "GET",
+            &traits_uri(&theirs),
+            None,
+            Auth::Session(&admin),
+        )
+        .await;
+        let create = call(
+            &router,
+            "POST",
+            &traits_uri(&theirs),
+            Some(json!({"key": "city", "type": "string"})),
+            Auth::Session(&admin),
+        )
+        .await;
+        let by_key = call(&router, "GET", &traits_uri(&theirs), None, Auth::Key(&key)).await;
+        let own = call(
+            &router,
+            "GET",
+            &traits_uri(&mine),
+            None,
+            Auth::Session(&admin),
+        )
+        .await;
+
+        assert_eq!(list.status, StatusCode::NOT_FOUND);
+        assert_eq!(create.status, StatusCode::NOT_FOUND);
+        assert_eq!(by_key.status, StatusCode::NOT_FOUND);
+        assert_eq!(own.status, StatusCode::OK);
+        assert_eq!(own.body, json!([]));
+    }
 }

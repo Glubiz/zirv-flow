@@ -6,6 +6,7 @@ use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
+use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
 use crate::problem::Problem;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
@@ -44,6 +45,9 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         keys::list,
         keys::create,
         keys::revoke,
+        people::registry::list,
+        people::registry::create,
+        people::registry::update,
         traces::get,
         setup::status,
         setup::complete,
@@ -68,6 +72,9 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         ApiKeyBody,
         CreatedApiKeyBody,
         CreateApiKeyRequest,
+        TraitBody,
+        CreateTraitRequest,
+        UpdateTraitRequest,
         TraceBody,
         DecisionBody,
         CauseBody,
