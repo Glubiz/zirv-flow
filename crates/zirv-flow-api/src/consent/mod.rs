@@ -29,7 +29,7 @@ fn origin(principal: &Principal) -> (ChangeSource, Option<Uuid>) {
 
 /// The boolean query parameter `name`: false when absent, a bad request unless `true` or
 /// `false`.
-fn bool_param(query: &str, name: &str) -> Result<bool, ApiError> {
+pub(crate) fn bool_param(query: &str, name: &str) -> Result<bool, ApiError> {
     let mut flag = false;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key == name {

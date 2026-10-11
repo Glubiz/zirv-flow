@@ -3748,6 +3748,198 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/people/search": {
+      "post": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Finds people by an identifier, matched exactly after normalization and following merges to\nthe surviving person, or by one trait with an operator that fits its type. Results are\npaged by person id; identifier values are shown to the owner, workspace admins and\n`admin` keys and masked for everyone else. A search that runs past its time limit is\nanswered 503 with the code `search_timeout`.",
+        "operationId": "search_people",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A page of people",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not exactly one of identifier and trait, an invalid identifier, an unknown trait or operator, an operator that does not fit the trait's type, or a value that does not fit it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The search ran past its time limit (`code` is `search_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/people/{id}": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Everything the system holds about one person: identities grouped by the sources that list\nthem, traits with the source and time of each value, consent, lists and the people merged\ninto this one. A person that was merged into another is read as the survivor, with\n`merged_from` set. Identifier values and PII-flagged trait values are shown to the owner,\nworkspace admins and `admin` keys, and masked for everyone else.",
+        "operationId": "get_person",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/people/{id}/consent": {
       "get": {
         "tags": [
@@ -4215,6 +4407,146 @@
           },
           "404": {
             "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/people/{id}/timeline": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "A person's timeline, newest first: their events, and the decisions the system made about\nthem (trait changes, merges, consent changes, list membership, identity conflicts). Each\nentry has a `trace_id` that opens the decisions behind it. A person that was merged into\nanother reads as the survivor, with the merged people's entries included. Event properties\nthe schema flags as PII are masked for callers who may not see values.",
+        "description": "`event.accepted` decisions duplicate the event entry and are left out unless\n`all_decisions=true`.",
+        "operationId": "get_person_timeline",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Entries per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kinds",
+            "in": "query",
+            "description": "`event`, `decision` or both separated by a comma; default both",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "all_decisions",
+            "in": "query",
+            "description": "Include the `event.accepted` decisions; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or before, kinds or all_decisions is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6291,6 +6623,57 @@
           }
         }
       },
+      "DecisionEntryBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "action",
+          "outcome",
+          "cause_kind",
+          "subject_ids",
+          "trace_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What was decided, such as `trait.change`, `person.merge`, `consent.change`,\n`list.membership` or `identity.conflict`.",
+            "example": "trait.change"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the decision was recorded."
+          },
+          "cause_kind": {
+            "type": "string",
+            "description": "`event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string",
+            "example": "changed"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A reason code; never personal data."
+          },
+          "subject_ids": {
+            "type": "object",
+            "description": "Durable domain ids by name; never personal data."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`."
+          }
+        }
+      },
       "DepthBody": {
         "type": "object",
         "required": [
@@ -6303,6 +6686,84 @@
               "$ref": "#/components/schemas/KindDepthBody"
             },
             "description": "Sorted by kind."
+          }
+        }
+      },
+      "DisplayBody": {
+        "type": "object",
+        "description": "An identifier shown for a person. The value is null when `masked`: only workspace admins,\nthe owner and `admin` keys see identifier values.",
+        "required": [
+          "kind",
+          "masked"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "email"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EventEntryBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "name",
+          "properties",
+          "masked",
+          "validation_state",
+          "flags",
+          "trace_id"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event occurred."
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Timing flags such as `late` or `future`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "masked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the properties whose values were replaced by null."
+          },
+          "name": {
+            "type": "string",
+            "example": "order_completed"
+          },
+          "properties": {
+            "type": "object",
+            "description": "The stored properties. The values of properties the published schema flags as PII are\nnull for callers who may not see values; so is every value of an event without a\npublished schema."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`."
+          },
+          "validation_state": {
+            "type": "string",
+            "description": "`valid`, `flagged` or `unplanned`.",
+            "example": "valid"
           }
         }
       },
@@ -6524,6 +6985,24 @@
           }
         }
       },
+      "IdentifierQuery": {
+        "type": "object",
+        "description": "An identifier to find: the value is normalized for the kind, then matched exactly.",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+            "example": "email"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
       "IdentifierRequest": {
         "type": "object",
         "required": [
@@ -6621,6 +7100,26 @@
               "null"
             ],
             "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see values."
+          }
+        }
+      },
+      "IdentityGroupBody": {
+        "type": "object",
+        "required": [
+          "source",
+          "identities"
+        ],
+        "properties": {
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileIdentityBody"
+            }
+          },
+          "source": {
+            "type": "string",
+            "description": "The source whose live records list these identities.",
+            "example": "crm"
           }
         }
       },
@@ -7126,6 +7625,23 @@
           }
         }
       },
+      "MergeBody": {
+        "type": "object",
+        "required": [
+          "merged_person_id",
+          "merged_at"
+        ],
+        "properties": {
+          "merged_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "merged_person_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "MethodsBody": {
         "type": "object",
         "required": [
@@ -7165,6 +7681,35 @@
           "reason": {
             "type": "string",
             "example": "not_found"
+          }
+        }
+      },
+      "PersonHitBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "updated_at"
+        ],
+        "properties": {
+          "display": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayBody",
+                "description": "The strongest identifier; null for a person with none."
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The surviving person: a merged person is never listed."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -7223,6 +7768,13 @@
           "detail"
         ],
         "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable machine-readable code for a failure a client acts on, such as\n`search_timeout`; absent for the rest."
+          },
           "detail": {
             "type": "string"
           },
@@ -7262,6 +7814,163 @@
             "type": "string",
             "description": "Problem type URI; `about:blank` until specific types are defined.",
             "example": "about:blank"
+          }
+        }
+      },
+      "ProfileBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "identity_groups",
+          "observed",
+          "traits",
+          "consent",
+          "lists",
+          "merges"
+        ],
+        "properties": {
+          "consent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentStateBody"
+            },
+            "description": "The channel-wide state first, then topics by key."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayBody",
+                "description": "The strongest identifier; null for a person with none."
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The surviving person."
+          },
+          "identity_groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityGroupBody"
+            },
+            "description": "By source name."
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonListBody"
+            },
+            "description": "By name."
+          },
+          "merged_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id that was asked for, when it was merged into `id`; null otherwise."
+          },
+          "merges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeBody"
+            },
+            "description": "The people merged into this one, oldest first."
+          },
+          "observed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileIdentityBody"
+            },
+            "description": "Identities no live source record lists, such as one first seen on an event."
+          },
+          "traits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileTraitBody"
+            },
+            "description": "By key."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProfileIdentityBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "masked"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "email"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see values."
+          }
+        }
+      },
+      "ProfileTraitBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "masked",
+          "pii"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "example": "plan"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "pii": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source that supplied the value."
+          },
+          "trait_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`string`, `number`, `boolean`, `timestamp`, `date` or `string_list`; null for a key the\nregistry does not know."
+          },
+          "value": {
+            "description": "Null when `masked`: PII-flagged traits are shown only to workspace admins, the owner\nand `admin` keys."
           }
         }
       },
@@ -7502,6 +8211,72 @@
           }
         }
       },
+      "SearchBody": {
+        "type": "object",
+        "required": [
+          "people"
+        ],
+        "properties": {
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Pass as `after` for the next page; null when there is none."
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonHitBody"
+            },
+            "description": "By person id."
+          }
+        }
+      },
+      "SearchRequest": {
+        "type": "object",
+        "description": "Exactly one of `identifier` and `trait`. It is a POST so the values stay out of URLs and\naccess logs.",
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The `next_after` of the previous page."
+          },
+          "identifier": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/IdentifierQuery"
+              }
+            ]
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "People per page, 1 to 200; default 50.",
+            "minimum": 0
+          },
+          "trait": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TraitQuery"
+              }
+            ]
+          }
+        }
+      },
       "SessionBody": {
         "type": "object",
         "required": [
@@ -7718,6 +8493,74 @@
           }
         }
       },
+      "TimelineBody": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntryBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "TimelineEntryBody": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventEntryBody"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "event"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DecisionEntryBody"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "decision"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
       "TopicBody": {
         "type": "object",
         "required": [
@@ -7921,6 +8764,27 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TraitQuery": {
+        "type": "object",
+        "description": "A trait to compare. The operators that apply depend on the trait's registry type: `eq`\nand `exists` for any type (a `string_list` matches when it holds the value), `prefix` for\nstrings, and `gt`, `gte`, `lt` and `lte` for numbers, timestamps and dates.",
+        "required": [
+          "key",
+          "op"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "example": "plan"
+          },
+          "op": {
+            "type": "string",
+            "example": "eq"
+          },
+          "value": {
+            "description": "Required for every operator but `exists`; it must fit the trait's type."
           }
         }
       },

@@ -23,6 +23,10 @@ pub struct Problem {
     /// The invalid fields of an ingestion request: field names and reason codes, never values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<ItemProblem>>,
+    /// A stable machine-readable code for a failure a client acts on, such as
+    /// `search_timeout`; absent for the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// One invalid field of one item of an ingestion request.
@@ -43,6 +47,7 @@ pub(crate) struct ApiError {
     detail: String,
     errors: Option<Vec<ItemProblem>>,
     retry_after: Option<u64>,
+    code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -52,6 +57,7 @@ impl ApiError {
             detail: detail.into(),
             errors: None,
             retry_after: None,
+            code: None,
         }
     }
 
@@ -109,6 +115,17 @@ impl ApiError {
     pub(crate) fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
+
+    /// A bounded read that ran past its time limit and was cancelled.
+    pub(crate) fn search_timeout() -> Self {
+        Self {
+            code: Some("search_timeout"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the query took too long; narrow it and try again",
+            )
+        }
+    }
 }
 
 impl From<zirv_flow_core::ValidationError> for ApiError {
@@ -118,8 +135,12 @@ impl From<zirv_flow_core::ValidationError> for ApiError {
 }
 
 impl From<zirv_flow_store::StoreError> for ApiError {
-    fn from(_: zirv_flow_store::StoreError) -> Self {
-        Self::internal()
+    fn from(error: zirv_flow_store::StoreError) -> Self {
+        if error.is_timeout() {
+            Self::search_timeout()
+        } else {
+            Self::internal()
+        }
     }
 }
 
@@ -146,6 +167,7 @@ impl IntoResponse for ApiError {
             request_id: request_id::current(),
             trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
             errors: self.errors,
+            code: self.code.map(str::to_owned),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
@@ -275,5 +297,18 @@ mod tests {
         );
         let plain = ApiError::not_found().into_response();
         assert!(plain.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_a_503_problem_with_the_search_timeout_code() {
+        let response = ApiError::search_timeout().into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "search_timeout");
+        assert_eq!(problem["status"], 503);
     }
 }

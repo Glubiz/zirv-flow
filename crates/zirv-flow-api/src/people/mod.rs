@@ -2,7 +2,10 @@
 //! review (section 7.3).
 
 pub(crate) mod conflicts;
+pub(crate) mod profile;
 pub(crate) mod registry;
+pub(crate) mod search;
+pub(crate) mod timeline;
 
 pub(crate) use registry::{
     CreateTraitRequest, TraitBody, UpdateTraitRequest, create, list, update,
