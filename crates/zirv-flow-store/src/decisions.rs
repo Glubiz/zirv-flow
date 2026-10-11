@@ -16,6 +16,11 @@ use crate::StoreError;
 /// Records per statement of [`append_decisions`]: 11 binds each stay far below PostgreSQL's limit.
 const MAX_BATCH: usize = 1000;
 
+/// The `bench-no-decisions` feature, a benchmark-only switch that makes [`append_decision`] and
+/// [`append_decisions`] write nothing. The failed-job records written by the job queue's own SQL
+/// are not affected. Never set in a release build.
+const BENCH_NO_DECISIONS: bool = cfg!(feature = "bench-no-decisions");
+
 /// A record to append.
 #[derive(Clone, Debug)]
 pub struct NewDecision {
@@ -87,6 +92,9 @@ pub async fn append_decision<'e>(
     executor: impl PgExecutor<'e>,
     decision: &NewDecision,
 ) -> Result<(), StoreError> {
+    if BENCH_NO_DECISIONS {
+        return Ok(());
+    }
     let subjects: Map<String, Value> = decision
         .subject_ids
         .iter()
@@ -121,6 +129,9 @@ pub async fn append_decisions(
     connection: &mut PgConnection,
     decisions: &[NewDecision],
 ) -> Result<(), StoreError> {
+    if BENCH_NO_DECISIONS {
+        return Ok(());
+    }
     for chunk in decisions.chunks(MAX_BATCH) {
         let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
@@ -276,6 +287,30 @@ mod tests {
         assert_eq!(next_month(date!(2026 - 10 - 01)), date!(2026 - 11 - 01));
         assert_eq!(next_month(date!(2026 - 12 - 01)), date!(2027 - 01 - 01));
         assert_eq!(bound(date!(2027 - 01 - 01)), "2027-01-01 00:00:00+00");
+    }
+
+    #[test]
+    fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
+        assert_eq!(BENCH_NO_DECISIONS, cfg!(feature = "bench-no-decisions"));
+        #[cfg(not(feature = "bench-no-decisions"))]
+        assert!(!BENCH_NO_DECISIONS);
+    }
+
+    #[cfg(feature = "bench-no-decisions")]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_the_benchmark_feature_appends_write_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        append_decision(&pool, &decision(ws, &trace, "step"))
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        append_decisions(&mut connection, &[decision(ws, &trace, "step")])
+            .await
+            .unwrap();
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        assert!(records.is_empty());
     }
 
     #[sqlx::test]

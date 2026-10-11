@@ -18,5 +18,11 @@ tokio.workspace = true
 uuid.workspace = true
 zirv-flow-core.workspace = true
 
+[features]
+# BENCHMARK ONLY (architecture section 19, decision-log overhead): turns decision appends into
+# no-ops. Never enable it in a release build, the Dockerfile or CD; scripts/check-bench-features.sh
+# fails CI if they do. Tests that read decisions fail with it on, by design.
+bench-no-decisions = []
+
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true
