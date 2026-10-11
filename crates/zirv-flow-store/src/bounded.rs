@@ -42,6 +42,23 @@ pub(crate) async fn begin_bounded_for(
     Ok(tx)
 }
 
+/// Like [`begin_bounded_for`], and every statement of the transaction sees one snapshot
+/// (`REPEATABLE READ`, `READ ONLY`). A request that reads twice, such as a breakdown and its
+/// totals, then cannot be torn by a concurrent write.
+pub(crate) async fn begin_snapshot_for(
+    pool: &sqlx::PgPool,
+    timeout: Duration,
+) -> Result<Tx, StoreError> {
+    let mut tx = begin(pool).await?;
+    // It must come before the first query of the transaction.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    limit_statements(&mut tx, timeout).await?;
+    Ok(tx)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -93,5 +110,63 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_snapshot_transaction_is_repeatable_read_only_and_ignores_later_commits(
+        pool: PgPool,
+    ) {
+        sqlx::query("CREATE TABLE snapshot_probe (n integer)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = begin_snapshot_for(&pool, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (level, read_only): (String, String) = sqlx::query_as(
+            "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM snapshot_probe")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO snapshot_probe VALUES (1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM snapshot_probe")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let write = sqlx::query("INSERT INTO snapshot_probe VALUES (2)")
+            .execute(&mut *tx)
+            .await;
+
+        assert_eq!(
+            (level.as_str(), read_only.as_str()),
+            ("repeatable read", "on")
+        );
+        assert_eq!((before, after), (0, 0));
+        assert!(write.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_plain_bounded_read_stays_read_committed(pool: PgPool) {
+        let mut tx = begin_bounded_for(&pool, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let level: String = sqlx::query_scalar("SELECT current_setting('transaction_isolation')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        assert_eq!(level, "read committed");
     }
 }

@@ -3,7 +3,7 @@
 //!
 //! Every query carries `workspace_id` and the time bounds, so only the partitions of the
 //! range are read, and runs in a read-only transaction under the caller's statement timeout
-//! (`begin_bounded_for`): a slow scan is cancelled and surfaces as a timeout, never runs
+//! (`begin_snapshot_for`, one snapshot per request): a slow scan is cancelled and surfaces as a timeout, never runs
 //! unbounded. The count, the breakdown, the list and the export share one `WHERE`, so they
 //! agree on what matches.
 //!
@@ -35,7 +35,7 @@ pub use filter::{ExploreFilter, FilterOp};
 use filter::{Planned, Test, check_key, plan};
 
 use crate::StoreError;
-use crate::bounded::begin_bounded_for;
+use crate::bounded::begin_snapshot_for;
 use crate::people::person_group;
 
 /// The widest time range a query may cover.
@@ -432,7 +432,7 @@ pub async fn explore_count(
     limits: ExploreLimits,
     reveal: bool,
 ) -> Result<CountResult, ExploreError> {
-    let mut tx = begin_bounded_for(pool, limits.timeout).await?;
+    let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
     let limit = row_limit(limits);
     let mut qb: Builder = QueryBuilder::new(format!(
@@ -464,7 +464,7 @@ pub async fn explore_total(
     limits: ExploreLimits,
     reveal: bool,
 ) -> Result<i64, ExploreError> {
-    let mut tx = begin_bounded_for(pool, limits.timeout).await?;
+    let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
     let mut qb: Builder = QueryBuilder::new("SELECT count(*)");
     push_scope(&mut qb, workspace, scope, &prepared);
@@ -487,7 +487,7 @@ pub async fn explore_breakdown(
     reveal: bool,
 ) -> Result<Breakdown, ExploreError> {
     check_key("property", property).map_err(|(field, reason)| invalid(field, reason))?;
-    let mut tx = begin_bounded_for(pool, limits.timeout).await?;
+    let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
     if !reveal
         && !prepared
@@ -562,7 +562,7 @@ pub async fn explore_rows(
     reveal: bool,
 ) -> Result<RowsPage, ExploreError> {
     let limit = i64::from(limit.clamp(1, limits.row_limit.max(1)));
-    let mut tx = begin_bounded_for(pool, limits.timeout).await?;
+    let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
     let mut qb: Builder = QueryBuilder::new(
         "SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state, \
