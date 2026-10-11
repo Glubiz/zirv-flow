@@ -936,6 +936,42 @@ does not yet rewrite events.
   enrollments, steps, sends and skips. Each system record links to its trace
   tree; values remain subject to the caller's PII access.
 
+As built (people search, profile and person timeline):
+
+- **The person key.** Every decision about a person carries `subject_ids.person`, the person
+  whose timeline it belongs on. The merge decision (`person.merge`), the merge rewrite and the
+  list-membership move add it next to `survivor` and `merged`; the trait, consent, identity,
+  list and event decisions already had it. Migration `0012_people_timeline.sql` indexes
+  `decision_records (workspace_id, (subject_ids ->> 'person'), recorded_at DESC)` for rows that
+  have the key, on the partitioned parent so every partition gets it, and adds a GIN
+  `jsonb_path_ops` index on `people.traits` for equality search until OQ-1 decides the
+  indexing. Decisions written before the migration are not backfilled.
+- **Search** (`store::people::search_people`). An identifier search is an exact match on the
+  normalized value that follows `merged_into` to the survivor. A trait search compares one
+  registered field, with the operator checked against the field's type (`eq`, `exists`;
+  `prefix` for `string`; `gt`, `gte`, `lt`, `lte` for `number`, `timestamp`, `date`), keyset
+  paged by person id, and skips merged people. Values are bound, never formatted into SQL, and
+  errors name the field and the rule, never the value.
+- **Profile** (`store::people::load_profile`). Identities are grouped by the `source` of the
+  live source records that list them; the rest are `observed`. Each field comes from
+  `people.traits` and `trait_sources`, with the observation time of the latest record of the
+  winning source that carries the value.
+- **Timeline** (`store::people::load_timeline`). Two keyset streams, events by `occurred_at`
+  (across partitions) and decisions by `recorded_at`, for the person and everyone merged into
+  it, are merged newest first under the cursor `(at, kind, id)`; at equal times a decision
+  sorts before an event, then ids descend. `event.accepted` is left out unless asked for.
+  Each event carries the published schema version it was validated against, so the API can
+  mask PII properties; an event with no schema is masked entirely for callers without value
+  access.
+- **Bounds.** Search, profile and timeline reads run in a transaction with
+  `SET LOCAL statement_timeout = 5000`. PostgreSQL's cancellation (SQLSTATE 57014) becomes
+  `StoreError::is_timeout`, which the API answers as `503` with the problem code
+  `search_timeout` (the problem document gained an optional `code`).
+- **API and UI.** `POST /people/search`, `GET /people/{id}` and `GET /people/{id}/timeline`
+  need `read`; masking uses the same rule as identity conflicts and lists. The web UI's
+  People page is the search, `people/:id` the profile with the consent panel (owned by the
+  consent feature) and the lists panel (owned by the lists feature).
+
 ### 12.4 End-to-end causality
 
 Every derived action appends a typed decision record in the same transaction
