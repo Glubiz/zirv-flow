@@ -7,6 +7,7 @@ mod rejects;
 mod retention;
 mod schemas;
 
+pub(crate) use apply::{EventBatch, FailedItem, apply_event_record, reject_apply_failed};
 pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 pub use partitions::ensure_event_partitions;
 pub use rejects::{IngestReject, RejectCursor, RejectFilter, list_ingest_rejects};
