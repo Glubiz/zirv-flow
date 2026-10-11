@@ -362,6 +362,35 @@ reference. This runs Keycloak 26.8.0 locally on port 8081 and zirv-flow on 8080.
    (`zirv-flow admin create-owner --email jane@example.com`, or
    `POST /api/v1/users`); the verified address links it on first sign-in.
 
+## Web UI
+
+The server serves a React single-page app (`web/`, TypeScript and Vite) from the same
+port as the API. Everything that is not `/api`, `/healthz`, `/readyz` or `/metrics`
+is the app: files are served as built, and any other path falls back to `index.html`
+so deep links work. An unknown `/api/...` path is still a JSON problem, never the app.
+The sign-in screen asks `GET /api/v1/session/methods` which of local and SSO sign-in
+are enabled.
+
+The app is compiled into the binary. `cargo build` embeds `web/dist` when
+`web/dist/index.html` exists, and otherwise a small placeholder page from
+`crates/zirv-flow-api/web-placeholder/`, so a checkout without Node still builds.
+If `/` shows "The web UI was not built", build the app and then the server again:
+
+```sh
+cd web
+npm ci
+npm run build
+cd ..
+cargo build
+```
+
+For UI work, run the server (`cargo run -- all`), then in `web/` run `npm ci` once and
+`npm run dev`. The Vite dev server proxies `/api`, `/healthz` and `/readyz` to
+`http://127.0.0.1:8080`. `npm run lint`, `typecheck`, `test` and `build` are the checks CI runs;
+`npm run gen:api` regenerates the API client from `crates/zirv-flow-api/openapi.json`
+and `npm run gen:api:check` fails when it is stale. The Docker image and the release
+build compile the app first, so released binaries always carry it.
+
 ## Development
 
 Install the stable Rust toolchain and [cargo-nextest](https://nexte.st), then:

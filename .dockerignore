@@ -4,6 +4,7 @@ target/
 .zirv/
 .claude/
 web/node_modules/
+web/dist/
 **/*.md
 !README.md
 Dockerfile

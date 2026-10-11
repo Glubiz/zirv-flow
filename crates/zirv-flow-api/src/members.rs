@@ -55,6 +55,7 @@ pub(crate) struct RoleBody {
 /// The members of a workspace. Any member can read this.
 #[utoipa::path(
     get,
+    operation_id = "list_members",
     path = "/api/v1/workspaces/{ws}/members",
     tag = "members",
     params(("ws" = Uuid, Path, description = "Workspace id")),
@@ -79,6 +80,7 @@ pub(crate) async fn list(
 /// Adds a user to the workspace or changes their role. Workspace admins and the owner only.
 #[utoipa::path(
     put,
+    operation_id = "set_member_role",
     path = "/api/v1/workspaces/{ws}/members/{user_id}",
     tag = "members",
     params(
@@ -115,6 +117,7 @@ pub(crate) async fn set(
 /// Removes a user from the workspace. Workspace admins and the owner only.
 #[utoipa::path(
     delete,
+    operation_id = "remove_member",
     path = "/api/v1/workspaces/{ws}/members/{user_id}",
     tag = "members",
     params(

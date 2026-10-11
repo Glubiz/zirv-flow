@@ -24,6 +24,7 @@ pub(crate) struct CreateUserRequest {
 /// Lists every user. Owner only.
 #[utoipa::path(
     get,
+    operation_id = "list_users",
     path = "/api/v1/users",
     tag = "users",
     responses(
@@ -45,6 +46,7 @@ pub(crate) async fn list(
 /// Creates a user. Owner only. Needs the CSRF token.
 #[utoipa::path(
     post,
+    operation_id = "create_user",
     path = "/api/v1/users",
     tag = "users",
     request_body = CreateUserRequest,

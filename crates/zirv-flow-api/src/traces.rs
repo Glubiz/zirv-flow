@@ -83,6 +83,7 @@ impl From<Decision> for DecisionBody {
 /// this workspace is 404, whether or not it exists elsewhere.
 #[utoipa::path(
     get,
+    operation_id = "get_trace",
     path = "/api/v1/workspaces/{ws}/traces/{trace_id}",
     tag = "traces",
     params(

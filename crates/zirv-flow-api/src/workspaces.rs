@@ -49,6 +49,7 @@ pub(crate) struct CreateWorkspaceRequest {
 /// The workspaces the caller can see: all of them for the owner, otherwise their memberships.
 #[utoipa::path(
     get,
+    operation_id = "list_workspaces",
     path = "/api/v1/workspaces",
     tag = "workspaces",
     responses(
@@ -75,6 +76,7 @@ pub(crate) async fn list(
 /// Creates a workspace. Owner only. Needs the CSRF token.
 #[utoipa::path(
     post,
+    operation_id = "create_workspace",
     path = "/api/v1/workspaces",
     tag = "workspaces",
     request_body = CreateWorkspaceRequest,
@@ -106,6 +108,7 @@ pub(crate) async fn create(
 /// One workspace. A caller with no access gets 404, never 403.
 #[utoipa::path(
     get,
+    operation_id = "get_workspace",
     path = "/api/v1/workspaces/{ws}",
     tag = "workspaces",
     params(("ws" = Uuid, Path, description = "Workspace id")),
