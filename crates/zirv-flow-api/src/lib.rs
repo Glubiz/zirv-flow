@@ -5,6 +5,7 @@ mod auth;
 mod cookies;
 mod credentials;
 mod health;
+mod jobs_admin;
 mod json;
 mod keys;
 mod members;
@@ -15,6 +16,7 @@ mod passwords;
 mod problem;
 mod request_id;
 mod session;
+mod setup;
 mod state;
 mod trace;
 mod traces;
@@ -51,6 +53,13 @@ fn routes() -> Router<AppState> {
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(metrics::render))
         .route("/api/v1/version", get(version::version))
+        .route("/api/v1/setup", get(setup::status).post(setup::complete))
+        .route("/api/v1/admin/jobs", get(jobs_admin::depth))
+        .route("/api/v1/admin/jobs/dead", get(jobs_admin::dead))
+        .route(
+            "/api/v1/admin/jobs/{id}/retry",
+            axum::routing::post(jobs_admin::retry),
+        )
         .route(
             "/api/v1/session",
             get(session::current)

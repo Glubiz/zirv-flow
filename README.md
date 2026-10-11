@@ -156,7 +156,7 @@ leader. A worker-only or scheduler-only process has no metrics endpoint yet.
 People sign in with a local account (e-mail and password, hashed with argon2id).
 One account is the instance **owner**; the owner administers every workspace.
 Other accounts are members or admins of individual workspaces. Create the owner
-once, from the command line (the first-run UI setup arrives with the UI shell):
+once, from the command line or through the first-run setup below:
 
 ```sh
 printf '%s
@@ -170,6 +170,24 @@ argument), connect, run the same startup schema check as `serve`, and exit 1 on
 any error. `reset-password` also clears a lockout and ends the user's sessions.
 Passwords are 12 to 1024 characters.
 
+- **First-run setup.** While no owner exists, `serve` mints a one-time setup
+  token and logs it once, as a `warn` line: `no owner exists; finish setup at
+  <public_url or http://<bind>>/setup with setup token <token>, or run
+  zirv-flow admin create-owner`. `GET /api/v1/setup` answers
+  `{"required": true}` until an owner exists. `POST /api/v1/setup` with
+  `{token, email, password}` creates the owner and signs them in exactly like
+  `POST /api/v1/session` (cookie, user and `csrf_token`); a missing or wrong
+  token is 403, an existing owner 409. The token lives only in that process's
+  memory (as a SHA-256) and ends when an owner exists by any path or the process
+  restarts, which mints a new one. With several `serve` processes each has its
+  own token and any one works against its own process; on a multi-instance
+  deployment use `admin create-owner`.
+- **Jobs administration.** Owner session only; API keys get 403.
+  `GET /api/v1/admin/jobs` shows ready, running and dead counts per job kind and
+  the age of the oldest runnable job. `GET /api/v1/admin/jobs/dead?limit=&before=`
+  lists dead jobs newest first (payloads are never shown), with their
+  `trace_id`; `POST /api/v1/admin/jobs/{id}/retry` puts a dead job back in the
+  queue under its original trace, and is audited.
 - **Sessions.** `POST /api/v1/session` with `{email, password}` returns the user
   and a `csrf_token` and sets the `zf_session` cookie (HttpOnly, SameSite=Lax,
   Secure unless `server.cookie_secure` is false). Sessions expire after 12 hours

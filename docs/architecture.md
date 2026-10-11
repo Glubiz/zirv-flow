@@ -1001,7 +1001,19 @@ the reference: the authorization-code flow with PKCE, a state cookie bound to a
 single-use server-side login, and ID-token verification in `zirv-flow-identity`.
 An identity links to a user by issuer and subject, or by a verified e-mail
 address; provider roles are not mapped, so an admin grants workspace access.
-Local sign-in can be turned off. **Public endpoints:**
+Local sign-in can be turned off. **First-run setup:** while no owner exists,
+`serve` mints a one-time setup token (kept as a SHA-256 in memory, logged once)
+and `GET /api/v1/setup` reports `{required}`; `POST /api/v1/setup` with
+`{token, email, password}` creates the owner through the shared audited admin
+operation and signs them in like `POST /api/v1/session` (403 on a wrong token,
+409 when an owner exists). Each `serve` process has its own token. **Jobs
+administration (instance owner session only; API keys get 403):**
+`GET /api/v1/admin/jobs` (ready, running and dead counts per kind and the age of
+the oldest runnable job), `GET /api/v1/admin/jobs/dead` (dead letters newest
+first, keyset-paginated, with trace ids and no payload) and
+`POST /api/v1/admin/jobs/{id}/retry` (requeues a dead job under its original
+trace; audited as `job.retried`, plus a `job.retry` decision for workspace
+jobs). **Public endpoints:**
 `/api/v1/ingest/{identify,track,batch}` (ingestion key implies workspace; size
 and per-key rate limits; schema validation; `202` after durable append),
 `/hooks/{id}` (HMAC signature), `/t/*` and `/u/*` (signed tokens), `/a/*`
