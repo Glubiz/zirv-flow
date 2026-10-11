@@ -36,6 +36,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
   const requests = usePaged(fetchPage, [workspaceId]);
   usePolling(
     requests.resource.status === "ready" && requests.resource.data.some((request) => request.status === "pending"),
+    requests.resource.status === "ready" && requests.resource.refreshing,
     requests.resource.reload,
   );
   const [pending, setPending] = useState<PersonTarget | null>(null);
