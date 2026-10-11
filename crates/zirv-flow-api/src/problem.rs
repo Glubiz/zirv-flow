@@ -127,6 +127,17 @@ impl ApiError {
         }
     }
 
+    /// An `Idempotency-Key` that was first used for a different request.
+    pub(crate) fn idempotency_key_reused() -> Self {
+        Self {
+            code: Some("idempotency_key_reused"),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the Idempotency-Key was already used for a different request",
+            )
+        }
+    }
+
     /// A bounded read that ran past its time limit and was cancelled.
     pub(crate) fn search_timeout() -> Self {
         Self {

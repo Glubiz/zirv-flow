@@ -12,6 +12,7 @@ use sqlx::PgConnection;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
+use zirv_flow_core::contacts;
 use zirv_flow_core::people::{
     Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
@@ -113,6 +114,23 @@ pub async fn remove_contribution(
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
     let mut tx = begin(pool).await?;
+    let removed =
+        remove_contribution_in(&mut tx, workspace, source, stream, record_key, trace).await?;
+    if removed {
+        commit(tx).await?;
+    }
+    Ok(removed)
+}
+
+/// [`remove_contribution`] inside the caller's transaction, which the caller commits.
+pub(crate) async fn remove_contribution_in(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source: &str,
+    stream: &str,
+    record_key: &str,
+    trace: &TraceContext,
+) -> Result<bool, StoreError> {
     // The record is locked first, then its person: the order the drain's existing-record path
     // uses. With the record locked a merge cannot move it, so the owner cannot change.
     let record: Option<(Uuid, Uuid)> = sqlx::query_as(
@@ -124,7 +142,7 @@ pub async fn remove_contribution(
     .bind(source)
     .bind(stream)
     .bind(record_key)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let Some((locked_id, owner)) = record else {
@@ -133,7 +151,7 @@ pub async fn remove_contribution(
     sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
         .bind(workspace.as_uuid())
         .bind(owner)
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
     let (record_id, person_id, traits, identifiers): (Uuid, Uuid, Value, Value) = sqlx::query_as(
@@ -141,16 +159,16 @@ pub async fn remove_contribution(
              WHERE id = $1 RETURNING id, person_id, traits, identifiers",
     )
     .bind(locked_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let keys: Vec<String> = traits
         .as_object()
         .map(|map| map.keys().cloned().collect())
         .unwrap_or_default();
-    if recompute(&mut tx, workspace, person_id, &keys).await? {
+    if recompute(&mut *connection, workspace, person_id, &keys).await? {
         record_decision(
-            &mut tx,
+            &mut *connection,
             workspace,
             trace,
             "trait.change",
@@ -160,10 +178,17 @@ pub async fn remove_contribution(
         )
         .await?;
     }
-    remove_unshared_identities(&mut tx, workspace, person_id, record_id, &identifiers).await?;
-    mark_dirty(&mut tx, workspace, person_id).await?;
+    remove_unshared_identities(
+        &mut *connection,
+        workspace,
+        person_id,
+        record_id,
+        &identifiers,
+    )
+    .await?;
+    mark_dirty(&mut *connection, workspace, person_id).await?;
     record_decision(
-        &mut tx,
+        &mut *connection,
         workspace,
         trace,
         "contribution.removed",
@@ -172,12 +197,18 @@ pub async fn remove_contribution(
         vec![("person", person_id), ("source_record", record_id)],
     )
     .await?;
-    if crate::orphan_policy(&mut *tx, workspace).await? == Some(OrphanPolicy::Delete)
-        && is_orphan(&mut tx, workspace, person_id).await?
+    if crate::orphan_policy(&mut *connection, workspace).await? == Some(OrphanPolicy::Delete)
+        && is_orphan(&mut *connection, workspace, person_id).await?
     {
-        crate::delete_person(&mut tx, workspace, person_id, DeleteReason::Orphan, trace).await?;
+        crate::delete_person(
+            &mut *connection,
+            workspace,
+            person_id,
+            DeleteReason::Orphan,
+            trace,
+        )
+        .await?;
     }
-    commit(tx).await?;
     Ok(true)
 }
 
@@ -637,7 +668,7 @@ async fn upsert_ledger_row(
             }
         }
     }
-    let mut union: Vec<(String, String)> = live
+    let previous: Vec<(String, String)> = live
         .and_then(|row| row.identifiers.as_array())
         .into_iter()
         .flatten()
@@ -648,14 +679,31 @@ async fn upsert_ledger_row(
             ))
         })
         .collect();
-    union.extend(
+    // A source's record only ever adds identifiers, except a native contact's, which lists
+    // exactly the identifiers its fields name now.
+    let replaces = record.source == contacts::SOURCE && record.stream == contacts::STREAM;
+    let mut current: Vec<(String, String)> = if replaces {
+        Vec::new()
+    } else {
+        previous.clone()
+    };
+    current.extend(
         identifiers
             .iter()
             .map(|i| (i.kind().as_text(), i.value().to_owned())),
     );
-    union.sort();
-    union.dedup();
-    let stored: Vec<Value> = union
+    current.sort();
+    current.dedup();
+    let released: Vec<Value> = if replaces {
+        previous
+            .iter()
+            .filter(|pair| !current.contains(pair))
+            .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let stored: Vec<Value> = current
         .into_iter()
         .map(|(kind, value)| serde_json::json!({ "kind": kind, "value": value }))
         .collect();
@@ -674,9 +722,21 @@ async fn upsert_ledger_row(
             .bind(Value::Array(stored))
             .bind(Value::Object(traits))
             .bind(hash)
-            .execute(connection)
+            .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
+            // An identity this record no longer lists goes, unless another live record of
+            // the person lists it.
+            if !released.is_empty() {
+                remove_unshared_identities(
+                    connection,
+                    workspace,
+                    person_id,
+                    row.id,
+                    &Value::Array(released),
+                )
+                .await?;
+            }
             Ok((row.id, keys))
         }
         None => {

@@ -1,3 +1,10 @@
+/** One invalid field of a request, by position, field name and reason code; never a value. */
+export interface FieldError {
+  index: number;
+  field: string;
+  reason: string;
+}
+
 export interface ProblemDetails {
   title: string;
   detail: string;
@@ -6,6 +13,8 @@ export interface ProblemDetails {
   requestId: string | null;
   /** A stable code for failures a client acts on, such as `search_timeout`. */
   code?: string | null;
+  /** The invalid fields, when the failure lists them. */
+  errors?: FieldError[];
 }
 
 export class ApiError extends Error {
@@ -15,6 +24,7 @@ export class ApiError extends Error {
   readonly traceId: string | null;
   readonly requestId: string | null;
   readonly code: string | null;
+  readonly errors: FieldError[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -25,6 +35,7 @@ export class ApiError extends Error {
     this.traceId = problem.traceId;
     this.requestId = problem.requestId;
     this.code = problem.code ?? null;
+    this.errors = problem.errors ?? [];
   }
 }
 
@@ -45,6 +56,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       traceId: text(body["trace_id"]),
       requestId: text(body["request_id"]),
       code: text(body["code"]),
+      errors: fieldErrors(body["errors"]),
     });
   }
   return new ApiError({
@@ -71,4 +83,15 @@ export function describeError(error: unknown): ErrorSummary {
     detail: error instanceof Error ? error.message : "Check your connection and try again.",
     traceId: null,
   };
+}
+
+function fieldErrors(value: unknown): FieldError[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { index, field, reason } = entry;
+    return typeof index === "number" && typeof field === "string" && typeof reason === "string"
+      ? [{ index, field, reason }]
+      : [];
+  });
 }

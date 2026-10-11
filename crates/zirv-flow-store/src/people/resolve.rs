@@ -90,8 +90,12 @@ pub(crate) async fn resolve_person(
             // batch looks the identifiers up again and resolves into a new person.
             return Err(StoreError::retryable_race());
         }
-        if locked.iter().any(|person| person.merged_into.is_some()) {
-            // A merge committed after the lookup: the identities now name the survivor.
+        // A merge committed after the lookup (the identities now name the survivor), or an
+        // identity was deleted or moved while the people were being locked: look again.
+        if locked.iter().any(|person| person.merged_into.is_some())
+            || (!owners.is_empty()
+                && !same_owners(&owners, connection, workspace, identifiers).await?)
+        {
             attempt += 1;
             if attempt >= MAX_ATTEMPTS {
                 return Err(StoreError::retryable_race());
@@ -202,6 +206,26 @@ pub(crate) async fn find_known_person(
         }
     }
     Ok(Some(person))
+}
+
+/// Whether a lookup under the people's locks finds the same identities with the same owners
+/// as the lookup made before them.
+async fn same_owners(
+    before: &[Owned],
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    identifiers: &[Identifier],
+) -> Result<bool, StoreError> {
+    let key = |owned: &Owned| (owned.identifier_index, owned.person_id, owned.identity_id);
+    let mut then: Vec<_> = before.iter().map(key).collect();
+    let mut now: Vec<_> = lookup_owners(connection, workspace, identifiers)
+        .await?
+        .iter()
+        .map(key)
+        .collect();
+    then.sort();
+    now.sort();
+    Ok(then == now)
 }
 
 async fn lookup_owners(

@@ -5,6 +5,7 @@ mod api_keys;
 mod audit;
 mod bounded;
 mod consent;
+mod contacts;
 mod decisions;
 mod events;
 mod identities;
@@ -36,6 +37,12 @@ pub use consent::{
     ConsentChange, ConsentEntry, ConsentHistoryEntry, ConsentOutcome, NewTopic, Topic, TopicUpdate,
     consent_for, consent_history, create_topic, find_topic, find_topic_by_key, list_topics,
     set_consent, update_topic,
+};
+pub use contacts::{
+    Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
+    DefinitionError, DefinitionProblem, Idempotency, WriteError, Written, contact_registry,
+    delete_contact, expire_contact_idempotency, find_contact, find_contact_definition,
+    list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
 };
 pub use decisions::{
     Decision, NewDecision, append_decision, append_decisions, ensure_decision_partitions,

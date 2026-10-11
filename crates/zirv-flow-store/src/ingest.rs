@@ -14,9 +14,11 @@ use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+use zirv_flow_core::contacts;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
+use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
@@ -35,6 +37,11 @@ pub enum IngestPayload {
     Identify {
         traits: Map<String, Value>,
     },
+    /// A native contact: the traits are all of the contact's fields, and `identifiers` start
+    /// with the contact key.
+    Contact {
+        traits: Map<String, Value>,
+    },
     Track {
         event: String,
         properties: Map<String, Value>,
@@ -47,6 +54,7 @@ impl IngestPayload {
         match self {
             Self::Identify { .. } => "identify",
             Self::Track { .. } => "track",
+            Self::Contact { .. } => "contact",
         }
     }
 }
@@ -78,7 +86,9 @@ fn stored_json(item: &IngestItem) -> Value {
         .and_then(|timestamp| timestamp.format(&Rfc3339).ok());
     let mut stored = json!({ "identifiers": item.identifiers, "timestamp": timestamp });
     match &item.payload {
-        IngestPayload::Identify { traits } => stored["traits"] = Value::Object(traits.clone()),
+        IngestPayload::Identify { traits } | IngestPayload::Contact { traits } => {
+            stored["traits"] = Value::Object(traits.clone());
+        }
         IngestPayload::Track { event, properties } => {
             stored["event"] = Value::String(event.clone());
             stored["properties"] = Value::Object(properties.clone());
@@ -256,6 +266,8 @@ impl InboxRow {
 
 enum Mapped {
     Profile(ProfileRecord),
+    /// A native contact, which replaces the stored contact's fields.
+    Contact(ProfileRecord),
     Event(EventRecord),
 }
 
@@ -273,6 +285,20 @@ fn map_row(row: &InboxRow) -> Option<Mapped> {
             source: SOURCE.to_owned(),
             stream: "identify".to_owned(),
             record_key: strongest_identifier(&stored.identifiers)?,
+            identifiers: stored.identifiers,
+            traits: stored.traits,
+            observed_at: timestamp.unwrap_or(row.received_at),
+            trace,
+        })),
+        "contact" => Some(Mapped::Contact(ProfileRecord {
+            source: contacts::SOURCE.to_owned(),
+            stream: contacts::STREAM.to_owned(),
+            record_key: stored
+                .identifiers
+                .iter()
+                .find(|(kind, _)| kind == contacts::KEY_KIND)?
+                .1
+                .clone(),
             identifiers: stored.identifiers,
             traits: stored.traits,
             observed_at: timestamp.unwrap_or(row.received_at),
@@ -338,13 +364,58 @@ async fn delete_rows(
     Ok(())
 }
 
-fn tally_profile(outcome: &mut DrainOutcome, result: &ProfileOutcome) {
+/// Takes the contact lock of every contact in `rows`, in the drain's transaction and before any
+/// row is applied, so a single write of the same contact (which holds the lock while it reads
+/// and writes) and this drain see each other's fields. See the module doc of `contacts::write`
+/// for the lock orders.
+async fn lock_contact_rows(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    rows: &[InboxRow],
+) -> Result<(), StoreError> {
+    let keys: Vec<String> = rows
+        .iter()
+        .filter(|row| row.kind == "contact")
+        .filter_map(|row| match map_row(row) {
+            Some(Mapped::Contact(record)) => Some(record.record_key),
+            _ => None,
+        })
+        .collect();
+    lock_contacts(connection, workspace, keys.iter().map(String::as_str)).await
+}
+
+/// Applies a contact record so that it replaces the stored contact's fields.
+async fn apply_contact(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+) -> Result<ProfileOutcome, StoreError> {
+    let mut record = record.clone();
+    replace_stored_fields(connection, workspace, &mut record).await?;
+    apply_profile_record(connection, workspace, &record).await
+}
+
+/// The traits a contact record could not store, as a key to reason-code map: a single write
+/// answers `422` for them, so the drain rejects the row. Holds keys and codes, never values.
+fn dropped_fields(result: &ProfileOutcome) -> Map<String, Value> {
+    match result {
+        ProfileOutcome::Applied { dropped, .. } | ProfileOutcome::Unchanged { dropped, .. } => {
+            dropped
+                .iter()
+                .map(|dropped| (dropped.key.clone(), Value::from(dropped.reason)))
+                .collect()
+        }
+        ProfileOutcome::Rejected { .. } => Map::new(),
+    }
+}
+
+fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &ProfileOutcome) {
     let label = match result {
         ProfileOutcome::Applied { .. } => "valid",
         ProfileOutcome::Unchanged { .. } => "duplicate",
         ProfileOutcome::Rejected { .. } => "rejected",
     };
-    outcome.count("identify", label);
+    outcome.count(kind, label);
 }
 
 fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
@@ -376,6 +447,7 @@ pub async fn drain_batch(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let rows = take_rows(&mut tx, workspace, limit).await?;
+    lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         ..DrainOutcome::default()
@@ -385,7 +457,15 @@ pub async fn drain_batch(
         match map_row(row).ok_or_else(StoreError::poison)? {
             Mapped::Profile(record) => {
                 let result = apply_profile_record(&mut tx, workspace, &record).await?;
-                tally_profile(&mut outcome, &result);
+                tally_profile(&mut outcome, "identify", &result);
+            }
+            Mapped::Contact(record) => {
+                let result = apply_contact(&mut tx, workspace, &record).await?;
+                // Rolls the batch back, so that the row is isolated and rejected singly.
+                if !dropped_fields(&result).is_empty() {
+                    return Err(StoreError::poison());
+                }
+                tally_profile(&mut outcome, "contact", &result);
             }
             Mapped::Event(record) => {
                 let result =
@@ -411,6 +491,7 @@ pub async fn drain_batch_singly(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let rows = take_rows(&mut tx, workspace, limit).await?;
+    lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         ..DrainOutcome::default()
@@ -418,12 +499,21 @@ pub async fn drain_batch_singly(
     for row in &rows {
         let mapped = map_row(row);
         let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
+        let mut unstorable = Map::new();
         let applied = match &mapped {
             Some(Mapped::Profile(record)) => {
                 apply_profile_record(&mut savepoint, workspace, record)
                     .await
-                    .map(|result| tally_profile(&mut outcome, &result))
+                    .map(|result| tally_profile(&mut outcome, "identify", &result))
             }
+            Some(Mapped::Contact(record)) => apply_contact(&mut savepoint, workspace, record)
+                .await
+                .map(|result| {
+                    unstorable = dropped_fields(&result);
+                    if unstorable.is_empty() {
+                        tally_profile(&mut outcome, "contact", &result);
+                    }
+                }),
             Some(Mapped::Event(record)) => {
                 let mut events = EventBatch::default();
                 match apply_event_record(&mut savepoint, workspace, key, &mut events, record).await
@@ -438,12 +528,34 @@ pub async fn drain_batch_singly(
             None => Err(StoreError::poison()),
         };
         match applied {
-            Ok(()) => savepoint.commit().await.map_err(StoreError::query)?,
+            Ok(()) if unstorable.is_empty() => {
+                savepoint.commit().await.map_err(StoreError::query)?;
+            }
+            Ok(()) => {
+                // What a single write answers `422` for: the row is rejected whole, with the
+                // keys and codes of the fields as its sample.
+                savepoint.rollback().await.map_err(StoreError::query)?;
+                if let Some(Mapped::Contact(record)) = &mapped {
+                    let mut rejected = record.clone();
+                    rejected.traits = unstorable;
+                    reject_row(
+                        &mut tx,
+                        workspace,
+                        key,
+                        row,
+                        Some(&Mapped::Contact(rejected)),
+                    )
+                    .await?;
+                }
+                outcome.count("contact", "rejected");
+            }
             Err(error) if error.is_retryable() => return Err(error),
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;
                 reject_row(&mut tx, workspace, key, row, mapped.as_ref()).await?;
-                let kind = if row.kind == "identify" {
+                let kind = if row.kind == "contact" {
+                    "contact"
+                } else if row.kind == "identify" {
                     "identify"
                 } else {
                     "track"
@@ -477,6 +589,16 @@ async fn reject_row(
             message_id: Some(&row.message_id),
             trace: &trace,
         },
+        Some(Mapped::Contact(record)) => FailedItem {
+            kind: "record",
+            source: &record.source,
+            name: None,
+            values: &record.traits,
+            timestamp: Some(record.observed_at),
+            received_at: row.received_at,
+            message_id: Some(&row.message_id),
+            trace: &trace,
+        },
         Some(Mapped::Event(record)) => FailedItem {
             kind: "event",
             source: SOURCE,
@@ -488,7 +610,7 @@ async fn reject_row(
             trace: &trace,
         },
         None => FailedItem {
-            kind: if row.kind == "identify" {
+            kind: if row.kind != "track" {
                 "record"
             } else {
                 "event"
@@ -635,6 +757,35 @@ mod tests {
         );
         assert_eq!(with.record_key, "email:a@example.com");
         assert_eq!(with.traits["plan"], "pro");
+    }
+
+    #[test]
+    fn a_contact_row_maps_to_a_native_record_keyed_by_its_contact_key() {
+        let item = IngestItem {
+            identifiers: pairs(&[("external:contact_key", "c-1"), ("email", "a@example.com")]),
+            timestamp: None,
+            message_id: None,
+            payload: IngestPayload::Contact {
+                traits: object(json!({"plan": "pro"})),
+            },
+        };
+        let stored = stored_json(&item);
+
+        let Some(Mapped::Contact(record)) = map_row(&row("contact", stored)) else {
+            panic!("not a contact");
+        };
+
+        assert_eq!(
+            (record.source.as_str(), record.stream.as_str()),
+            ("native", "contacts")
+        );
+        assert_eq!(record.record_key, "c-1");
+        assert_eq!(record.identifiers.len(), 2);
+        assert_eq!(record.traits["plan"], "pro");
+        assert_eq!(item.payload.kind(), "contact");
+        // Without its key the row cannot be placed: it is poison.
+        let keyless = json!({"identifiers": [["email", "a@example.com"]], "traits": {}});
+        assert!(map_row(&row("contact", keyless)).is_none());
     }
 
     #[test]

@@ -19,12 +19,11 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
-use zirv_flow_core::{Cause, TraceContext};
 
 use crate::AppState;
 use crate::auth::Principal;
 use crate::problem::{ApiError, ItemProblem, Problem};
-use crate::{request_id, trace};
+use crate::trace::request_trace;
 use limiter::RateLimiter;
 use payload::{ItemError, Kind, batch_items, parse_items};
 
@@ -68,6 +67,24 @@ impl IngestState {
             Instant::now(),
         ));
         Self { limits, limiter }
+    }
+
+    pub(crate) fn limits(&self) -> &IngestLimits {
+        &self.limits
+    }
+
+    /// Charges `items` against the bucket of `id` (an API key id, or a user id for a session):
+    /// a 429 with `Retry-After` when they do not fit.
+    pub(crate) fn charge(&self, id: uuid::Uuid, items: usize) -> Result<(), ApiError> {
+        self.limiter
+            .take(id, items, Instant::now())
+            .map_err(|seconds| {
+                ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "the API key is over its rate limit",
+                )
+                .with_retry_after(seconds)
+            })
     }
 }
 
@@ -333,36 +350,13 @@ async fn accept(
     let key = principal.require_ingest_key()?;
     let limits = &state.ingest.limits;
 
-    let declared = request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > limits.max_request_bytes) {
-        return Err(too_large());
-    }
-    // A body that outruns the limit, or cannot be read, is refused the same way.
-    let bytes = axum::body::to_bytes(request.into_body(), limits.max_request_bytes)
-        .await
-        .map_err(|_| too_large())?;
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?;
+    let body = read_json(request, limits.max_request_bytes).await?;
 
     let values: &[Value] = match endpoint {
         Endpoint::Batch => batch_items(&body, limits.max_batch_items).map_err(invalid)?,
         Endpoint::Identify | Endpoint::Track => std::slice::from_ref(&body),
     };
-    state
-        .ingest
-        .limiter
-        .take(key.key.id.as_uuid(), values.len(), Instant::now())
-        .map_err(|seconds| {
-            ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "the API key is over its rate limit",
-            )
-            .with_retry_after(seconds)
-        })?;
+    state.ingest.charge(key.key.id.as_uuid(), values.len())?;
     let items = parse_items(values, endpoint.kind()).map_err(invalid)?;
 
     let accepted = Accepted {
@@ -375,14 +369,11 @@ async fn accept(
             .filter(|item| item.payload.kind() == "track")
             .count(),
     };
-    let trace = trace::current().unwrap_or_else(|| {
-        TraceContext::root(Cause::api(request_id::current().unwrap_or_default()))
-    });
     zirv_flow_store::append_inbox(
         &state.pool,
         key.key.workspace_id,
         key.key.id.as_uuid(),
-        &trace,
+        &request_trace(),
         &items,
     )
     .await
@@ -394,7 +385,25 @@ fn too_large() -> ApiError {
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
 }
 
-fn unavailable() -> ApiError {
+/// Reads the JSON body of an ingestion request: `413` over `max_bytes`, declared or not, or
+/// when it cannot be read, and `400` when it is not JSON.
+pub(crate) async fn read_json(request: Request, max_bytes: usize) -> Result<Value, ApiError> {
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_some_and(|length| length > max_bytes) {
+        return Err(too_large());
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), max_bytes)
+        .await
+        .map_err(|_| too_large())?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::bad_request("request body is not valid JSON"))
+}
+
+pub(crate) fn unavailable() -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "ingestion is unavailable; nothing was stored, so retry",

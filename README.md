@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, and the live event debugger, explorer and reject replay, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, and native contacts, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -673,6 +673,101 @@ keys see its kind and a `masked` flag instead.
 **Merges.** When two people are merged, the survivor is in every list either of them was in,
 keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
 history moves to the survivor.
+
+## Contacts
+
+For a company with no customer system of its own, zirv flow can hold the contacts itself. A
+**contact** is a person with a record from the built-in `native` source (stream `contacts`),
+identified by your **contact key**: 1 to 256 characters, stored as the identifier
+`external:contact_key` and used in URLs. Because a contact is an ordinary person, identity
+resolution, precedence, consent, suppression, lists, search and erasure work on it unchanged.
+`search` and `bulk` are not valid keys, because they name endpoints.
+
+**The definition.** `GET` and `PUT /api/v1/workspaces/{ws}/contact-definition` read and save
+the shape of a workspace's contacts: a list of `{key, required, identifier}`, where `key`
+names a field of the [field registry](#people-and-fields), which supplies the type;
+`required` makes a contact without it a `422`; and `identifier` (`email`, `phone`,
+`anonymous_id` or `external:<name>`) also makes the value an identity of the person, with the
+usual normalisation. An identifier field must be a `string` field. Saving needs the workspace
+admin role (an `admin` key) and is audited as `contact_definition.updated`; unknown and
+archived registry keys come back as a `422` listing each by position. Without a saved
+definition a contact needs only its key and accepts any valid registry key; once one is
+saved, a contact may hold only the fields it lists. Open **Contacts**, then **Definition**,
+in the web UI to edit it.
+
+**Single contacts are synchronous.** Each write is validated against the definition and
+applied in the request, in one transaction with its audit entry, so the answer is the stored
+contact:
+
+```sh
+KEY=zfk_...   # an API key with the write scope
+BASE=http://127.0.0.1:8080/api/v1/workspaces/$WS
+
+# create: 201 with the contact, 409 when the key exists
+curl -X POST $BASE/contacts -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -H 'idempotency-key: signup-8841' \
+  -d '{"key": "c-1001", "fields": {"email": "ada@example.test", "age": 36}}'
+
+# read, list (keyset-paginated by key), search
+curl $BASE/contacts/c-1001 -H "authorization: Bearer $KEY"
+curl "$BASE/contacts?limit=50&after=<next_after>" -H "authorization: Bearer $KEY"
+curl "$BASE/contacts/search?q=c-10" -H "authorization: Bearer $KEY"
+
+# replace all the fields (200), or a JSON merge patch where null removes a field (200)
+curl -X PUT $BASE/contacts/c-1001 -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"fields": {"email": "ada@example.test"}}'
+curl -X PATCH $BASE/contacts/c-1001 -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"fields": {"age": 37}}'
+
+# delete: 204
+curl -X DELETE $BASE/contacts/c-1001 -H "authorization: Bearer $KEY"
+```
+
+A missing required field, a wrong type or a field the definition does not list is a `422`
+whose `errors` name the field and a reason code (`missing_required`, `wrong_type`,
+`unplanned_property`, `invalid_email`, ...) and never echo a value. Removing a required
+field with a patch is refused the same way. The key is also kept as the contact's first
+identifier; changing the value of an identifier field (by `PUT`, `PATCH` or a bulk upsert)
+replaces the identity: the old one leaves the person unless another source's record of the
+person also lists it, so it is no longer found by search and can no longer merge people.
+
+**Search.** `GET .../contacts/search?q=` matches a contact key by prefix and an email address
+or phone number exactly, after normalisation. The value is then in the URL and the access
+logs, so for addresses and numbers use `POST .../contacts/search` with
+`{"identifier": {"kind": "email", "value": "..."}}` or `{"q": "..."}`; the web app does.
+
+**Idempotency.** Send an `Idempotency-Key` header (1 to 255 characters) on a create, replace,
+patch or delete to make a retry safe. The same key with the same method, path and body
+replays the first status and changes nothing, and the response carries `Idempotent-Replayed:
+true`; the body is the contact as it is stored now, or `404` if it has since been deleted or
+erased, and a delete replays `204`. The same key with a different request is a `422` with the
+code `idempotency_key_reused`. Keys are remembered for 24 hours and then forgotten by the
+scheduler leader. The table that remembers them (`contact_idempotency`) holds the key, a
+hash of the request and the status, and no field value, person id or contact key, so
+deleting or erasing a person has nothing to remove there. Without the header an identical repeat of a
+replace or patch still writes nothing, because a write that changes nothing is a no-op.
+
+**Bulk upsert is asynchronous.** `POST .../contacts/bulk` takes
+`{"contacts": [{"key": "...", "fields": {...}}]}`, at most `ingest.max_batch_items` of them. Every item
+is validated first against the definition (or, in a workspace without one, the field registry), as a single write is; one invalid item makes the whole request a `422`
+with `errors` by `index`, `field` and `reason`, and nothing is stored. Valid items are appended
+to the ingestion inbox as kind `contact` and the answer is `202 {"accepted": n}`. The
+`ingest.drain` job applies them in order, replacing the fields of an existing contact (a field the registry has since archived rejects the row), and
+the result is the same state the single-contact writes make. A bulk request is limited like
+ingestion: the same body size and the same per-key rate, which a signed-in session shares per
+user. Use it for imports and use the single endpoints when you need the stored contact in the
+answer.
+
+**Permissions and masking.** Reads need the `read` scope and writes the `write` scope (or
+any member of the workspace in the app; a session needs the CSRF token for writes). Values
+of identifier fields and of fields flagged personal data are shown to the owner, workspace
+admins and `admin` keys; members and `read` keys get `null` for them and the field names in
+`masked_fields`. That applies to the response of a write too.
+
+**Deleting a contact** retracts its `native` record. What stays of the person follows the
+workspace's [orphan policy](#deletion-erasure-and-export): another source's data on the same
+person stays, and under the `delete` policy a person left with nothing is deleted with the
+contact. Erasing a person removes everything, including the idempotency rows.
 
 ## Deletion, erasure and export
 

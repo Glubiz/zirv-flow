@@ -3,6 +3,7 @@
 pub mod admin;
 mod auth;
 mod consent;
+mod contacts;
 mod cookies;
 mod credentials;
 mod events;
@@ -220,6 +221,29 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/suppressions/export",
             get(consent::suppressions::export),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/contact-definition",
+            get(contacts::definition::get).put(contacts::definition::put),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/contacts",
+            get(contacts::crud::list).post(contacts::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/contacts/bulk",
+            post(contacts::bulk::bulk),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/contacts/search",
+            get(contacts::search::get).post(contacts::search::post),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/contacts/{key}",
+            get(contacts::crud::get)
+                .put(contacts::crud::replace)
+                .patch(contacts::crud::patch)
+                .delete(contacts::crud::remove),
         )
         .route(
             "/api/v1/workspaces/{ws}/lists",

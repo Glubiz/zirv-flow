@@ -2,8 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 
 import { describeError } from "../../api";
-import { Button, EmptyState, formatDateTime, InlineError, Panel, Pill, ResourceView } from "../../ui";
-import { HiddenValue } from "./HiddenValue";
+import { Button, EmptyState, formatDateTime, HiddenValue, InlineError, Panel, Pill, ResourceView } from "../../ui";
 import { actionLabel, outcomeLabel, reasonText, validationLabel } from "./timelineLabels";
 import { useTimeline, type TimelineEntry, type TimelineKinds } from "./useTimeline";
 

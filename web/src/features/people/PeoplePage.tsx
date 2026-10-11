@@ -7,6 +7,7 @@ import {
   EmptyState,
   ErrorState,
   formatDateTime,
+  HiddenValue,
   InlineError,
   kindLabel,
   PageHeader,
@@ -16,7 +17,6 @@ import {
   shortId,
   TextField,
 } from "../../ui";
-import { HiddenValue } from "./HiddenValue";
 import { typeLabel } from "./TraitDialog";
 import { operatorsFor, parseSearchValue, valueHint } from "./traitSearch";
 import { useSearch, type PersonHit, type SearchQuery } from "./useSearch";

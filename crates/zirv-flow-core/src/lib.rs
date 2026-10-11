@@ -3,6 +3,7 @@
 //! This crate is pure: no database, HTTP or network dependencies.
 
 pub mod consent;
+pub mod contacts;
 pub mod csv_file;
 mod email;
 pub mod events;

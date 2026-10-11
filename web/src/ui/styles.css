@@ -206,6 +206,11 @@ select {
   font-weight: 600;
 }
 
+.field-error {
+  font-size: 14px;
+  color: var(--error-text);
+}
+
 .field-hint {
   font-size: 14px;
   color: var(--ink-3);
