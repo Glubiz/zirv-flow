@@ -399,11 +399,11 @@ impl Config {
         self.server.bind
     }
 
-    /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn ops_bind(&self) -> Option<SocketAddr> {
         self.ops.bind
     }
 
+    /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn server_cookie_secure(&self) -> bool {
         self.server.cookie_secure
     }

@@ -185,18 +185,18 @@ async fn run_roles_reporting(
     let liveness = Arc::new(RoleLiveness::default());
     let ops = match (ops_bind, render) {
         (Some(addr), Some(render)) => {
-            let readiness: Arc<dyn Fn() -> Option<&'static str> + Send + Sync> = {
+            let readiness = {
                 let liveness = Arc::clone(&liveness);
                 let stopped = stopped.clone();
-                Arc::new(move || {
+                move || {
                     if *stopped.borrow() {
                         Some("shutting down")
                     } else {
                         liveness.not_ready()
                     }
-                })
+                }
             };
-            let state = zirv_flow_api::OpsState::new(pool.clone(), render, readiness);
+            let state = zirv_flow_api::OpsState::new(pool.clone(), render, Arc::new(readiness));
             match start_ops(addr, state).await {
                 Ok(ops) => {
                     if let Some(report) = ops_bound {

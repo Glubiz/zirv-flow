@@ -37,7 +37,7 @@ impl OpsState {
     pub fn new(
         pool: PgPool,
         render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
-        role_readiness: Arc<dyn Fn() -> Option<&'static str> + Send + Sync>,
+        role_readiness: RoleReadiness,
     ) -> Self {
         Self {
             pool,
