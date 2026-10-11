@@ -203,6 +203,10 @@ pub async fn list_erasure_requests(
     Ok((requests, more))
 }
 
+/// A ledger row as the erasure reads it: the person, the identifier hashes and their kinds,
+/// and the status.
+type LedgerRow = (Uuid, Vec<Vec<u8>>, Vec<String>, String);
+
 /// What [`erase_person`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EraseOutcome {
@@ -233,7 +237,7 @@ pub async fn erase_person(
     request: Uuid,
     trace: &TraceContext,
 ) -> Result<EraseOutcome, StoreError> {
-    let row: Option<(Uuid, Vec<Vec<u8>>, Vec<String>, String)> = sqlx::query_as(
+    let row: Option<LedgerRow> = sqlx::query_as(
         "SELECT person_id, identifier_hashes, identifier_kinds, status FROM erasure_requests \
          WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
     )

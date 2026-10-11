@@ -17,6 +17,7 @@ use crate::lists;
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
+use crate::privacy::{self, erasures, exports};
 use crate::problem::{ItemProblem, Problem};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
@@ -105,6 +106,14 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         jobs_admin::depth,
         jobs_admin::dead,
         jobs_admin::retry,
+        privacy::person::remove,
+        erasures::create,
+        erasures::list,
+        exports::create,
+        exports::list,
+        exports::download_handler,
+        privacy::settings::get,
+        privacy::settings::put,
     ),
     components(schemas(
         Problem,
@@ -207,6 +216,13 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         KindDepthBody,
         JobBody,
         DeadJobsBody,
+        privacy::PersonTarget,
+        privacy::TargetIdentifier,
+        erasures::ErasureBody,
+        erasures::ErasuresBody,
+        exports::ExportBody,
+        exports::ExportsBody,
+        privacy::settings::PrivacySettingsBody,
     )),
     modifiers(&SecuritySchemes)
 )]

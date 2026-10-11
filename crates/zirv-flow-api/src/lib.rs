@@ -19,6 +19,7 @@ mod openapi;
 mod ops;
 mod passwords;
 mod people;
+mod privacy;
 mod problem;
 mod request_id;
 mod session;
@@ -40,7 +41,7 @@ use std::io;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
 pub use ingest::IngestLimits;
@@ -222,6 +223,26 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/people/{id}/lists/history",
             get(lists::person::history),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}",
+            delete(privacy::person::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/privacy/erasures",
+            get(privacy::erasures::list).post(privacy::erasures::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/privacy/exports",
+            get(privacy::exports::list).post(privacy::exports::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/privacy/exports/{id}/download",
+            get(privacy::exports::download_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/privacy/settings",
+            get(privacy::settings::get).put(privacy::settings::put),
         )
         .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",

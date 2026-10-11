@@ -28,6 +28,7 @@ zirv-flow-store.workspace = true
 
 [dev-dependencies]
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+flate2.workspace = true
 http-body-util.workspace = true
 metrics-exporter-prometheus.workspace = true
 sqlx.workspace = true
