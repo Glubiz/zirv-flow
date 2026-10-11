@@ -5,7 +5,10 @@
 //! that the browser that comes back is the one that left (the `zf_oidc_state` cookie), has
 //! the identity provider's answer verified, maps it to a user and starts the same session a
 //! password sign-in starts. Every failure gives one generic 401; the reason goes only to the
-//! audit log, and never carries a token, code, address or claim value.
+//! audit log, and never carries a token, code, address or claim value. The reasons are
+//! `state_mismatch`, `unknown_state`, `provider_error`, `exchange_failed`, `invalid_token`,
+//! `no_matching_user` and `link_conflict` (the address belongs to a user already linked to a
+//! different subject at this issuer).
 
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -41,6 +44,8 @@ pub(crate) fn home_url(redirect_url: &str) -> String {
 /// Why a callback did not sign anybody in. The reason is an audit code, not for callers.
 enum Failure {
     Reason(&'static str),
+    /// A unique constraint was hit while resolving the user; see [`resolve_user`].
+    Conflict,
     Error(ApiError),
 }
 
@@ -60,7 +65,7 @@ impl From<ApiError> for Failure {
 /// somebody else in the meantime; that is a refusal, not a server fault.
 fn conflict_or_error(error: StoreError) -> Failure {
     if error.is_conflict() {
-        Failure::Reason("no_matching_user")
+        Failure::Conflict
     } else {
         error.into()
     }
@@ -107,7 +112,8 @@ impl Callback {
 )]
 pub(crate) async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {
     let oidc = state.oidc.as_ref().ok_or_else(ApiError::not_found)?;
-    let authorization = oidc.provider.begin().await.map_err(|_| {
+    let authorization = oidc.provider.begin().await.map_err(|error| {
+        tracing::warn!(%error, "OIDC sign-in cannot start");
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "the identity provider is unavailable",
@@ -173,6 +179,10 @@ pub(crate) async fn callback(
             record_failure(&state, reason).await?;
             Ok(failed(&state))
         }
+        Err(Failure::Conflict) => {
+            record_failure(&state, "link_conflict").await?;
+            Ok(failed(&state))
+        }
         Err(Failure::Error(error)) => Err(error),
     }
 }
@@ -208,11 +218,13 @@ async fn complete(
         .finish(&code, &login.pkce_verifier, &login.nonce)
         .await
         .map_err(|error| {
-            Failure::Reason(match error {
+            let reason = match error {
                 IdentityError::Exchange => "exchange_failed",
                 IdentityError::InvalidToken => "invalid_token",
                 IdentityError::Discovery | IdentityError::Settings(_) => "provider_error",
-            })
+            };
+            tracing::warn!(reason, %error, "OIDC sign-in refused");
+            Failure::Reason(reason)
         })?;
     let user = resolve_user(state, oidc, &identity).await?;
     let new = session::start(state, user.id, "oidc").await?;
@@ -233,7 +245,23 @@ async fn complete(
 
 /// The user an identity signs in as: the one it is linked to; else the one with the same
 /// verified address, which is then linked; else, when allowed, a new one.
+///
+/// Two first sign-ins for the same subject can race past the pre-checks; the loser hits a
+/// unique constraint. It resolves once more in a fresh transaction, where the winner's link
+/// is visible. A second conflict means the address belongs to a user linked to a different
+/// subject, which is `Failure::Conflict`.
 async fn resolve_user(
+    state: &AppState,
+    oidc: &OidcState,
+    identity: &VerifiedIdentity,
+) -> Result<User, Failure> {
+    match resolve_once(state, oidc, identity).await {
+        Err(Failure::Conflict) => resolve_once(state, oidc, identity).await,
+        result => result,
+    }
+}
+
+async fn resolve_once(
     state: &AppState,
     oidc: &OidcState,
     identity: &VerifiedIdentity,
@@ -751,7 +779,7 @@ mod tests {
         let reply = sign_in_as(&setup, "subject-2", Some("jane@example.com"), true).await;
 
         assert_generic_failure(&reply);
-        assert_eq!(failure_reasons(&pool).await, ["no_matching_user"]);
+        assert_eq!(failure_reasons(&pool).await, ["link_conflict"]);
     }
 
     #[sqlx::test]
