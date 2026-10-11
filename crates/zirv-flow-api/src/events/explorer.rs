@@ -82,7 +82,7 @@ impl ExplorerLimits {
 /// schema of `name`; without a name, or for a property the schema does not declare, values
 /// compare as text.
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct FilterRequest {
+pub(crate) struct ExploreFilterRequest {
     /// A top-level property name.
     #[schema(example = "plan")]
     key: String,
@@ -98,11 +98,11 @@ pub(crate) struct FilterRequest {
 
 /// What a query looks at.
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct ScopeRequest {
+pub(crate) struct ExploreScopeRequest {
     /// Only events of this name.
     name: Option<String>,
     #[serde(default)]
-    filters: Vec<FilterRequest>,
+    filters: Vec<ExploreFilterRequest>,
     /// Start of the range, inclusive.
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
@@ -115,7 +115,7 @@ pub(crate) struct ScopeRequest {
     person_id: Option<Uuid>,
 }
 
-impl ScopeRequest {
+impl ExploreScopeRequest {
     fn filters(&self) -> Result<Vec<ExploreFilter>, ApiError> {
         self.filters
             .iter()
@@ -145,9 +145,9 @@ impl ScopeRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct CountRequest {
+pub(crate) struct ExploreCountRequest {
     #[serde(flatten)]
-    scope: ScopeRequest,
+    scope: ExploreScopeRequest,
     /// `hour`, `day` or `week`, in UTC.
     #[schema(example = "day")]
     bucket: String,
@@ -162,7 +162,7 @@ pub(crate) struct BucketBody {
 }
 
 #[derive(Serialize, ToSchema)]
-pub(crate) struct CountBody {
+pub(crate) struct ExploreCountBody {
     /// Oldest first; buckets without events are left out.
     buckets: Vec<BucketBody>,
     /// The sum of the buckets.
@@ -179,9 +179,9 @@ pub(crate) struct CountBody {
     path = "/api/v1/workspaces/{ws}/events/explore/count",
     tag = "events",
     params(("ws" = Uuid, Path, description = "Workspace id")),
-    request_body = CountRequest,
+    request_body = ExploreCountRequest,
     responses(
-        (status = 200, description = "Counts per bucket", body = CountBody),
+        (status = 200, description = "Counts per bucket", body = ExploreCountBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
@@ -194,8 +194,8 @@ pub(crate) async fn count(
     State(state): State<crate::AppState>,
     principal: Principal,
     Path(ws): Path<String>,
-    ApiJson(request): ApiJson<CountRequest>,
-) -> Result<Json<CountBody>, ApiError> {
+    ApiJson(request): ApiJson<ExploreCountRequest>,
+) -> Result<Json<ExploreCountBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let bucket: Bucket = request
         .bucket
@@ -213,7 +213,7 @@ pub(crate) async fn count(
     )
     .await?;
     let total = result.buckets.iter().map(|(_, count)| count).sum();
-    Ok(Json(CountBody {
+    Ok(Json(ExploreCountBody {
         buckets: result
             .buckets
             .into_iter()
@@ -228,9 +228,9 @@ pub(crate) async fn count(
 }
 
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct BreakdownRequest {
+pub(crate) struct ExploreBreakdownRequest {
     #[serde(flatten)]
-    scope: ScopeRequest,
+    scope: ExploreScopeRequest,
     /// The property to count the values of. A caller who may not see values can break down
     /// only a property the published schema of `name` declares non-PII.
     #[schema(example = "plan")]
@@ -245,7 +245,7 @@ pub(crate) struct ValueCountBody {
 }
 
 #[derive(Serialize, ToSchema)]
-pub(crate) struct BreakdownBody {
+pub(crate) struct ExploreBreakdownBody {
     property: String,
     /// The 50 most common values, most common first.
     values: Vec<ValueCountBody>,
@@ -262,9 +262,9 @@ pub(crate) struct BreakdownBody {
     path = "/api/v1/workspaces/{ws}/events/explore/breakdown",
     tag = "events",
     params(("ws" = Uuid, Path, description = "Workspace id")),
-    request_body = BreakdownRequest,
+    request_body = ExploreBreakdownRequest,
     responses(
-        (status = 200, description = "The top values", body = BreakdownBody),
+        (status = 200, description = "The top values", body = ExploreBreakdownBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a PII property for a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
@@ -277,8 +277,8 @@ pub(crate) async fn breakdown(
     State(state): State<crate::AppState>,
     principal: Principal,
     Path(ws): Path<String>,
-    ApiJson(request): ApiJson<BreakdownRequest>,
-) -> Result<Json<BreakdownBody>, ApiError> {
+    ApiJson(request): ApiJson<ExploreBreakdownRequest>,
+) -> Result<Json<ExploreBreakdownBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let filters = request.scope.filters()?;
     let reveal = may_see_values(&state, &principal, workspace.id).await;
@@ -291,7 +291,7 @@ pub(crate) async fn breakdown(
         reveal,
     )
     .await?;
-    Ok(Json(BreakdownBody {
+    Ok(Json(ExploreBreakdownBody {
         property: request.property,
         values: result
             .values
@@ -304,9 +304,9 @@ pub(crate) async fn breakdown(
 }
 
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct ListRequest {
+pub(crate) struct ExploreListRequest {
     #[serde(flatten)]
-    scope: ScopeRequest,
+    scope: ExploreScopeRequest,
     /// Rows per page, 1 to 200; default 50.
     limit: Option<u32>,
     /// The `next_after` of the previous page.
@@ -358,7 +358,7 @@ fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
 }
 
 #[derive(Serialize, ToSchema)]
-pub(crate) struct ListBody {
+pub(crate) struct ExploreListBody {
     /// Newest first.
     events: Vec<ExploredEventBody>,
     /// Pass as `after` for the next page; null when there is none.
@@ -389,9 +389,9 @@ fn decode_cursor(text: &str) -> Option<RowCursor> {
     path = "/api/v1/workspaces/{ws}/events/explore/list",
     tag = "events",
     params(("ws" = Uuid, Path, description = "Workspace id")),
-    request_body = ListRequest,
+    request_body = ExploreListRequest,
     responses(
-        (status = 200, description = "A page of events", body = ListBody),
+        (status = 200, description = "A page of events", body = ExploreListBody),
         (status = 400, description = "limit is out of range or after is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
@@ -405,8 +405,8 @@ pub(crate) async fn list(
     State(state): State<crate::AppState>,
     principal: Principal,
     Path(ws): Path<String>,
-    ApiJson(request): ApiJson<ListRequest>,
-) -> Result<Json<ListBody>, ApiError> {
+    ApiJson(request): ApiJson<ExploreListRequest>,
+) -> Result<Json<ExploreListBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let limit = match request.limit {
         None => DEFAULT_LIMIT,
@@ -436,7 +436,7 @@ pub(crate) async fn list(
         reveal,
     )
     .await?;
-    Ok(Json(ListBody {
+    Ok(Json(ExploreListBody {
         events: page
             .rows
             .into_iter()
@@ -484,7 +484,7 @@ fn export_lines(rows: Vec<ExploreRow>, reveal: bool) -> String {
 
 /// The shape of a query for the audit trail: operators and counts, never a name, a key or a
 /// value.
-fn audit_shape(request: &ScopeRequest, filters: &[ExploreFilter]) -> Value {
+fn audit_shape(request: &ExploreScopeRequest, filters: &[ExploreFilter]) -> Value {
     json!({
         "filter_ops": filters.iter().map(|filter| filter.op.as_str()).collect::<Vec<_>>(),
         "named": request.name.is_some(),
@@ -513,7 +513,7 @@ enum Export {
     path = "/api/v1/workspaces/{ws}/events/explore/export",
     tag = "events",
     params(("ws" = Uuid, Path, description = "Workspace id")),
-    request_body = ScopeRequest,
+    request_body = ExploreScopeRequest,
     responses(
         (status = 200, description = "The events as CSV, newest first", body = String, content_type = "text/csv"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
@@ -528,7 +528,7 @@ pub(crate) async fn export(
     State(state): State<crate::AppState>,
     principal: Principal,
     Path(ws): Path<String>,
-    ApiJson(request): ApiJson<ScopeRequest>,
+    ApiJson(request): ApiJson<ExploreScopeRequest>,
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let filters = request.filters()?;
@@ -650,7 +650,7 @@ pub(crate) async fn export(
 struct ExportSource {
     pool: PgPool,
     workspace: WorkspaceId,
-    request: ScopeRequest,
+    request: ExploreScopeRequest,
     filters: Vec<ExploreFilter>,
     limits: ExploreLimits,
     reveal: bool,
@@ -683,8 +683,8 @@ mod tests {
 
     use super::*;
 
-    fn scope_request(filters: Vec<FilterRequest>) -> ScopeRequest {
-        ScopeRequest {
+    fn scope_request(filters: Vec<ExploreFilterRequest>) -> ExploreScopeRequest {
+        ExploreScopeRequest {
             name: Some("order".into()),
             filters,
             from: datetime!(2026-06-01 0:00 UTC),
@@ -693,8 +693,8 @@ mod tests {
         }
     }
 
-    fn filter(op: &str) -> FilterRequest {
-        FilterRequest {
+    fn filter(op: &str) -> ExploreFilterRequest {
+        ExploreFilterRequest {
             key: "plan".into(),
             op: op.into(),
             value: Some(json!("pro")),

@@ -2316,7 +2316,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BreakdownRequest"
+                "$ref": "#/components/schemas/ExploreBreakdownRequest"
               }
             }
           },
@@ -2328,7 +2328,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BreakdownBody"
+                  "$ref": "#/components/schemas/ExploreBreakdownBody"
                 }
               }
             }
@@ -2417,7 +2417,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CountRequest"
+                "$ref": "#/components/schemas/ExploreCountRequest"
               }
             }
           },
@@ -2429,7 +2429,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CountBody"
+                  "$ref": "#/components/schemas/ExploreCountBody"
                 }
               }
             }
@@ -2518,7 +2518,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ScopeRequest"
+                "$ref": "#/components/schemas/ExploreScopeRequest"
               }
             }
           },
@@ -2619,7 +2619,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ListRequest"
+                "$ref": "#/components/schemas/ExploreListRequest"
               }
             }
           },
@@ -2631,7 +2631,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBody"
+                  "$ref": "#/components/schemas/ExploreListBody"
                 }
               }
             }
@@ -8489,57 +8489,6 @@
           }
         }
       },
-      "BreakdownBody": {
-        "type": "object",
-        "required": [
-          "property",
-          "values",
-          "other",
-          "missing"
-        ],
-        "properties": {
-          "missing": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Matching events without the property."
-          },
-          "other": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Matching events whose value is not among `values`."
-          },
-          "property": {
-            "type": "string"
-          },
-          "values": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ValueCountBody"
-            },
-            "description": "The 50 most common values, most common first."
-          }
-        }
-      },
-      "BreakdownRequest": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ScopeRequest"
-          },
-          {
-            "type": "object",
-            "required": [
-              "property"
-            ],
-            "properties": {
-              "property": {
-                "type": "string",
-                "description": "The property to count the values of. A caller who may not see values can break down\nonly a property the published schema of `name` declares non-PII.",
-                "example": "plan"
-              }
-            }
-          }
-        ]
-      },
       "BucketBody": {
         "type": "object",
         "required": [
@@ -8775,52 +8724,6 @@
             ]
           }
         }
-      },
-      "CountBody": {
-        "type": "object",
-        "required": [
-          "buckets",
-          "total",
-          "truncated"
-        ],
-        "properties": {
-          "buckets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BucketBody"
-            },
-            "description": "Oldest first; buckets without events are left out."
-          },
-          "total": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The sum of the buckets."
-          },
-          "truncated": {
-            "type": "boolean",
-            "description": "More buckets matched than the row limit allows; the newest were left out."
-          }
-        }
-      },
-      "CountRequest": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ScopeRequest"
-          },
-          {
-            "type": "object",
-            "required": [
-              "bucket"
-            ],
-            "properties": {
-              "bucket": {
-                "type": "string",
-                "description": "`hour`, `day` or `week`, in UTC.",
-                "example": "day"
-              }
-            }
-          }
-        ]
       },
       "CreateApiKeyRequest": {
         "type": "object",
@@ -9722,6 +9625,217 @@
           }
         }
       },
+      "ExploreBreakdownBody": {
+        "type": "object",
+        "required": [
+          "property",
+          "values",
+          "other",
+          "missing"
+        ],
+        "properties": {
+          "missing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching events without the property."
+          },
+          "other": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching events whose value is not among `values`."
+          },
+          "property": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValueCountBody"
+            },
+            "description": "The 50 most common values, most common first."
+          }
+        }
+      },
+      "ExploreBreakdownRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ExploreScopeRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "property"
+            ],
+            "properties": {
+              "property": {
+                "type": "string",
+                "description": "The property to count the values of. A caller who may not see values can break down\nonly a property the published schema of `name` declares non-PII.",
+                "example": "plan"
+              }
+            }
+          }
+        ]
+      },
+      "ExploreCountBody": {
+        "type": "object",
+        "required": [
+          "buckets",
+          "total",
+          "truncated"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BucketBody"
+            },
+            "description": "Oldest first; buckets without events are left out."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The sum of the buckets."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More buckets matched than the row limit allows; the newest were left out."
+          }
+        }
+      },
+      "ExploreCountRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ExploreScopeRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket"
+            ],
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "`hour`, `day` or `week`, in UTC.",
+                "example": "day"
+              }
+            }
+          }
+        ]
+      },
+      "ExploreFilterRequest": {
+        "type": "object",
+        "description": "One property filter. The operators that apply follow the property's type in the published\nschema of `name`; without a name, or for a property the schema does not declare, values\ncompare as text.",
+        "required": [
+          "key",
+          "op"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "A top-level property name.",
+            "example": "plan"
+          },
+          "op": {
+            "type": "string",
+            "description": "`eq`, `ne`, `in`, `prefix`, `gt`, `gte`, `lt`, `lte` or `exists`. For a string list,\n`eq` means \"contains\". `ne` also matches events without the property.",
+            "example": "eq"
+          },
+          "value": {
+            "description": "Required for every operator but `exists` (where `false` means \"absent\"); `in` takes\na list of up to 100 values."
+          }
+        }
+      },
+      "ExploreListBody": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExploredEventBody"
+            },
+            "description": "Newest first."
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `after` for the next page; null when there is none."
+          }
+        }
+      },
+      "ExploreListRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ExploreScopeRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "after": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `next_after` of the previous page."
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Rows per page, 1 to 200; default 50.",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
+      "ExploreScopeRequest": {
+        "type": "object",
+        "description": "What a query looks at.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExploreFilterRequest"
+            }
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the range, inclusive."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only events of this name."
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Only this person's events, and those of the people merged into them."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the range, exclusive; at most 400 days after `from`."
+          }
+        }
+      },
       "ExploredEventBody": {
         "type": "object",
         "required": [
@@ -9866,29 +9980,6 @@
               "null"
             ],
             "description": "Pass as `before` for the next page; null when there is none."
-          }
-        }
-      },
-      "FilterRequest": {
-        "type": "object",
-        "description": "One property filter. The operators that apply follow the property's type in the published\nschema of `name`; without a name, or for a property the schema does not declare, values\ncompare as text.",
-        "required": [
-          "key",
-          "op"
-        ],
-        "properties": {
-          "key": {
-            "type": "string",
-            "description": "A top-level property name.",
-            "example": "plan"
-          },
-          "op": {
-            "type": "string",
-            "description": "`eq`, `ne`, `in`, `prefix`, `gt`, `gte`, `lt`, `lte` or `exists`. For a string list,\n`eq` means \"contains\". `ne` also matches events without the property.",
-            "example": "eq"
-          },
-          "value": {
-            "description": "Required for every operator but `exists` (where `false` means \"absent\"); `in` takes\na list of up to 100 values."
           }
         }
       },
@@ -10576,34 +10667,6 @@
             "description": "Pass as `before` for the next page; null when there is none."
           }
         }
-      },
-      "ListRequest": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ScopeRequest"
-          },
-          {
-            "type": "object",
-            "properties": {
-              "after": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The `next_after` of the previous page."
-              },
-              "limit": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int32",
-                "description": "Rows per page, 1 to 200; default 50.",
-                "minimum": 0
-              }
-            }
-          }
-        ]
       },
       "MappingBody": {
         "type": "object",
@@ -11544,47 +11607,6 @@
           "version": {
             "type": "integer",
             "format": "int32"
-          }
-        }
-      },
-      "ScopeRequest": {
-        "type": "object",
-        "description": "What a query looks at.",
-        "required": [
-          "from",
-          "to"
-        ],
-        "properties": {
-          "filters": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FilterRequest"
-            }
-          },
-          "from": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Start of the range, inclusive."
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Only events of this name."
-          },
-          "person_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Only this person's events, and those of the people merged into them."
-          },
-          "to": {
-            "type": "string",
-            "format": "date-time",
-            "description": "End of the range, exclusive; at most 400 days after `from`."
           }
         }
       },
