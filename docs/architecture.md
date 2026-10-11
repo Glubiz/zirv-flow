@@ -406,6 +406,22 @@ holds its unique key; the scheduler leader enqueues a drain for each workspace w
 row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 
+As built (CSV import): `POST /imports` streams the file into `import_chunks` (1 MiB each, written
+with the `imports` row in one transaction, so a refused upload leaves nothing) while the SHA-256,
+the row count, the header and the first rows are taken with the pure incremental reader (over `csv-core`) in
+`core::csv_file`. The mapping is the pure `core::mapping` (column rules, the bounded transform set,
+save-time validation, row errors as codes), which the M3 sync runs will reuse. `import.dry_run`
+and `import.run` are job kinds that read the chunks in batches of 500 rows; each batch of a run is
+one transaction on a connection beside the job's, which applies the profile records through the
+transaction-taking profile path, adds list members, writes the rejects and advances `rows_done`,
+fenced on the import still being `running` at that checkpoint (a cancel or a second attempt makes
+the batch a no-op). The record key is the key column's value, else `<file sha256>:<row number>`,
+under the import's own source and stream. A run fails with `reject_threshold` once more than 1,000
+rows are done and the rejected share is over the import's threshold (5%); applied batches stay.
+The worker's lease heartbeat covers the long run, so there is no segmenting. The scheduler
+leader's hourly upkeep deletes the chunks 7 days after an import ends and the rejects (whose
+`raw` cells are admin-only personal data) 30 days after they were written.
+
 ### 7.2 Sources, streams and sync runs
 
 A **source** is a connector instance (type, config, encrypted credentials,
@@ -1322,7 +1338,7 @@ after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
 defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
 per-name workspace overrides (drop monthly partitions; batched deletes where
-an override is shorter), messages 13 months, ingest and sync rejects 30 days,
+an override is shorter), messages 13 months, ingest, sync and import rejects 30 days, import files 7 days after the import ends,
 job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28
 and assistant transcript retention is OQ-26.
 
