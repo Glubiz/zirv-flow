@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, and CSV imports with mapping, a dry run and checkpointed runs, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, and the live event debugger, explorer and reject replay, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -104,6 +104,10 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
 | `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
+| `explorer.interactive_timeout_ms` | u64 | 5000 | at least 1; how long an explorer count, breakdown or page of rows may run before it is cancelled (`503`, code `query_timeout`) |
+| `explorer.export_timeout_ms` | u64 | 60000 | at least 1; the same for each page query of a CSV export |
+| `explorer.interactive_row_limit` | u32 | 10000 | at least 1; the most buckets or rows an interactive explorer query returns (`truncated` is set when more matched) |
+| `explorer.export_row_limit` | u32 | 1000000 | at least 1; the most rows an export writes; a final `#` comment line says when it stopped there |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -514,6 +518,53 @@ admin sets within `events.min_retention_days` and `events.max_retention_days`; r
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
 records of events that no longer exist. The scheduler leader creates the partitions for this
 and next month.
+## Event debugger and explorer
+
+Under **Events** in the web UI, **Debugger**, **Explorer** and **Rejects** show what the event
+store did with what was sent.
+
+**Debugger.** A live list of events as they are decided, newest first (`GET
+/api/v1/workspaces/{ws}/debugger/stream`, server-sent events, `read` access). Each frame
+is an `item` with the outcome (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`),
+the reasons, the properties and a trace link; filter by source, event name and outcome. The
+page can pause and resume, shows a notice when it could not keep up (`event: gap`) and
+reconnects from `Last-Event-ID`. It is live: opening it shows nothing from before except the last few seconds. A
+workspace has at most 20 streams per server process (more get 429), and the page says when
+the server's notifier is down and updates are delayed.
+Ingestion writes the feed only while someone watches the workspace (a viewer renews a 30 s
+watch every 10 s); with nobody watching it pays nothing extra, and feed rows older than 15
+minutes are deleted. The feed is unlogged and holds redacted values only.
+
+**Masking and reveal.** Values are masked per viewer as in the person timeline: only
+properties the published schema declares non-PII are shown, and every other value is null and
+listed as masked. Owners, workspace admins and `admin` keys may ask for `reveal=true` (the
+**Reveal PII** toggle) to see the stored values. They are the values after ingest redaction,
+so dropped and hashed properties stay dropped and hashed. Members and `read` keys never see
+them.
+
+**Explorer.** `POST /api/v1/workspaces/{ws}/events/explore/count`, `.../breakdown`,
+`.../list` and `.../export` (POSTs, so filters stay out of URLs). A query names a time range
+of at most 400 days, optionally an event name, a person (merged people included) and
+property filters. Operators follow the schema type of the property (`eq`, `ne`, `in`,
+`prefix`, `gt`, `gte`, `lt`, `lte`, `exists`); undeclared properties compare as text. The page
+draws counts per hour, day or week as an inline SVG bar chart with the same numbers in a table,
+a top-50 breakdown of one property, paged rows and a CSV export (audited as `events.exported`
+with the shape of the filters and the row count, never values). A caller without access to
+values can filter PII and undeclared properties only with `eq` and `exists` and cannot break
+them down. Queries always carry the workspace and the time range, run under the `explorer.*`
+timeouts, and answer `503` with the code `query_timeout` instead of running unbounded.
+
+**Replay.** After fixing a schema or the settings, an admin can replay rejects from
+**Rejects**: select some, or replay everything that matches the filter (at most 10,000). A
+preview checks each reject's stored, redacted payload against what is in force now and
+predicts the outcome without writing; confirming queues an `ingest.replay` job. An event that
+now passes is stored once, flagged `replayed`, with an `event.replayed` decision that records
+why. A second replay of the same reject does nothing, and a message id that is already stored
+counts as a duplicate. A reject that never named a person cannot be replayed. **Downstream
+triggers stay off by default**: replayed events also carry the flag `no_triggers`, which the
+event-trigger path (added with flows) must skip; turn on **Emit downstream triggers** only if
+people should still receive what these events would have started.
+
 ## Consent and suppressions
 
 The profile store also holds what people have agreed to receive, and the addresses that must

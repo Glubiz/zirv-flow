@@ -39,7 +39,67 @@ export const REJECT_REASONS: Record<string, string> = {
   no_identifier: "No identifier",
   invalid_event_name: "Invalid event name",
   invalid_message_id: "Invalid message id",
+  apply_failed: "Could not be applied",
+  no_person: "Names no person",
+  not_replayable: "Cannot be replayed",
 };
+
+export const OUTCOMES: { value: string; label: string }[] = [
+  { value: "accepted", label: "Accepted" },
+  { value: "flagged", label: "Flagged" },
+  { value: "unplanned", label: "Unplanned" },
+  { value: "rejected", label: "Rejected" },
+  { value: "duplicate", label: "Duplicate" },
+];
+
+export const FILTER_OPS: { value: string; label: string }[] = [
+  { value: "eq", label: "is" },
+  { value: "ne", label: "is not" },
+  { value: "in", label: "is one of" },
+  { value: "prefix", label: "starts with" },
+  { value: "gt", label: "is greater than" },
+  { value: "gte", label: "is at least" },
+  { value: "lt", label: "is less than" },
+  { value: "lte", label: "is at most" },
+  { value: "exists", label: "is present" },
+];
+
+/** The operators a property type takes; an undeclared property compares as text. */
+export function operatorsFor(type: string | null): string[] {
+  switch (type) {
+    case "string":
+      return ["eq", "ne", "in", "prefix", "exists"];
+    case "number":
+    case "integer":
+      return ["eq", "ne", "in", "gt", "gte", "lt", "lte", "exists"];
+    case "boolean":
+    case "string_list":
+      return ["eq", "ne", "exists"];
+    case "timestamp":
+    case "date":
+      return ["eq", "ne", "gt", "gte", "lt", "lte", "exists"];
+    case "object":
+      return ["exists"];
+    default:
+      return ["eq", "ne", "in", "prefix", "gt", "gte", "lt", "lte", "exists"];
+  }
+}
+
+export const REPLAY_OUTCOMES: Record<string, string> = {
+  accept: "Will be stored",
+  flag: "Will be stored, flagged",
+  still_rejected: "Still rejected",
+  duplicate: "Already stored",
+  already_replayed: "Already replayed",
+};
+
+export function outcomeLabel(value: string): string {
+  return OUTCOMES.find((outcome) => outcome.value === value)?.label ?? value;
+}
+
+export function opLabel(value: string): string {
+  return FILTER_OPS.find((op) => op.value === value)?.label ?? value;
+}
 
 export function typeLabel(value: string): string {
   return PROPERTY_TYPES.find((type) => type.value === value)?.label ?? value;

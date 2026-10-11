@@ -6,6 +6,8 @@ use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::events::ExplorerLimits;
+use crate::events::debugger::DebuggerHub;
 use crate::imports::ImportLimits;
 use crate::ingest::{IngestLimits, IngestState};
 use crate::oidc;
@@ -35,6 +37,13 @@ pub struct AppState {
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
     pub(crate) identifier_key: Option<Arc<HmacKey>>,
+    /// The explorer's time and row limits.
+    pub(crate) explorer: ExplorerLimits,
+    /// The shared listener and the viewers of the event debugger.
+    pub(crate) debugger: DebuggerHub,
+    /// Fires when the server is shutting down, so long-lived streams end and do not hold the
+    /// graceful shutdown up. Absent when nothing tells the state about shutdown.
+    pub(crate) stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -51,6 +60,7 @@ impl AppState {
     /// independent of the exporter.
     pub fn new(pool: PgPool, render_metrics: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         Self {
+            debugger: DebuggerHub::new(pool.clone()),
             pool,
             render_metrics,
             schema_check: Arc::new(|pool| {
@@ -64,6 +74,8 @@ impl AppState {
             imports: ImportLimits::default(),
             setup_token: Arc::default(),
             identifier_key: None,
+            explorer: ExplorerLimits::default(),
+            stop: None,
         }
     }
 
@@ -83,6 +95,19 @@ impl AppState {
     /// The operator's event retention settings; their bounds limit per-name overrides.
     pub fn with_event_retention(mut self, settings: EventRetention) -> Self {
         self.event_retention = settings;
+        self
+    }
+
+    /// The explorer's query timeouts and row limits.
+    pub fn with_explorer_limits(mut self, limits: ExplorerLimits) -> Self {
+        self.explorer = limits;
+        self
+    }
+
+    /// Ends the debugger streams when `stop` becomes true. [`serve`](crate::serve) does this
+    /// from its shutdown future.
+    pub(crate) fn with_stop(mut self, stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.stop = Some(stop);
         self
     }
 
@@ -184,6 +209,23 @@ mod tests {
         assert_eq!(
             with.identifier_key.unwrap().digest(b"x"),
             derived.digest(b"x")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_explorer_limits_default_and_can_be_set() {
+        let limits = ExplorerLimits {
+            export_row_limit: 5,
+            ..ExplorerLimits::default()
+        };
+
+        assert_eq!(state().explorer, ExplorerLimits::default());
+        assert_eq!(
+            state()
+                .with_explorer_limits(limits)
+                .explorer
+                .export_row_limit,
+            5
         );
     }
 

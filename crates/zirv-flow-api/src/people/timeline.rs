@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::TraceId;
+use zirv_flow_core::events::{Masked, mask_event};
 use zirv_flow_store::{
     TimelineCursor, TimelineDecision, TimelineEntry, TimelineEvent, TimelineFilter, TimelineKind,
 };
@@ -94,37 +95,8 @@ fn event_body(event: TimelineEvent, reveal: bool) -> EventEntryBody {
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    // Without access, only a property the published schema declares non-PII is shown; one it
-    // does not declare (stored though flagged) or does not have a schema for may be personal.
-    let (properties, masked) = if reveal {
-        (stored, Vec::new())
-    } else {
-        let declared_plain = |name: &str| {
-            event.schema.as_ref().is_some_and(|schema| {
-                schema
-                    .iter()
-                    .any(|declared| declared.name == name && !declared.pii)
-            })
-        };
-        let mut masked: Vec<String> = stored
-            .keys()
-            .filter(|name| !declared_plain(name))
-            .cloned()
-            .collect();
-        masked.sort();
-        let shown = stored
-            .into_iter()
-            .map(|(name, value)| {
-                let value = if masked.contains(&name) {
-                    Value::Null
-                } else {
-                    value
-                };
-                (name, value)
-            })
-            .collect();
-        (shown, masked)
-    };
+    // The rule is shared with the debugger: see `mask_event`.
+    let Masked { properties, masked } = mask_event(&stored, event.schema.as_deref(), reveal);
     EventEntryBody {
         id: event.id,
         at: event.at,

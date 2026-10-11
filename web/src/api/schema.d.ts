@@ -327,6 +327,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/debugger/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Watches the workspace's events as they are decided: one `item` frame per outcome
+         *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no
+         *     history beyond the last few seconds before it connected (so a batch that was still
+         *     committing is not missed). Each frame's `id` is a position that is safe to resume from: send it back as
+         *     `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
+         *     client already has (their `seq` identifies them). A position beyond the feed (the feed is
+         *     unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
+         *     frame whose `reset` is true. A viewer that cannot keep up gets an `event: gap` frame with
+         *     the number of rows skipped (an upper bound when filters apply). While the server's
+         *     notifier is down, an `event: status` frame says `degraded` and the stream polls every few
+         *     seconds instead of reacting at once; another says it recovered.
+         * @description While at least one viewer watches a workspace, ingestion writes a feed row per event;
+         *     when none does, it writes nothing extra. Values are masked per viewer as in the person
+         *     timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
+         *     (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
+         *     most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
+         *     server shuts down.
+         */
+        get: operations["stream_event_debugger"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/event-policy": {
         parameters: {
             query?: never;
@@ -412,6 +447,83 @@ export interface paths {
          *     draft.
          */
         post: operations["publish_event_schema"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/events/explore/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The most common values of one property over the same events a count covers. */
+        post: operations["explore_event_breakdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/events/explore/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Events per bucket over the range, for the filters given. The sum of the buckets is the
+         *     number of matching events, and equals what the breakdown and the list cover.
+         */
+        post: operations["explore_event_count"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/events/explore/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The matching events as CSV with the list's columns and masking, streamed a page at a
+         *     time (`id,occurred_at,name,source,person_id,validation_state,flags,trace_id,properties,masked`;
+         *     `flags` and `masked` are joined by `|`). At most the export row limit is written; when
+         *     more matched, the last line is a `#` comment saying so. The export is audited as
+         *     `events.exported` with the shape of the filters and the row count, no values.
+         */
+        post: operations["export_events"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/events/explore/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The events of the range that match, newest first in keyset pages, masked for the caller. */
+        post: operations["explore_event_list"];
         delete?: never;
         options?: never;
         head?: never;
@@ -668,6 +780,33 @@ export interface paths {
         get: operations["list_ingest_rejects"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/ingest-rejects/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replays rejected events after a schema or policy fix. A request that covers no reject
+         *     (ids that name none, or a filter that matches none) answers 200 with `selected: 0` and
+         *     queues nothing; an empty `ids` list is a 422. With `dry_run` it validates each
+         *     reject's stored, redacted payload against the current schema and policy and predicts the
+         *     outcome, writing nothing. Without it, a job stores each event that now passes, once, with
+         *     the flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and
+         *     `replay_event_id` on the reject and records an `event.replayed` decision with the cause.
+         *     Replaying a reject again changes nothing. A reject that named no person cannot be
+         *     replayed (`still_rejected` with `no_person`).
+         */
+        post: operations["replay_ingest_rejects"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1380,6 +1519,12 @@ export interface components {
              */
             batch: components["schemas"]["BatchItemRequest"][];
         };
+        BucketBody: {
+            /** Format: date-time */
+            bucket_start: string;
+            /** Format: int64 */
+            count: number;
+        };
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
             id: string;
@@ -1673,6 +1818,39 @@ export interface components {
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
         };
+        /** @description The data of an `item` frame. */
+        DebuggerItemBody: {
+            /** Format: date-time */
+            at: string;
+            /** Format: uuid */
+            event_id?: string | null;
+            /** @description The names whose values were replaced by null. */
+            masked: string[];
+            /** @description Null when the name itself was invalid. */
+            name?: string | null;
+            /** @description `accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`. */
+            outcome: string;
+            /**
+             * @description The stored (redacted) properties. Values of PII-flagged or undeclared properties are
+             *     null unless the viewer asked to reveal and may see values; every value of a rejected
+             *     event is null for a viewer who does not reveal, except those the schema declares
+             *     non-PII with the declared type.
+             */
+            properties: Record<string, never>;
+            /** @description The reject code of a rejected event, such as `validation_failed`. */
+            reason?: string | null;
+            reasons: components["schemas"]["ReasonItem"][];
+            /** Format: uuid */
+            reject_id?: string | null;
+            /**
+             * Format: int64
+             * @description The feed position; the frame's `id`, and the `Last-Event-ID` to resume from.
+             */
+            seq: number;
+            source: string;
+            /** @description 32 lowercase hex characters. */
+            trace_id: string;
+        };
         DecisionBody: {
             /** @example job.attempt */
             action: string;
@@ -1841,6 +2019,130 @@ export interface components {
             schema: components["schemas"]["EventSchemaBody"];
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
+        };
+        ExploreBreakdownBody: {
+            /**
+             * Format: int64
+             * @description Matching events without the property.
+             */
+            missing: number;
+            /**
+             * Format: int64
+             * @description Matching events whose value is not among `values`.
+             */
+            other: number;
+            property: string;
+            /** @description The 50 most common values, most common first. */
+            values: components["schemas"]["ValueCountBody"][];
+        };
+        ExploreBreakdownRequest: components["schemas"]["ExploreScopeRequest"] & {
+            /**
+             * @description The property to count the values of. A caller who may not see values can break down
+             *     only a property the published schema of `name` declares non-PII.
+             * @example plan
+             */
+            property: string;
+        };
+        ExploreCountBody: {
+            /** @description Oldest first; buckets without events are left out. */
+            buckets: components["schemas"]["BucketBody"][];
+            /**
+             * Format: int64
+             * @description The sum of the buckets.
+             */
+            total: number;
+            /** @description More buckets matched than the row limit allows; the newest were left out. */
+            truncated: boolean;
+        };
+        ExploreCountRequest: components["schemas"]["ExploreScopeRequest"] & {
+            /**
+             * @description `hour`, `day` or `week`, in UTC.
+             * @example day
+             */
+            bucket: string;
+        };
+        /**
+         * @description One property filter. The operators that apply follow the property's type in the published
+         *     schema of `name`; without a name, or for a property the schema does not declare, values
+         *     compare as text.
+         */
+        ExploreFilterRequest: {
+            /**
+             * @description A top-level property name.
+             * @example plan
+             */
+            key: string;
+            /**
+             * @description `eq`, `ne`, `in`, `prefix`, `gt`, `gte`, `lt`, `lte` or `exists`. For a string list,
+             *     `eq` means "contains". `ne` also matches events without the property.
+             * @example eq
+             */
+            op: string;
+            /**
+             * @description Required for every operator but `exists` (where `false` means "absent"); `in` takes
+             *     a list of up to 100 values.
+             */
+            value?: unknown;
+        };
+        ExploreListBody: {
+            /** @description Newest first. */
+            events: components["schemas"]["ExploredEventBody"][];
+            /** @description Pass as `after` for the next page; null when there is none. */
+            next_after?: string | null;
+        };
+        ExploreListRequest: components["schemas"]["ExploreScopeRequest"] & {
+            /** @description The `next_after` of the previous page. */
+            after?: string | null;
+            /**
+             * Format: int32
+             * @description Rows per page, 1 to 200; default 50.
+             */
+            limit?: number | null;
+        };
+        /** @description What a query looks at. */
+        ExploreScopeRequest: {
+            filters?: components["schemas"]["ExploreFilterRequest"][];
+            /**
+             * Format: date-time
+             * @description Start of the range, inclusive.
+             */
+            from: string;
+            /** @description Only events of this name. */
+            name?: string | null;
+            /**
+             * Format: uuid
+             * @description Only this person's events, and those of the people merged into them.
+             */
+            person_id?: string | null;
+            /**
+             * Format: date-time
+             * @description End of the range, exclusive; at most 400 days after `from`.
+             */
+            to: string;
+        };
+        ExploredEventBody: {
+            /** @description Timing flags such as `late`, and `replayed` and `no_triggers` for a replayed event. */
+            flags: string[];
+            /** Format: uuid */
+            id: string;
+            /** @description The names whose values were replaced by null. */
+            masked: string[];
+            name: string;
+            /** Format: date-time */
+            occurred_at: string;
+            /** Format: uuid */
+            person_id: string;
+            /**
+             * @description The stored properties. The values of properties the published schema flags as PII,
+             *     of undeclared properties and of every property of an event without a published
+             *     schema are null for callers who may not see values.
+             */
+            properties: Record<string, never>;
+            source: string;
+            /** @description 32 lowercase hex characters. */
+            trace_id: string;
+            /** @description `valid`, `flagged` or `unplanned`. */
+            validation_state: string;
         };
         ExportBody: {
             /**
@@ -2274,6 +2576,28 @@ export interface components {
              */
             person_id?: string | null;
         };
+        PredictionBody: {
+            /** @description `accept`, `flag`, `still_rejected`, `duplicate` or `already_replayed`. */
+            outcome: string;
+            /**
+             * @description For `still_rejected`: `validation_failed`, `unplanned_event`, `no_person` or
+             *     `not_replayable`.
+             */
+            reason?: string | null;
+            reasons: components["schemas"]["ReasonBody"][];
+            /**
+             * @description Properties the policy hashes that the schema types as something other than a string.
+             *     The stored payload holds their hash, so they fail validation.
+             */
+            redacted_type_changed: string[];
+            /**
+             * @description The redaction rules changed since the reject was stored: storing it applies the
+             *     current `drop` and `truncate_ip` rules and any `hash` path it has not had yet.
+             */
+            redaction_changed: boolean;
+            /** Format: uuid */
+            reject_id: string;
+        };
         PrivacySettingsBody: {
             /**
              * @description What happens to a person left with no source record, event or explicit consent after a
@@ -2391,6 +2715,12 @@ export interface components {
             /** @description `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`. */
             reason: string;
         };
+        ReasonItem: {
+            /** @description The property that failed; never its value. */
+            property: string;
+            /** @description `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`. */
+            reason: string;
+        };
         /**
          * @description Which properties are redacted before storage. Paths are dot-separated and reach into
          *     nested objects.
@@ -2419,6 +2749,57 @@ export interface components {
         RemoveMembersRequest: {
             /** @description At most 1000. */
             person_ids: string[];
+        };
+        ReplayBody: {
+            dry_run: boolean;
+            /** @description The predictions of a dry run, in the order of the rejects; empty for a real run. */
+            rejects: components["schemas"]["PredictionBody"][];
+            /** @description How many rejects the request covers. */
+            selected: number;
+            /** @description The predicted totals of a dry run; zero for a real run. */
+            totals: components["schemas"]["TotalsBody"];
+            /** @description The trace of a real run: its `event.replayed` decisions are on it. Null for a dry run. */
+            trace_id?: string | null;
+            /**
+             * @description A dry run lists at most 200 predictions, the first in the order of the rejects; the
+             *     totals always cover all of them.
+             */
+            truncated: boolean;
+        };
+        /** @description Which rejects, other than by id. */
+        ReplayFilter: {
+            /**
+             * Format: date-time
+             * @description Only rejects received at or after this time.
+             */
+            from?: string | null;
+            /** @description Only rejects of this event name. */
+            name?: string | null;
+            /** @description Only rejects with this reason code. */
+            reason?: string | null;
+            /**
+             * Format: date-time
+             * @description Only rejects received before this time.
+             */
+            to?: string | null;
+        };
+        /** @description Exactly one of `ids` and `filter`, at most 10,000 rejects. */
+        ReplayRequest: {
+            /**
+             * @description `manual` for a person's decision, or `definition_change` after a schema or policy
+             *     fix. It is recorded on the `event.replayed` decisions.
+             * @example definition_change
+             */
+            cause: string;
+            /** @description Predict the outcomes and write nothing. Default false. */
+            dry_run?: boolean;
+            /**
+             * @description Whether downstream event triggers may fire for the replayed events. Off by default:
+             *     the events are flagged `no_triggers`, which the trigger path skips.
+             */
+            emit_triggers?: boolean;
+            filter?: null | components["schemas"]["ReplayFilter"];
+            ids?: string[] | null;
         };
         /** @description How to close a conflict. */
         ResolveRequest: {
@@ -2633,6 +3014,18 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        TotalsBody: {
+            /** Format: int64 */
+            accept: number;
+            /** Format: int64 */
+            already_replayed: number;
+            /** Format: int64 */
+            duplicate: number;
+            /** Format: int64 */
+            flag: number;
+            /** Format: int64 */
+            still_rejected: number;
+        };
         TraceBody: {
             /** @description Oldest first. */
             records: components["schemas"]["DecisionBody"][];
@@ -2789,6 +3182,12 @@ export interface components {
             /** Format: uuid */
             id: string;
             is_owner: boolean;
+        };
+        ValueCountBody: {
+            /** Format: int64 */
+            count: number;
+            /** @description The property's text; a list or an object is its JSON. */
+            value: string;
         };
         VersionBody: {
             /** @description The running zirv-flow version. */
@@ -3915,6 +4314,86 @@ export interface operations {
             };
         };
     };
+    stream_event_debugger: {
+        parameters: {
+            query?: {
+                /** @description Only events from this source */
+                source?: string;
+                /** @description Only events of this name */
+                name?: string;
+                /** @description `accepted`, `flagged`, `unplanned`, `rejected` or `duplicate` */
+                outcome?: string;
+                /** @description Show stored values to a viewer who may see values; default false */
+                reveal?: boolean;
+            };
+            header?: {
+                /** @description The `id` of the last frame received */
+                "Last-Event-ID"?: string | null;
+            };
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A text/event-stream of `item`, `gap` and `status` frames */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["DebuggerItemBody"];
+                };
+            };
+            /** @description outcome or reveal is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace already has 20 streams open on this server; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_event_policy: {
         parameters: {
             query?: never;
@@ -4384,6 +4863,303 @@ export interface operations {
             };
             /** @description The schema has no draft to publish */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explore_event_breakdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExploreBreakdownRequest"];
+            };
+        };
+        responses: {
+            /** @description The top values */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExploreBreakdownBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, a missing CSRF token, or a PII property for a caller who may not see values (`code` is `pii_property_not_explorable`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A malformed range, filter or property */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query ran past its time limit (`code` is `query_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explore_event_count: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExploreCountRequest"];
+            };
+        };
+        responses: {
+            /** @description Counts per bucket */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExploreCountBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A malformed range, filter or bucket */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query ran past its time limit (`code` is `query_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    export_events: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExploreScopeRequest"];
+            };
+        };
+        responses: {
+            /** @description The events as CSV, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A malformed range or filter */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query ran past its time limit (`code` is `query_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explore_event_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExploreListRequest"];
+            };
+        };
+        responses: {
+            /** @description A page of events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExploreListBody"];
+                };
+            };
+            /** @description limit is out of range or after is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A malformed range or filter */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query ran past its time limit (`code` is `query_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5263,6 +6039,87 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    replay_ingest_rejects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description A dry run: the predicted outcomes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayBody"];
+                };
+            };
+            /** @description The replay job was enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The dry run ran past its time limit (`code` is `query_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

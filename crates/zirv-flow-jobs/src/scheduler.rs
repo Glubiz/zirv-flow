@@ -13,7 +13,7 @@ use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
     enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_exports,
-    inbox_heads, queue_depths, reap_expired, try_lead,
+    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, try_lead,
 };
 
 use crate::metrics::{QueueGauges, set_inbox_age};
@@ -27,6 +27,8 @@ const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// The longest between deletes of the data imports keep past their end (architecture 16.3).
 const IMPORT_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+/// The longest between prunes of the debugger feed.
+const FEED_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -80,6 +82,8 @@ pub struct Scheduler {
     partitions_checked: Option<Instant>,
     /// When the import retention last ran; none until this instance leads.
     imports_checked: Option<Instant>,
+    /// When the debugger feed was last pruned; none until this instance leads.
+    feed_pruned: Option<Instant>,
 }
 
 impl Scheduler {
@@ -91,6 +95,7 @@ impl Scheduler {
             gauges: Mutex::new(QueueGauges::default()),
             partitions_checked: None,
             imports_checked: None,
+            feed_pruned: None,
         }
     }
 
@@ -128,6 +133,7 @@ impl Scheduler {
         let now = database_now(&self.pool).await?;
         self.keep_partitions(now).await;
         self.keep_imports().await;
+        self.keep_debugger_feed().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -140,6 +146,7 @@ impl Scheduler {
         }
         self.keep_partitions(now).await;
         self.keep_imports().await;
+        self.keep_debugger_feed().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -190,6 +197,21 @@ impl Scheduler {
         }
     }
 
+    /// Deletes debugger feed rows past their 15 minutes: on gaining leadership, then at most
+    /// every minute. A failure is logged and retried at the next check.
+    async fn keep_debugger_feed(&mut self) {
+        let due = self
+            .feed_pruned
+            .is_none_or(|pruned| pruned.elapsed() >= FEED_PRUNE_INTERVAL);
+        if !due {
+            return;
+        }
+        self.feed_pruned = Some(Instant::now());
+        if let Err(error) = prune_debugger_feed(&self.pool).await {
+            warn!("could not prune the debugger feed: {error}");
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -201,6 +223,7 @@ impl Scheduler {
             self.leadership = None;
             self.partitions_checked = None;
             self.imports_checked = None;
+            self.feed_pruned = None;
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")
@@ -692,6 +715,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "the import and its status stay");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_prunes_the_debugger_feed_of_rows_past_fifteen_minutes(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "watched").await;
+        for age in [20, 1] {
+            sqlx::query(
+                "INSERT INTO debugger_feed (workspace_id, at, source, outcome, trace_id)                  VALUES ($1, now() - make_interval(mins => $2), 'web', 'accepted',                          gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(age)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut leader = scheduler(&pool);
+
+        leader.tick().await.unwrap();
+
+        let left: Vec<i64> = sqlx::query_scalar(
+            "SELECT (extract(epoch FROM now() - at) / 60)::bigint FROM debugger_feed",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, [1]);
     }
 
     async fn partitions(pool: &PgPool) -> Vec<String> {

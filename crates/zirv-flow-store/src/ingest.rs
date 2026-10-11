@@ -394,6 +394,7 @@ pub async fn drain_batch(
             }
         }
     }
+    events.finish(&mut tx, workspace).await?;
     delete_rows(&mut tx, workspace, &rows).await?;
     commit(tx).await?;
     Ok(outcome)
@@ -425,9 +426,14 @@ pub async fn drain_batch_singly(
             }
             Some(Mapped::Event(record)) => {
                 let mut events = EventBatch::default();
-                apply_event_record(&mut savepoint, workspace, key, &mut events, record)
-                    .await
-                    .map(|result| tally_event(&mut outcome, &result))
+                match apply_event_record(&mut savepoint, workspace, key, &mut events, record).await
+                {
+                    Ok(result) => {
+                        tally_event(&mut outcome, &result);
+                        events.finish(&mut savepoint, workspace).await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             None => Err(StoreError::poison()),
         };

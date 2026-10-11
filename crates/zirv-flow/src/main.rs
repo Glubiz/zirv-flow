@@ -588,7 +588,8 @@ fn http_state(
         .with_local_sign_in(config.auth_local_enabled())
         .with_event_retention(config.events_retention())
         .with_ingest_limits(config.ingest_limits())
-        .with_import_limits(config.import_limits());
+        .with_import_limits(config.import_limits())
+        .with_explorer_limits(config.explorer_limits());
     if let Some(key) = master_key {
         state = state.with_master_key(key);
     }

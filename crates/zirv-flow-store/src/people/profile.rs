@@ -13,9 +13,9 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::people::TraitType;
 
-use super::bounded::begin_bounded;
 use super::profiles::{StoredIdentity, find_person};
 use crate::StoreError;
+use crate::bounded::begin_bounded;
 
 /// The identities one source lists for the person.
 #[derive(Clone, Debug, PartialEq)]

@@ -919,7 +919,7 @@ adds that grant, only owners and admins can view them. Per-event-name retention
 may shorten or extend the deployment default within operator-set bounds.
 
 **As built.** The store ships the registry, validation and storage of this section, and 7.1
-describes the ingestion API; the debugger, explorer and replay come later. Versions are immutable
+describes the ingestion API; the debugger, explorer and replay are described under 12.2 and 12.3. Versions are immutable
 (a trigger refuses an update), an unplanned name drafts a schema only when it has no entry yet,
 and a reject sample keeps a value only when the published schema marks the property as
 non-PII and not an `object`. Only an accepted event claims its `message_id`, so a rejected
@@ -944,6 +944,27 @@ does not yet rewrite events.
   id and a typed `manual` or `definition_change` cause. It never re-triggers
   flows unless the operator explicitly selects that separately previewed
   action; forwarding re-drives cannot trigger flows.
+
+As built (reject replay): `POST /ingest-rejects/replay` (admin, CSRF) takes `ids` or a
+`filter` (at most 10,000 rejects), a typed `cause` (`manual` or `definition_change`),
+`emit_triggers` (default false) and `dry_run`. A dry run judges each reject's stored,
+redacted payload against the current schema and policy and predicts `accept`, `flag`,
+`still_rejected` (with reasons), `duplicate` or `already_replayed`, and names properties that
+the policy hashes although the schema types them as something other than text
+(`redacted_type_changed`); it writes nothing. A real run audits `ingest_rejects.replayed`
+with counts and enqueues one `ingest.replay` job on a trace whose cause is the typed one.
+The job replays each reject in its own transaction: it stores the event once under the
+reject's original `message_id` and person (the payload keeps no identifiers, so a reject that
+named no person is `still_rejected` as `no_person`), applies the redaction rules the payload
+has not had yet (a reject records the rules it was stored under in `ingest_rejects.redaction`;
+`drop` and `truncate_ip` are applied in full, `hash` only for paths not recorded, a legacy
+reject gets the full current rules; the dry run reports `redaction_changed`), writes the
+debugger feed row when the workspace is watched, sets `replayed_at` and `replay_event_id`, flags the event `replayed` and
+appends an `event.replayed` decision (subjects `reject`, `event`, `person`). A second replay
+finds `replayed_at` and does nothing; a `message_id` that is already stored resolves the
+reject as a duplicate. With `emit_triggers` false the event is also flagged `no_triggers`.
+**The M5 event-trigger path must skip an event flagged `no_triggers`**; no flow reads events
+before M5, so nothing consumes the flag yet (`EventFlag::NoTriggers` documents the rule).
 
 ### 12.3 Debugger, explorer and person timeline
 
@@ -997,6 +1018,47 @@ As built (people search, profile and person timeline):
   need `read`; masking uses the same rule as identity conflicts and lists. The web UI's
   People page is the search, `people/:id` the profile with the consent panel (owned by the
   consent feature) and the lists panel (owned by the lists feature).
+
+As built (debugger, explorer):
+
+- **Feed.** Migration `0016_investigation.sql` adds `debugger_watch` and an UNLOGGED
+  `debugger_feed`. A `serve` process with a viewer for a workspace upserts
+  `debugger_watch.until = now() + 30 s` every 10 s and on connect. While `until` is in the
+  future, `apply_event_record` writes one feed row per outcome (`accepted`, `flagged`,
+  `unplanned`, `rejected`, `duplicate`) in the deciding transaction and the batch ends with
+  one `pg_notify('zf_debugger', workspace_id)`; otherwise it writes nothing extra. Rows hold
+  the redacted properties only, the reject code, the reasons and the published schema version
+  for later masking. The leader deletes rows older than 15 minutes every minute. The feed
+  does not survive a crash, which also starts `seq` over. `seq` is taken when a row is
+  inserted, not when its transaction commits, so a row can become visible behind a newer one.
+- **Stream.** `GET /debugger/stream` (`read`) uses one shared `PgListener` per `serve`
+  process; a separate timer renews the watch, so a failing listener cannot let it expire, and
+  while the listener is down the viewers poll every 5 s and send `event: status` with
+  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a low
+  watermark (every `seq` up to it is settled) and the rows it sent above it, reads what it has
+  not sent, and waits 10 s for a missing `seq` before giving up on it (its writer rolled
+  back), so a late commit is never lost. A frame's `id` is the watermark after it, so
+  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells);
+  a position beyond the feed is clamped to its end with a `gap` frame whose `reset` is true.
+  At most 20 streams per workspace per process (`429` with `Retry-After`), and every stream
+  ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
+  sample rule), and sends `item` frames through a bounded channel. A full channel makes the
+  viewer skip to the head and send `event: gap` with the number skipped. `Last-Event-ID`
+  resumes as described; without it the stream starts at the newest row older than 10 s, so a batch still committing at that moment is not missed (live, plus those seconds). `reveal=true`
+  shows stored values only to owners, admins and `admin` keys. Comments keep idle
+  connections open every 15 s.
+- **Explorer.** `POST /events/explore/{count,breakdown,list,export}` (`read`). Every query
+  carries `workspace_id` and `[from, to)` (at most 400 days), so partitions are pruned, and
+  runs in one `REPEATABLE READ READ ONLY` snapshot under `SET LOCAL statement_timeout`
+  through the shared bounded-read helper, so a breakdown and its totals agree; a timeout
+  is `503` with the code `query_timeout`. Filter operators follow the published schema type of
+  the chosen name (undeclared properties compare as text); callers without value access may
+  use only `eq` and `exists` on PII or undeclared properties and cannot break them down
+  (`403 pii_property_not_explorable`). Count, breakdown, list and export share one `WHERE`.
+  The export counts first (so a timeout is an error response and the audit entry exists),
+  audits `events.exported` with operators and counts only, then streams keyset pages and
+  ends with a `#` comment when the row limit cut it short. The `[explorer]` settings hold the
+  timeouts and row limits.
 
 ### 12.4 End-to-end causality
 

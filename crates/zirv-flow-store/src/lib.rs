@@ -3,6 +3,7 @@
 mod accounts;
 mod api_keys;
 mod audit;
+mod bounded;
 mod consent;
 mod decisions;
 mod events;
@@ -41,12 +42,19 @@ pub use decisions::{
     list_trace,
 };
 pub use events::{
+    BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
-    IngestReject, NewEventSchema, PublishOutcome, RETENTION_BATCH, RejectCursor, RejectFilter,
-    RetentionReport, SchemaVersion, apply_event_batch, apply_event_retention, create_event_schema,
-    ensure_event_partitions, find_event_schema, get_event_policy, list_event_schemas,
-    list_ingest_rejects, list_schema_versions, publish_schema_draft, save_schema_draft,
-    set_event_policy, update_event_schema,
+    ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
+    FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS, MAX_REPLAY,
+    NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor, RejectFilter,
+    ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage,
+    SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
+    debugger_feed_head, debugger_feed_position, debugger_feed_seqs, debugger_feed_start,
+    enqueue_replay, ensure_event_partitions, explore_breakdown, explore_count, explore_rows,
+    explore_total, find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
+    list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
+    publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
+    set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -199,6 +207,28 @@ impl StoreError {
             Self::with_source(StoreErrorKind::Timeout, source)
         } else {
             Self::query(source)
+        }
+    }
+
+    /// Reclassifies a query cancelled at its statement timeout (SQLSTATE 57014) as a timeout.
+    /// For the errors of a bounded read that goes through helpers which report plain query
+    /// failures; any other error is returned as it was.
+    pub(crate) fn into_bounded(self) -> Self {
+        let cancelled = matches!(self.kind, StoreErrorKind::Query)
+            && self
+                .source
+                .as_deref()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code())
+                .is_some_and(|code| code.as_ref() == "57014");
+        if cancelled {
+            Self {
+                kind: StoreErrorKind::Timeout,
+                source: self.source,
+            }
+        } else {
+            self
         }
     }
 

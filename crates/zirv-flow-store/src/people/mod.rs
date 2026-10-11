@@ -2,7 +2,6 @@
 //! identities, the profile path of apply-batch, identity merges and conflict review.
 
 mod apply;
-mod bounded;
 mod conflicts;
 mod merge;
 mod profile;
@@ -40,6 +39,7 @@ pub use registry::{
 };
 pub(crate) use resolve::{find_known_person, resolve_person};
 pub use search::{PersonSearch, SearchError, SearchHit, SearchPage, TraitOp, search_people};
+pub(crate) use timeline::person_group;
 pub use timeline::{
     TimelineCursor, TimelineDecision, TimelineEntry, TimelineEvent, TimelineFilter, TimelineKind,
     TimelinePage, load_timeline,

@@ -3,13 +3,18 @@ import { useParams } from "react-router";
 
 import { client, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, PageHeader, Panel, Pill, ResourceView, TextField, formatDateTime } from "../../ui";
+import { useWorkspaceAccess } from "../members";
 import { EventsNav } from "./EventsNav";
+import { PropertyFacts } from "./PropertyFacts";
+import { ReplayDialog, type ReplayTarget } from "./ReplayDialog";
 import { reasonLabel, rejectReasonLabel } from "./labels";
 
 type Reject = components["schemas"]["IngestRejectBody"];
 
 export function RejectsPage() {
   const { ws = "" } = useParams();
+  const access = useWorkspaceAccess(ws);
+  const canReplay = access.status === "ready" && access.data.canManage;
 
   return (
     <div className="page">
@@ -18,16 +23,18 @@ export function RejectsPage() {
         lede="Events that were refused, newest first. Values are masked: only properties your schema marks as not personal data are shown."
       />
       <EventsNav workspaceId={ws} />
-      <RejectList key={ws} workspaceId={ws} />
+      <RejectList key={ws} workspaceId={ws} canReplay={canReplay} />
     </div>
   );
 }
 
-function RejectList({ workspaceId }: { workspaceId: string }) {
+function RejectList({ workspaceId, canReplay }: { workspaceId: string; canReplay: boolean }) {
   const [name, setName] = useState("");
   const [reason, setReason] = useState("");
   const [applied, setApplied] = useState({ name: "", reason: "" });
   const [before, setBefore] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [replay, setReplay] = useState<ReplayTarget | null>(null);
 
   const rejects = useResource(
     () =>
@@ -46,9 +53,17 @@ function RejectList({ workspaceId }: { workspaceId: string }) {
     [workspaceId, applied.name, applied.reason, before],
   );
 
+  function toggle(id: string, on: boolean) {
+    const next = new Set(selected);
+    if (on) next.add(id);
+    else next.delete(id);
+    setSelected(next);
+  }
+
   function filter(event: SyntheticEvent) {
     event.preventDefault();
     setBefore(null);
+    setSelected(new Set());
     setApplied({ name: name.trim(), reason: reason.trim() });
   }
 
@@ -68,6 +83,27 @@ function RejectList({ workspaceId }: { workspaceId: string }) {
         />
         <Button type="submit">Filter</Button>
       </form>
+      {canReplay ? (
+        <div className="row" role="group" aria-label="Replay">
+          <Button disabled={selected.size === 0} onClick={() => setReplay({ kind: "ids", ids: [...selected] })}>
+            Replay selected{selected.size > 0 ? ` (${selected.size})` : ""}
+          </Button>
+          <Button onClick={() => setReplay({ kind: "filter", name: applied.name, reason: applied.reason })}>
+            {filtered ? "Replay all that match the filter" : "Replay all open rejects"}
+          </Button>
+        </div>
+      ) : null}
+      {replay ? (
+        <ReplayDialog
+          workspaceId={workspaceId}
+          target={replay}
+          onClose={() => setReplay(null)}
+          onQueued={() => {
+            setSelected(new Set());
+            rejects.reload();
+          }}
+        />
+      ) : null}
       <Panel flush>
         <ResourceView
           resource={rejects}
@@ -88,6 +124,11 @@ function RejectList({ workspaceId }: { workspaceId: string }) {
                   <caption>Rejected events</caption>
                   <thead>
                     <tr>
+                      {canReplay ? (
+                        <th scope="col">
+                          <span className="visually-hidden">Select</span>
+                        </th>
+                      ) : null}
                       <th scope="col">Received</th>
                       <th scope="col">Event</th>
                       <th scope="col">Source</th>
@@ -97,7 +138,13 @@ function RejectList({ workspaceId }: { workspaceId: string }) {
                   </thead>
                   <tbody>
                     {data.rejects.map((reject) => (
-                      <RejectRow key={reject.id} reject={reject} />
+                      <RejectRow
+                        key={reject.id}
+                        reject={reject}
+                        selectable={canReplay}
+                        selected={selected.has(reject.id)}
+                        onSelect={(on) => toggle(reject.id, on)}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -114,12 +161,31 @@ function RejectList({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function RejectRow({ reject }: { reject: Reject }) {
+interface RejectRowProps {
+  reject: Reject;
+  selectable: boolean;
+  selected: boolean;
+  onSelect: (on: boolean) => void;
+}
+
+function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
   const sample = reject.sample as { properties?: Record<string, unknown>; masked?: string[] };
-  const properties = Object.entries(sample.properties ?? {});
-  const masked = new Set(sample.masked ?? []);
   return (
     <tr>
+      {selectable ? (
+        <td>
+          {reject.replayed_at ? (
+            <span className="faint">Replayed</span>
+          ) : (
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={(event) => onSelect(event.target.checked)}
+              aria-label={`Select the ${reject.name ?? "rejected"} reject received ${formatDateTime(reject.received_at)}`}
+            />
+          )}
+        </td>
+      ) : null}
       <td>{formatDateTime(reject.received_at)}</td>
       <td className="strong">{reject.name ?? <span className="faint">invalid name</span>}</td>
       <td>{reject.source}</td>
@@ -140,18 +206,7 @@ function RejectRow({ reject }: { reject: Reject }) {
           <summary>
             Show sample <span className="visually-hidden">of the {reject.name ?? "rejected"} event</span>
           </summary>
-          {properties.length === 0 ? (
-            <p className="faint">No properties.</p>
-          ) : (
-            <dl className="facts">
-              {properties.map(([key, value]) => (
-                <div key={key} className="fact">
-                  <dt className="mono">{key}</dt>
-                  <dd>{masked.has(key) ? <span className="faint">masked</span> : <span className="mono">{JSON.stringify(value)}</span>}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
+          <PropertyFacts properties={sample.properties ?? {}} masked={sample.masked ?? []} />
         </details>
       </td>
     </tr>

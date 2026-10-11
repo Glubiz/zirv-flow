@@ -15,9 +15,9 @@ use zirv_flow_core::people::{
     Identifier, IdentifierKind, TraitType, TraitValue, coerce, validate_key,
 };
 
-use super::bounded::begin_bounded;
 use super::registry::find_trait_definition;
 use crate::StoreError;
+use crate::bounded::begin_bounded;
 
 /// How a trait is compared with the searched value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

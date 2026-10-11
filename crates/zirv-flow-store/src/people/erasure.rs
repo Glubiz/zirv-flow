@@ -57,6 +57,24 @@ pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<
     if decisions > 0 {
         found.push(("decision_records.subject_ids".into(), decisions));
     }
+    // The debugger feed names no person: its rows point at the person's events and rejects.
+    for column in ["event_id", "reject_id"] {
+        let table = if column == "event_id" {
+            "events"
+        } else {
+            "ingest_rejects"
+        };
+        let fed: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM debugger_feed f WHERE f.{column} IN                 (SELECT id FROM {table} WHERE person_id = $1)"
+        )))
+        .bind(person)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if fed > 0 {
+            found.push((format!("debugger_feed.{column}"), fed));
+        }
+    }
     found.sort();
     found
 }

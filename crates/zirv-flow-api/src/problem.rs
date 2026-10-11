@@ -137,6 +137,43 @@ impl ApiError {
             )
         }
     }
+
+    /// An explorer query that ran past its time limit and was cancelled.
+    pub(crate) fn query_timeout() -> Self {
+        Self {
+            code: Some("query_timeout"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the query took too long; narrow the time range or the filters and try again",
+            )
+        }
+    }
+
+    /// A caller without access to values asked to probe or break down a PII property.
+    pub(crate) fn pii_property_not_explorable() -> Self {
+        Self {
+            code: Some("pii_property_not_explorable"),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "only eq and exists apply to a PII or undeclared property without access to                  values, and it cannot be broken down",
+            )
+        }
+    }
+}
+
+impl From<zirv_flow_store::ExploreError> for ApiError {
+    fn from(error: zirv_flow_store::ExploreError) -> Self {
+        use zirv_flow_store::ExploreError;
+
+        match error {
+            ExploreError::Invalid { field, reason } => {
+                Self::unprocessable(format!("{field}: {reason}"))
+            }
+            ExploreError::PiiPropertyNotExplorable => Self::pii_property_not_explorable(),
+            ExploreError::Store(error) if error.is_timeout() => Self::query_timeout(),
+            ExploreError::Store(_) => Self::internal(),
+        }
+    }
 }
 
 impl From<zirv_flow_core::ValidationError> for ApiError {
@@ -321,5 +358,32 @@ mod tests {
         let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(problem["code"], "search_timeout");
         assert_eq!(problem["status"], 503);
+    }
+
+    #[tokio::test]
+    async fn an_explorer_timeout_is_a_503_with_the_query_timeout_code() {
+        let response = ApiError::query_timeout().into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "query_timeout");
+    }
+
+    #[test]
+    fn explorer_refusals_map_to_422_and_403() {
+        use zirv_flow_store::ExploreError;
+
+        let invalid = ApiError::from(ExploreError::Invalid {
+            field: "to",
+            reason: "must be after from",
+        });
+        let pii = ApiError::from(ExploreError::PiiPropertyNotExplorable);
+
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.detail(), "to: must be after from");
+        assert_eq!(pii.status(), StatusCode::FORBIDDEN);
     }
 }

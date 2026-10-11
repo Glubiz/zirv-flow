@@ -11,6 +11,7 @@ mod import_dry_run;
 mod import_rows;
 mod import_run;
 mod ingest_drain;
+mod ingest_replay;
 mod noop;
 mod person_merge_rewrite;
 mod privacy_erase;
@@ -23,6 +24,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &traits_recompute::TraitsRecompute,
     &events_retention::EventsRetention,
     &ingest_drain::IngestDrain,
+    &ingest_replay::IngestReplay,
     &privacy_erase::PrivacyErase,
     &privacy_export::PrivacyExport,
     &import_dry_run::ImportDryRun,
