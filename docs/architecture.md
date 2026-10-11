@@ -398,7 +398,7 @@ Deterministic matching only, with rules per identifier kind:
 |------|---------|---------|
 | Normalization | email: trim + lowercase; phone: E.164; external ids exact, namespaced per source | as stated |
 | `unique_per_person` | At most one value of this kind per person | on for external ids |
-| `max_per_person` | Cap per kind, preventing chain merges through shared addresses | email 10, phone 10 |
+| `max_per_person` | Cap per kind, preventing chain merges through shared addresses | email 10, phone 10, anonymous id 100 |
 | Merge policy | Whether a match may merge two existing people | allowed unless a uniqueness rule would break |
 
 - **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case). A review ends in one of two outcomes: keep the people separate, or move the identifier to one of them.
@@ -414,9 +414,7 @@ As built (people, identities and the field registry):
   `00` read as `+`), with no national-format guessing; anonymous and external ids are exact,
   non-empty, at most 256 characters, with no control characters. Strength for an attach:
   external, then email, phone, anonymous id. An invalid identifier rejects the record with a
-  typed reason; a record needs at least one valid identifier. Until merges exist, a match
-  across several people attaches to the strongest identifier's owner and writes an
-  `identity_conflicts` row (`merge_deferred`) per other person.
+  typed reason; a record needs at least one valid identifier.
 - **Inference.** An unregistered key is registered on first sight with `inferred = true`,
   `latest` precedence and `pii = false`: a string becomes `string`, a number `number`, a
   boolean `boolean`, an array of strings `string_list`. Timestamp and date are never
@@ -431,6 +429,35 @@ As built (people, identities and the field registry):
   `people.traits` and `trait_sources` while the ledger keeps them, so unarchiving restores
   them. Retry: `StoreError::is_retryable()` is true for deadlocks, serialization failures and
   an identity race that outlasts three attempts; the caller retries the whole batch.
+
+As built (merges and conflict review):
+
+- **Rules.** A const table in `core::people` holds the defaults per kind, which are not
+  configurable yet: `external:*` is `unique_per_person` with a maximum of 1, `email` and
+  `phone` 10, `anonymous_id` 100. `merge_allowed` checks the union of the people's
+  identities plus the record's new identifiers and answers `unique_kind` or `max_per_person`.
+  The check is all or nothing for the people a record touches.
+- **Resolution.** The people a record matches are locked `FOR UPDATE` in id order, so
+  concurrent resolutions and merges cannot deadlock on each other; a person found already
+  merged away re-runs the resolution (three attempts, then a retryable error). Allowed: the
+  oldest person (`created_at`, then id) survives, and in the record's transaction each loser's
+  identities and source records move, its traits are cleared, `merged_into` is set and chains
+  are compressed, open conflicts among the merged people close as `merged`, a `person_merges`
+  row, a `person.merge` decision and the `person.merge.rewrite` job are written, and the
+  survivor's traits are recomputed. Blocked: the `identity_conflicts` row carries the reason
+  and the shared `identity_id`, and an `identity.conflict` decision is appended.
+- **Rewrite job.** `person.merge.rewrite` (payload `{workspace_id, merged_person_id}`)
+  re-points `identity_conflicts.person_id` and `other_person_id` in batches of 1,000 rows per
+  statement to the person the merged one now points at, then appends a
+  `person.merge.rewrite` decision. A re-run moves nothing. Other person-scoped tables (events)
+  join the target list in `store::people::merge` when they exist.
+- **Review.** Conflicts are listed newest first by keyset (`status=open|resolved`).
+  Resolving needs the admin role (or an `admin` key) and CSRF. `keep_separate` closes the
+  conflict. `move_identifier` moves the conflict's identity to one of its two people unless
+  the rules forbid it for that person (409), and recomputes nothing because identities carry
+  no traits. Both are audited with ids only and appended as `identity.conflict.resolved`.
+  Identifier values are returned to the owner, workspace admins and `admin` keys, and masked
+  for members and `read` keys.
 
 ### 7.4 Deletion propagation
 
