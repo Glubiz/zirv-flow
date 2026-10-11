@@ -6,7 +6,7 @@ mod precedence;
 mod rules;
 mod traits;
 
-pub use identifier::{Identifier, IdentifierError, IdentifierKind};
+pub use identifier::{Identifier, IdentifierError, IdentifierKind, identifier_hash};
 pub use precedence::{Contribution, Precedence, resolve};
 pub use rules::{BlockReason, KindRule, merge_allowed, rule_for};
 pub use traits::{DropReason, TraitType, TraitValue, coerce, infer_type, validate_key};
