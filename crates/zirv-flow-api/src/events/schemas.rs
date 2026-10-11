@@ -352,7 +352,7 @@ pub(crate) async fn update_schema(
     }
 
     let mut tx = zirv_flow_store::begin(pool).await?;
-    let schema = zirv_flow_store::update_event_schema(&mut *tx, workspace, name, &update)
+    let schema = zirv_flow_store::update_event_schema(&mut tx, workspace, name, &update)
         .await?
         .ok_or(AdminError::NotFound("event schema"))?;
     admin::audit(
