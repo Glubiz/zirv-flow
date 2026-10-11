@@ -100,6 +100,10 @@ impl Scheduler {
         if let Some(leadership) = self.leadership.take() {
             leadership.release().await;
         }
+        self.gauges
+            .get_mut()
+            .expect("the gauge lock is never held across a panic")
+            .zero_all();
     }
 
     /// One pass: take or keep the lock, and if this instance leads, do the leader's work
@@ -481,20 +485,87 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_creates_the_decision_log_partitions_for_this_month(pool: PgPool) {
         migrated(&pool).await;
+        let now = database_now(&pool).await.unwrap();
+        let months_ahead = 24;
+        let index = now.year() * 12 + i32::from(u8::from(now.month())) - 1 + months_ahead;
+        let (year, month) = (index / 12, index % 12 + 1);
+        let base = datetime!(2000-01-01 00:00 UTC)
+            .replace_year(year)
+            .unwrap()
+            .replace_month(time::Month::try_from(u8::try_from(month).unwrap()).unwrap())
+            .unwrap();
+        let names = [
+            format!("decision_records_y{year:04}m{month:02}"),
+            if month == 12 {
+                format!("decision_records_y{:04}m01", year + 1)
+            } else {
+                format!("decision_records_y{year:04}m{:02}", month + 1)
+            },
+        ];
         let mut leader = scheduler(&pool);
 
-        leader.tick_at(BASE).await.unwrap();
+        let before = partitions(&pool).await;
+        leader.tick_at(base).await.unwrap();
+        let after = partitions(&pool).await;
 
-        let partitions: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-             WHERE i.inhparent = 'decision_records'::regclass                AND c.relname::text LIKE 'decision_records_y2030%' ORDER BY 1",
+        for name in &names {
+            assert!(!before.contains(name), "{name} existed before the tick");
+            assert!(
+                after.contains(name),
+                "{name} missing after the tick: {after:?}"
+            );
+        }
+    }
+
+    async fn partitions(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid              WHERE i.inhparent = 'decision_records'::regclass",
         )
-        .fetch_all(&pool)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn losing_the_leadership_lock_zeroes_the_published_queue_gauges(pool: PgPool) {
+        migrated(&pool).await;
+        zirv_flow_store::enqueue(
+            &pool,
+            &NewJob::new("test.tick", TraceContext::root(Cause::api("test-request"))),
+        )
         .await
         .unwrap();
-        assert_eq!(
-            partitions,
-            ["decision_records_y2030m01", "decision_records_y2030m02"]
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        assert!(matches!(leader.tick().await.unwrap(), Tick::Led(_)));
+        let pair = "zirv_flow_jobs{kind=\"test.tick\",state=\"ready\"}";
+        assert!(
+            handle.render().contains(&format!("{pair} 1")),
+            "{}",
+            handle.render()
+        );
+
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks              WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let _rival = loop {
+            if let Some(rival) = try_lead(&pool).await.unwrap() {
+                break rival;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        assert_eq!(leader.tick().await.unwrap(), Tick::Standby);
+        assert!(
+            handle.render().contains(&format!("{pair} 0")),
+            "{}",
+            handle.render()
         );
     }
 

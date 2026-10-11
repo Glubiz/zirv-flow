@@ -321,7 +321,7 @@ mod tests {
 
     async fn insert_at(pool: &PgPool, ws: WorkspaceId, recorded_at: &str) {
         sqlx::query(
-            "INSERT INTO decision_records                 (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id)              VALUES ($1, $2, $3, $4::timestamptz, 'step', 'done', 'api', 'x')",
+            "INSERT INTO decision_records             (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id)          VALUES ($1, $2, $3, $4::timestamptz, 'step', 'done', 'api', 'x')",
         )
         .bind(Uuid::new_v4())
         .bind(ws.as_uuid())
@@ -330,6 +330,22 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn far_month(pool: &PgPool) -> Date {
+        let mut month = database_today(pool).await.replace_day(1).unwrap();
+        for _ in 0..24 {
+            month = next_month(month);
+        }
+        month
+    }
+
+    fn partition_name(month: Date) -> String {
+        format!(
+            "decision_records_y{:04}m{:02}",
+            month.year(),
+            u8::from(month.month())
+        )
     }
 
     async fn partition_exists(pool: &PgPool, name: &str) -> bool {
@@ -371,7 +387,9 @@ mod tests {
     ) {
         let ws = workspace(&pool, "ours").await;
 
-        insert_at(&pool, ws, "2031-01-15 00:00:00+00").await;
+        let month = far_month(&pool).await;
+
+        insert_at(&pool, ws, &format!("{}-15 00:00:00+00", &bound(month)[..7])).await;
 
         assert_eq!(only_partition(&pool).await, "decision_records_default");
     }
@@ -382,13 +400,14 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "ours").await;
-        insert_at(&pool, ws, "2031-01-15 00:00:00+00").await;
+        let month = far_month(&pool).await;
+        insert_at(&pool, ws, &format!("{}-15 00:00:00+00", &bound(month)[..7])).await;
 
-        let result = ensure_decision_partitions(&pool, date!(2031 - 01 - 10)).await;
+        let result = ensure_decision_partitions(&pool, month.replace_day(10).unwrap()).await;
 
         assert!(result.is_err());
-        assert!(partition_exists(&pool, "decision_records_y2031m02").await);
-        assert!(!partition_exists(&pool, "decision_records_y2031m01").await);
+        assert!(partition_exists(&pool, &partition_name(next_month(month))).await);
+        assert!(!partition_exists(&pool, &partition_name(month)).await);
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
             .fetch_one(&pool)
             .await
