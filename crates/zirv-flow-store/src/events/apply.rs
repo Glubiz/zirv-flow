@@ -20,7 +20,7 @@ use zirv_flow_core::events::{
 };
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
-use super::debugger::{FeedEntry, is_watched, notify_feed, write_feed};
+use super::debugger::{FeedEntry, is_watched, notify_feed, outcome_label, write_feed};
 use super::schemas::{
     EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
 };
@@ -218,11 +218,17 @@ async fn feed_outcome(
     let (label, reasons, reason, event_id, reject_id) = match outcome {
         EventOutcome::Accepted {
             event_id, state, ..
-        } => match state {
-            ValidationState::Valid => ("accepted", reasons(), None, Some(*event_id), None),
-            ValidationState::Flagged => ("flagged", reasons(), None, Some(*event_id), None),
-            ValidationState::Unplanned => ("unplanned", Vec::new(), None, Some(*event_id), None),
-        },
+        } => (
+            outcome_label(*state),
+            if *state == ValidationState::Unplanned {
+                Vec::new()
+            } else {
+                reasons()
+            },
+            None,
+            Some(*event_id),
+            None,
+        ),
         EventOutcome::Duplicate { original_event_id } => (
             "duplicate",
             Vec::new(),

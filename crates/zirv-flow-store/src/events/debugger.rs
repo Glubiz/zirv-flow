@@ -15,7 +15,7 @@ use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::events::{Reason, SchemaProperty};
+use zirv_flow_core::events::{Reason, SchemaProperty, ValidationState};
 
 use crate::StoreError;
 
@@ -45,6 +45,15 @@ pub async fn touch_debugger_watch<'e>(
     .await
     .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// The feed outcome of an event stored in `state`.
+pub(crate) const fn outcome_label(state: ValidationState) -> &'static str {
+    match state {
+        ValidationState::Valid => "accepted",
+        ValidationState::Flagged => "flagged",
+        ValidationState::Unplanned => "unplanned",
+    }
 }
 
 pub(crate) async fn is_watched(
@@ -350,6 +359,13 @@ mod tests {
         let shown = format!("{item:?}");
 
         assert!(!shown.contains("a@example.com") && !shown.contains("secret-name"));
+    }
+
+    #[test]
+    fn a_stored_state_has_a_feed_outcome() {
+        assert_eq!(outcome_label(ValidationState::Valid), "accepted");
+        assert_eq!(outcome_label(ValidationState::Flagged), "flagged");
+        assert_eq!(outcome_label(ValidationState::Unplanned), "unplanned");
     }
 
     #[sqlx::test]

@@ -26,6 +26,7 @@ use zirv_flow_core::events::{
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use super::apply::{NewEvent, insert_event};
+use super::debugger::{FeedEntry, is_watched, notify_feed, outcome_label, write_feed};
 use super::schemas::{EventPolicy, PublishedSchema, find_published_schema, get_event_policy};
 use crate::bounded::begin_snapshot_for;
 use crate::{NewDecision, NewJob, PgPool, StoreError, append_decision, begin, commit, enqueue};
@@ -699,6 +700,27 @@ async fn store_replayed(
     )
     .await?;
     mark_replayed(connection, workspace, reject.id, event_id).await?;
+    // A replayed event is an outcome like any other: watched viewers see it.
+    if is_watched(connection, workspace).await? {
+        write_feed(
+            connection,
+            workspace,
+            &FeedEntry {
+                source: &reject.source,
+                name: Some(name),
+                outcome: outcome_label(state),
+                reasons,
+                reason: None,
+                properties: &properties,
+                schema_version,
+                event_id: Some(event_id),
+                reject_id: Some(reject.id),
+                trace_id: reject.trace_id,
+            },
+        )
+        .await?;
+        notify_feed(connection, workspace).await?;
+    }
     append_decision(
         connection,
         &NewDecision {
@@ -1294,5 +1316,51 @@ mod tests {
             },
             None
         ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replayed_event_reaches_the_debugger_feed_and_notifies_when_watched(pool: PgPool) {
+        let (ws, reject) = rejected(&pool).await;
+        fix_the_schema(&pool, ws).await;
+        crate::touch_debugger_watch(&pool, ws).await.unwrap();
+        let mut listener = crate::listen_for_debugger(&pool).await.unwrap();
+
+        replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
+            .await
+            .unwrap();
+
+        let (outcome, event, rejected, properties): (String, Option<Uuid>, Option<Uuid>, Value) =
+            sqlx::query_as("SELECT outcome, event_id, reject_id, properties FROM debugger_feed")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome, "accepted");
+        assert_eq!(rejected, Some(reject));
+        let stored: Uuid = sqlx::query_scalar("SELECT id FROM events WHERE message_id = 'm-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(event, Some(stored));
+        assert_eq!(properties["total"], "ten");
+        let heard = tokio::time::timeout(Duration::from_secs(5), listener.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(heard, Some(ws));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_writes_no_feed_row_when_nobody_watches(pool: PgPool) {
+        let (ws, reject) = rejected(&pool).await;
+        fix_the_schema(&pool, ws).await;
+
+        replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(count(&pool, "debugger_feed").await, 0);
+        assert_eq!(count(&pool, "events").await, 2);
     }
 }
