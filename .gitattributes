@@ -13,3 +13,9 @@
 /CLAUDE.md -text
 /AGENTS.md -text
 /.zirv/context/*.md text eol=lf
+
+# The image build runs shell from these files, so a Windows checkout must not
+# give them CRLF line endings.
+/Dockerfile text eol=lf
+/.dockerignore text eol=lf
+/docker-compose.yml text eol=lf
