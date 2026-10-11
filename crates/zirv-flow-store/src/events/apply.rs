@@ -1338,6 +1338,54 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_shared_identities_between_the_same_people_leave_two_open_conflicts(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let with = |identifiers: &[(&str, &str)]| {
+            let mut record = event("anything", json!({}));
+            record.identifiers = identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect();
+            record
+        };
+        apply_one(
+            &pool,
+            ws,
+            with(&[
+                ("external:crm", "1"),
+                ("email", "x@example.com"),
+                ("email", "y@example.com"),
+            ]),
+        )
+        .await;
+        apply_one(&pool, ws, with(&[("external:crm", "2")])).await;
+        let sharing_x = with(&[("external:crm", "2"), ("email", "x@example.com")]);
+        let sharing_y = with(&[("external:crm", "2"), ("email", "y@example.com")]);
+
+        apply_one(&pool, ws, sharing_x.clone()).await;
+        apply_one(&pool, ws, sharing_y.clone()).await;
+        apply_one(&pool, ws, sharing_x).await;
+        apply_one(&pool, ws, sharing_y).await;
+
+        let identities: Vec<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT identity_id FROM identity_conflicts WHERE resolved_at IS NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_ne!(identities[0], identities[1]);
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'identity.conflict'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decisions, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn decisions_name_ids_and_codes_only(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         publish(
