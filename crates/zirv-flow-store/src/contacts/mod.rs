@@ -43,21 +43,21 @@ mod tests {
         find_person_by_identifier, set_orphan_policy,
     };
 
-    fn object(value: Value) -> Map<String, Value> {
+    pub(super) fn object(value: Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap()
     }
 
-    fn trace() -> TraceContext {
+    pub(super) fn trace() -> TraceContext {
         TraceContext::root(Cause::api("test"))
     }
 
-    async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+    pub(super) async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
         let slug = Slug::parse(slug).unwrap();
         create_workspace(pool, &name, &slug).await.unwrap().id
     }
 
-    async fn registry(pool: &PgPool, ws: WorkspaceId, key: &str, trait_type: TraitType) {
+    pub(super) async fn registry(pool: &PgPool, ws: WorkspaceId, key: &str, trait_type: TraitType) {
         create_trait_definition(
             pool,
             ws,
@@ -76,7 +76,7 @@ mod tests {
         .unwrap();
     }
 
-    fn field(key: &str, required: bool, identifier: Option<&str>) -> ContactField {
+    pub(super) fn field(key: &str, required: bool, identifier: Option<&str>) -> ContactField {
         ContactField {
             key: key.to_owned(),
             required,
@@ -86,7 +86,7 @@ mod tests {
 
     /// A workspace with the registry fields `email`, `age` and `plan` and a definition that
     /// requires the email, which is also an identifier.
-    async fn defined(pool: &PgPool, slug: &str) -> WorkspaceId {
+    pub(super) async fn defined(pool: &PgPool, slug: &str) -> WorkspaceId {
         let ws = workspace(pool, slug).await;
         registry(pool, ws, "email", TraitType::String).await;
         registry(pool, ws, "age", TraitType::Number).await;
@@ -108,7 +108,7 @@ mod tests {
         ws
     }
 
-    async fn write(
+    pub(super) async fn write(
         pool: &PgPool,
         ws: WorkspaceId,
         key: &str,
@@ -679,137 +679,6 @@ mod tests {
             .unwrap();
         assert_eq!(expire_contact_idempotency(&pool).await.unwrap(), 1);
         assert_eq!(count(&pool, "contact_idempotency").await, 0);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn contacts_are_listed_in_key_order_searched_and_kept_inside_their_workspace(
-        pool: PgPool,
-    ) {
-        let one = defined(&pool, "one").await;
-        let two = defined(&pool, "two").await;
-        for ws in [one, two] {
-            for (key, email) in [
-                ("b", "b@example.com"),
-                ("a2", "a2@example.com"),
-                ("a1", "a1@example.com"),
-            ] {
-                write(
-                    &pool,
-                    ws,
-                    key,
-                    ContactChange::Create(object(json!({"email": email}))),
-                    None,
-                )
-                .await
-                .unwrap();
-            }
-        }
-        let mut connection = pool.acquire().await.unwrap();
-
-        let first = list_contacts(&mut connection, one, None, 2).await.unwrap();
-        let second = list_contacts(&mut connection, one, first.next_after.as_deref(), 2)
-            .await
-            .unwrap();
-        let prefixed = search_contacts(
-            &mut connection,
-            one,
-            &ContactSearch::KeyPrefix("a".into()),
-            10,
-        )
-        .await
-        .unwrap();
-        let by_email = search_contacts(
-            &mut connection,
-            one,
-            &ContactSearch::Identifier {
-                kind: "email".into(),
-                value: "B@Example.com".into(),
-            },
-            10,
-        )
-        .await
-        .unwrap();
-        let invalid = search_contacts(
-            &mut connection,
-            one,
-            &ContactSearch::Identifier {
-                kind: "email".into(),
-                value: "nope".into(),
-            },
-            10,
-        )
-        .await;
-
-        let keys = |contacts: &[Contact]| -> Vec<String> {
-            contacts.iter().map(|contact| contact.key.clone()).collect()
-        };
-        assert_eq!(keys(&first.contacts), ["a1", "a2"]);
-        assert_eq!(keys(&second.contacts), ["b"]);
-        assert_eq!(second.next_after, None);
-        assert_eq!(keys(&prefixed), ["a1", "a2"]);
-        assert_eq!(keys(&by_email), ["b"]);
-        assert!(matches!(
-            invalid,
-            Err(ContactSearchError::InvalidIdentifier("invalid_email"))
-        ));
-        // The same keys in the other workspace belong to other people.
-        let other = find_contact(&mut connection, two, "b")
-            .await
-            .unwrap()
-            .unwrap();
-        let mine = find_contact(&mut connection, one, "b")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(other.person_id, mine.person_id);
-        let theirs = list_contacts(&mut connection, two, None, 10).await.unwrap();
-        assert_eq!(keys(&theirs.contacts), ["a1", "a2", "b"]);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_definition_must_name_live_registry_fields_and_identifiers_must_be_strings(
-        pool: PgPool,
-    ) {
-        let ws = workspace(&pool, "one").await;
-        registry(&pool, ws, "age", TraitType::Number).await;
-        let mut connection = pool.acquire().await.unwrap();
-
-        let unknown =
-            put_contact_definition(&mut connection, ws, &[field("nope", false, None)], None)
-                .await
-                .unwrap_err();
-        let numeric = put_contact_definition(
-            &mut connection,
-            ws,
-            &[field("age", false, Some("external:age"))],
-            None,
-        )
-        .await
-        .unwrap_err();
-        let malformed = put_contact_definition(
-            &mut connection,
-            ws,
-            &[field("age", false, None), field("age", true, None)],
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        let DefinitionError::Fields(unknown) = unknown else {
-            panic!("expected field problems");
-        };
-        let DefinitionError::Fields(numeric) = numeric else {
-            panic!("expected field problems");
-        };
-        assert_eq!(
-            (unknown[0].index, unknown[0].key.as_str(), unknown[0].reason),
-            (0, "nope", "unknown_key")
-        );
-        assert_eq!(numeric[0].reason, "identifier_needs_string");
-        assert!(matches!(malformed, DefinitionError::Invalid(_)));
-        assert!(find_contact_definition(&pool, ws).await.unwrap().is_none());
     }
 
     #[sqlx::test]

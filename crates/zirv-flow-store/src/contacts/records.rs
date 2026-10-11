@@ -181,3 +181,98 @@ pub async fn search_contacts(
     };
     Ok(rows.into_iter().map(Contact::from).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{defined, object, write};
+    use super::super::{ContactChange, ContactSearchError};
+    use super::*;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn contacts_are_listed_in_key_order_searched_and_kept_inside_their_workspace(
+        pool: PgPool,
+    ) {
+        let one = defined(&pool, "one").await;
+        let two = defined(&pool, "two").await;
+        for ws in [one, two] {
+            for (key, email) in [
+                ("b", "b@example.com"),
+                ("a2", "a2@example.com"),
+                ("a1", "a1@example.com"),
+            ] {
+                write(
+                    &pool,
+                    ws,
+                    key,
+                    ContactChange::Create(object(json!({"email": email}))),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let first = list_contacts(&mut connection, one, None, 2).await.unwrap();
+        let second = list_contacts(&mut connection, one, first.next_after.as_deref(), 2)
+            .await
+            .unwrap();
+        let prefixed = search_contacts(
+            &mut connection,
+            one,
+            &ContactSearch::KeyPrefix("a".into()),
+            10,
+        )
+        .await
+        .unwrap();
+        let by_email = search_contacts(
+            &mut connection,
+            one,
+            &ContactSearch::Identifier {
+                kind: "email".into(),
+                value: "B@Example.com".into(),
+            },
+            10,
+        )
+        .await
+        .unwrap();
+        let invalid = search_contacts(
+            &mut connection,
+            one,
+            &ContactSearch::Identifier {
+                kind: "email".into(),
+                value: "nope".into(),
+            },
+            10,
+        )
+        .await;
+
+        let keys = |contacts: &[Contact]| -> Vec<String> {
+            contacts.iter().map(|contact| contact.key.clone()).collect()
+        };
+        assert_eq!(keys(&first.contacts), ["a1", "a2"]);
+        assert_eq!(keys(&second.contacts), ["b"]);
+        assert_eq!(second.next_after, None);
+        assert_eq!(keys(&prefixed), ["a1", "a2"]);
+        assert_eq!(keys(&by_email), ["b"]);
+        assert!(matches!(
+            invalid,
+            Err(ContactSearchError::InvalidIdentifier("invalid_email"))
+        ));
+        // The same keys in the other workspace belong to other people.
+        let other = find_contact(&mut connection, two, "b")
+            .await
+            .unwrap()
+            .unwrap();
+        let mine = find_contact(&mut connection, one, "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(other.person_id, mine.person_id);
+        let theirs = list_contacts(&mut connection, two, None, 10).await.unwrap();
+        assert_eq!(keys(&theirs.contacts), ["a1", "a2", "b"]);
+    }
+}

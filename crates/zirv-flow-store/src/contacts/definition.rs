@@ -171,3 +171,96 @@ pub async fn typed_definition(
             .collect(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{defined, field, registry, workspace};
+    use super::*;
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_definition_must_name_live_registry_fields_and_identifiers_must_be_strings(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        registry(&pool, ws, "age", TraitType::Number).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let unknown =
+            put_contact_definition(&mut connection, ws, &[field("nope", false, None)], None)
+                .await
+                .unwrap_err();
+        let numeric = put_contact_definition(
+            &mut connection,
+            ws,
+            &[field("age", false, Some("external:age"))],
+            None,
+        )
+        .await
+        .unwrap_err();
+        let malformed = put_contact_definition(
+            &mut connection,
+            ws,
+            &[field("age", false, None), field("age", true, None)],
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let DefinitionError::Fields(unknown) = unknown else {
+            panic!("expected field problems");
+        };
+        let DefinitionError::Fields(numeric) = numeric else {
+            panic!("expected field problems");
+        };
+        assert_eq!(
+            (unknown[0].index, unknown[0].key.as_str(), unknown[0].reason),
+            (0, "nope", "unknown_key")
+        );
+        assert_eq!(numeric[0].reason, "identifier_needs_string");
+        assert!(matches!(malformed, DefinitionError::Invalid(_)));
+        assert!(find_contact_definition(&pool, ws).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_typed_definition_leaves_out_fields_whose_registry_key_was_archived(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let none = workspace(&pool, "none").await;
+
+        let all = typed_definition(&mut connection, ws)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::update_trait_definition(
+            &pool,
+            ws,
+            "plan",
+            &crate::TraitDefinitionUpdate {
+                archived: Some(true),
+                ..crate::TraitDefinitionUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+        let live = typed_definition(&mut connection, ws)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let keys = |fields: &[TypedField]| -> Vec<String> {
+            fields.iter().map(|typed| typed.field.key.clone()).collect()
+        };
+        assert_eq!(keys(&all), ["email", "age", "plan"]);
+        assert_eq!(keys(&live), ["email", "age"]);
+        assert_eq!(live[0].trait_type, TraitType::String);
+        assert!(
+            typed_definition(&mut connection, none)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
