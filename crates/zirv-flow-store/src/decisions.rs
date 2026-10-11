@@ -298,6 +298,7 @@ mod tests {
     }
 
     /// Nearest-rank percentile (0 to 100) of an ascending slice.
+    #[cfg(not(feature = "bench-no-decisions"))]
     fn percentile_ms(sorted: &[f64], p: f64) -> f64 {
         let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
         sorted[rank.clamp(1, sorted.len()) - 1]
