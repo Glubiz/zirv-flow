@@ -1,5 +1,7 @@
 //! The schema registry and the workspace event policy (architecture section 12.1).
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 use sqlx::prelude::FromRow;
 use sqlx::types::Json;
@@ -378,6 +380,38 @@ pub(crate) async fn find_published_schema(
         })
     })
     .transpose()
+}
+
+/// The published schemas of `names` in one query. A name without a published version is
+/// absent from the map.
+pub(crate) async fn find_published_schemas(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    names: &[String],
+) -> Result<HashMap<String, PublishedSchema>, StoreError> {
+    let rows: Vec<(String, String, i32, Json<Vec<SchemaProperty>>)> = sqlx::query_as(
+        "SELECT s.name, s.mode, v.version, v.properties FROM event_schemas s \
+         JOIN event_schema_versions v \
+           ON v.workspace_id = s.workspace_id AND v.name = s.name AND v.version = s.current_version \
+         WHERE s.workspace_id = $1 AND s.name = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(names)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    rows.into_iter()
+        .map(|(name, mode, version, properties)| {
+            Ok((
+                name,
+                PublishedSchema {
+                    mode: mode.parse().map_err(|_| corrupt("unknown event mode"))?,
+                    version,
+                    properties: properties.0,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The workspace's policy, or the defaults when none was saved.

@@ -27,7 +27,9 @@ use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use super::apply::{NewEvent, insert_event};
 use super::debugger::{FeedEntry, is_watched, notify_feed, outcome_label, write_feed};
-use super::schemas::{EventPolicy, PublishedSchema, find_published_schema, get_event_policy};
+use super::schemas::{
+    EventPolicy, PublishedSchema, find_published_schema, find_published_schemas, get_event_policy,
+};
 use crate::bounded::begin_snapshot_for;
 use crate::{NewDecision, NewJob, PgPool, StoreError, append_decision, begin, commit, enqueue};
 
@@ -174,6 +176,9 @@ pub struct ReplayPrediction {
 struct Judge {
     policy: Option<EventPolicy>,
     schemas: HashMap<String, Option<PublishedSchema>>,
+    /// Schema queries issued, so a test can show the number does not grow with the names.
+    #[cfg(test)]
+    schema_loads: usize,
 }
 
 impl Judge {
@@ -181,7 +186,37 @@ impl Judge {
         Self {
             policy: None,
             schemas: HashMap::new(),
+            #[cfg(test)]
+            schema_loads: 0,
         }
+    }
+
+    /// Loads the published schemas of every name in one query, so judging a reject never asks
+    /// for its own. A name without one is remembered as having none.
+    async fn preload(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        names: &[String],
+    ) -> Result<(), StoreError> {
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| !self.schemas.contains_key(*name))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            self.schema_loads += 1;
+        }
+        let mut found = find_published_schemas(connection, workspace, &missing).await?;
+        for name in missing {
+            let schema = found.remove(&name);
+            self.schemas.insert(name, schema);
+        }
+        Ok(())
     }
 
     async fn policy(
@@ -203,6 +238,10 @@ impl Judge {
     ) -> Result<Option<PublishedSchema>, StoreError> {
         if let Some(found) = self.schemas.get(name) {
             return Ok(found.clone());
+        }
+        #[cfg(test)]
+        {
+            self.schema_loads += 1;
         }
         let found = find_published_schema(connection, workspace, name).await?;
         self.schemas.insert(name.to_owned(), found.clone());
@@ -350,7 +389,7 @@ pub async fn preview_replay(
     timeout: Duration,
 ) -> Result<Vec<ReplayPrediction>, StoreError> {
     let mut tx = begin_snapshot_for(pool, timeout).await?;
-    preview_in(&mut tx, workspace, ids)
+    preview_in(&mut tx, workspace, ids, &mut Judge::new())
         .await
         .map_err(StoreError::into_bounded)
 }
@@ -359,6 +398,7 @@ async fn preview_in(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     ids: &[Uuid],
+    judge: &mut Judge,
 ) -> Result<Vec<ReplayPrediction>, StoreError> {
     let mut rejects: Vec<RejectRow> = sqlx::query_as(
         "SELECT id, kind, source, name, payload, person_id, message_id, received_at, trace_id, \
@@ -403,7 +443,13 @@ async fn preview_in(
     .into_iter()
     .collect();
 
-    let mut judge = Judge::new();
+    let names: Vec<String> = rejects
+        .iter()
+        .filter_map(|reject| reject.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    judge.preload(connection, workspace, &names).await?;
     let policy = judge.policy(connection, workspace).await?;
     let mut predictions = Vec::with_capacity(rejects.len());
     for reject in rejects {
@@ -549,6 +595,20 @@ pub async fn replay_rejects(
 ) -> Result<ReplayTotals, StoreError> {
     let mut totals = ReplayTotals::default();
     let mut judge = Judge::new();
+    {
+        // Every schema the batch needs, in one query rather than one per name.
+        let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT name FROM ingest_rejects \
+             WHERE workspace_id = $1 AND id = ANY($2) AND name IS NOT NULL",
+        )
+        .bind(workspace.as_uuid())
+        .bind(ids)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        judge.preload(&mut connection, workspace, &names).await?;
+    }
     for id in ids {
         let mut tx = begin(pool).await?;
         let Some(reject) = load_reject(&mut tx, workspace, *id, true).await? else {
@@ -1362,5 +1422,68 @@ mod tests {
 
         assert_eq!(count(&pool, "debugger_feed").await, 0);
         assert_eq!(count(&pool, "events").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_loads_the_schemas_in_one_query_however_many_names_there_are(pool: PgPool) {
+        let (ws, reject) = rejected(&pool).await;
+        fix_the_schema(&pool, ws).await;
+        sqlx::query(
+            "INSERT INTO ingest_rejects \
+                (id, workspace_id, received_at, source, kind, name, reason, trace_id) \
+             SELECT gen_random_uuid(), $1, now(), 'web', 'event', 'name_' || n, \
+                    'validation_failed', gen_random_uuid() \
+             FROM generate_series(1, 400) AS n",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM ingest_rejects WHERE name <> 'order'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        ids.push(reject);
+        let mut judge = Judge::new();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let predictions = preview_in(&mut connection, ws, &ids, &mut judge)
+            .await
+            .unwrap();
+
+        assert_eq!(predictions.len(), 401);
+        assert_eq!(
+            judge.schema_loads, 1,
+            "one query for 401 rejects of 401 names"
+        );
+        let order = predictions.iter().find(|p| p.reject_id == reject).unwrap();
+        assert_eq!(
+            order.outcome, "accept",
+            "the schema that exists is still found"
+        );
+        assert!(
+            predictions
+                .iter()
+                .filter(|p| p.reject_id != reject)
+                .all(|p| p.outcome == "still_rejected" && p.reason == Some("no_person"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_name_with_no_published_schema_is_remembered_so_it_is_not_asked_again(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let mut judge = Judge::new();
+        let mut connection = pool.acquire().await.unwrap();
+        let names = vec!["a".to_owned(), "b".to_owned()];
+
+        judge.preload(&mut connection, ws, &names).await.unwrap();
+        judge.preload(&mut connection, ws, &names).await.unwrap();
+        let asked = judge.schema(&mut connection, ws, "a").await.unwrap();
+
+        assert!(asked.is_none());
+        assert_eq!(judge.schema_loads, 1);
     }
 }
