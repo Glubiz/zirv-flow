@@ -143,9 +143,11 @@ pub async fn list_trace(
 
 /// Creates the monthly partitions for the month of `today` and the next one, if they are
 /// missing. Fails when the DEFAULT partition already holds rows of a month, which cannot
-/// then get a partition of its own; those rows stay readable.
+/// then get a partition of its own; those rows stay readable. Every month is attempted
+/// before the first error is returned.
 pub async fn ensure_decision_partitions(pool: &PgPool, today: Date) -> Result<(), StoreError> {
     let first = today.replace_day(1).expect("day 1 exists in every month");
+    let mut first_error = None;
     for start in [first, next_month(first)] {
         let end = next_month(start);
         // The names and bounds are built from integers only.
@@ -158,12 +160,15 @@ pub async fn ensure_decision_partitions(pool: &PgPool, today: Date) -> Result<()
             bound(start),
             bound(end),
         );
-        sqlx::query(sqlx::AssertSqlSafe(statement))
+        let created = sqlx::query(sqlx::AssertSqlSafe(statement))
             .execute(pool)
             .await
-            .map_err(StoreError::query)?;
+            .map_err(StoreError::query);
+        if let Err(error) = created {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn next_month(first_of_month: Date) -> Date {
@@ -314,32 +319,80 @@ mod tests {
         );
     }
 
+    async fn insert_at(pool: &PgPool, ws: WorkspaceId, recorded_at: &str) {
+        sqlx::query(
+            "INSERT INTO decision_records                 (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id)              VALUES ($1, $2, $3, $4::timestamptz, 'step', 'done', 'api', 'x')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(ws.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(recorded_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn partition_exists(pool: &PgPool, name: &str) -> bool {
+        sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn without_upkeep_a_row_still_lands_in_the_default_partition(pool: PgPool) {
+    async fn migrating_creates_this_and_next_month_so_a_fresh_row_skips_the_default(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
+        let today = database_today(&pool).await;
         let trace = TraceContext::root(Cause::api("req-1"));
+        let next = next_month(today.replace_day(1).unwrap());
 
         append_decision(&pool, &decision(ws, &trace, "step"))
             .await
             .unwrap();
+
+        let name = |date: Date| {
+            format!(
+                "decision_records_y{:04}m{:02}",
+                date.year(),
+                u8::from(date.month())
+            )
+        };
+        assert_eq!(only_partition(&pool).await, name(today));
+        assert!(partition_exists(&pool, &name(next)).await);
+        ensure_decision_partitions(&pool, today).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_upkeep_a_row_outside_the_precreated_months_lands_in_the_default_partition(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+
+        insert_at(&pool, ws, "2031-01-15 00:00:00+00").await;
 
         assert_eq!(only_partition(&pool).await, "decision_records_default");
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn upkeep_fails_when_the_default_partition_holds_that_month(pool: PgPool) {
+    async fn upkeep_fails_when_the_default_partition_holds_that_month_but_still_makes_the_next(
+        pool: PgPool,
+    ) {
         let ws = workspace(&pool, "ours").await;
-        let today = database_today(&pool).await;
-        let trace = TraceContext::root(Cause::api("req-1"));
-        append_decision(&pool, &decision(ws, &trace, "step"))
+        insert_at(&pool, ws, "2031-01-15 00:00:00+00").await;
+
+        let result = ensure_decision_partitions(&pool, date!(2031 - 01 - 10)).await;
+
+        assert!(result.is_err());
+        assert!(partition_exists(&pool, "decision_records_y2031m02").await);
+        assert!(!partition_exists(&pool, "decision_records_y2031m01").await);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
+            .fetch_one(&pool)
             .await
             .unwrap();
-
-        assert!(ensure_decision_partitions(&pool, today).await.is_err());
-
-        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
-        assert_eq!(records.len(), 1);
+        assert_eq!(rows, 1);
     }
 }

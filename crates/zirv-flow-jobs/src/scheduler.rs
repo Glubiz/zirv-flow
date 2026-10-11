@@ -149,6 +149,10 @@ impl Scheduler {
             warn!("the scheduler lost its leadership lock");
             self.leadership = None;
             self.partitions_checked = None;
+            self.gauges
+                .get_mut()
+                .expect("the gauge lock is never held across a panic")
+                .zero_all();
         }
         self.leadership = try_lead(&self.pool).await?;
         Ok(self.leadership.is_some())
@@ -483,18 +487,14 @@ mod tests {
 
         let partitions: Vec<String> = sqlx::query_scalar(
             "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-             WHERE i.inhparent = 'decision_records'::regclass ORDER BY 1",
+             WHERE i.inhparent = 'decision_records'::regclass                AND c.relname::text LIKE 'decision_records_y2030%' ORDER BY 1",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
         assert_eq!(
             partitions,
-            [
-                "decision_records_default",
-                "decision_records_y2030m01",
-                "decision_records_y2030m02"
-            ]
+            ["decision_records_y2030m01", "decision_records_y2030m02"]
         );
     }
 

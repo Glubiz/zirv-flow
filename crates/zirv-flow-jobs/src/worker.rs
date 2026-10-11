@@ -627,6 +627,24 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_worker_publishes_the_jobs_and_heartbeat_pool_gauges(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let (stop, joined) = start(&pool, test_config(1));
+
+        eventually("both pool gauges to be published", || async {
+            let output = handle.render();
+            output.contains("zirv_flow_db_pool_connections{pool=\"jobs\"")
+                && output.contains("zirv_flow_db_pool_connections{pool=\"heartbeat\"")
+        })
+        .await;
+
+        stop_and_join(stop, joined).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once(pool: PgPool) {
         migrated(&pool).await;
         enqueue_effects(&pool, 10_000, 0).await;

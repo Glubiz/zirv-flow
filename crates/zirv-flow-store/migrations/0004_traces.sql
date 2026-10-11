@@ -37,3 +37,26 @@ CREATE TABLE decision_records (
 CREATE TABLE decision_records_default PARTITION OF decision_records DEFAULT;
 
 CREATE INDEX decision_records_trace_idx ON decision_records (workspace_id, trace_id, recorded_at);
+
+-- The current and the next UTC month get their partitions now, so decisions written before
+-- any scheduler leader has run do not land in DEFAULT. Names and bounds match the leader's
+-- upkeep in the store crate, which then finds them existing.
+DO $$
+DECLARE
+    month_start timestamptz;
+BEGIN
+    FOREACH month_start IN ARRAY ARRAY[
+        date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+        (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'
+    ] LOOP
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS decision_records_y%sm%s PARTITION OF decision_records '
+            'FOR VALUES FROM (%L) TO (%L)',
+            to_char(month_start AT TIME ZONE 'UTC', 'YYYY'),
+            to_char(month_start AT TIME ZONE 'UTC', 'MM'),
+            to_char(month_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00',
+            to_char(month_start AT TIME ZONE 'UTC' + interval '1 month', 'YYYY-MM-DD HH24:MI:SS') || '+00'
+        );
+    END LOOP;
+END
+$$;

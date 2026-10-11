@@ -61,6 +61,11 @@ impl QueueGauges {
         }
         self.seen = current;
     }
+
+    /// Sets every pair this instance has published to 0, for an instance that stops leading.
+    pub(crate) fn zero_all(&mut self) {
+        self.update(&[]);
+    }
 }
 
 fn queue_gauge(kind: &str, state: &str, value: f64) {
@@ -150,6 +155,28 @@ mod tests {
         assert!(
             second.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"running\"} 0"),
             "{second}"
+        );
+    }
+
+    #[test]
+    fn stepping_down_zeroes_every_published_pair() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = QueueGauges::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[depth("a.kind", "ready", 7), depth("b.kind", "dead", 4)]);
+            gauges.zero_all();
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_jobs{kind=\"a.kind\",state=\"ready\"} 0"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_jobs{kind=\"b.kind\",state=\"dead\"} 0"),
+            "{output}"
         );
     }
 
