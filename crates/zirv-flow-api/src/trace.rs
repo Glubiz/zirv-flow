@@ -25,6 +25,13 @@ pub(crate) fn current() -> Option<TraceContext> {
     TRACE.try_with(Clone::clone).ok()
 }
 
+/// The trace of the request being handled, or a new one caused by it.
+pub(crate) fn request_trace() -> TraceContext {
+    current().unwrap_or_else(|| {
+        TraceContext::root(Cause::api(request_id::current().unwrap_or_default()))
+    })
+}
+
 #[cfg(test)]
 pub(crate) async fn with_trace<F: std::future::Future>(
     trace: TraceContext,
@@ -174,6 +181,23 @@ mod tests {
             .await
             .unwrap();
         (headers, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn outside_the_middleware_a_request_trace_is_a_new_root_caused_by_the_api() {
+        let trace = request_trace();
+
+        assert_eq!(trace.cause.kind, zirv_flow_core::CauseKind::Api);
+        assert_ne!(trace.trace_id, request_trace().trace_id);
+    }
+
+    #[tokio::test]
+    async fn inside_a_trace_the_request_trace_is_that_trace() {
+        let trace = TraceContext::root(Cause::api("req"));
+
+        let seen = with_trace(trace.clone(), async { request_trace() }).await;
+
+        assert_eq!(seen.trace_id, trace.trace_id);
     }
 
     #[tokio::test]

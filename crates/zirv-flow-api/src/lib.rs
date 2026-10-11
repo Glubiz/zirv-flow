@@ -9,6 +9,7 @@ mod health;
 mod jobs_admin;
 mod json;
 mod keys;
+mod lists;
 mod members;
 mod metrics;
 mod oidc;
@@ -35,8 +36,9 @@ use std::future::Future;
 use std::io;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
-use axum::routing::{get, patch, put};
+use axum::routing::{get, patch, post, put};
 use tokio::net::TcpListener;
 
 pub use oidc::redirect_url as oidc_redirect_url;
@@ -136,6 +138,36 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/ingest-rejects",
             get(events::rejects::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/lists",
+            get(lists::crud::list).post(lists::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/lists/{id}",
+            get(lists::crud::get)
+                .patch(lists::crud::update)
+                .delete(lists::crud::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/lists/{id}/members",
+            get(lists::members::page).post(lists::members::add),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/lists/{id}/members/remove",
+            post(lists::members::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/lists/{id}/members/import",
+            post(lists::import::import).layer(DefaultBodyLimit::max(lists::import::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/lists",
+            get(lists::person::lists),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/lists/history",
+            get(lists::person::history),
         )
         .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",

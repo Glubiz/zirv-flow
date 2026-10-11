@@ -3315,4 +3315,808 @@ mod tests {
         }
         assert_eq!(rejects[1]["sample"]["properties"]["total"], Value::Null);
     }
+
+    fn lists_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/lists")
+    }
+
+    /// A raw-body call, for the CSV import.
+    async fn call_raw(
+        router: &Router,
+        uri: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-request-id", "test-request");
+        match auth {
+            Auth::Session(login) => {
+                request = request
+                    .header(header::COOKIE, &login.cookie)
+                    .header("x-csrf-token", &login.csrf);
+            }
+            Auth::Key(key) => {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
+            }
+            _ => panic!("not needed by these tests"),
+        }
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        Reply {
+            status,
+            headers,
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
+    }
+
+    async fn make_list(router: &Router, who: Auth<'_>, ws: &str, name: &str) -> String {
+        let reply = call(
+            router,
+            "POST",
+            &lists_uri(ws),
+            Some(json!({"name": name})),
+            who,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        reply.body["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Three people: Ada (email and external id), Bob (email) and an anonymous visitor.
+    async fn seed_people(pool: &PgPool, ws: &str) -> (String, String, String) {
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            pool,
+            workspace,
+            &[
+                profile("1", &[("email", "ada@example.com"), ("external:crm", "1")]),
+                profile("2", &[("email", "bob@example.com")]),
+                profile("3", &[("anonymous_id", "visitor")]),
+            ],
+        )
+        .await
+        .unwrap();
+        let person = |outcome: &zirv_flow_store::ProfileOutcome| match outcome {
+            zirv_flow_store::ProfileOutcome::Applied { person_id, .. } => person_id.to_string(),
+            other => panic!("not applied: {other:?}"),
+        };
+        (
+            person(&outcomes[0]),
+            person(&outcomes[1]),
+            person(&outcomes[2]),
+        )
+    }
+
+    async fn people_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_creates_renames_reads_and_deletes_lists_and_each_change_is_audited(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+
+        let id = make_list(&router, Auth::Session(&member), &ws, "Newsletter").await;
+        let duplicate = call(
+            &router,
+            "POST",
+            &lists_uri(&ws),
+            Some(json!({"name": " newsletter "})),
+            Auth::Session(&member),
+        )
+        .await;
+        let blank = call(
+            &router,
+            "POST",
+            &lists_uri(&ws),
+            Some(json!({"name": "   "})),
+            Auth::Session(&member),
+        )
+        .await;
+        let other = make_list(&router, Auth::Session(&owner), &ws, "Beta").await;
+        let taken = call(
+            &router,
+            "PATCH",
+            &format!("{}/{other}", lists_uri(&ws)),
+            Some(json!({"name": "NEWSLETTER"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let empty_patch = call(
+            &router,
+            "PATCH",
+            &format!("{}/{id}", lists_uri(&ws)),
+            Some(json!({})),
+            Auth::Session(&member),
+        )
+        .await;
+        let renamed = call(
+            &router,
+            "PATCH",
+            &format!("{}/{id}", lists_uri(&ws)),
+            Some(json!({"name": "Weekly", "description": "Fridays"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let listed = call(
+            &router,
+            "GET",
+            &lists_uri(&ws),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let one = call(
+            &router,
+            "GET",
+            &format!("{}/{id}", lists_uri(&ws)),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let deleted = call(
+            &router,
+            "DELETE",
+            &format!("{}/{id}", lists_uri(&ws)),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let gone = call(
+            &router,
+            "GET",
+            &format!("{}/{id}", lists_uri(&ws)),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        assert_eq!(blank.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(taken.status, StatusCode::CONFLICT);
+        assert_eq!(empty_patch.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(renamed.status, StatusCode::OK);
+        assert_eq!(renamed.body["name"], "Weekly");
+        assert_eq!(renamed.body["member_count"], 0);
+        assert_eq!(renamed.body["created_by"], member_id.to_string().as_str());
+        let names: Vec<&str> = listed
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|list| list["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Beta", "Weekly"]);
+        assert_eq!(one.body["description"], "Fridays");
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert_eq!(gone.status, StatusCode::NOT_FOUND);
+
+        let audited: Vec<(String, Option<String>, Value)> = sqlx::query_as(
+            "SELECT action, object_id::text, summary FROM audit_log \
+             WHERE action LIKE 'list.%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let actions: Vec<&str> = audited.iter().map(|(action, ..)| action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "list.created",
+                "list.created",
+                "list.updated",
+                "list.deleted"
+            ]
+        );
+        assert_eq!(audited[0].2, json!({"name": "Newsletter"}));
+        assert_eq!(
+            audited[2].2,
+            json!({"name": "Weekly", "fields": ["name", "description"]})
+        );
+        assert_eq!(audited[3].2, json!({"name": "Weekly", "member_count": 0}));
+        assert_eq!(audited[3].1.as_deref(), Some(id.as_str()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn people_are_added_by_id_and_by_identifier_idempotently_and_never_created(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, bob, _) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let members = format!("{}/{list}/members", lists_uri(&ws));
+        let before = people_count(&pool).await;
+
+        let first = call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({
+                "person_ids": [ada, "00000000-0000-7000-8000-000000000000"],
+                "identifiers": [
+                    {"kind": "email", "value": " BOB@example.com "},
+                    {"kind": "email", "value": "nobody@example.com"}
+                ]
+            })),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({"person_ids": [ada, bob]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let malformed = call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({"identifiers": [{"kind": "email", "value": "not-an-email-secret"}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let too_many = call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({"person_ids": vec![ada.as_str(); 1001]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let one = call(
+            &router,
+            "GET",
+            &format!("{}/{list}", lists_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(first.body["added"], 2);
+        assert_eq!(first.body["already_member"], 0);
+        assert_eq!(
+            first.body["not_found"],
+            json!([
+                {"field": "person_ids", "index": 1, "reason": "not_found"},
+                {"field": "identifiers", "index": 1, "reason": "not_found"}
+            ])
+        );
+        assert_eq!(again.body["added"], 0);
+        assert_eq!(again.body["already_member"], 2);
+        assert_eq!(malformed.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(malformed.body["detail"], "identifiers[0]: invalid_email");
+        assert!(!malformed.body.to_string().contains("secret"));
+        assert_eq!(too_many.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(one.body["member_count"], 2);
+        assert_eq!(people_count(&pool).await, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_is_idempotent_and_the_count_follows(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, bob, visitor) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let members = format!("{}/{list}/members", lists_uri(&ws));
+        call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({"person_ids": [ada, bob]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let removed = call(
+            &router,
+            "POST",
+            &format!("{members}/remove"),
+            Some(json!({"person_ids": [ada, visitor, "00000000-0000-7000-8000-000000000000"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &format!("{members}/remove"),
+            Some(json!({"person_ids": [ada]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let one = call(
+            &router,
+            "GET",
+            &format!("{}/{list}", lists_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
+        assert_eq!(removed.body["removed"], 1);
+        assert_eq!(removed.body["not_member"], 1);
+        assert_eq!(
+            removed.body["not_found"],
+            json!([{"field": "person_ids", "index": 2, "reason": "not_found"}])
+        );
+        assert_eq!(again.body["removed"], 0);
+        assert_eq!(again.body["not_member"], 1);
+        assert_eq!(one.body["member_count"], 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn members_page_newest_first_and_values_are_masked_for_members_and_read_keys(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, bob, visitor) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let members = format!("{}/{list}/members", lists_uri(&ws));
+        for person in [&ada, &bob, &visitor] {
+            call(
+                &router,
+                "POST",
+                &members,
+                Some(json!({"person_ids": [person]})),
+                Auth::Session(&owner),
+            )
+            .await;
+        }
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin", "read"]).await;
+
+        let first = call(
+            &router,
+            "GET",
+            &format!("{members}?limit=2"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let second = call(
+            &router,
+            "GET",
+            &format!("{members}?limit=2&before={cursor}"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let as_member = call(&router, "GET", &members, None, Auth::Session(&member)).await;
+        let as_read_key = call(&router, "GET", &members, None, Auth::Key(&read_key)).await;
+        let as_admin_key = call(&router, "GET", &members, None, Auth::Key(&admin_key)).await;
+        let bad_limit = call(
+            &router,
+            "GET",
+            &format!("{members}?limit=0"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let ids = |reply: &Reply| -> Vec<String> {
+            reply.body["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["person_id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mut paged = ids(&first);
+        paged.extend(ids(&second));
+        assert_eq!(paged, [visitor.clone(), bob.clone(), ada.clone()]);
+        assert!(second.body["next_before"].is_null());
+        assert_eq!(first.body["members"][0]["source"], "ui");
+        assert_eq!(
+            first.body["members"][0]["identifier"]["kind"],
+            "anonymous_id"
+        );
+        assert_eq!(first.body["members"][0]["identifier"]["value"], "visitor");
+        assert_eq!(first.body["members"][0]["identifier"]["masked"], false);
+        for masked in [&as_member, &as_read_key] {
+            assert_eq!(masked.status, StatusCode::OK);
+            let text = masked.body.to_string();
+            assert!(!text.contains("example.com") && !text.contains("visitor"));
+            for entry in masked.body["members"].as_array().unwrap() {
+                assert!(entry["identifier"]["value"].is_null());
+                assert_eq!(entry["identifier"]["masked"], true);
+            }
+        }
+        assert_eq!(
+            as_member.body["members"][2]["identifier"]["kind"],
+            "external:crm"
+        );
+        assert_eq!(as_admin_key.body["members"][2]["identifier"]["value"], "1");
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn writes_need_the_write_scope_and_a_csrf_token_and_reads_the_read_scope(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other_ws = workspace(&router, &owner, "Beta").await;
+        let (ada, ..) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin", "ingest"]).await;
+        let members = format!("{}/{list}/members", lists_uri(&ws));
+        let add_body = Some(json!({"person_ids": [ada]}));
+
+        let mut statuses = Vec::new();
+        for key in [&read_key, &admin_key] {
+            for (method, uri, body) in [
+                ("POST", lists_uri(&ws), Some(json!({"name": "X"}))),
+                (
+                    "PATCH",
+                    format!("{}/{list}", lists_uri(&ws)),
+                    Some(json!({"name": "Y"})),
+                ),
+                ("DELETE", format!("{}/{list}", lists_uri(&ws)), None),
+                ("POST", members.clone(), add_body.clone()),
+                ("POST", format!("{members}/remove"), add_body.clone()),
+            ] {
+                statuses.push(
+                    call(&router, method, &uri, body, Auth::Key(key))
+                        .await
+                        .status,
+                );
+            }
+            let import = call_raw(
+                &router,
+                &format!("{members}/import"),
+                Some("text/csv"),
+                b"kind,value\n".to_vec(),
+                Auth::Key(key),
+            )
+            .await;
+            statuses.push(import.status);
+        }
+        let no_csrf = call(
+            &router,
+            "POST",
+            &members,
+            add_body.clone(),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let write_added = call(&router, "POST", &members, add_body, Auth::Key(&write_key)).await;
+        let write_cannot_read = call(&router, "GET", &members, None, Auth::Key(&write_key)).await;
+        let read_reads = call(&router, "GET", &lists_uri(&ws), None, Auth::Key(&read_key)).await;
+        let foreign = call(
+            &router,
+            "GET",
+            &format!("{}/{list}", lists_uri(&other_ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_key = call(
+            &router,
+            "GET",
+            &lists_uri(&other_ws),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+
+        assert!(
+            statuses
+                .iter()
+                .all(|status| *status == StatusCode::FORBIDDEN),
+            "{statuses:?}"
+        );
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(write_added.status, StatusCode::OK);
+        assert_eq!(write_cannot_read.status, StatusCode::FORBIDDEN);
+        assert_eq!(read_reads.status, StatusCode::OK);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_key.status, StatusCode::NOT_FOUND);
+        let source: String = sqlx::query_scalar("SELECT source FROM list_members")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source, "api");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_csv_import_previews_then_commits_and_reports_rows_never_values(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, ..) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let import = format!("{}/{list}/members/import", lists_uri(&ws));
+        call(
+            &router,
+            "POST",
+            &format!("{}/{list}/members", lists_uri(&ws)),
+            Some(json!({"person_ids": [ada]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let before = people_count(&pool).await;
+        let csv = "kind,value\n\
+                   email,ada@example.com\n\
+                   email,bob@example.com\n\
+                   email,bob@example.com\n\
+                   email,ghost-person@example.com\n\
+                   email,not-an-email-secret\n\
+                   fax,12345\n\
+                   email\n\
+                   anonymous_id,visitor\n";
+        let post = |uri: String| {
+            let router = router.clone();
+            let owner = &owner;
+            async move {
+                call_raw(
+                    &router,
+                    &uri,
+                    Some("text/csv; charset=utf-8"),
+                    csv.as_bytes().to_vec(),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+
+        let preview = post(format!("{import}?dry_run=true")).await;
+        let count_after_preview: i64 = sqlx::query_scalar("SELECT count(*) FROM list_members")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let committed = post(import.clone()).await;
+        let repeated = post(import.clone()).await;
+        let count_after_commit: i64 = sqlx::query_scalar("SELECT count(*) FROM list_members")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let expected_unmatched = json!([
+            {"row": 5, "reason": "not_found"},
+            {"row": 6, "reason": "invalid_email"},
+            {"row": 7, "reason": "unknown_identifier_kind"},
+            {"row": 8, "reason": "malformed_row"}
+        ]);
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["matched"], 4);
+        assert_eq!(preview.body["added"], 2);
+        assert_eq!(preview.body["already_member"], 2);
+        assert_eq!(preview.body["unmatched"], expected_unmatched);
+        assert_eq!(count_after_preview, 1);
+        assert_eq!(committed.body, preview.body);
+        assert_eq!(count_after_commit, 3);
+        assert_eq!(repeated.body["added"], 0);
+        assert_eq!(repeated.body["already_member"], 4);
+        for reply in [&preview, &committed, &repeated] {
+            let text = reply.body.to_string();
+            assert!(!text.contains("example.com") && !text.contains("secret"));
+        }
+        assert_eq!(people_count(&pool).await, before);
+        let imported: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM list_members WHERE source = 'import'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(imported, 2);
+        let one = call(
+            &router,
+            "GET",
+            &format!("{}/{list}", lists_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(one.body["member_count"], 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_refuses_a_wrong_type_a_bad_header_a_big_body_and_a_bad_flag(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let import = format!("{}/{list}/members/import", lists_uri(&ws));
+        let send = |uri: String, content_type: Option<&'static str>, body: Vec<u8>| {
+            let router = router.clone();
+            let owner = &owner;
+            async move { call_raw(&router, &uri, content_type, body, Auth::Session(owner)).await }
+        };
+
+        let json_type = send(
+            import.clone(),
+            Some("application/json"),
+            b"kind,value\n".to_vec(),
+        )
+        .await;
+        let no_type = send(import.clone(), None, b"kind,value\n".to_vec()).await;
+        let header = send(import.clone(), Some("text/csv"), b"email,value\n".to_vec()).await;
+        let binary = send(import.clone(), Some("text/csv"), vec![0xff, 0xfe, 0x00]).await;
+        let flag = send(
+            format!("{import}?dry_run=maybe"),
+            Some("text/csv"),
+            b"kind,value\n".to_vec(),
+        )
+        .await;
+        let mut big = b"kind,value\n".to_vec();
+        big.resize(10 * 1024 * 1024 + 1, b'x');
+        let too_big = send(import.clone(), Some("text/csv"), big).await;
+        let missing = send(
+            format!(
+                "{}/00000000-0000-7000-8000-000000000000/members/import",
+                lists_uri(&ws)
+            ),
+            Some("text/csv"),
+            b"kind,value\n".to_vec(),
+        )
+        .await;
+        let empty = send(import.clone(), Some("text/csv"), b"kind,value\n".to_vec()).await;
+
+        assert_eq!(json_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(no_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(header.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(binary.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(flag.status, StatusCode::BAD_REQUEST);
+        assert_eq!(too_big.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(empty.status, StatusCode::OK);
+        assert_eq!(empty.body["matched"], 0);
+        assert_eq!(empty.body["unmatched"], json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_persons_lists_and_history_follow_them_and_their_merges(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, _, visitor) = seed_people(&pool, &ws).await;
+        let first = make_list(&router, Auth::Session(&owner), &ws, "First").await;
+        let second = make_list(&router, Auth::Session(&owner), &ws, "Second").await;
+        for (list, person) in [(&first, &ada), (&second, &visitor)] {
+            call(
+                &router,
+                "POST",
+                &format!("{}/{list}/members", lists_uri(&ws)),
+                Some(json!({"person_ids": [person]})),
+                Auth::Session(&owner),
+            )
+            .await;
+        }
+        call(
+            &router,
+            "POST",
+            &format!("{}/{first}/members/remove", lists_uri(&ws)),
+            Some(json!({"person_ids": [ada]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        call(
+            &router,
+            "POST",
+            &format!("{}/{first}/members", lists_uri(&ws)),
+            Some(json!({"person_ids": [ada]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        // A record naming both identifiers merges the visitor into Ada.
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        zirv_flow_store::apply_profile_batch(
+            &pool,
+            workspace_id,
+            &[profile(
+                "9",
+                &[("email", "ada@example.com"), ("anonymous_id", "visitor")],
+            )],
+        )
+        .await
+        .unwrap();
+        let person_lists = |person: &str| format!("/api/v1/workspaces/{ws}/people/{person}/lists");
+
+        let lists = call(
+            &router,
+            "GET",
+            &person_lists(&ada),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let through_loser = call(
+            &router,
+            "GET",
+            &person_lists(&visitor),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let history = call(
+            &router,
+            "GET",
+            &format!("{}/history?limit=3", person_lists(&ada)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let rest = call(
+            &router,
+            "GET",
+            &format!(
+                "{}/history?limit=3&before={}",
+                person_lists(&ada),
+                history.body["next_before"].as_str().unwrap()
+            ),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "GET",
+            &person_lists("00000000-0000-7000-8000-000000000000"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(lists.status, StatusCode::OK, "{:?}", lists.body);
+        let names: Vec<&str> = lists
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|list| list["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["First", "Second"]);
+        assert_eq!(lists.body[1]["source"], "merge");
+        assert_eq!(through_loser.body, lists.body);
+        assert_eq!(history.body["changes"].as_array().unwrap().len(), 3);
+        assert!(history.body["next_before"].is_string());
+        assert_eq!(history.body["changes"][0]["action"], "added");
+        assert_eq!(history.body["changes"][0]["list_name"], "First");
+        assert_eq!(rest.body["changes"].as_array().unwrap().len(), 1);
+        assert!(rest.body["next_before"].is_null());
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        let membership_audit: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action LIKE 'list.m%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(membership_audit, 0);
+    }
 }

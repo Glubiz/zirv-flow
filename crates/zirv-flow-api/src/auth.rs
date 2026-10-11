@@ -18,7 +18,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use zirv_flow_core::token::{hash_matches, sha256};
-use zirv_flow_core::{Role, Scope, WorkspaceId};
+use zirv_flow_core::{Role, Scope, UserId, WorkspaceId};
 use zirv_flow_store::{ApiKey, User, Workspace};
 
 use crate::problem::ApiError;
@@ -59,11 +59,22 @@ pub(crate) enum Need {
     Read,
     /// Read the member list: as `Read`, and also an `admin` key.
     ReadMembers,
+    /// Change the workspace's data, such as its lists: any member, a workspace admin, the
+    /// owner, or a `write` key.
+    Write,
     /// Manage members and keys: a workspace admin, the owner, or an `admin` key.
     Admin,
 }
 
 impl Principal {
+    /// The signed-in user, or none for an API key.
+    pub(crate) fn user_id(&self) -> Option<UserId> {
+        match self {
+            Self::Session(session) => Some(session.user.id),
+            Self::Key(_) => None,
+        }
+    }
+
     pub(crate) fn context(&self) -> admin::Context {
         let context = match self {
             Self::Session(session) => admin::Context::user(session.user.id),
@@ -177,6 +188,7 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
     match need {
         Need::Read => scopes.contains(&Scope::Read),
         Need::ReadMembers => scopes.contains(&Scope::Read) || scopes.contains(&Scope::Admin),
+        Need::Write => scopes.contains(&Scope::Write),
         Need::Admin => scopes.contains(&Scope::Admin),
     }
 }
@@ -184,7 +196,7 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
 /// Whether a workspace role (or the owner flag) allows the request.
 pub(crate) fn role_allows(role: Role, need: Need) -> bool {
     match need {
-        Need::Read | Need::ReadMembers => true,
+        Need::Read | Need::ReadMembers | Need::Write => true,
         Need::Admin => role == Role::Admin,
     }
 }
@@ -223,6 +235,18 @@ pub(crate) async fn authorize(
     zirv_flow_store::find_workspace(&state.pool, id)
         .await?
         .ok_or_else(ApiError::not_found)
+}
+
+/// Whether the caller may see identifier values: the owner, a workspace admin or an `admin`
+/// key. Everyone else who may read the workspace sees them masked.
+pub(crate) async fn may_see_values(
+    state: &AppState,
+    principal: &Principal,
+    workspace: WorkspaceId,
+) -> bool {
+    authorize(state, principal, workspace, Need::Admin)
+        .await
+        .is_ok()
 }
 
 /// Parses an id from a path segment; a malformed id is a plain 404.
@@ -311,6 +335,33 @@ mod tests {
         assert!(scopes_allow(&[Scope::Admin], Need::Admin));
         assert!(!scopes_allow(&[Scope::Read, Scope::Write], Need::Admin));
         assert!(!scopes_allow(&[], Need::Read));
+        assert!(scopes_allow(&[Scope::Write], Need::Write));
+        assert!(!scopes_allow(
+            &[Scope::Read, Scope::Admin, Scope::Ingest],
+            Need::Write
+        ));
+    }
+
+    #[test]
+    fn any_member_may_write_and_a_key_belongs_to_no_user() {
+        assert!(role_allows(Role::Member, Need::Write));
+        assert!(role_allows(Role::Admin, Need::Write));
+        let member = session(false);
+        let id = member.user.id;
+        assert_eq!(Principal::Session(member).user_id(), Some(id));
+        let key = Principal::Key(KeyPrincipal {
+            key: ApiKey {
+                id: zirv_flow_core::ApiKeyId::new(),
+                workspace_id: WorkspaceId::new(),
+                name: "ci".into(),
+                scopes: vec![Scope::Write],
+                created_by: None,
+                created_at: OffsetDateTime::now_utc(),
+                last_used_at: None,
+                revoked_at: None,
+            },
+        });
+        assert_eq!(key.user_id(), None);
     }
 
     #[test]

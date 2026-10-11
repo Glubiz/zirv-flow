@@ -9,6 +9,7 @@ use crate::events::{
 use crate::health::{self, StatusBody};
 use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
+use crate::lists;
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
@@ -65,6 +66,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         events::policy::get,
         events::policy::put,
         events::rejects::list,
+        lists::crud::list,
+        lists::crud::create,
+        lists::crud::get,
+        lists::crud::update,
+        lists::crud::remove,
+        lists::members::page,
+        lists::members::add,
+        lists::members::remove,
+        lists::import::import,
+        lists::person::lists,
+        lists::person::history,
         traces::get,
         setup::status,
         setup::complete,
@@ -110,6 +122,23 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         IngestRejectBody,
         IngestRejectsBody,
         ReasonBody,
+        lists::crud::ListBody,
+        lists::crud::CreateListRequest,
+        lists::crud::UpdateListRequest,
+        lists::members::ListMembersBody,
+        lists::members::ListMemberBody,
+        lists::members::MemberIdentifierBody,
+        lists::members::AddMembersRequest,
+        lists::members::IdentifierInput,
+        lists::members::AddMembersBody,
+        lists::members::RemoveMembersRequest,
+        lists::members::RemoveMembersBody,
+        lists::members::NotFoundBody,
+        lists::import::ImportBody,
+        lists::import::UnmatchedRow,
+        lists::person::PersonListBody,
+        lists::person::MembershipHistoryBody,
+        lists::person::MembershipChangeBody,
         TraceBody,
         DecisionBody,
         CauseBody,
