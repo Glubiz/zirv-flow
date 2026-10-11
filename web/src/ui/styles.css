@@ -1163,6 +1163,8 @@ main:focus {
     grid-template-columns: minmax(0, 1fr);
     padding: 14px 20px;
   }
+}
+
 .stepper {
   display: flex;
   flex-wrap: wrap;
