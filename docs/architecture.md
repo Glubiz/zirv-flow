@@ -329,6 +329,18 @@ erDiagram
 | AI settings | Per-workspace enablement, provider/model choice, budget, transcript retention and PII opt-in. Deployment configuration declares the permitted providers and models. |
 | AI call log | Audit record for each assistant call: workspace, user, feature, provider, model, tokens, estimated cost, latency, outcome and resulting draft id; transcript content follows the workspace retention setting. |
 
+As built (lists): `lists` holds `member_count`, kept exact under a row lock on the list;
+`list_members` is keyed `(list_id, person_id)` and `list_member_changes` is the history.
+`store::lists` adds and removes in one transaction that locks the people (resolved through
+`merged_into`, re-resolved if a merge wins the race) before the list, the same order a merge
+uses, and writes one history row and one `list.membership` decision (ids only) per real
+change. `merge_people` calls `lists::move_on_merge`, which gives the survivor the union of
+both memberships with the earlier `added_at`, deletes the loser's rows, corrects the counts
+and re-points the loser's history. Reads need `read`; writes need `write` (any member for a
+session) and CSRF. Identifier values on the member page use the same masking as conflict
+review. The CSV import resolves identifiers to existing people and never creates one; its
+dry run runs the real transaction and rolls it back, so its counts are exact.
+
 ## 7. Data sources and ingestion
 
 ### 7.1 Paths and the common write path

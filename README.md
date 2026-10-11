@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry, static lists and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -505,6 +505,51 @@ admin sets within `events.min_retention_days` and `events.max_retention_days`; r
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
 records of events that no longer exist. The scheduler leader creates the partitions for this
 and next month.
+
+## Lists
+
+A list is a named set of people that you fill by hand, from a CSV or through the API. Flow
+actions that add people come with flows. Open **Lists** in the web UI to create, rename and
+delete lists and to see who is in one. Deleting a list asks first, naming the list and how
+many people it holds; it removes the list, its members and their membership history, and the
+people stay. A list name is unique in a workspace, ignoring case. Any member of the
+workspace can manage lists; an API key needs the `write` scope to change them and `read` to
+look at them.
+
+**Adding people.** Three ways, all of which add only people who already exist and never
+create one:
+
+- by id: `POST /api/v1/workspaces/{ws}/lists/{id}/members` with `{"person_ids": [...]}`;
+- by identifier: the same call with `{"identifiers": [{"kind": "email", "value": "..."}]}`, or
+  the **Add a person** form on the list page. Identifiers are normalized like everywhere
+  else, and one that no person owns comes back in `not_found` with its position;
+- by CSV: `POST .../lists/{id}/members/import` with `Content-Type: text/csv`, a header row
+  `kind,value` and one identifier per row, up to 10 MiB and 100,000 rows. Add
+  `?dry_run=true` to see `{matched, added, already_member, unmatched}` without changing
+  anything; the web UI always previews first. `unmatched` lists row numbers (the header is
+  row 1) with a reason code and never echoes a value.
+
+Remove people with `POST .../lists/{id}/members/remove` and `{"person_ids": [...]}`, or tick
+them on the list page. One call takes at most 1,000 people.
+
+**Idempotent.** Adding someone who is already in the list, or removing someone who is not,
+changes nothing and writes nothing. The member count on a list is exact: it is kept in the
+same transaction as every change. A person id that was merged into another is read as the
+person it was merged into.
+
+**History.** Every real change writes a row of the person's membership history (list, added
+or removed, source, who and the trace) and a `list.membership` decision that holds ids only.
+Read it with `GET /api/v1/workspaces/{ws}/people/{id}/lists` (the lists a person is in) and
+`GET .../people/{id}/lists/history`. Creating, renaming and deleting a list is audited as
+`list.created`, `list.updated` and `list.deleted`; membership changes are not audited.
+
+**Masking.** The member page shows each person's strongest identifier. As with identity
+conflicts, workspace admins, the owner and `admin` keys see the value; members and `read`
+keys see its kind and a `masked` flag instead.
+
+**Merges.** When two people are merged, the survivor is in every list either of them was in,
+keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
+history moves to the survivor.
 
 ## Web UI
 
