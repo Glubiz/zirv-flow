@@ -94,7 +94,7 @@ pub async fn load_profile(
     .bind(found.id)
     .fetch_all(&mut *tx)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     let records: Vec<(String, Value, Value)> = sqlx::query_as(
         "SELECT source, identifiers, traits FROM source_records \
          WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL \
@@ -104,13 +104,13 @@ pub async fn load_profile(
     .bind(found.id)
     .fetch_all(&mut *tx)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     let definitions: Vec<(String, String, bool)> =
         sqlx::query_as("SELECT key, type, pii FROM trait_definitions WHERE workspace_id = $1")
             .bind(workspace.as_uuid())
             .fetch_all(&mut *tx)
             .await
-            .map_err(StoreError::query)?;
+            .map_err(StoreError::bounded)?;
     let merges: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(
         "SELECT merged_person_id, created_at FROM person_merges \
          WHERE workspace_id = $1 AND survivor_person_id = $2 ORDER BY created_at, id",
@@ -119,7 +119,7 @@ pub async fn load_profile(
     .bind(found.id)
     .fetch_all(&mut *tx)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     drop(tx);
 
     let mut groups: BTreeMap<String, Vec<StoredIdentity>> = BTreeMap::new();

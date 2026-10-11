@@ -157,13 +157,7 @@ impl StoreError {
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "40P01" | "40001"));
-        let timeout = source
-            .as_database_error()
-            .and_then(|error| error.code())
-            .is_some_and(|code| code.as_ref() == "57014");
-        let kind = if timeout {
-            StoreErrorKind::Timeout
-        } else if conflict {
+        let kind = if conflict {
             StoreErrorKind::Conflict
         } else if retryable {
             StoreErrorKind::Retryable
@@ -171,6 +165,21 @@ impl StoreError {
             StoreErrorKind::Query
         };
         Self::with_source(kind, source)
+    }
+
+    /// A failed query of a bounded read (search, profile, timeline). PostgreSQL cancelling it
+    /// at its statement timeout (SQLSTATE 57014) becomes a timeout; anywhere else a
+    /// cancellation stays a plain query failure.
+    pub(crate) fn bounded(source: sqlx::Error) -> Self {
+        let timeout = source
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code.as_ref() == "57014");
+        if timeout {
+            Self::with_source(StoreErrorKind::Timeout, source)
+        } else {
+            Self::query(source)
+        }
     }
 
     /// A transaction that lost a race it could not resolve: nothing was committed and the

@@ -57,11 +57,27 @@ mod tests {
         let error = sqlx::query("SELECT pg_sleep(2)")
             .execute(&mut *tx)
             .await
-            .map_err(StoreError::query)
+            .map_err(StoreError::bounded)
             .unwrap_err();
 
         assert!(error.is_timeout());
         assert!(!error.is_conflict() && !error.is_retryable());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cancelled_statement_outside_a_bounded_read_is_not_a_timeout(pool: PgPool) {
+        let mut tx = begin_bounded_for(&pool, Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        let error = sqlx::query("SELECT pg_sleep(2)")
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::query)
+            .unwrap_err();
+
+        assert!(!error.is_timeout());
     }
 
     #[sqlx::test]

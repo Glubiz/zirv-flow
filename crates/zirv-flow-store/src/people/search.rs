@@ -271,7 +271,7 @@ pub async fn search_people(
             .bind(identifier.value())
             .fetch_all(&mut *tx)
             .await
-            .map_err(StoreError::query)?;
+            .map_err(StoreError::bounded)?;
             Ok(finish(&mut tx, workspace, rows, None).await?)
         }
         PersonSearch::Trait { key, op, value } => {
@@ -319,7 +319,7 @@ pub async fn search_people(
                 .bind(limit + 1)
                 .fetch_all(&mut *tx)
                 .await
-                .map_err(StoreError::query)?;
+                .map_err(StoreError::bounded)?;
             Ok(finish(&mut tx, workspace, rows, Some(limit)).await?)
         }
     }
@@ -370,7 +370,7 @@ pub(crate) async fn strongest_identifiers(
     .bind(people)
     .fetch_all(&mut *connection)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     let strength = |kind: &str| IdentifierKind::parse(kind).map_or(0, |kind| kind.strength());
     let mut best: HashMap<Uuid, (String, String)> = HashMap::new();
     for (person, kind, value) in rows {

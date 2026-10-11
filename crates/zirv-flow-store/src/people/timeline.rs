@@ -198,7 +198,7 @@ pub async fn load_timeline(
     .bind(person)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     let Some(current) = current else {
         return Ok(None);
     };
@@ -214,7 +214,7 @@ pub async fn load_timeline(
     .bind(current)
     .fetch_all(&mut *tx)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(StoreError::bounded)?;
     let texts: Vec<String> = people.iter().map(Uuid::to_string).collect();
     let (at, rank, id) = match before {
         Some(cursor) => (Some(cursor.at), cursor.kind.rank(), Some(cursor.id)),
@@ -242,7 +242,7 @@ pub async fn load_timeline(
         .bind(limit + 1)
         .fetch_all(&mut *tx)
         .await
-        .map_err(StoreError::query)?;
+        .map_err(StoreError::bounded)?;
         entries.extend(rows.into_iter().map(|row| {
             TimelineEntry::Event(TimelineEvent {
                 id: row.id,
@@ -279,7 +279,7 @@ pub async fn load_timeline(
         .bind(limit + 1)
         .fetch_all(&mut *tx)
         .await
-        .map_err(StoreError::query)?;
+        .map_err(StoreError::bounded)?;
         entries.extend(rows.into_iter().map(|row| {
             TimelineEntry::Decision(TimelineDecision {
                 id: row.id,
