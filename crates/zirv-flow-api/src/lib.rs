@@ -9,6 +9,7 @@ mod json;
 mod keys;
 mod members;
 mod metrics;
+mod oidc;
 mod openapi;
 mod passwords;
 mod problem;
@@ -30,9 +31,11 @@ use axum::middleware::from_fn;
 use axum::routing::{get, put};
 use tokio::net::TcpListener;
 
+pub use oidc::redirect_url as oidc_redirect_url;
 pub use openapi::openapi;
 pub use problem::Problem;
 pub use state::AppState;
+pub use zirv_flow_identity::{IdentityError, OidcSettings, SecretString};
 
 /// Builds the router for every HTTP surface of the server.
 pub fn router(state: AppState) -> Router {
@@ -47,6 +50,8 @@ pub fn router(state: AppState) -> Router {
                 .post(session::sign_in)
                 .delete(session::sign_out),
         )
+        .route("/api/v1/session/oidc/start", get(oidc::start))
+        .route("/api/v1/session/oidc/callback", get(oidc::callback))
         .route("/api/v1/users", get(users::list).post(users::create))
         .route(
             "/api/v1/workspaces",

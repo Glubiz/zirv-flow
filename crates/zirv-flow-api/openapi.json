@@ -150,6 +150,111 @@
         ]
       }
     },
+    "/api/v1/session/oidc/callback": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Finishes an OIDC sign-in: the identity provider sends the browser here with `code` and\n`state`.",
+        "description": "On success redirects to the server's public URL with the `zf_session` cookie set. Any\nfailure is the same 401, and clears the `zf_oidc_state` cookie.",
+        "operationId": "callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "description": "The authorization code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Must match the zf_oidc_state cookie",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "description": "Set by the identity provider when it refused",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Signed in; redirect to the server's public URL, sets the zf_session cookie"
+          },
+          "401": {
+            "description": "Sign-in failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OIDC sign-in is not configured",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/v1/session/oidc/start": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Starts an OIDC sign-in: redirects the browser to the identity provider.",
+        "description": "Sets the `zf_oidc_state` cookie (HttpOnly, SameSite=Lax) that the callback needs.",
+        "operationId": "start",
+        "responses": {
+          "303": {
+            "description": "Redirect to the identity provider; sets the zf_oidc_state cookie"
+          },
+          "404": {
+            "description": "OIDC sign-in is not configured",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider cannot be reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [

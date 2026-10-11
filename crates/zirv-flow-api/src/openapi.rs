@@ -4,6 +4,7 @@ use utoipa::{Modify, OpenApi};
 use crate::health::{self, StatusBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
 use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
+use crate::oidc;
 use crate::problem::Problem;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::users::{self, CreateUserRequest};
@@ -26,6 +27,8 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         session::sign_in,
         session::current,
         session::sign_out,
+        oidc::start,
+        oidc::callback,
         users::list,
         users::create,
         workspaces::list,

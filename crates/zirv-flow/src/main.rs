@@ -106,15 +106,19 @@ async fn run(
                 }
             };
             let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
-            return serve_http(
-                pool,
-                render,
-                config.server_bind(),
-                config.server_cookie_secure(),
-                stderr,
-                shutdown_signal(),
-            )
-            .await;
+            let mut state = zirv_flow_api::AppState::new(pool, render)
+                .with_cookie_secure(config.server_cookie_secure())
+                .with_local_sign_in(config.auth_local_enabled());
+            if let Some((settings, auto_create_users)) = config.oidc() {
+                state = match state.with_oidc(settings, auto_create_users) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        let _ = writeln!(stderr, "error: auth.oidc: {error}");
+                        return 2;
+                    }
+                };
+            }
+            return serve_http(state, config.server_bind(), stderr, shutdown_signal()).await;
         }
     }
 
@@ -128,10 +132,8 @@ async fn run(
 
 /// Binds `addr` and serves the API until `shutdown` completes.
 async fn serve_http(
-    pool: PgPool,
-    render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
+    state: zirv_flow_api::AppState,
     addr: SocketAddr,
-    cookie_secure: bool,
     stderr: &mut impl Write,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
@@ -145,8 +147,6 @@ async fn serve_http(
     let bound = listener.local_addr().unwrap_or(addr);
     let _ = writeln!(stderr, "listening on {bound}");
 
-    let state =
-        zirv_flow_api::AppState::new(pool, render_metrics).with_cookie_secure(cookie_secure);
     let (drain, draining) = tokio::sync::watch::channel(false);
     let server = zirv_flow_api::serve(listener, state, async move {
         let mut draining = draining;
@@ -365,6 +365,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_check_redacts_the_oidc_client_secret() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Config(ConfigCommand::Check)),
+        };
+        let mut env = database_env("postgres://localhost/database");
+        env.extend([
+            (
+                "ZIRV_FLOW_SERVER__PUBLIC_URL".into(),
+                "https://flow.example.com".into(),
+            ),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__ISSUER_URL".into(),
+                "https://idp.example.com".into(),
+            ),
+            ("ZIRV_FLOW_AUTH__OIDC__CLIENT_ID".into(), "zirv-flow".into()),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET".into(),
+                "oidc-secret-value".into(),
+            ),
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut stderr).await;
+        let output = String::from_utf8(stdout).unwrap();
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(!output.contains("oidc-secret-value"));
+        assert!(output.contains("client_secret = \"***\""));
+        assert!(output.contains("public_url = \"https://flow.example.com\""));
+    }
+
+    #[tokio::test]
     async fn a_configuration_error_exits_with_code_two() {
         let cli = Cli {
             config: None,
@@ -468,7 +502,13 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert!(users[0].is_owner);
         assert_eq!(users[0].email, "owner@example.com");
-        assert!(!users[0].password_hash.contains("correct horse battery"));
+        assert!(
+            !users[0]
+                .password_hash
+                .as_deref()
+                .unwrap()
+                .contains("correct horse battery")
+        );
     }
 
     #[sqlx::test]
@@ -544,6 +584,7 @@ mod tests {
             .password_hash
             .clone();
         assert_ne!(before, after);
+        let after = after.unwrap();
         assert!(after.starts_with("$argon2id$"));
         assert!(!after.contains("another long password"));
     }
@@ -606,21 +647,17 @@ mod tests {
             .unwrap()
     }
 
+    fn state() -> zirv_flow_api::AppState {
+        zirv_flow_api::AppState::new(lazy_pool(), Arc::new(String::new))
+    }
+
     #[tokio::test]
     async fn a_bind_failure_is_reported_with_exit_code_one() {
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap();
         let mut stderr = Vec::new();
 
-        let code = serve_http(
-            lazy_pool(),
-            Arc::new(String::new),
-            addr,
-            true,
-            &mut stderr,
-            std::future::ready(()),
-        )
-        .await;
+        let code = serve_http(state(), addr, &mut stderr, std::future::ready(())).await;
 
         assert_eq!(code, 1);
         let message = String::from_utf8(stderr).unwrap();
@@ -635,10 +672,8 @@ mod tests {
         let mut stderr = Vec::new();
 
         let code = serve_http(
-            lazy_pool(),
-            Arc::new(String::new),
+            state(),
             "127.0.0.1:0".parse().unwrap(),
-            true,
             &mut stderr,
             std::future::ready(()),
         )

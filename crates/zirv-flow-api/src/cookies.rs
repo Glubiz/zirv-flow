@@ -3,6 +3,13 @@
 use axum::http::{HeaderMap, HeaderValue, header};
 
 pub(crate) const SESSION_COOKIE: &str = "zf_session";
+/// Holds the `state` of an OIDC login in progress, so only the browser that started it can
+/// finish it.
+pub(crate) const OIDC_STATE_COOKIE: &str = "zf_oidc_state";
+/// The state cookie is sent only to the OIDC endpoints.
+const OIDC_STATE_PATH: &str = "/api/v1/session/oidc";
+/// How long a login in progress lasts, for the cookie and for the stored row.
+pub(crate) const OIDC_LOGIN_SECONDS: i64 = 600;
 
 /// How long the browser keeps the cookie: the absolute session timeout.
 pub(crate) const SESSION_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
@@ -21,19 +28,36 @@ pub(crate) fn read<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// `Set-Cookie` value that stores the session token. HttpOnly keeps it from scripts,
 /// SameSite=Lax from cross-site subrequests.
 pub(crate) fn session(token: &str, secure: bool) -> HeaderValue {
-    build(token, SESSION_MAX_AGE_SECONDS, secure)
+    build(SESSION_COOKIE, token, "/", SESSION_MAX_AGE_SECONDS, secure)
 }
 
 /// `Set-Cookie` value that removes the session cookie.
 pub(crate) fn clear(secure: bool) -> HeaderValue {
-    build("", 0, secure)
+    build(SESSION_COOKIE, "", "/", 0, secure)
 }
 
-fn build(value: &str, max_age: i64, secure: bool) -> HeaderValue {
+/// `Set-Cookie` value that stores the `state` of a login in progress. SameSite=Lax still
+/// sends it on the provider's top-level redirect back to the callback.
+pub(crate) fn oidc_state(state: &str, secure: bool) -> HeaderValue {
+    build(
+        OIDC_STATE_COOKIE,
+        state,
+        OIDC_STATE_PATH,
+        OIDC_LOGIN_SECONDS,
+        secure,
+    )
+}
+
+/// `Set-Cookie` value that removes the OIDC state cookie.
+pub(crate) fn clear_oidc_state(secure: bool) -> HeaderValue {
+    build(OIDC_STATE_COOKIE, "", OIDC_STATE_PATH, 0, secure)
+}
+
+fn build(name: &str, value: &str, path: &str, max_age: i64, secure: bool) -> HeaderValue {
     let secure = if secure { "; Secure" } else { "" };
     // Tokens are base64url, so the value is always a valid header value.
     HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure}"
+        "{name}={value}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={max_age}{secure}"
     ))
     .expect("cookie values are visible ASCII")
 }
@@ -102,5 +126,36 @@ mod tests {
 
         assert!(text.starts_with("zf_session=;"));
         assert!(text.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn the_oidc_state_cookie_is_scoped_to_the_oidc_endpoints_and_lasts_ten_minutes() {
+        let text = oidc_state("st4te", true).to_str().unwrap().to_owned();
+
+        assert!(text.starts_with("zf_oidc_state=st4te;"));
+        for attribute in [
+            "HttpOnly",
+            "SameSite=Lax",
+            "Path=/api/v1/session/oidc",
+            "Max-Age=600",
+            "Secure",
+        ] {
+            assert!(text.contains(attribute), "{text}");
+        }
+        assert!(
+            !oidc_state("st4te", false)
+                .to_str()
+                .unwrap()
+                .contains("Secure")
+        );
+    }
+
+    #[test]
+    fn clearing_the_oidc_state_cookie_expires_it_on_the_same_path() {
+        let text = clear_oidc_state(true).to_str().unwrap().to_owned();
+
+        assert!(text.starts_with("zf_oidc_state=;"));
+        assert!(text.contains("Max-Age=0"));
+        assert!(text.contains("Path=/api/v1/session/oidc"));
     }
 }

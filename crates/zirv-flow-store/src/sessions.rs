@@ -23,7 +23,7 @@ struct ActiveRow {
     last_seen_at: OffsetDateTime,
     id: Uuid,
     email: String,
-    password_hash: String,
+    password_hash: Option<String>,
     is_owner: bool,
     failed_sign_ins: i32,
     locked_until: Option<OffsetDateTime>,
@@ -157,10 +157,15 @@ mod tests {
     const ABSOLUTE: i64 = 7 * 24 * 3600;
 
     async fn user(pool: &PgPool) -> UserId {
-        create_user(pool, &Email::parse("a@example.com").unwrap(), "hash", false)
-            .await
-            .unwrap()
-            .id
+        create_user(
+            pool,
+            &Email::parse("a@example.com").unwrap(),
+            Some("hash"),
+            false,
+        )
+        .await
+        .unwrap()
+        .id
     }
 
     #[sqlx::test]

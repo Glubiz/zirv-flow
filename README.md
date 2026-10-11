@@ -18,7 +18,8 @@ from that data, and run automation flows for everyone or for a segment.
 
 Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton and local accounts with workspaces,
-sessions and API keys are implemented, but nothing is ready to use yet.
+sessions and API keys, and OIDC sign-in (Keycloak is the reference provider) are
+implemented, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -34,13 +35,22 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 |-----|------|---------|------|
 | `server.bind` | socket address | `127.0.0.1:8080` | must parse |
 | `server.cookie_secure` | bool | true | none; set false only for plain-HTTP development |
+| `server.public_url` | http(s) URL | none | required when `auth.oidc` is set; the URL users reach the server at |
+| `auth.local.enabled` | bool | true | none; false turns off `POST /api/v1/session` (404) |
+| `auth.oidc.issuer_url` | URL | none | https, or http for localhost; setting any `auth.oidc` key turns OIDC on |
+| `auth.oidc.client_id` | string | required with `auth.oidc` | not empty |
+| `auth.oidc.client_secret` | string, secret | required with `auth.oidc` | not empty; redacted as `***` |
+| `auth.oidc.scopes` | list of strings | `["openid", "email", "profile"]` | `openid` is always requested |
+| `auth.oidc.auto_create_users` | bool | false | none |
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
 | `worker.concurrency` | u32 | 4 | at least 1 |
 
 Run `zirv-flow config check` to validate the effective configuration and print
-it as TOML with the database password redacted.
+it as TOML with the database password and the OIDC client secret redacted.
+Supply the client secret as `ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET` rather than in
+a file.
 
 ## Requirements and database migrations
 
@@ -104,6 +114,22 @@ Passwords are 12 to 1024 characters.
   Secure unless `server.cookie_secure` is false). Sessions expire after 12 hours
   idle or 7 days in total. `GET /api/v1/session` shows the current user and CSRF
   token; `DELETE /api/v1/session` signs out.
+- **OIDC sign-in.** With `auth.oidc` configured, `GET /api/v1/session/oidc/start`
+  redirects (303) to the identity provider using the authorization-code flow
+  with PKCE (S256); the provider sends the browser back to
+  `{server.public_url}/api/v1/session/oidc/callback`, which starts the same
+  session as a password sign-in and redirects to `server.public_url`. The login
+  in progress is stored server-side, single-use and valid for 10 minutes, and is
+  tied to the browser by the HttpOnly `zf_oidc_state` cookie. An identity is
+  matched by issuer and subject; failing that, by a **verified** e-mail address
+  to an existing user, which is then linked. With `auto_create_users`, an
+  unknown user with a verified address is created without a password and
+  without workspace access: provider roles and groups are not mapped, so an
+  admin grants memberships. Any failure is one generic 401 (the reason goes to
+  the audit log only). Discovery is lazy and cached for 15 minutes, so the
+  server starts while the provider is down; `start` then answers 503. With
+  `auth.local.enabled = false`, `POST /api/v1/session` is 404;
+  `zirv-flow admin reset-password` still works.
 - **CSRF.** A request authenticated by the cookie that uses POST, PUT, PATCH or
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
@@ -128,11 +154,66 @@ Passwords are 12 to 1024 characters.
 | Endpoint | Who |
 |----------|-----|
 | `POST/GET/DELETE /api/v1/session` | anyone / signed in / signed in |
+| `GET /api/v1/session/oidc/start`, `GET .../oidc/callback` | anyone; 404 unless `auth.oidc` is configured |
 | `GET/POST /api/v1/users` | owner |
 | `GET /api/v1/workspaces`, `POST /api/v1/workspaces` | signed in / owner |
 | `GET /api/v1/workspaces/{ws}`, `.../members` | members, admins, owner, `read` keys |
 | `PUT/DELETE /api/v1/workspaces/{ws}/members/{user_id}` | workspace admins, owner, `admin` keys |
 | `GET/POST /api/v1/workspaces/{ws}/api-keys`, `DELETE .../api-keys/{id}` | workspace admins, owner, `admin` keys |
+
+## Sign in with Keycloak
+
+Any OpenID Connect provider that publishes discovery works; Keycloak is the
+reference. This runs Keycloak 26.8.0 locally on port 8081 and zirv-flow on 8080.
+
+1. Start Keycloak (development mode, admin console at http://localhost:8081):
+
+   ```sh
+   docker run -d --name zf-keycloak -p 8081:8080      -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin      quay.io/keycloak/keycloak:26.8.0 start-dev
+   ```
+
+2. Create the realm, a confidential client and a user with a verified e-mail
+   (wait until the container logs `Listening on`). Git Bash on Windows needs
+   `export MSYS_NO_PATHCONV=1` first:
+
+   ```sh
+   kcadm="docker exec zf-keycloak /opt/keycloak/bin/kcadm.sh"
+   $kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin
+   $kcadm create realms -s realm=zirv -s enabled=true
+   $kcadm create clients -r zirv -s clientId=zirv-flow -s enabled=true      -s protocol=openid-connect -s publicClient=false -s secret=zirv-flow-dev-secret      -s standardFlowEnabled=true -s directAccessGrantsEnabled=false      -s 'redirectUris=["http://localhost:8080/api/v1/session/oidc/callback"]'      -s 'attributes."pkce.code.challenge.method"=S256'
+   $kcadm create users -r zirv -s username=jane -s email=jane@example.com      -s emailVerified=true -s firstName=Jane -s lastName=Doe -s enabled=true
+   $kcadm set-password -r zirv --username jane --new-password jane-password
+   ```
+
+   The same in the admin console: create realm `zirv`; under Clients create an
+   OpenID Connect client `zirv-flow` with Client authentication on, Standard flow
+   on (everything else off), valid redirect URI
+   `http://localhost:8080/api/v1/session/oidc/callback`, then on its Advanced tab
+   set Proof Key for Code Exchange Code Challenge Method to `S256` and copy the
+   secret from the Credentials tab; under Users create `jane` with Email
+   `jane@example.com`, Email verified on, and a password (Temporary off).
+
+3. Configure zirv-flow (`zirv-flow --config zirv-flow.toml serve`), with the
+   database settings as usual. `cookie_secure = false` is for plain-HTTP
+   development only:
+
+   ```toml
+   [server]
+   public_url = "http://localhost:8080"
+   cookie_secure = false
+
+   [auth.oidc]
+   issuer_url = "http://localhost:8081/realms/zirv"
+   client_id = "zirv-flow"
+   client_secret = "zirv-flow-dev-secret" # prefer ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET
+   auto_create_users = true               # or create jane first, see below
+   ```
+
+4. Open http://localhost:8080/api/v1/session/oidc/start, sign in as `jane`, and
+   you land on `http://localhost:8080/` with a session. `GET /api/v1/session`
+   shows the user. With `auto_create_users = false`, create the user first
+   (`zirv-flow admin create-owner --email jane@example.com`, or
+   `POST /api/v1/users`); the verified address links it on first sign-in.
 
 ## Development
 

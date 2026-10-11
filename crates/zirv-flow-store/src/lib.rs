@@ -3,6 +3,7 @@
 mod accounts;
 mod api_keys;
 mod audit;
+mod identities;
 mod migrations;
 mod pool;
 mod sessions;
@@ -20,6 +21,10 @@ pub use api_keys::{
     touch_api_key,
 };
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
+pub use identities::{
+    OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
+    take_oidc_login,
+};
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use pool::{PgPool, Tx, begin, commit, connect};
 pub use sessions::{
@@ -180,8 +185,10 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 5] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 7] = [
         "users",
+        "user_identities",
+        "oidc_logins",
         "workspaces",
         "sessions",
         "audit_log",
