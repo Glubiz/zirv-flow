@@ -136,6 +136,32 @@ impl<'a> RowReader<'a> {
     }
 }
 
+/// What a test hooks into a pass: a simulated crash after some batches, and work done "behind
+/// the handler's back" just before a batch is committed. Release builds pass the default.
+#[derive(Default)]
+pub(super) struct Probe {
+    pub(super) stop_after: Option<usize>,
+    pub(super) before_commit: Option<Box<dyn Fn() -> BoxFuture + Send + Sync>>,
+}
+
+pub(super) type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+impl Probe {
+    pub(super) fn stopping_after(batches: Option<usize>) -> Self {
+        Self {
+            stop_after: batches,
+            before_commit: None,
+        }
+    }
+
+    /// Runs the `before_commit` hook once, if there is one.
+    pub(super) async fn before_commit(&self) {
+        if let Some(hook) = &self.before_commit {
+            hook().await;
+        }
+    }
+}
+
 /// What mapping needs besides the rows.
 pub(super) struct Planner<'a> {
     pub(super) mapping: &'a Mapping,

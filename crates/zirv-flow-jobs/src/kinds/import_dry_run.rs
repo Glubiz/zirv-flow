@@ -13,7 +13,7 @@ use zirv_flow_store::{
     find_import, finish_import_dry_run,
 };
 
-use super::import_rows::{BATCH_ROWS, Planner, RowReader, hex, load_catalog};
+use super::import_rows::{BATCH_ROWS, Planner, Probe, RowReader, hex, load_catalog};
 use super::import_run::{fail, import_id, unreadable};
 use crate::{JobContext, JobError, JobKind};
 
@@ -32,6 +32,15 @@ pub(super) async fn dry_run_import(
     ctx: &mut JobContext<'_>,
     payload: &Value,
     stop_after: Option<usize>,
+) -> Result<(), JobError> {
+    dry_run_import_probed(ctx, payload, &Probe::stopping_after(stop_after)).await
+}
+
+/// [`dry_run_import`] with the test hooks of `probe`.
+pub(super) async fn dry_run_import_probed(
+    ctx: &mut JobContext<'_>,
+    payload: &Value,
+    probe: &Probe,
 ) -> Result<(), JobError> {
     let id = import_id(payload)?;
     let workspace = ctx
@@ -91,13 +100,29 @@ pub(super) async fn dry_run_import(
             accepted: i64::try_from(planned.records.len()).unwrap_or(i64::MAX),
             rejected: &planned.rejected,
         };
-        // Cancelled, or another attempt got further.
+        probe.before_commit().await;
         if !commit_dry_run_batch(&pool, &batch).await? {
-            return Ok(());
+            // The checkpoint moved: a cancel, or an attempt that got further. Go on from where
+            // the import now stands, unless it ended.
+            let Some(now) = find_import(&pool, workspace, id).await? else {
+                return Ok(());
+            };
+            if now.status != ImportStatus::DryRunning {
+                return Ok(());
+            }
+            if now.rows_done == done {
+                return Err(JobError::new("the dry run batch kept conflicting"));
+            }
+            reader = RowReader::new(&pool, &now);
+            if let Err(error) = reader.skip(now.rows_done).await {
+                return unreadable(&pool, workspace, id, error).await;
+            }
+            done = now.rows_done;
+            continue;
         }
         done += count;
         batches += 1;
-        if stop_after == Some(batches) {
+        if probe.stop_after == Some(batches) {
             return Err(JobError::new("stopped for a test"));
         }
     }
@@ -191,6 +216,10 @@ mod tests {
         import: &Import,
         stop_after: Option<usize>,
     ) -> Result<(), JobError> {
+        attempt_probed(pool, import, &Probe::stopping_after(stop_after)).await
+    }
+
+    async fn attempt_probed(pool: &PgPool, import: &Import, probe: &Probe) -> Result<(), JobError> {
         let claimed = zirv_flow_store::ClaimedJob {
             id: Uuid::now_v7(),
             workspace_id: Some(import.workspace_id),
@@ -209,7 +238,7 @@ mod tests {
             redaction_key: None,
             batch_size: 500,
         });
-        dry_run_import(&mut ctx, &claimed.payload.clone(), stop_after).await
+        dry_run_import_probed(&mut ctx, &claimed.payload.clone(), probe).await
     }
 
     async fn count(pool: &PgPool, table: &str) -> i64 {
@@ -275,6 +304,35 @@ mod tests {
         assert_eq!(count(&pool, "import_rejects").await, 110);
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dry_run_batch_fenced_out_goes_on_from_the_checkpoint_to_the_end(pool: PgPool) {
+        let (ws, import) = dry_running(&pool, 1100, 10).await;
+        let behind = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = Probe {
+            stop_after: None,
+            before_commit: Some(Box::new({
+                let (pool, import, behind) = (pool.clone(), import.clone(), behind.clone());
+                move || {
+                    let (pool, import, behind) = (pool.clone(), import.clone(), behind.clone());
+                    Box::pin(async move {
+                        if !behind.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            assert!(attempt(&pool, &import, Some(1)).await.is_err());
+                        }
+                    })
+                }
+            })),
+        };
+
+        attempt_probed(&pool, &import, &probe).await.unwrap();
+
+        let done = find_import(&pool, ws, import.id).await.unwrap().unwrap();
+        assert_eq!(done.status, ImportStatus::DryRunDone);
+        assert_eq!(
+            (done.rows_done, done.rows_applied, done.rows_rejected),
+            (1100, 990, 110)
+        );
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dry_run_that_is_not_running_does_nothing(pool: PgPool) {

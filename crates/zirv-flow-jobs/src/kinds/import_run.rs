@@ -21,7 +21,7 @@ use zirv_flow_store::{
     commit_import_batch, fail_import, find_import, finish_import_run,
 };
 
-use super::import_rows::{BATCH_ROWS, Planner, ReadError, RowReader, hex, load_catalog};
+use super::import_rows::{BATCH_ROWS, Planner, Probe, ReadError, RowReader, hex, load_catalog};
 use super::ingest_drain::retrying;
 use crate::{JobContext, JobError, JobKind};
 
@@ -96,6 +96,15 @@ pub(super) async fn run_import(
     payload: &Value,
     stop_after: Option<usize>,
 ) -> Result<(), JobError> {
+    run_import_probed(ctx, payload, &Probe::stopping_after(stop_after)).await
+}
+
+/// [`run_import`] with the test hooks of `probe`.
+pub(super) async fn run_import_probed(
+    ctx: &mut JobContext<'_>,
+    payload: &Value,
+    probe: &Probe,
+) -> Result<(), JobError> {
     let id = import_id(payload)?;
     let workspace = ctx
         .workspace_id()
@@ -156,6 +165,7 @@ pub(super) async fn run_import(
             rejected: &planned.rejected,
             trace: &trace,
         };
+        probe.before_commit().await;
         match commit_batch(&pool, &batch).await? {
             BatchOutcome::Committed(progress) => {
                 done = progress.rows_done;
@@ -164,14 +174,31 @@ pub(super) async fn run_import(
                     return Ok(());
                 }
             }
-            // Cancelled, or another attempt got further.
-            BatchOutcome::Superseded => return Ok(()),
+            // The checkpoint moved: a cancel, or an attempt that got further (or a commit this
+            // one never heard of). Go on from where the import now stands, unless it ended.
+            BatchOutcome::Superseded => {
+                let Some(now) = find_import(&pool, workspace, id).await? else {
+                    return Ok(());
+                };
+                if now.status != ImportStatus::Running {
+                    return Ok(());
+                }
+                if now.rows_done == done {
+                    return Err(CONFLICTED);
+                }
+                reader = RowReader::new(&pool, &now);
+                if let Err(error) = reader.skip(now.rows_done).await {
+                    return unreadable(&pool, workspace, id, error).await;
+                }
+                done = now.rows_done;
+                continue;
+            }
             BatchOutcome::ListMissing => {
                 return fail(&pool, workspace, id, "list_not_found").await;
             }
         }
         batches += 1;
-        if stop_after == Some(batches) {
+        if probe.stop_after == Some(batches) {
             return Err(JobError::new("stopped for a test"));
         }
     }
@@ -333,6 +360,10 @@ mod tests {
         import: &Import,
         stop_after: Option<usize>,
     ) -> Result<(), JobError> {
+        attempt_probed(pool, import, &Probe::stopping_after(stop_after)).await
+    }
+
+    async fn attempt_probed(pool: &PgPool, import: &Import, probe: &Probe) -> Result<(), JobError> {
         let claimed = zirv_flow_store::ClaimedJob {
             id: Uuid::now_v7(),
             workspace_id: Some(import.workspace_id),
@@ -351,7 +382,7 @@ mod tests {
             redaction_key: None,
             batch_size: 500,
         });
-        run_import(&mut ctx, &claimed.payload.clone(), stop_after).await
+        run_import_probed(&mut ctx, &claimed.payload.clone(), probe).await
     }
 
     async fn reread(pool: &PgPool, import: &Import) -> Import {
@@ -540,6 +571,42 @@ mod tests {
         assert_eq!(snapshot(&pool, ws).await.1, 1200, "the applied rows stay");
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_fenced_out_by_an_attempt_that_got_further_goes_on_and_applies_every_row_once(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let import = start(&pool, ws, &file(1200, 0), 1200, None).await;
+        let behind = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = Probe {
+            stop_after: None,
+            before_commit: Some(Box::new({
+                let (pool, import, behind) = (pool.clone(), import.clone(), behind.clone());
+                move || {
+                    let (pool, import, behind) = (pool.clone(), import.clone(), behind.clone());
+                    Box::pin(async move {
+                        // Once, another attempt commits the first batch before this one does.
+                        if !behind.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            assert!(attempt(&pool, &import, Some(1)).await.is_err());
+                        }
+                    })
+                }
+            })),
+        };
+
+        attempt_probed(&pool, &import, &probe).await.unwrap();
+
+        let done = reread(&pool, &import).await;
+        assert_eq!(done.status, ImportStatus::Succeeded);
+        assert_eq!(
+            (done.rows_done, done.rows_applied, done.rows_unchanged),
+            (1200, 1200, 0),
+            "every row was applied exactly once"
+        );
+        assert_eq!(snapshot(&pool, ws).await.1, 1200);
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_cancelled_run_stops_at_the_next_batch_boundary(pool: PgPool) {
