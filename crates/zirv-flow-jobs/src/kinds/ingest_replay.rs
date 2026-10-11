@@ -26,13 +26,16 @@ impl JobKind for IngestReplay {
                 "the payload names another workspace than the job",
             ));
         }
-        let pool = ctx
+        let settings = ctx
             .ingest()
-            .ok_or(JobError::new("the worker has no pool for the replay"))?
-            .pool
-            .clone();
+            .ok_or(JobError::new("the worker has no pool for the replay"))?;
+        let pool = settings.pool.clone();
+        let key = settings
+            .redaction_key
+            .clone()
+            .ok_or(JobError::new("the worker has no master key"))?;
         let trace = ctx.trace().clone();
-        let totals = replay_rejects(&pool, workspace, &ids, &trace, emit_triggers).await?;
+        let totals = replay_rejects(&pool, workspace, &key, &ids, &trace, emit_triggers).await?;
         info!(
             stored = totals.stored(),
             flagged = totals.flagged,
@@ -139,7 +142,7 @@ mod tests {
             .await
             .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = std::sync::Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Redaction));
         let record = |message: &str, total: Value| EventRecord {
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],
@@ -191,7 +194,7 @@ mod tests {
             let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
             let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(IngestSettings {
                 pool: pool.clone(),
-                redaction_key: None,
+                redaction_key: Some(key.clone()),
                 batch_size: 10,
             });
             IngestReplay

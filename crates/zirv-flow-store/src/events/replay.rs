@@ -20,10 +20,10 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::events::{
-    EventFlag, PropertyType, Reason, UnplannedPolicy, ValidationState, apply_time_rules,
-    check_properties, evaluate,
+    EventFlag, PropertyType, Reason, RedactionRules, UnplannedPolicy, ValidationState,
+    apply_time_rules, check_properties, evaluate, redact,
 };
-use zirv_flow_core::{TraceContext, WorkspaceId};
+use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use super::apply::{NewEvent, insert_event};
 use super::schemas::{EventPolicy, PublishedSchema, find_published_schema, get_event_policy};
@@ -129,6 +129,8 @@ struct RejectRow {
     received_at: OffsetDateTime,
     trace_id: Uuid,
     replayed_at: Option<OffsetDateTime>,
+    /// The redaction rules in force when the reject was written; null for a legacy reject.
+    redaction: Option<Value>,
 }
 
 /// What judging a reject again finds.
@@ -162,6 +164,9 @@ pub struct ReplayPrediction {
     /// Properties the schema types as something other than a string that the policy hashes:
     /// the stored payload holds a hash, so they cannot validate.
     pub redacted_type_changed: Vec<String>,
+    /// The redaction rules differ from the ones the reject was stored under, so storing it
+    /// applies the current rules that its payload has not had yet.
+    pub redaction_changed: bool,
 }
 
 /// Judgements that share their reads across a request.
@@ -318,10 +323,10 @@ async fn load_reject(
 ) -> Result<Option<RejectRow>, StoreError> {
     let sql = if lock {
         "SELECT id, kind, source, name, payload, person_id, message_id, received_at, trace_id, \
-                replayed_at FROM ingest_rejects WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
+                replayed_at, redaction FROM ingest_rejects WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
     } else {
         "SELECT id, kind, source, name, payload, person_id, message_id, received_at, trace_id, \
-                replayed_at FROM ingest_rejects WHERE workspace_id = $1 AND id = $2"
+                replayed_at, redaction FROM ingest_rejects WHERE workspace_id = $1 AND id = $2"
     };
     sqlx::query_as(sql)
         .bind(workspace.as_uuid())
@@ -356,7 +361,7 @@ async fn preview_in(
 ) -> Result<Vec<ReplayPrediction>, StoreError> {
     let mut rejects: Vec<RejectRow> = sqlx::query_as(
         "SELECT id, kind, source, name, payload, person_id, message_id, received_at, trace_id, \
-                replayed_at FROM ingest_rejects WHERE workspace_id = $1 AND id = ANY($2)",
+                replayed_at, redaction FROM ingest_rejects WHERE workspace_id = $1 AND id = ANY($2)",
     )
     .bind(workspace.as_uuid())
     .bind(ids)
@@ -413,7 +418,7 @@ async fn preview_in(
             .as_ref()
             .and_then(|message| stored.get(message).copied());
         let verdict = decide(&reject, person, original, &policy, schema.as_ref());
-        let changed = redacted_type_changed(&policy, schema.as_ref(), &reject.payload);
+        let changed = redacted_type_changed(&policy, &reject, schema.as_ref());
         let (outcome, reason, reasons) = match verdict {
             Verdict::AlreadyReplayed => ("already_replayed", None, Vec::new()),
             Verdict::Duplicate { .. } => ("duplicate", None, Vec::new()),
@@ -434,26 +439,70 @@ async fn preview_in(
             reason,
             reasons,
             redacted_type_changed: changed,
+            redaction_changed: redaction_changed(
+                &policy.redaction,
+                recorded_rules(&reject).as_ref(),
+            ),
         });
     }
     Ok(predictions)
 }
 
+/// The rules the reject was written under; none for a legacy reject.
+fn recorded_rules(reject: &RejectRow) -> Option<RedactionRules> {
+    reject
+        .redaction
+        .as_ref()
+        .and_then(|rules| serde_json::from_value(rules.clone()).ok())
+}
+
+/// Whether the current rules differ from the recorded ones. For a legacy reject nothing is
+/// recorded, so any current rule counts.
+fn redaction_changed(current: &RedactionRules, recorded: Option<&RedactionRules>) -> bool {
+    match recorded {
+        Some(recorded) => recorded != current,
+        None => {
+            !(current.drop.is_empty() && current.hash.is_empty() && current.truncate_ip.is_empty())
+        }
+    }
+}
+
+/// The rules to apply when storing a replayed reject: `drop` and `truncate_ip` in full, both
+/// idempotent, and `hash` only for paths the recorded rules did not already hash, so a value
+/// is never hashed twice. A legacy reject applies the current rules in full.
+fn replay_rules(current: &RedactionRules, recorded: Option<&RedactionRules>) -> RedactionRules {
+    RedactionRules {
+        drop: current.drop.clone(),
+        hash: current
+            .hash
+            .iter()
+            .filter(|path| recorded.is_none_or(|rules| !rules.hash.contains(path)))
+            .cloned()
+            .collect(),
+        truncate_ip: current.truncate_ip.clone(),
+    }
+}
+
+/// Properties the schema types as something other than a string that the payload already
+/// holds as a hash, so they cannot validate. A legacy reject may have been hashed under any
+/// current path.
 fn redacted_type_changed(
     policy: &EventPolicy,
+    reject: &RejectRow,
     schema: Option<&PublishedSchema>,
-    payload: &Value,
 ) -> Vec<String> {
     let Some(schema) = schema else {
         return Vec::new();
     };
-    let properties = payload_properties(payload);
+    let applied =
+        recorded_rules(reject).map_or_else(|| policy.redaction.hash.clone(), |rules| rules.hash);
+    let properties = payload_properties(&reject.payload);
     let mut changed: Vec<String> = schema
         .properties
         .iter()
         .filter(|declared| {
             declared.property_type != PropertyType::String
-                && policy.redaction.hash.contains(&declared.name)
+                && applied.contains(&declared.name)
                 && properties.contains_key(&declared.name)
         })
         .map(|declared| declared.name.clone())
@@ -486,9 +535,13 @@ impl ReplayTotals {
 /// the stored events are flagged `no_triggers`.
 ///
 /// Replaying a reject twice stores one event: the second finds `replayed_at` set.
+///
+/// The stored event gets the current redaction rules its payload has not had yet (see
+/// [`replay_rules`]); `key` hashes the paths that are new.
 pub async fn replay_rejects(
     pool: &PgPool,
     workspace: WorkspaceId,
+    key: &HmacKey,
     ids: &[Uuid],
     trace: &TraceContext,
     emit_triggers: bool,
@@ -517,6 +570,7 @@ pub async fn replay_rejects(
                 if store_replayed(
                     &mut tx,
                     workspace,
+                    key,
                     &mut judge,
                     &reject,
                     person_id,
@@ -566,6 +620,7 @@ async fn mark_replayed(
 async fn store_replayed(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
+    key: &HmacKey,
     judge: &mut Judge,
     reject: &RejectRow,
     person_id: Uuid,
@@ -574,7 +629,14 @@ async fn store_replayed(
     emit_triggers: bool,
 ) -> Result<bool, StoreError> {
     let policy = judge.policy(connection, workspace).await?;
-    let properties = payload_properties(&reject.payload);
+    // Validation saw the payload as stored; what is kept has the rules it has not had yet.
+    let mut properties = payload_properties(&reject.payload);
+    redact(
+        &mut properties,
+        &replay_rules(&policy.redaction, recorded_rules(reject).as_ref()),
+        workspace,
+        key,
+    );
     let timing = apply_time_rules(
         payload_timestamp(&reject.payload),
         reject.received_at,
@@ -815,10 +877,10 @@ mod tests {
         fix_the_schema(&pool, ws).await;
         let trace = manual_trace();
 
-        let first = replay_rejects(&pool, ws, &[reject], &trace, false)
+        let first = replay_rejects(&pool, ws, &key(), &[reject], &trace, false)
             .await
             .unwrap();
-        let second = replay_rejects(&pool, ws, &[reject], &trace, false)
+        let second = replay_rejects(&pool, ws, &key(), &[reject], &trace, false)
             .await
             .unwrap();
 
@@ -867,7 +929,7 @@ mod tests {
         let (ws, reject) = rejected(&pool).await;
         fix_the_schema(&pool, ws).await;
 
-        replay_rejects(&pool, ws, &[reject], &manual_trace(), true)
+        replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), true)
             .await
             .unwrap();
 
@@ -896,14 +958,14 @@ mod tests {
         .await
         .unwrap();
 
-        let duplicate = replay_rejects(&pool, ws, &[reject], &manual_trace(), false)
+        let duplicate = replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
             .await
             .unwrap();
 
         assert_eq!(duplicate.duplicate, 1);
         assert_eq!(count(&pool, "events").await, 1);
         let resolved: Option<OffsetDateTime> =
-            sqlx::query_scalar("SELECT replayed_at FROM ingest_rejects WHERE id = $1")
+            sqlx::query_scalar("SELECT replayed_at, redaction FROM ingest_rejects WHERE id = $1")
                 .bind(reject)
                 .fetch_one(&pool)
                 .await
@@ -939,7 +1001,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let preview = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
-        let totals = replay_rejects(&pool, ws, &[reject], &manual_trace(), true)
+        let totals = replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), true)
             .await
             .unwrap();
 
@@ -955,7 +1017,7 @@ mod tests {
     async fn without_a_fix_nothing_is_stored_and_the_reject_stays_open(pool: PgPool) {
         let (ws, reject) = rejected(&pool).await;
 
-        let totals = replay_rejects(&pool, ws, &[reject], &manual_trace(), false)
+        let totals = replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
             .await
             .unwrap();
 
@@ -1000,7 +1062,7 @@ mod tests {
         };
 
         let found = select_rejects(&pool, ws, filter).await.unwrap().unwrap();
-        replay_rejects(&pool, ws, &found, &manual_trace(), false)
+        replay_rejects(&pool, ws, &key(), &found, &manual_trace(), false)
             .await
             .unwrap();
         let after = select_rejects(&pool, ws, filter).await.unwrap().unwrap();
@@ -1032,8 +1094,205 @@ mod tests {
         .await
         .unwrap();
 
+        // The reject was stored while the policy already hashed `total`.
+        sqlx::query("UPDATE ingest_rejects SET redaction = $2 WHERE id = $1")
+            .bind(reject)
+            .bind(json!({"drop": [], "hash": ["total"], "truncate_ip": []}))
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let prediction = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
 
         assert_eq!(prediction[0].redacted_type_changed, ["total"]);
+    }
+
+    /// A block-mode `order` schema (number `total`, text `phone`, `secret`, `token`, `ip`), a
+    /// policy that hashes `secret`, and one reject of an event with a text `total`.
+    async fn rejected_with_values(pool: &PgPool) -> (WorkspaceId, Uuid) {
+        let ws = workspace(pool).await;
+        let all = |total: PropertyType| {
+            vec![
+                property("total", total, true),
+                property("phone", PropertyType::String, false),
+                property("secret", PropertyType::String, false),
+                property("token", PropertyType::String, false),
+                property("ip", PropertyType::String, false),
+            ]
+        };
+        create_event_schema(
+            pool,
+            ws,
+            &NewEventSchema {
+                name: "order".into(),
+                mode: EventMode::Block,
+                description: String::new(),
+                properties: all(PropertyType::Number),
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(pool).await.unwrap();
+        publish_schema_draft(&mut tx, ws, "order", None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        set_event_policy(
+            pool,
+            ws,
+            &EventPolicy {
+                redaction: RedactionRules {
+                    drop: Vec::new(),
+                    hash: vec!["secret".into()],
+                    truncate_ip: Vec::new(),
+                },
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+        let first = record("a@example.com", "m-0", json!({"total": 1}));
+        apply_event_batch(pool, ws, &key(), &[first]).await.unwrap();
+        let outcomes = apply_event_batch(
+            pool,
+            ws,
+            &key(),
+            &[record(
+                "a@example.com",
+                "m-1",
+                json!({"total": "ten", "phone": "555-1234", "secret": "s3", "token": "tok",
+                       "ip": "203.0.113.9"}),
+            )],
+        )
+        .await
+        .unwrap();
+        let EventOutcome::Rejected { reject_id, .. } = outcomes[0] else {
+            panic!("not rejected");
+        };
+        let mut tx = begin(pool).await.unwrap();
+        save_schema_draft(&mut *tx, ws, "order", &all(PropertyType::String))
+            .await
+            .unwrap();
+        publish_schema_draft(&mut tx, ws, "order", None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        (ws, reject_id)
+    }
+
+    async fn stricter_rules(pool: &PgPool, ws: WorkspaceId) {
+        set_event_policy(
+            pool,
+            ws,
+            &EventPolicy {
+                redaction: RedactionRules {
+                    drop: vec!["phone".into()],
+                    hash: vec!["secret".into(), "token".into()],
+                    truncate_ip: vec!["ip".into()],
+                },
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_applies_the_rules_added_since_and_never_hashes_a_path_twice(pool: PgPool) {
+        let (ws, reject) = rejected_with_values(&pool).await;
+        stricter_rules(&pool, ws).await;
+        let (recorded, payload): (Value, Value) =
+            sqlx::query_as("SELECT redaction, payload FROM ingest_rejects WHERE id = $1")
+                .bind(reject)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let hashed_once = payload["properties"]["secret"].as_str().unwrap().to_owned();
+
+        let preview = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
+        replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(recorded["hash"], json!(["secret"]));
+        assert_eq!(hashed_once.len(), 64);
+        assert!(preview[0].redaction_changed);
+        let stored: Value =
+            sqlx::query_scalar("SELECT properties FROM events WHERE message_id = 'm-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.get("phone").is_none(), "{stored}");
+        assert_eq!(stored["secret"], hashed_once.as_str());
+        let token = stored["token"].as_str().unwrap();
+        assert_eq!(token.len(), 64);
+        assert_ne!(token, "tok");
+        assert_eq!(stored["ip"], "203.0.113.0");
+        assert!(!stored.to_string().contains("555-1234"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn unchanged_rules_change_nothing_and_a_legacy_reject_gets_the_full_current_rules(
+        pool: PgPool,
+    ) {
+        let (ws, reject) = rejected_with_values(&pool).await;
+        let unchanged = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
+        sqlx::query("UPDATE ingest_rejects SET redaction = NULL WHERE id = $1")
+            .bind(reject)
+            .execute(&pool)
+            .await
+            .unwrap();
+        stricter_rules(&pool, ws).await;
+
+        let legacy = preview_replay(&pool, ws, &[reject], LONG).await.unwrap();
+        replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
+            .await
+            .unwrap();
+
+        assert!(!unchanged[0].redaction_changed);
+        assert!(legacy[0].redaction_changed);
+        let stored: Value =
+            sqlx::query_scalar("SELECT properties FROM events WHERE message_id = 'm-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.get("phone").is_none());
+        assert_eq!(stored["token"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn replay_rules_hash_only_paths_the_record_did_not() {
+        let current = RedactionRules {
+            drop: vec!["a".into()],
+            hash: vec!["x".into(), "y".into()],
+            truncate_ip: vec!["ip".into()],
+        };
+        let recorded = RedactionRules {
+            drop: Vec::new(),
+            hash: vec!["x".into()],
+            truncate_ip: Vec::new(),
+        };
+
+        let with_record = replay_rules(&current, Some(&recorded));
+        let legacy = replay_rules(&current, None);
+
+        assert_eq!(with_record.hash, ["y"]);
+        assert_eq!(
+            (with_record.drop.clone(), with_record.truncate_ip),
+            (current.drop.clone(), current.truncate_ip.clone())
+        );
+        assert_eq!(legacy.hash, ["x", "y"]);
+        assert!(redaction_changed(&current, Some(&recorded)));
+        assert!(!redaction_changed(&current, Some(&current)));
+        assert!(!redaction_changed(
+            &RedactionRules {
+                drop: vec![],
+                hash: vec![],
+                truncate_ip: vec![]
+            },
+            None
+        ));
     }
 }

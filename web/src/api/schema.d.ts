@@ -2582,6 +2582,11 @@ export interface components {
              *     The stored payload holds their hash, so they fail validation.
              */
             redacted_type_changed: string[];
+            /**
+             * @description The redaction rules changed since the reject was stored: storing it applies the
+             *     current `drop` and `truncate_ip` rules and any `hash` path it has not had yet.
+             */
+            redaction_changed: boolean;
             /** Format: uuid */
             reject_id: string;
         };

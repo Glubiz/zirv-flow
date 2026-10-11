@@ -55,3 +55,8 @@ EXCEPTION WHEN others THEN
     RETURN NULL;
 END
 $$;
+
+-- The redaction rules in force when a reject was written, so a replay applies only what the
+-- payload has not had yet (a hash is bare hex and cannot be told from a value). Null for a
+-- reject written before this column existed: nothing is known to have been applied.
+ALTER TABLE ingest_rejects ADD COLUMN redaction jsonb;

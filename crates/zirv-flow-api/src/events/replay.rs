@@ -75,6 +75,9 @@ pub(crate) struct PredictionBody {
     /// Properties the policy hashes that the schema types as something other than a string.
     /// The stored payload holds their hash, so they fail validation.
     redacted_type_changed: Vec<String>,
+    /// The redaction rules changed since the reject was stored: storing it applies the
+    /// current `drop` and `truncate_ip` rules and any `hash` path it has not had yet.
+    redaction_changed: bool,
 }
 
 impl From<ReplayPrediction> for PredictionBody {
@@ -89,6 +92,7 @@ impl From<ReplayPrediction> for PredictionBody {
                 .map(|reason| ReasonBody::new(reason.property, reason.reason.as_str()))
                 .collect(),
             redacted_type_changed: prediction.redacted_type_changed,
+            redaction_changed: prediction.redaction_changed,
         }
     }
 }
@@ -318,6 +322,7 @@ mod tests {
                 reason: ReasonCode::WrongType,
             }],
             redacted_type_changed: vec!["total".into()],
+            redaction_changed: true,
         };
 
         let shown = serde_json::to_value(PredictionBody::from(prediction)).unwrap();
@@ -338,6 +343,7 @@ mod tests {
             reason: None,
             reasons: Vec::new(),
             redacted_type_changed: Vec::new(),
+            redaction_changed: false,
         };
         let predictions = [
             body("accept"),

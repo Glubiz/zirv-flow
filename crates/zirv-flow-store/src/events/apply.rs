@@ -554,8 +554,8 @@ async fn refuse(
     let inserted: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO ingest_rejects \
             (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, payload, \
-             person_id, message_id, trace_id) \
-         VALUES ($1, $2, $3, $4, 'event', $5, $6, $7, $8, $9, $10, $11, $12) \
+             person_id, message_id, trace_id, redaction) \
+         VALUES ($1, $2, $3, $4, 'event', $5, $6, $7, $8, $9, $10, $11, $12, $13) \
          ON CONFLICT (workspace_id, message_id) \
             WHERE message_id IS NOT NULL AND replayed_at IS NULL DO NOTHING \
          RETURNING id",
@@ -572,6 +572,7 @@ async fn refuse(
     .bind(refusal.person_id)
     .bind(message_id)
     .bind(record.trace.trace_id.as_uuid())
+    .bind(Json(&policy.redaction))
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -645,8 +646,8 @@ pub(crate) async fn reject_apply_failed(
     let inserted: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO ingest_rejects \
             (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, payload, \
-             message_id, trace_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'apply_failed', '[]'::jsonb, $7, $8, $9, $10) \
+             message_id, trace_id, redaction) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'apply_failed', '[]'::jsonb, $7, $8, $9, $10, $11) \
          ON CONFLICT (workspace_id, message_id) \
             WHERE message_id IS NOT NULL AND replayed_at IS NULL DO NOTHING \
          RETURNING id",
@@ -661,6 +662,7 @@ pub(crate) async fn reject_apply_failed(
     .bind(Json(&payload))
     .bind(item.message_id)
     .bind(item.trace.trace_id.as_uuid())
+    .bind(Json(&policy.redaction))
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;

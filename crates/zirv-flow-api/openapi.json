@@ -10988,7 +10988,8 @@
           "reject_id",
           "outcome",
           "reasons",
-          "redacted_type_changed"
+          "redacted_type_changed",
+          "redaction_changed"
         ],
         "properties": {
           "outcome": {
@@ -11014,6 +11015,10 @@
               "type": "string"
             },
             "description": "Properties the policy hashes that the schema types as something other than a string.\nThe stored payload holds their hash, so they fail validation."
+          },
+          "redaction_changed": {
+            "type": "boolean",
+            "description": "The redaction rules changed since the reject was stored: storing it applies the\ncurrent `drop` and `truncate_ip` rules and any `hash` path it has not had yet."
           },
           "reject_id": {
             "type": "string",
