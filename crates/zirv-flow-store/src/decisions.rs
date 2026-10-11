@@ -293,7 +293,9 @@ mod tests {
     fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
         assert_eq!(BENCH_NO_DECISIONS, cfg!(feature = "bench-no-decisions"));
         #[cfg(not(feature = "bench-no-decisions"))]
-        assert!(!BENCH_NO_DECISIONS);
+        const {
+            assert!(!BENCH_NO_DECISIONS)
+        };
     }
 
     #[cfg(feature = "bench-no-decisions")]
