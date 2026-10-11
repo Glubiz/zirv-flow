@@ -789,7 +789,8 @@ mod tests {
             .max_connections(1)
             .connect_lazy_with((*pool.connect_options()).clone());
         let mut config = test_config(1);
-        config.lease = Duration::from_secs(2);
+        // Heartbeats every 2 s against a 6 s lease: only a stall of about 4 s fails this.
+        config.lease = Duration::from_secs(6);
         let (stop, stopped) = watch::channel(false);
         let handle = tokio::spawn(Worker::new(given, registry(), config).run(stopped));
         wait_until(&pool, "the listener to subscribe", LISTENING).await;
