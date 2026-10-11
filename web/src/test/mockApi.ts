@@ -13,10 +13,6 @@ export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-export function noContent(): Response {
-  return new Response(null, { status: 204 });
-}
-
 export function problem(status: number, title: string, detail: string, traceId?: string): Response {
   return new Response(
     JSON.stringify({ type: "about:blank", title, status, detail, trace_id: traceId ?? null, request_id: null }),
