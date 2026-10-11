@@ -1,11 +1,26 @@
 //! What a running handler sees of its job.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
-use zirv_flow_store::{ClaimedJob, EventRetention, NewDecision, NewJob, PgConnection};
+
+use zirv_flow_store::{
+    ClaimedJob, EventRetention, HmacKey, NewDecision, NewJob, PgConnection, PgPool,
+};
 
 use crate::JobError;
+
+/// What the ingest drain needs beyond the handler's transaction: a pool for its own
+/// transaction per batch (the job's transaction only holds the lease), the redaction key
+/// and the batch size.
+#[derive(Clone)]
+pub(crate) struct IngestSettings {
+    pub(crate) pool: PgPool,
+    pub(crate) redaction_key: Option<Arc<HmacKey>>,
+    pub(crate) batch_size: u32,
+}
 
 /// The handler's view of one claimed job and the transaction it runs in.
 ///
@@ -16,6 +31,7 @@ pub struct JobContext<'a> {
     connection: &'a mut PgConnection,
     job: &'a ClaimedJob,
     event_retention: EventRetention,
+    ingest: Option<IngestSettings>,
 }
 
 impl<'a> JobContext<'a> {
@@ -24,6 +40,7 @@ impl<'a> JobContext<'a> {
             connection,
             job,
             event_retention: EventRetention::default(),
+            ingest: None,
         }
     }
 
@@ -36,6 +53,17 @@ impl<'a> JobContext<'a> {
     /// The operator's event retention settings.
     pub fn event_retention(&self) -> &EventRetention {
         &self.event_retention
+    }
+
+    /// Gives the handler what the ingest drain needs.
+    pub(crate) fn with_ingest(mut self, settings: IngestSettings) -> Self {
+        self.ingest = Some(settings);
+        self
+    }
+
+    /// The ingest drain's settings; none when the worker was given no pool for them.
+    pub(crate) fn ingest(&self) -> Option<&IngestSettings> {
+        self.ingest.as_ref()
     }
 
     /// The handler's transaction.
@@ -222,5 +250,22 @@ mod tests {
             error.message(),
             "an instance-level job has no workspace to record a decision in"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_handler_has_no_ingest_settings_unless_the_worker_gave_them(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (claimed, mut tx) = claimed_in_transaction(&pool, None).await;
+
+        let ctx = JobContext::new(&mut tx, &claimed);
+        assert!(ctx.ingest().is_none());
+        let ctx = ctx.with_ingest(IngestSettings {
+            pool: pool.clone(),
+            redaction_key: None,
+            batch_size: 7,
+        });
+
+        assert_eq!(ctx.ingest().unwrap().batch_size, 7);
     }
 }

@@ -9,11 +9,11 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
-    ClaimedJob, EventRetention, FailOutcome, PgPool, begin, claim_job, complete_job, fail_job,
-    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
+    ClaimedJob, EventRetention, FailOutcome, HmacKey, PgPool, begin, claim_job, complete_job,
+    fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
-use crate::context::JobContext;
+use crate::context::{IngestSettings, JobContext};
 use crate::metrics::{self, Outcome};
 use crate::registry::Registry;
 
@@ -40,6 +40,10 @@ pub struct WorkerConfig {
     pub backoff_cap: Duration,
     /// What the `events.retention` job keeps and for how long.
     pub event_retention: EventRetention,
+    /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
+    pub redaction_key: Option<Arc<HmacKey>>,
+    /// Inbox rows `ingest.drain` applies per transaction.
+    pub ingest_drain_batch_size: u32,
 }
 
 impl WorkerConfig {
@@ -52,14 +56,17 @@ impl WorkerConfig {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(3600),
             event_retention: EventRetention::default(),
+            redaction_key: None,
+            ingest_drain_batch_size: 500,
         }
     }
 }
 
 /// A pool of workers over one database. It runs on pools of its own, so neither the HTTP
 /// server nor running handlers can starve a claim, a handler transaction or a heartbeat:
-/// `concurrency + 1` connections for claims, handler transactions and failures, and
-/// `concurrency` for heartbeats only.
+/// `2 * concurrency + 1` connections for claims, handler transactions, the transactions a
+/// handler such as the ingest drain commits on its own beside its job transaction, and
+/// failures, and `concurrency` for heartbeats only.
 pub struct Worker {
     pool: PgPool,
     registry: Registry,
@@ -96,7 +103,12 @@ impl Worker {
         let slots = u32::try_from(self.config.concurrency).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared {
             kinds: self.registry.kinds(),
-            pool: sized_like(&self.pool, slots.saturating_add(1), 0, ACQUIRE_TIMEOUT),
+            pool: sized_like(
+                &self.pool,
+                slots.saturating_mul(2).saturating_add(1),
+                0,
+                ACQUIRE_TIMEOUT,
+            ),
             // A warm pool keeps connecting off the heartbeat's path; a beat may wait one
             // period, and a failed one is retried on the next, before the lease ends.
             heartbeat_pool: sized_like(&self.pool, slots, slots, self.config.lease / 3),
@@ -318,8 +330,13 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         lost,
     )));
     let result = {
-        let mut ctx =
-            JobContext::new(&mut tx, &job).with_event_retention(shared.config.event_retention);
+        let mut ctx = JobContext::new(&mut tx, &job)
+            .with_event_retention(shared.config.event_retention)
+            .with_ingest(IngestSettings {
+                pool: shared.pool.clone(),
+                redaction_key: shared.config.redaction_key.clone(),
+                batch_size: shared.config.ingest_drain_batch_size,
+            });
         let handler = kind.run(&mut ctx, job.payload.clone());
         tokio::select! {
             result = handler => Some(result),
@@ -369,7 +386,7 @@ async fn heartbeat(shared: Arc<Shared>, job: ClaimedJob, lost: oneshot::Sender<(
 }
 
 /// A random number in `[0, 1)`.
-fn random_unit() -> f64 {
+pub(crate) fn random_unit() -> f64 {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).expect("the operating system provides randomness");
     (u64::from_le_bytes(bytes) >> 11) as f64 / (1_u64 << 53) as f64
@@ -522,6 +539,8 @@ mod tests {
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(5),
             event_retention: EventRetention::default(),
+            redaction_key: None,
+            ingest_drain_batch_size: 500,
         }
     }
 
@@ -648,6 +667,56 @@ mod tests {
         stop_and_join(stop, joined).await;
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_with_the_redaction_key_drains_an_appended_inbox(pool: PgPool) {
+        use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        migrated(&pool).await;
+        let name = WorkspaceName::parse("ours").unwrap();
+        let slug = Slug::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let items: Vec<IngestItem> = (0..25)
+            .map(|n| IngestItem {
+                identifiers: vec![("anonymous_id".into(), format!("a{n}"))],
+                timestamp: None,
+                message_id: Some(format!("m-{n}")),
+                payload: IngestPayload::Track {
+                    event: "seen".into(),
+                    properties: serde_json::Map::new(),
+                },
+            })
+            .collect();
+        append_inbox(
+            &pool,
+            ws,
+            uuid::Uuid::now_v7(),
+            &TraceContext::root(Cause::api("req")),
+            time::OffsetDateTime::now_utc(),
+            &items,
+        )
+        .await
+        .unwrap();
+        let mut config = test_config(2);
+        config.redaction_key = Some(Arc::new(
+            MasterKey::generate().hmac_key(HmacPurpose::Redaction),
+        ));
+        config.ingest_drain_batch_size = 10;
+        let (stop, handle) = start(&pool, config);
+
+        wait_until(
+            &pool,
+            "the inbox to drain",
+            "SELECT NOT EXISTS (SELECT 1 FROM ingest_inbox) AND (SELECT count(*) FROM events) = 25",
+        )
+        .await;
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once(pool: PgPool) {

@@ -8,14 +8,15 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::warn;
 use zirv_flow_core::schedule::latest_slot;
-use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
+use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, disable_schedule, due_schedules, enqueue, ensure_decision_partitions,
-    ensure_event_partitions, queue_depths, reap_expired, try_lead,
+    database_now, disable_schedule, due_schedules, enqueue, enqueue_drain,
+    ensure_decision_partitions, ensure_event_partitions, inbox_heads, queue_depths, reap_expired,
+    try_lead,
 };
 
-use crate::metrics::QueueGauges;
+use crate::metrics::{QueueGauges, set_inbox_age};
 
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
@@ -23,6 +24,9 @@ const DUE_BATCH: i64 = 100;
 /// The longest between checks that the decision log and the event store have partitions for
 /// this and next month.
 const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// How long an inbox row waits before the leader enqueues a drain for its workspace.
+const STALE_INBOX: Duration = Duration::from_secs(2);
 
 /// How often the scheduler works.
 #[derive(Clone, Debug)]
@@ -50,6 +54,8 @@ pub struct LeaderReport {
     /// Slots of far-behind schedules that were skipped.
     pub skipped: u64,
     pub reaped: Reaped,
+    /// Ingest drains the safety net enqueued for inboxes that had waited too long.
+    pub drains: u64,
     pub counts: QueueCounts,
 }
 
@@ -178,6 +184,7 @@ impl Scheduler {
                 reaped.dead
             );
         }
+        let drains = self.wake_stale_inboxes().await?;
         let depths = queue_depths(&self.pool).await?;
         self.gauges
             .lock()
@@ -196,8 +203,37 @@ impl Scheduler {
             fired,
             skipped,
             reaped,
+            drains,
             counts,
         })
+    }
+
+    /// The ingest safety net: enqueues `ingest.drain` for every workspace whose oldest
+    /// inbox row has waited more than [`STALE_INBOX`]. The unique key makes it a no-op
+    /// while a drain is ready or running. It covers an append that landed as a drain
+    /// finished, and a drain that ran out of its time budget. Also publishes the age of
+    /// the oldest row anywhere. Returns the drains enqueued.
+    async fn wake_stale_inboxes(&self) -> Result<u64, StoreError> {
+        let heads = inbox_heads(&self.pool).await?;
+        let oldest = heads
+            .iter()
+            .map(|head| head.age_seconds)
+            .fold(0.0_f64, f64::max);
+        set_inbox_age(oldest);
+        let mut enqueued = 0;
+        for head in heads
+            .iter()
+            .filter(|head| head.age_seconds > STALE_INBOX.as_secs_f64())
+        {
+            let trace = TraceContext::root(Cause::from_stored(
+                CauseKind::Api,
+                "ingest.safety_net".to_owned(),
+            ));
+            if enqueue_drain(&self.pool, head.workspace_id, &trace).await? {
+                enqueued += 1;
+            }
+        }
+        Ok(enqueued)
     }
 
     /// Enqueues the latest due slot of every due schedule; returns (fired, skipped).
@@ -713,5 +749,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, json!(0));
+    }
+
+    async fn inbox_workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let name = zirv_flow_core::WorkspaceName::parse(slug).unwrap();
+        let slug = zirv_flow_core::Slug::parse(slug).unwrap();
+        zirv_flow_store::create_workspace(pool, &name, &slug)
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn put_in_inbox(pool: &PgPool, ws: WorkspaceId, age_seconds: i32) {
+        sqlx::query(
+            "INSERT INTO ingest_inbox \
+                (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id) \
+             VALUES ($1, gen_random_uuid(), 'track', '{}', gen_random_uuid()::text, \
+                     now() - make_interval(secs => $2), gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(f64::from(age_seconds))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn drain_jobs(pool: &PgPool) -> Vec<Option<String>> {
+        sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'ingest.drain'")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_safety_net_enqueues_a_drain_for_a_stale_inbox_only_once(pool: PgPool) {
+        migrated(&pool).await;
+        let stale = inbox_workspace(&pool, "stale").await;
+        let fresh = inbox_workspace(&pool, "fresh").await;
+        put_in_inbox(&pool, stale, 5).await;
+        put_in_inbox(&pool, stale, 0).await;
+        put_in_inbox(&pool, fresh, 0).await;
+        let mut scheduler = scheduler(&pool);
+
+        let first = led(scheduler.tick_at(BASE).await.unwrap());
+        let second = led(scheduler.tick_at(BASE).await.unwrap());
+
+        assert_eq!((first.drains, second.drains), (1, 0));
+        assert_eq!(
+            drain_jobs(&pool).await,
+            [Some(format!("ingest.drain:{}", stale.as_uuid()))]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_safety_net_judges_a_workspace_by_its_first_row_and_ignores_an_empty_inbox(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        let mut scheduler = scheduler(&pool);
+        assert_eq!(led(scheduler.tick_at(BASE).await.unwrap()).drains, 0);
+
+        put_in_inbox(&pool, ws, 1).await;
+        let young = led(scheduler.tick_at(BASE).await.unwrap());
+        sqlx::query("DELETE FROM ingest_inbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        put_in_inbox(&pool, ws, 600).await;
+        put_in_inbox(&pool, ws, 0).await;
+        let old = led(scheduler.tick_at(BASE).await.unwrap());
+
+        assert_eq!((young.drains, old.drains), (0, 1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_age_of_the_oldest_inbox_row(pool: PgPool) {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        put_in_inbox(&pool, ws, 40).await;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut scheduler = scheduler(&pool);
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        scheduler.tick_at(BASE).await.unwrap();
+
+        let output = handle.render();
+        let age: f64 = output
+            .lines()
+            .find_map(|line| line.strip_prefix("zirv_flow_ingest_inbox_age_seconds "))
+            .unwrap_or_else(|| panic!("no gauge in {output}"))
+            .parse()
+            .unwrap();
+        assert!((39.0..120.0).contains(&age), "{age}");
     }
 }

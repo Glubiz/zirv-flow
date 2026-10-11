@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use zirv_flow_store::QueueDepth;
+use zirv_flow_store::{DrainOutcome, QueueDepth};
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +40,27 @@ pub(crate) fn record_claim_lag(kind: &str, seconds: f64) {
         .record(seconds);
 }
 
+/// Counts what a drained batch did: `zirv_flow_ingest_applied_total{kind,outcome}` and
+/// `zirv_flow_ingest_late_total`.
+pub(crate) fn record_drained(outcome: &DrainOutcome) {
+    for ((kind, result), count) in &outcome.applied {
+        metrics::counter!(
+            "zirv_flow_ingest_applied_total",
+            "kind" => *kind,
+            "outcome" => *result,
+        )
+        .increment(*count);
+    }
+    if outcome.late > 0 {
+        metrics::counter!("zirv_flow_ingest_late_total").increment(outcome.late);
+    }
+}
+
+/// The `zirv_flow_ingest_inbox_age_seconds` gauge: the oldest unprocessed inbox row.
+pub(crate) fn set_inbox_age(seconds: f64) {
+    metrics::gauge!("zirv_flow_ingest_inbox_age_seconds").set(seconds);
+}
+
 /// The queue-depth gauge `zirv_flow_jobs{kind,state}`. It remembers which pairs it has set,
 /// so a pair that drops out of the counts is set to 0 rather than left at its last value.
 #[derive(Default)]
@@ -65,6 +86,7 @@ impl QueueGauges {
     /// Sets every pair this instance has published to 0, for an instance that stops leading.
     pub(crate) fn zero_all(&mut self) {
         self.update(&[]);
+        set_inbox_age(0.0);
     }
 }
 
@@ -193,5 +215,52 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("kind=\"a.kind\""), "{output}");
+    }
+
+    #[test]
+    fn a_drained_batch_counts_by_kind_and_outcome_and_the_age_gauge_follows() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut outcome = DrainOutcome {
+            rows: 3,
+            late: 2,
+            ..DrainOutcome::default()
+        };
+        outcome.applied.insert(("track", "valid"), 2);
+        outcome.applied.insert(("identify", "apply_failed"), 1);
+
+        metrics::with_local_recorder(&recorder, || {
+            record_drained(&outcome);
+            set_inbox_age(12.5);
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_ingest_applied_total{kind=\"track\",outcome=\"valid\"} 2"),
+            "{output}"
+        );
+        assert!(output.contains("outcome=\"apply_failed\"} 1"), "{output}");
+        assert!(output.contains("zirv_flow_ingest_late_total 2"), "{output}");
+        assert!(
+            output.contains("zirv_flow_ingest_inbox_age_seconds 12.5"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn stepping_down_zeroes_the_inbox_age() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            set_inbox_age(9.0);
+            QueueGauges::default().zero_all();
+        });
+
+        assert!(
+            handle
+                .render()
+                .contains("zirv_flow_ingest_inbox_age_seconds 0"),
+        );
     }
 }
