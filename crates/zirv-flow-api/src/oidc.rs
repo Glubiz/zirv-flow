@@ -23,6 +23,7 @@ use crate::{AppState, admin, cookies, request_id, session};
 /// Where the identity provider sends the browser back to.
 const CALLBACK_PATH: &str = "/api/v1/session/oidc/callback";
 const FAILED: &str = "sign-in failed";
+const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
 /// The redirect URI to register at the identity provider for a server at `public_url`.
 pub fn redirect_url(public_url: &str) -> String {
@@ -131,7 +132,7 @@ pub(crate) async fn start(State(state): State<AppState>) -> Result<Response, Api
                 header::SET_COOKIE,
                 cookies::oidc_state(&authorization.state, state.cookie_secure),
             ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (header::CACHE_CONTROL, NO_STORE),
         ],
         Redirect::to(&authorization.url),
     )
@@ -186,11 +187,12 @@ async fn complete(
     let presented = query.state.ok_or(Failure::Reason("state_mismatch"))?;
     let cookie = cookies::read(headers, cookies::OIDC_STATE_COOKIE)
         .ok_or(Failure::Reason("state_mismatch"))?;
-    if !hash_matches(cookie, &sha256(&presented)) {
+    let state_hash = sha256(&presented);
+    if !hash_matches(cookie, &state_hash) {
         return Err(Failure::Reason("state_mismatch"));
     }
     // Taking the login deletes it, so a replayed callback finds nothing.
-    let login = zirv_flow_store::take_oidc_login(&state.pool, &sha256(&presented))
+    let login = zirv_flow_store::take_oidc_login(&state.pool, &state_hash)
         .await?
         .ok_or(Failure::Reason("unknown_state"))?;
     if query.error.is_some() {
@@ -225,7 +227,7 @@ async fn complete(
         header::SET_COOKIE,
         cookies::clear_oidc_state(state.cookie_secure),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::CACHE_CONTROL, NO_STORE);
     Ok(response)
 }
 
@@ -251,16 +253,17 @@ async fn resolve_user(
         .ok_or(Failure::Reason("no_matching_user"))?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let context =
+        |user: &User| admin::Context::user(user.id).with_request_id(request_id::current());
     let (user, matched) = match zirv_flow_store::find_user_by_email(&mut *tx, &email).await? {
         Some(user) => (user, "verified_email"),
         None if oidc.auto_create_users => {
             let user = zirv_flow_store::create_user(&mut *tx, &email, None, false)
                 .await
                 .map_err(conflict_or_error)?;
-            let context = admin::Context::user(user.id).with_request_id(request_id::current());
             admin::audit(
                 &mut tx,
-                &context,
+                &context(&user),
                 None,
                 "user.created",
                 Some(("user", user.id.as_uuid())),
@@ -274,10 +277,9 @@ async fn resolve_user(
     zirv_flow_store::link_identity(&mut *tx, &identity.issuer, &identity.subject, user.id)
         .await
         .map_err(conflict_or_error)?;
-    let context = admin::Context::user(user.id).with_request_id(request_id::current());
     admin::audit(
         &mut tx,
-        &context,
+        &context(&user),
         None,
         "user.identity_linked",
         Some(("user", user.id.as_uuid())),
@@ -312,7 +314,7 @@ fn failed(state: &AppState) -> Response {
         header::SET_COOKIE,
         cookies::clear_oidc_state(state.cookie_secure),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::CACHE_CONTROL, NO_STORE);
     response
 }
 
@@ -506,6 +508,19 @@ mod tests {
         admin::create_user(pool, &admin::Context::system(), email, PASSWORD)
             .await
             .unwrap()
+    }
+
+    async fn password_sign_in(router: &Router, email: &str, password: &str) -> Reply {
+        send(
+            router,
+            Request::post("/api/v1/session")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
     }
 
     fn assert_generic_failure(reply: &Reply) {
@@ -921,16 +936,7 @@ mod tests {
         let router =
             router(AppState::new(pool.clone(), Arc::new(String::new)).with_local_sign_in(false));
 
-        let reply = send(
-            &router,
-            Request::post("/api/v1/session")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"email": "jane@example.com", "password": PASSWORD}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
+        let reply = password_sign_in(&router, "jane@example.com", PASSWORD).await;
 
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
         assert_eq!(
@@ -954,21 +960,7 @@ mod tests {
         .await
         .unwrap();
         existing_user(&pool, "jane@example.com").await;
-        let attempt = |email: &'static str| {
-            let router = router.clone();
-            async move {
-                send(
-                    &router,
-                    Request::post("/api/v1/session")
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(
-                            json!({"email": email, "password": "not the password"}).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-            }
-        };
+        let attempt = |email: &'static str| password_sign_in(&router, email, "not the password");
 
         let sso = attempt("sso@example.com").await;
         let wrong = attempt("jane@example.com").await;
@@ -994,16 +986,7 @@ mod tests {
         let router = router(AppState::new(pool.clone(), Arc::new(String::new)));
         existing_user(&pool, "jane@example.com").await;
 
-        let reply = send(
-            &router,
-            Request::post("/api/v1/session")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"email": "jane@example.com", "password": PASSWORD}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
+        let reply = password_sign_in(&router, "jane@example.com", PASSWORD).await;
 
         assert_eq!(reply.status, StatusCode::OK);
         let methods: Vec<String> = sqlx::query_scalar(
