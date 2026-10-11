@@ -262,8 +262,8 @@ fn decode_cursor(cursor: &str) -> Option<DeadCursor> {
     let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
     let text = String::from_utf8(bytes).ok()?;
     let (micros, id) = text.split_once(':')?;
-    let dead_at =
-        OffsetDateTime::from_unix_timestamp_nanos(micros.parse::<i128>().ok()? * 1000).ok()?;
+    let nanos = micros.parse::<i128>().ok()?.checked_mul(1000)?;
+    let dead_at = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
     Some((dead_at, id.parse().ok()?))
 }
 
@@ -286,7 +286,14 @@ mod tests {
 
     #[test]
     fn a_malformed_cursor_does_not_decode() {
-        for bad in ["", "!!", "bm9wZQ", &URL_SAFE_NO_PAD.encode("1:not-a-uuid")] {
+        let overflowing = format!("1{}:{}", "0".repeat(36), Uuid::nil());
+        for bad in [
+            "",
+            "!!",
+            "bm9wZQ",
+            &URL_SAFE_NO_PAD.encode("1:not-a-uuid"),
+            &URL_SAFE_NO_PAD.encode(overflowing),
+        ] {
             assert_eq!(decode_cursor(bad), None, "{bad}");
         }
     }

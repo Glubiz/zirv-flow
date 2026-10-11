@@ -332,7 +332,8 @@ pub async fn fail_job<'e>(
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = CASE WHEN attempts >= max_attempts THEN run_at \
                               ELSE now() + make_interval(secs => $3) END, \
-                dead_at = CASE WHEN attempts >= max_attempts THEN now() END,                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
+                dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
+                last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id = $1 AND lease_token = $2 \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
          recorded AS ( \
@@ -389,7 +390,8 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
         "WITH updated AS ( \
              UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
-                run_at = now(), last_error = 'lease expired',                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
+                run_at = now(), last_error = 'lease expired', \
+                dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE state = 'running' AND lease_expires_at < now() \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
