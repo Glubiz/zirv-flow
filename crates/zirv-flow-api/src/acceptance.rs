@@ -2472,14 +2472,26 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let (_, _, id) = seed_conflict(&pool, &ws).await;
         for _ in 0..2 {
+            // Another open conflict about the same identifier, from another person.
+            let extra = uuid::Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id) \
+                 SELECT $1, workspace_id FROM identity_conflicts WHERE id = $2",
+            )
+            .bind(extra)
+            .bind(uuid::Uuid::parse_str(&id).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::query(
                 "INSERT INTO identity_conflicts \
                     (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
-                 SELECT $1, workspace_id, person_id, other_person_id, kind, source_record_id, \
+                 SELECT $1, workspace_id, $3, other_person_id, kind, source_record_id, \
                         reason FROM identity_conflicts WHERE id = $2",
             )
             .bind(uuid::Uuid::now_v7())
             .bind(uuid::Uuid::parse_str(&id).unwrap())
+            .bind(extra)
             .execute(&pool)
             .await
             .unwrap();

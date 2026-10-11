@@ -1189,34 +1189,54 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_whose_identifiers_belong_to_two_people_records_the_conflict(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
-        let mut by_phone = event("anything", json!({}));
-        by_phone.identifiers = vec![("phone".into(), "+4512345678".into())];
-        let EventOutcome::Accepted { person_id: p2, .. } = apply_one(&pool, ws, by_phone).await
+        let with = |identifiers: &[(&str, &str)]| {
+            let mut record = event("anything", json!({}));
+            record.identifiers = identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect();
+            record
+        };
+        // Two people that hold different external ids cannot be merged by an email.
+        let EventOutcome::Accepted { person_id: p1, .. } = apply_one(
+            &pool,
+            ws,
+            with(&[("external:crm", "1"), ("email", "x@example.com")]),
+        )
+        .await
         else {
             panic!("not accepted");
         };
-        let EventOutcome::Accepted { person_id: p1, .. } =
-            apply_one(&pool, ws, event("anything", json!({}))).await
+        let EventOutcome::Accepted { person_id: p2, .. } =
+            apply_one(&pool, ws, with(&[("external:crm", "2")])).await
         else {
             panic!("not accepted");
         };
-        let mut both = event("anything", json!({}));
-        both.identifiers = vec![
-            ("email".into(), "ada@example.com".into()),
-            ("phone".into(), "+4512345678".into()),
-        ];
+        let both = with(&[("external:crm", "2"), ("email", "x@example.com")]);
 
         let first = apply_one(&pool, ws, both.clone()).await;
         apply_one(&pool, ws, both).await;
 
-        assert!(matches!(first, EventOutcome::Accepted { person_id, .. } if person_id == p1));
+        assert!(matches!(first, EventOutcome::Accepted { person_id, .. } if person_id == p2));
         let rows: Vec<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
-            "SELECT person_id, other_person_id, source_record_id, reason FROM identity_conflicts",
+            "SELECT person_id, other_person_id, source_record_id, reason, identity_id \
+             FROM identity_conflicts",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(rows, [(p1, p2, None, "merge_deferred".to_owned())]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].0, rows[0].1, rows[0].2, rows[0].3.as_str()),
+            (p2, p1, None, "unique_kind")
+        );
+        let with_identity: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM identity_conflicts WHERE identity_id IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(with_identity, 1);
         let decisions: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM decision_records WHERE action = 'identity.conflict'",
         )

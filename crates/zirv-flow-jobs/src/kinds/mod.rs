@@ -11,6 +11,5 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
     &person_merge_rewrite::PersonMergeRewrite,
     &traits_recompute::TraitsRecompute,
-    &traits_recompute::TraitsRecompute,
     &events_retention::EventsRetention,
 ];
