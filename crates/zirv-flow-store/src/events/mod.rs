@@ -6,6 +6,7 @@ mod debugger;
 mod explore;
 mod partitions;
 mod rejects;
+mod replay;
 mod retention;
 mod schemas;
 
@@ -22,6 +23,10 @@ pub use explore::{
 };
 pub use partitions::ensure_event_partitions;
 pub use rejects::{IngestReject, RejectCursor, RejectFilter, list_ingest_rejects};
+pub use replay::{
+    MAX_REPLAY, REPLAY_JOB_KIND, ReplayPrediction, ReplaySelection, ReplayTotals, enqueue_replay,
+    preview_replay, replay_rejects, select_rejects,
+};
 pub use retention::{EventRetention, RETENTION_BATCH, RetentionReport, apply_event_retention};
 pub use schemas::{
     EventPolicy, EventSchema, EventSchemaUpdate, NewEventSchema, PublishOutcome, SchemaVersion,

@@ -394,35 +394,25 @@ async fn judge_event_record(
     let mut properties = record.properties.clone();
     redact(&mut properties, &policy.redaction, workspace, key);
     let flags: Vec<&str> = timing.flags.iter().map(|flag| flag.as_str()).collect();
-    sqlx::query(
-        "INSERT INTO events \
-            (id, workspace_id, person_id, name, schema_version, occurred_at, received_at, \
-             properties, source, message_id, trace_id, validation_state, validation_reasons, \
-             flags) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-    )
-    .bind(event_id)
-    .bind(workspace.as_uuid())
-    .bind(person_id)
-    .bind(&record.name)
-    .bind(schema_version)
-    .bind(timing.occurred_at)
-    .bind(record.received_at)
-    .bind(Json(&properties))
-    .bind(&record.source)
-    .bind(record.message_id.as_deref())
-    .bind(record.trace.trace_id.as_uuid())
-    .bind(state.as_str())
-    .bind(Json(&reasons))
-    .bind(&flags)
-    .execute(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    mark_changed(
+    insert_event(
         connection,
         workspace,
-        person_id,
-        timing.is_late().then_some(timing.occurred_at),
+        &NewEvent {
+            id: event_id,
+            person_id,
+            name: &record.name,
+            schema_version,
+            occurred_at: timing.occurred_at,
+            received_at: record.received_at,
+            properties: &properties,
+            source: &record.source,
+            message_id: record.message_id.as_deref(),
+            trace_id: record.trace.trace_id.as_uuid(),
+            state,
+            reasons: &reasons,
+            flags: &flags,
+            late: timing.is_late(),
+        },
     )
     .await?;
     decide(
@@ -441,6 +431,61 @@ async fn judge_event_record(
         state,
         flags: timing.flags,
     })
+}
+
+/// An event to store.
+pub(crate) struct NewEvent<'a> {
+    pub(crate) id: Uuid,
+    pub(crate) person_id: Uuid,
+    pub(crate) name: &'a str,
+    pub(crate) schema_version: Option<i32>,
+    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) received_at: OffsetDateTime,
+    /// Already redacted.
+    pub(crate) properties: &'a Map<String, Value>,
+    pub(crate) source: &'a str,
+    pub(crate) message_id: Option<&'a str>,
+    pub(crate) trace_id: Uuid,
+    pub(crate) state: ValidationState,
+    pub(crate) reasons: &'a [Reason],
+    pub(crate) flags: &'a [&'a str],
+    /// The event is late: the person's traits are recomputed from its time.
+    pub(crate) late: bool,
+}
+
+/// Inserts the event and marks its person changed.
+pub(crate) async fn insert_event(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    event: &NewEvent<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO events             (id, workspace_id, person_id, name, schema_version, occurred_at, received_at,              properties, source, message_id, trace_id, validation_state, validation_reasons,              flags)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+    )
+    .bind(event.id)
+    .bind(workspace.as_uuid())
+    .bind(event.person_id)
+    .bind(event.name)
+    .bind(event.schema_version)
+    .bind(event.occurred_at)
+    .bind(event.received_at)
+    .bind(Json(event.properties))
+    .bind(event.source)
+    .bind(event.message_id)
+    .bind(event.trace_id)
+    .bind(event.state.as_str())
+    .bind(Json(event.reasons))
+    .bind(event.flags)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    mark_changed(
+        connection,
+        workspace,
+        event.person_id,
+        event.late.then_some(event.occurred_at),
+    )
+    .await
 }
 
 /// The checks that need no database: the name, the message id and the identifiers.
