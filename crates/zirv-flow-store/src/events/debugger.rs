@@ -118,6 +118,36 @@ pub(crate) async fn notify_feed(
     Ok(())
 }
 
+/// A dedicated connection listening for feed notifications.
+pub struct DebuggerListener {
+    inner: sqlx::postgres::PgListener,
+}
+
+/// Starts listening on [`DEBUGGER_CHANNEL`] with a connection of its own.
+pub async fn listen_for_debugger(pool: &crate::PgPool) -> Result<DebuggerListener, StoreError> {
+    let mut inner = sqlx::postgres::PgListener::connect_with(pool)
+        .await
+        .map_err(StoreError::query)?;
+    inner
+        .listen(DEBUGGER_CHANNEL)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(DebuggerListener { inner })
+}
+
+impl DebuggerListener {
+    /// Waits for a notification and returns the workspace whose feed grew. `Ok(None)` means
+    /// the connection was lost (it reconnects on the next call, and notifications sent
+    /// meanwhile are lost, so callers poll) or the payload was not a workspace id.
+    pub async fn wait(&mut self) -> Result<Option<WorkspaceId>, StoreError> {
+        let notification = self.inner.try_recv().await.map_err(StoreError::query)?;
+        Ok(
+            notification
+                .and_then(|notification| notification.payload().parse::<WorkspaceId>().ok()),
+        )
+    }
+}
+
 /// The newest feed `seq` of the workspace, or 0 when the feed is empty.
 pub async fn debugger_feed_head<'e>(
     executor: impl PgExecutor<'e>,
@@ -259,6 +289,8 @@ pub async fn prune_debugger_feed(pool: &crate::PgPool) -> Result<u64, StoreError
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
     use sqlx::PgPool;
     use zirv_flow_core::{Slug, WorkspaceName};
@@ -318,6 +350,22 @@ mod tests {
         let shown = format!("{item:?}");
 
         assert!(!shown.contains("a@example.com") && !shown.contains("secret-name"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_listener_names_the_workspace_that_notified(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut listener = listen_for_debugger(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        notify_feed(&mut connection, ws).await.unwrap();
+
+        let heard = tokio::time::timeout(Duration::from_secs(5), listener.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(heard, Some(ws));
     }
 
     #[sqlx::test]

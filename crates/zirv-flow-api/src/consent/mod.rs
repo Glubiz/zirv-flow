@@ -1,7 +1,7 @@
 //! The consent endpoints (architecture sections 6 and 10.1): a person's consent and its
 //! history, the topic catalog, and identifier suppressions.
 
-mod csv;
+pub(crate) mod csv;
 pub(crate) mod person;
 pub(crate) mod suppressions;
 pub(crate) mod topics;

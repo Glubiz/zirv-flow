@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 31] = [
+const CONFIG_KEYS: [&str; 35] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -42,6 +42,10 @@ const CONFIG_KEYS: [&str; 31] = [
     "ingest.burst_per_key",
     "ingest.drain_batch_size",
     "imports.max_file_bytes",
+    "explorer.interactive_timeout_ms",
+    "explorer.export_timeout_ms",
+    "explorer.interactive_row_limit",
+    "explorer.export_row_limit",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -66,6 +70,7 @@ pub(crate) struct Config {
     events: EventsConfig,
     ingest: IngestConfig,
     imports: ImportsConfig,
+    explorer: ExplorerConfig,
     log: LogConfig,
 }
 
@@ -272,6 +277,20 @@ struct ImportsConfig {
     max_file_bytes: u64,
 }
 
+/// How long the event explorer may run and how much it may return.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplorerConfig {
+    /// Milliseconds a count, a breakdown or a page of rows may run before it is cancelled.
+    interactive_timeout_ms: u64,
+    /// Milliseconds one page query of a CSV export may run.
+    export_timeout_ms: u64,
+    /// The most buckets or rows an interactive query returns.
+    interactive_row_limit: u32,
+    /// The most rows a CSV export writes.
+    export_row_limit: u32,
+}
+
 struct SecretUrl(Url);
 
 impl SecretUrl {
@@ -417,6 +436,22 @@ impl Config {
                 "imports.max_file_bytes",
                 536_870_912_u64,
             ))
+            .merge(Serialized::default(
+                "explorer.interactive_timeout_ms",
+                5_000_u64,
+            ))
+            .merge(Serialized::default(
+                "explorer.export_timeout_ms",
+                60_000_u64,
+            ))
+            .merge(Serialized::default(
+                "explorer.interactive_row_limit",
+                10_000_u32,
+            ))
+            .merge(Serialized::default(
+                "explorer.export_row_limit",
+                1_000_000_u32,
+            ))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -472,6 +507,14 @@ impl Config {
             ("ingest.rate_per_key", config.ingest.rate_per_key),
             ("ingest.burst_per_key", config.ingest.burst_per_key),
             ("ingest.drain_batch_size", config.ingest.drain_batch_size),
+            (
+                "explorer.interactive_row_limit",
+                config.explorer.interactive_row_limit,
+            ),
+            (
+                "explorer.export_row_limit",
+                config.explorer.export_row_limit,
+            ),
         ]
         .into_iter()
         .chain(
@@ -480,6 +523,25 @@ impl Config {
                 .max_running_per_workspace
                 .map(|cap| ("worker.max_running_per_workspace", cap)),
         ) {
+            if value == 0 {
+                return Err(ConfigError::new(
+                    key,
+                    "must be at least 1",
+                    source_for(key, path, &env_sources),
+                ));
+            }
+        }
+
+        for (key, value) in [
+            (
+                "explorer.interactive_timeout_ms",
+                config.explorer.interactive_timeout_ms,
+            ),
+            (
+                "explorer.export_timeout_ms",
+                config.explorer.export_timeout_ms,
+            ),
+        ] {
             if value == 0 {
                 return Err(ConfigError::new(
                     key,
@@ -750,6 +812,18 @@ impl Config {
         zirv_flow_api::ImportLimits {
             max_file_bytes: self.imports.max_file_bytes,
             ..zirv_flow_api::ImportLimits::default()
+        }
+    }
+
+    /// The event explorer's query timeouts and row limits.
+    pub(crate) fn explorer_limits(&self) -> zirv_flow_api::ExplorerLimits {
+        zirv_flow_api::ExplorerLimits {
+            interactive_timeout: std::time::Duration::from_millis(
+                self.explorer.interactive_timeout_ms,
+            ),
+            export_timeout: std::time::Duration::from_millis(self.explorer.export_timeout_ms),
+            interactive_row_limit: self.explorer.interactive_row_limit,
+            export_row_limit: self.explorer.export_row_limit,
         }
     }
 
@@ -1702,6 +1776,55 @@ endpoint = \"http://collector:4318\"
             let error = Config::load(None, env).unwrap_err().to_string();
 
             assert!(error.contains(expected), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_explorer_defaults_are_five_seconds_a_minute_ten_thousand_and_a_million() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(
+            config.explorer_limits(),
+            zirv_flow_api::ExplorerLimits::default()
+        );
+        assert!(toml::to_string(&config).unwrap().contains("[explorer]"));
+    }
+
+    #[test]
+    fn the_explorer_settings_can_be_set_from_the_environment_and_must_be_positive() {
+        let mut env = database_env("postgres://localhost/database");
+        for (key, value) in [
+            ("INTERACTIVE_TIMEOUT_MS", "250"),
+            ("EXPORT_TIMEOUT_MS", "9000"),
+            ("INTERACTIVE_ROW_LIMIT", "50"),
+            ("EXPORT_ROW_LIMIT", "77"),
+        ] {
+            env.push((format!("ZIRV_FLOW_EXPLORER__{key}").into(), value.into()));
+        }
+
+        let limits = Config::load(None, env).unwrap().explorer_limits();
+
+        assert_eq!(
+            limits.interactive_timeout,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(limits.export_timeout, std::time::Duration::from_secs(9));
+        assert_eq!(
+            (limits.interactive_row_limit, limits.export_row_limit),
+            (50, 77)
+        );
+        for key in [
+            "INTERACTIVE_TIMEOUT_MS",
+            "EXPORT_TIMEOUT_MS",
+            "INTERACTIVE_ROW_LIMIT",
+            "EXPORT_ROW_LIMIT",
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((format!("ZIRV_FLOW_EXPLORER__{key}").into(), "0".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains("must be at least 1"), "{key}: {error}");
         }
     }
 }

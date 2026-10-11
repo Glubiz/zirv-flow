@@ -22,6 +22,15 @@ pub(crate) struct ReasonBody {
     reason: String,
 }
 
+impl ReasonBody {
+    pub(crate) fn new(property: String, reason: &str) -> Self {
+        Self {
+            property,
+            reason: reason.to_owned(),
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct IngestRejectBody {
     id: Uuid,

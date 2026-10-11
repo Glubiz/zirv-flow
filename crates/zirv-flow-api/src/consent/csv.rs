@@ -76,7 +76,7 @@ pub(super) fn parse(text: &str) -> Vec<Record> {
 }
 
 /// One field of an exported record: quoted when it holds a comma, a quote or a line break.
-pub(super) fn field(value: &str) -> String {
+pub(crate) fn field(value: &str) -> String {
     let mut out = String::new();
     write_field(&mut out, value, ',');
     out

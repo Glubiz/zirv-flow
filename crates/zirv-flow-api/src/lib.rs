@@ -45,6 +45,7 @@ use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use events::ExplorerLimits;
 pub use imports::ImportLimits;
 pub use ingest::IngestLimits;
 pub use oidc::redirect_url as oidc_redirect_url;
@@ -159,6 +160,30 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/ingest-rejects",
             get(events::rejects::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ingest-rejects/replay",
+            post(events::replay::replay),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/debugger/stream",
+            get(events::debugger::stream),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/events/explore/count",
+            post(events::explorer::count),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/events/explore/breakdown",
+            post(events::explorer::breakdown),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/events/explore/list",
+            post(events::explorer::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/events/explore/export",
+            post(events::explorer::export),
         )
         .route(
             "/api/v1/workspaces/{ws}/topics",

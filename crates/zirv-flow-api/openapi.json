@@ -1462,6 +1462,136 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/debugger/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Watches the workspace's events as they are decided: one `item` frame per outcome\n(`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live only, with no\nhistory. The stream resumes from the `Last-Event-ID` header, the `seq` of the last frame\nseen, if the feed still holds the rows after it. A viewer that cannot keep up gets an\n`event: gap` frame with the number of rows skipped (an upper bound when filters apply).",
+        "description": "While at least one viewer watches a workspace, ingestion writes a feed row per event;\nwhen none does, it writes nothing extra. Values are masked per viewer as in the person\ntimeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values\n(owner, workspace admin or `admin` key) and is ignored for anyone else.",
+        "operationId": "stream_event_debugger",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Only events from this source",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Only events of this name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reveal",
+            "in": "query",
+            "description": "Show stored values to a viewer who may see values; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "The `id` of the last frame received",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A text/event-stream of `item` and `gap` frames",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebuggerItemBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "outcome or reveal is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/event-policy": {
       "get": {
         "tags": [
@@ -2144,6 +2274,420 @@
           },
           "409": {
             "description": "The schema has no draft to publish",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/events/explore/breakdown": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "The most common values of one property over the same events a count covers.",
+        "operationId": "explore_event_breakdown",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakdownRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The top values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakdownBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, a missing CSRF token, or a PII property for a caller who may not see values (`code` is `pii_property_not_explorable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A malformed range, filter or property",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/events/explore/count": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events per bucket over the range, for the filters given. The sum of the buckets is the\nnumber of matching events, and equals what the breakdown and the list cover.",
+        "operationId": "explore_event_count",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Counts per bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A malformed range, filter or bucket",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/events/explore/export": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "The matching events as CSV with the list's columns and masking, streamed a page at a\ntime (`id,occurred_at,name,source,person_id,validation_state,flags,trace_id,properties,masked`;\n`flags` and `masked` are joined by `|`). At most the export row limit is written; when\nmore matched, the last line is a `#` comment saying so. The export is audited as\n`events.exported` with the shape of the filters and the row count, no values.",
+        "operationId": "export_events",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The events as CSV, newest first",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A malformed range or filter",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/events/explore/list": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "The events of the range that match, newest first in keyset pages, masked for the caller.",
+        "operationId": "explore_event_list",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A page of events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range or after is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A malformed range or filter",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query ran past its time limit (`code` is `query_timeout`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3536,6 +4080,107 @@
           },
           "404": {
             "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/ingest-rejects/replay": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Replays rejected events after a schema or policy fix. With `dry_run` it validates each\nreject's stored, redacted payload against the current schema and policy and predicts the\noutcome, writing nothing. Without it, a job stores each event that now passes, once, with\nthe flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and\n`replay_event_id` on the reject and records an `event.replayed` decision with the cause.\nReplaying a reject again changes nothing. A reject that named no person cannot be\nreplayed (`still_rejected` with `no_person`).",
+        "operationId": "replay_ingest_rejects",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A dry run: the predicted outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayBody"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The replay job was enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not exactly one of ids and filter, an unknown cause, or more than 10,000 rejects",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7844,6 +8489,74 @@
           }
         }
       },
+      "BreakdownBody": {
+        "type": "object",
+        "required": [
+          "property",
+          "values",
+          "other",
+          "missing"
+        ],
+        "properties": {
+          "missing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching events without the property."
+          },
+          "other": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching events whose value is not among `values`."
+          },
+          "property": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValueCountBody"
+            },
+            "description": "The 50 most common values, most common first."
+          }
+        }
+      },
+      "BreakdownRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ScopeRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "property"
+            ],
+            "properties": {
+              "property": {
+                "type": "string",
+                "description": "The property to count the values of. A caller who may not see values can break down\nonly a property the published schema of `name` declares non-PII.",
+                "example": "plan"
+              }
+            }
+          }
+        ]
+      },
+      "BucketBody": {
+        "type": "object",
+        "required": [
+          "bucket_start",
+          "count"
+        ],
+        "properties": {
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "CauseBody": {
         "type": "object",
         "required": [
@@ -8062,6 +8775,52 @@
             ]
           }
         }
+      },
+      "CountBody": {
+        "type": "object",
+        "required": [
+          "buckets",
+          "total",
+          "truncated"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BucketBody"
+            },
+            "description": "Oldest first; buckets without events are left out."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The sum of the buckets."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More buckets matched than the row limit allows; the newest were left out."
+          }
+        }
+      },
+      "CountRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ScopeRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket"
+            ],
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "`hour`, `day` or `week`, in UTC.",
+                "example": "day"
+              }
+            }
+          }
+        ]
       },
       "CreateApiKeyRequest": {
         "type": "object",
@@ -8496,6 +9255,87 @@
           }
         }
       },
+      "DebuggerItemBody": {
+        "type": "object",
+        "description": "The data of an `item` frame.",
+        "required": [
+          "seq",
+          "at",
+          "source",
+          "outcome",
+          "reasons",
+          "properties",
+          "masked",
+          "trace_id"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "masked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names whose values were replaced by null."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when the name itself was invalid."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`."
+          },
+          "properties": {
+            "type": "object",
+            "description": "The stored (redacted) properties. Values of PII-flagged or undeclared properties are\nnull unless the viewer asked to reveal and may see values; every value of a rejected\nevent is null for a viewer who does not reveal, except those the schema declares\nnon-PII with the declared type."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reject code of a rejected event, such as `validation_failed`."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReasonItem"
+            }
+          },
+          "reject_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The feed position; the frame's `id`, and the `Last-Event-ID` to resume from."
+          },
+          "source": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "32 lowercase hex characters."
+          }
+        }
+      },
       "DecisionBody": {
         "type": "object",
         "required": [
@@ -8882,6 +9722,67 @@
           }
         }
       },
+      "ExploredEventBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "occurred_at",
+          "name",
+          "source",
+          "person_id",
+          "validation_state",
+          "flags",
+          "properties",
+          "masked",
+          "trace_id"
+        ],
+        "properties": {
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Timing flags such as `late`, and `replayed` and `no_triggers` for a replayed event."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "masked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names whose values were replaced by null."
+          },
+          "name": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "properties": {
+            "type": "object",
+            "description": "The stored properties. The values of properties the published schema flags as PII,\nof undeclared properties and of every property of an event without a published\nschema are null for callers who may not see values."
+          },
+          "source": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "32 lowercase hex characters."
+          },
+          "validation_state": {
+            "type": "string",
+            "description": "`valid`, `flagged` or `unplanned`."
+          }
+        }
+      },
       "ExportBody": {
         "type": "object",
         "required": [
@@ -8965,6 +9866,29 @@
               "null"
             ],
             "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "FilterRequest": {
+        "type": "object",
+        "description": "One property filter. The operators that apply follow the property's type in the published\nschema of `name`; without a name, or for a property the schema does not declare, values\ncompare as text.",
+        "required": [
+          "key",
+          "op"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "A top-level property name.",
+            "example": "plan"
+          },
+          "op": {
+            "type": "string",
+            "description": "`eq`, `ne`, `in`, `prefix`, `gt`, `gte`, `lt`, `lte` or `exists`. For a string list,\n`eq` means \"contains\". `ne` also matches events without the property.",
+            "example": "eq"
+          },
+          "value": {
+            "description": "Required for every operator but `exists` (where `false` means \"absent\"); `in` takes\na list of up to 100 values."
           }
         }
       },
@@ -9653,6 +10577,34 @@
           }
         }
       },
+      "ListRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ScopeRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "after": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `next_after` of the previous page."
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Rows per page, 1 to 200; default 50.",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
       "MappingBody": {
         "type": "object",
         "description": "How the columns of a file become identifiers, traits and lists.",
@@ -9957,6 +10909,45 @@
           }
         }
       },
+      "PredictionBody": {
+        "type": "object",
+        "required": [
+          "reject_id",
+          "outcome",
+          "reasons",
+          "redacted_type_changed"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "description": "`accept`, `flag`, `still_rejected`, `duplicate` or `already_replayed`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `still_rejected`: `validation_failed`, `unplanned_event`, `no_person` or\n`not_replayable`."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReasonBody"
+            }
+          },
+          "redacted_type_changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Properties the policy hashes that the schema types as something other than a string.\nThe stored payload holds their hash, so they fail validation."
+          },
+          "reject_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "PrivacySettingsBody": {
         "type": "object",
         "required": [
@@ -10244,6 +11235,23 @@
           }
         }
       },
+      "ReasonItem": {
+        "type": "object",
+        "required": [
+          "property",
+          "reason"
+        ],
+        "properties": {
+          "property": {
+            "type": "string",
+            "description": "The property that failed; never its value."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`."
+          }
+        }
+      },
       "RedactionBody": {
         "type": "object",
         "description": "Which properties are redacted before storage. Paths are dot-separated and reach into\nnested objects.",
@@ -10317,6 +11325,122 @@
               "format": "uuid"
             },
             "description": "At most 1000."
+          }
+        }
+      },
+      "ReplayBody": {
+        "type": "object",
+        "required": [
+          "dry_run",
+          "selected",
+          "rejects",
+          "totals"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "rejects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PredictionBody"
+            },
+            "description": "The predictions of a dry run, in the order of the rejects; empty for a real run."
+          },
+          "selected": {
+            "type": "integer",
+            "description": "How many rejects the request covers.",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/components/schemas/TotalsBody",
+            "description": "The predicted totals of a dry run; zero for a real run."
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The trace of a real run: its `event.replayed` decisions are on it. Null for a dry run."
+          }
+        }
+      },
+      "ReplayFilter": {
+        "type": "object",
+        "description": "Which rejects, other than by id.",
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Only rejects received at or after this time."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only rejects of this event name."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only rejects with this reason code."
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Only rejects received before this time."
+          }
+        }
+      },
+      "ReplayRequest": {
+        "type": "object",
+        "description": "Exactly one of `ids` and `filter`, at most 10,000 rejects.",
+        "required": [
+          "cause"
+        ],
+        "properties": {
+          "cause": {
+            "type": "string",
+            "description": "`manual` for a person's decision, or `definition_change` after a schema or policy\nfix. It is recorded on the `event.replayed` decisions.",
+            "example": "definition_change"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Predict the outcomes and write nothing. Default false."
+          },
+          "emit_triggers": {
+            "type": "boolean",
+            "description": "Whether downstream event triggers may fire for the replayed events. Off by default:\nthe events are flagged `no_triggers`, which the trigger path skips."
+          },
+          "filter": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayFilter",
+                "description": "The workspace's open event rejects that match."
+              }
+            ]
+          },
+          "ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         }
       },
@@ -10420,6 +11544,47 @@
           "version": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "ScopeRequest": {
+        "type": "object",
+        "description": "What a query looks at.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilterRequest"
+            }
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the range, inclusive."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only events of this name."
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Only this person's events, and those of the people merged into them."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the range, exclusive; at most 400 days after `from`."
           }
         }
       },
@@ -10925,6 +12090,43 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TotalsBody": {
+        "type": "object",
+        "required": [
+          "accept",
+          "flag",
+          "still_rejected",
+          "duplicate",
+          "already_replayed"
+        ],
+        "properties": {
+          "accept": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "already_replayed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "duplicate": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "flag": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "still_rejected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -11434,6 +12636,23 @@
           },
           "is_owner": {
             "type": "boolean"
+          }
+        }
+      },
+      "ValueCountBody": {
+        "type": "object",
+        "required": [
+          "value",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "value": {
+            "type": "string",
+            "description": "The property's text; a list or an object is its JSON."
           }
         }
       },

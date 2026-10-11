@@ -42,18 +42,18 @@ pub use decisions::{
     list_trace,
 };
 pub use events::{
-    BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, EventOutcome, EventPolicy,
-    EventRecord, EventRetention, EventSchema, EventSchemaUpdate, ExploreError, ExploreFilter,
-    ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES, FeedFilter, FeedItem,
-    FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS, MAX_REPLAY, NewEventSchema,
-    PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor, RejectFilter, ReplayPrediction,
-    ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage, SchemaVersion,
-    WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
+    BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
+    EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
+    ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
+    FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS, MAX_REPLAY,
+    NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor, RejectFilter,
+    ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage,
+    SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
     debugger_feed_head, enqueue_replay, ensure_event_partitions, explore_breakdown, explore_count,
     explore_rows, explore_total, find_event_schema, get_event_policy, list_event_schemas,
-    list_ingest_rejects, list_schema_versions, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    list_ingest_rejects, list_schema_versions, listen_for_debugger, preview_replay,
+    prune_debugger_feed, publish_schema_draft, read_debugger_feed, replay_rejects,
+    save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

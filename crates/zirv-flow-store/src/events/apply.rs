@@ -727,6 +727,17 @@ mod tests {
 
     const NOW: OffsetDateTime = datetime!(2026-06-01 12:00 UTC);
 
+    /// outcome, reason, reasons, properties, schema version, event id, reject id
+    type FeedRow = (
+        String,
+        Option<String>,
+        Value,
+        Value,
+        Option<i32>,
+        Option<Uuid>,
+        Option<Uuid>,
+    );
+
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
         let slug = Slug::parse(slug).unwrap();
@@ -1668,7 +1679,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(outcomes.len(), 4);
-        let rows: Vec<(String, Option<String>, Value, Value, Option<i32>, Option<Uuid>, Option<Uuid>)> =
+        let rows: Vec<FeedRow> =
             sqlx::query_as(
                 "SELECT outcome, reason, reasons, properties, schema_version, event_id, reject_id                  FROM debugger_feed ORDER BY seq",
             )

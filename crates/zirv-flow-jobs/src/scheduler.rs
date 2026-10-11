@@ -194,6 +194,9 @@ impl Scheduler {
             }
             Ok(_) => {}
             Err(error) => warn!("could not delete expired import data: {error}"),
+        }
+    }
+
     /// Deletes debugger feed rows past their 15 minutes: on gaining leadership, then at most
     /// every minute. A failure is logged and retried at the next check.
     async fn keep_debugger_feed(&mut self) {
@@ -712,6 +715,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "the import and its status stay");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_prunes_the_debugger_feed_of_rows_past_fifteen_minutes(pool: PgPool) {
         migrated(&pool).await;
         let ws = inbox_workspace(&pool, "watched").await;

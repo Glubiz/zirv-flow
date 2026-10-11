@@ -7517,4 +7517,978 @@ email,b@example.com,
             assert_eq!(rows, 0, "{table}");
         }
     }
+
+    // ---- The event debugger, the explorer and reject replay (#45) ----
+
+    fn app_limits(limits: crate::ExplorerLimits) -> impl Fn(&PgPool) -> Router {
+        move |pool| {
+            router(
+                AppState::new(pool.clone(), Arc::new(String::new))
+                    .with_master_key(&zirv_flow_core::MasterKey::generate())
+                    .with_explorer_limits(limits),
+            )
+        }
+    }
+
+    /// A schema `order` with a required number `total`, a PII `email` and a plain `plan`,
+    /// published, in the given mode.
+    async fn publish_order(router: &Router, owner: &Login, ws: &str, mode: &str) {
+        let created = call(
+            router,
+            "POST",
+            &schemas_uri(ws),
+            Some(json!({"name": "order", "mode": mode, "properties": [
+                {"name": "total", "type": "number", "required": true},
+                {"name": "email", "type": "string", "pii": true},
+                {"name": "plan", "type": "string"}
+            ]})),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let published = call(
+            router,
+            "POST",
+            &format!("{}/order/versions", schemas_uri(ws)),
+            None,
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+    }
+
+    async fn put_policy(router: &Router, owner: &Login, ws: &str, policy: Value) {
+        let reply = call(
+            router,
+            "PUT",
+            &format!("/api/v1/workspaces/{ws}/event-policy"),
+            Some(policy),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+
+    fn inv_record(
+        who: &str,
+        name: &str,
+        message: Option<&str>,
+        minutes_ago: i64,
+        properties: Value,
+    ) -> zirv_flow_store::EventRecord {
+        let now = time::OffsetDateTime::now_utc();
+        zirv_flow_store::EventRecord {
+            source: "web".into(),
+            identifiers: vec![("email".into(), who.into())],
+            name: name.into(),
+            properties: properties.as_object().cloned().unwrap(),
+            timestamp: Some(now - time::Duration::minutes(minutes_ago)),
+            received_at: now,
+            message_id: message.map(str::to_owned),
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        }
+    }
+
+    async fn inv_store(pool: &PgPool, ws: &str, records: Vec<zirv_flow_store::EventRecord>) {
+        let key =
+            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        zirv_flow_store::apply_event_batch(pool, ws.parse().unwrap(), &key, &records)
+            .await
+            .unwrap();
+    }
+
+    struct Frame {
+        event: String,
+        id: Option<String>,
+        data: Value,
+        raw: String,
+    }
+
+    struct Sse {
+        body: Body,
+        buffer: String,
+    }
+
+    async fn open_stream(
+        router: &Router,
+        uri: &str,
+        auth: Auth<'_>,
+        last_event_id: Option<&str>,
+    ) -> Sse {
+        let mut request = Request::builder().method("GET").uri(uri);
+        if let Some(last) = last_event_id {
+            request = request.header("last-event-id", last);
+        }
+        let response = router
+            .clone()
+            .oneshot(with_auth(request, auth).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        Sse {
+            body: response.into_body(),
+            buffer: String::new(),
+        }
+    }
+
+    impl Sse {
+        /// The next frame that is not a comment, or none within `wait`.
+        async fn next(&mut self, wait: std::time::Duration) -> Option<Frame> {
+            let deadline = tokio::time::Instant::now() + wait;
+            loop {
+                while let Some(end) = self.buffer.find("\n\n") {
+                    let chunk: String = self.buffer.drain(..end + 2).collect();
+                    if chunk.starts_with(':') {
+                        continue;
+                    }
+                    let mut frame = Frame {
+                        event: String::new(),
+                        id: None,
+                        data: Value::Null,
+                        raw: chunk.clone(),
+                    };
+                    for line in chunk.lines() {
+                        if let Some(rest) = line.strip_prefix("event: ") {
+                            frame.event = rest.to_owned();
+                        } else if let Some(rest) = line.strip_prefix("id: ") {
+                            frame.id = Some(rest.to_owned());
+                        } else if let Some(rest) = line.strip_prefix("data: ") {
+                            frame.data = serde_json::from_str(rest).unwrap();
+                        }
+                    }
+                    return Some(frame);
+                }
+                let left = deadline.checked_duration_since(tokio::time::Instant::now())?;
+                let next = tokio::time::timeout(left, self.body.frame()).await.ok()??;
+                if let Ok(data) = next.unwrap().into_data() {
+                    self.buffer.push_str(std::str::from_utf8(&data).unwrap());
+                }
+            }
+        }
+
+        async fn take(&mut self, count: usize) -> Vec<Frame> {
+            let mut frames = Vec::new();
+            while frames.len() < count {
+                let frame = self
+                    .next(std::time::Duration::from_secs(10))
+                    .await
+                    .expect("a frame within 10 seconds");
+                frames.push(frame);
+            }
+            frames
+        }
+    }
+
+    fn stream_uri(ws: &str, query: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/debugger/stream{query}")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_debugger_streams_outcomes_in_order_masked_per_viewer_and_never_unredacted(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        publish_order(&router, &owner, &ws, "warn").await;
+        put_policy(
+            &router,
+            &owner,
+            &ws,
+            json!({"unplanned": "reject", "future_skew_seconds": 300,
+                   "lateness_seconds": 86400, "redaction": {"hash": ["email"]}}),
+        )
+        .await;
+        let mut as_owner = open_stream(
+            &router,
+            &stream_uri(&ws, "?reveal=true"),
+            Auth::Session(&owner),
+            None,
+        )
+        .await;
+        let mut as_member =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&member), None).await;
+        let mut member_reveals = open_stream(
+            &router,
+            &stream_uri(&ws, "?reveal=true"),
+            Auth::Session(&member),
+            None,
+        )
+        .await;
+
+        inv_store(
+            &pool,
+            &ws,
+            vec![
+                inv_record(
+                    "a@example.com",
+                    "order",
+                    Some("m-1"),
+                    1,
+                    json!({"total": 5, "email": "a@example.com", "plan": "pro"}),
+                ),
+                inv_record(
+                    "a@example.com",
+                    "order",
+                    Some("m-2"),
+                    1,
+                    json!({"total": "free", "email": "a@example.com", "plan": "pro"}),
+                ),
+                inv_record(
+                    "a@example.com",
+                    "ghost",
+                    Some("m-3"),
+                    1,
+                    json!({"note": "plain-note"}),
+                ),
+            ],
+        )
+        .await;
+
+        let owner_frames = as_owner.take(3).await;
+        let member_frames = as_member.take(3).await;
+        let revealed_by_member = member_reveals.take(3).await;
+        let outcomes: Vec<&str> = owner_frames
+            .iter()
+            .map(|frame| frame.data["outcome"].as_str().unwrap())
+            .collect();
+        assert_eq!(outcomes, ["accepted", "flagged", "rejected"]);
+        assert!(owner_frames.iter().all(|frame| frame.event == "item"));
+        let seqs: Vec<i64> = owner_frames
+            .iter()
+            .map(|frame| frame.id.as_ref().unwrap().parse().unwrap())
+            .collect();
+        assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(owner_frames[1].data["reasons"][0]["reason"], "wrong_type");
+        assert_eq!(owner_frames[2].data["reason"], "unplanned_event");
+        // The owner who reveals sees the stored (hashed) value, never the raw one.
+        let hashed = owner_frames[0].data["properties"]["email"]
+            .as_str()
+            .unwrap();
+        assert_eq!(hashed.len(), 64);
+        assert_eq!(owner_frames[0].data["properties"]["plan"], "pro");
+        // A member sees the PII property masked, with or without asking to reveal.
+        for frames in [&member_frames, &revealed_by_member] {
+            assert!(frames[0].data["properties"]["email"].is_null());
+            assert!(
+                frames[0].data["masked"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("email"))
+            );
+            assert_eq!(frames[0].data["properties"]["plan"], "pro");
+            assert!(frames[2].data["properties"]["note"].is_null());
+        }
+        assert_eq!(owner_frames[2].data["properties"]["note"], "plain-note");
+        for frame in owner_frames
+            .iter()
+            .chain(&member_frames)
+            .chain(&revealed_by_member)
+        {
+            assert!(!frame.raw.contains("a@example.com"), "{}", frame.raw);
+        }
+        assert_eq!(owner_frames[0].data["trace_id"].as_str().unwrap().len(), 32);
+        // The feed rows hold the redacted value only.
+        let stored: String = sqlx::query_scalar(
+            "SELECT coalesce(string_agg(properties::text, ' '), '') FROM debugger_feed",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!stored.contains("a@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_debugger_resumes_from_last_event_id_and_isolates_workspaces(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let one = workspace(&router, &owner, "One").await;
+        let two = workspace(&router, &owner, "Two").await;
+        let mut first =
+            open_stream(&router, &stream_uri(&one, ""), Auth::Session(&owner), None).await;
+        let mut other =
+            open_stream(&router, &stream_uri(&two, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &one,
+            vec![
+                inv_record("a@example.com", "seen", None, 1, json!({})),
+                inv_record("a@example.com", "seen", None, 1, json!({})),
+                inv_record("a@example.com", "seen", None, 1, json!({})),
+            ],
+        )
+        .await;
+        let frames = first.take(3).await;
+        let after_first = frames[0].id.clone().unwrap();
+
+        let mut resumed = open_stream(
+            &router,
+            &stream_uri(&one, ""),
+            Auth::Session(&owner),
+            Some(&after_first),
+        )
+        .await;
+        let replayed = resumed.take(2).await;
+        inv_store(
+            &pool,
+            &two,
+            vec![inv_record("b@example.com", "seen", None, 1, json!({}))],
+        )
+        .await;
+        let theirs = other.take(1).await;
+
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|f| f.id.clone().unwrap())
+                .collect::<Vec<_>>(),
+            [frames[1].id.clone().unwrap(), frames[2].id.clone().unwrap()]
+        );
+        assert_eq!(theirs.len(), 1);
+        assert!(
+            other
+                .next(std::time::Duration::from_millis(500))
+                .await
+                .is_none()
+        );
+        let first_again = first.next(std::time::Duration::from_millis(300)).await;
+        assert!(
+            first_again.is_none(),
+            "workspace one saw an event of workspace two"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_debugger_filters_and_refuses_bad_queries_and_unauthorised_viewers(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["ingest"]).await;
+        let mut only_named = open_stream(
+            &router,
+            &stream_uri(&ws, "?name=wanted&outcome=unplanned"),
+            Auth::Session(&owner),
+            None,
+        )
+        .await;
+
+        inv_store(
+            &pool,
+            &ws,
+            vec![
+                inv_record("a@example.com", "other", None, 1, json!({})),
+                inv_record("a@example.com", "wanted", None, 1, json!({})),
+            ],
+        )
+        .await;
+        let frames = only_named.take(1).await;
+        let bad = call(
+            &router,
+            "GET",
+            &stream_uri(&ws, "?outcome=lost"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let anonymous = call(&router, "GET", &stream_uri(&ws, ""), None, Auth::Anonymous).await;
+        let ingest_only = call(
+            &router,
+            "GET",
+            &stream_uri(&ws, ""),
+            None,
+            Auth::Key(&write_key),
+        )
+        .await;
+
+        assert_eq!(frames[0].data["name"], "wanted");
+        assert!(
+            only_named
+                .next(std::time::Duration::from_millis(300))
+                .await
+                .is_none()
+        );
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ingest_only.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slow_viewer_gets_a_gap_and_ingestion_is_not_held_up(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut slow =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+
+        let started = std::time::Instant::now();
+        inv_store(
+            &pool,
+            &ws,
+            (0..300)
+                .map(|_| inv_record("a@example.com", "seen", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+
+        let mut items = 0;
+        let mut skipped = 0;
+        for _ in 0..200 {
+            let Some(frame) = slow.next(std::time::Duration::from_secs(12)).await else {
+                break;
+            };
+            match frame.event.as_str() {
+                "item" => items += 1,
+                "gap" => {
+                    skipped = frame.data["skipped"].as_u64().unwrap();
+                    break;
+                }
+                other => panic!("unexpected frame {other}"),
+            }
+        }
+
+        assert!(skipped > 0, "no gap after {items} items");
+        assert!(items < 300);
+    }
+
+    fn explore_uri(ws: &str, what: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/events/explore/{what}")
+    }
+
+    fn explore_range() -> Value {
+        let now = time::OffsetDateTime::now_utc();
+        let format = time::format_description::well_known::Rfc3339;
+        json!({
+            "from": (now - time::Duration::days(3)).format(&format).unwrap(),
+            "to": (now + time::Duration::hours(1)).format(&format).unwrap(),
+        })
+    }
+
+    fn with_range(mut body: Value) -> Value {
+        let range = explore_range();
+        body["from"] = range["from"].clone();
+        body["to"] = range["to"].clone();
+        body
+    }
+
+    async fn seed_explorer(pool: &PgPool, router: &Router, owner: &Login, ws: &str) {
+        publish_order(router, owner, ws, "warn").await;
+        inv_store(
+            pool,
+            ws,
+            vec![
+                inv_record(
+                    "a@example.com",
+                    "order",
+                    None,
+                    60,
+                    json!({"total": 10, "plan": "pro", "email": "a@example.com"}),
+                ),
+                inv_record(
+                    "a@example.com",
+                    "order",
+                    None,
+                    120,
+                    json!({"total": 20, "plan": "pro", "email": "a@example.com"}),
+                ),
+                inv_record(
+                    "b@example.com",
+                    "order",
+                    None,
+                    60 * 25,
+                    json!({"total": 30, "plan": "free"}),
+                ),
+                inv_record(
+                    "b@example.com",
+                    "order",
+                    None,
+                    60 * 26,
+                    json!({"total": 40, "plan": "team"}),
+                ),
+                inv_record("b@example.com", "page", None, 5, json!({"path": "/x"})),
+            ],
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_explorer_count_breakdown_list_and_export_agree_and_mask_per_viewer(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        seed_explorer(&pool, &router, &owner, &ws).await;
+        let scope = with_range(json!({
+            "name": "order",
+            "filters": [{"key": "total", "op": "gte", "value": 20}]
+        }));
+        let with = |extra: Value| {
+            let mut body = scope.clone();
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+
+        let count = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with(json!({"bucket": "day"}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        let breakdown = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "breakdown"),
+            Some(with(json!({"property": "plan"}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        let list = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(with(json!({"limit": 2}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member_list = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(with(json!({}))),
+            Auth::Session(&member),
+        )
+        .await;
+        let exported = call_text(
+            &router,
+            "POST",
+            &explore_uri(&ws, "export"),
+            Some("application/json"),
+            scope.to_string(),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member_export = call_text(
+            &router,
+            "POST",
+            &explore_uri(&ws, "export"),
+            Some("application/json"),
+            scope.to_string(),
+            Auth::Session(&member),
+        )
+        .await;
+
+        assert_eq!(count.status, StatusCode::OK, "{:?}", count.body);
+        assert_eq!(count.body["total"], 3);
+        assert_eq!(count.body["truncated"], false);
+        let grouped: i64 = breakdown.body["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["count"].as_i64().unwrap())
+            .sum();
+        assert_eq!(
+            grouped
+                + breakdown.body["other"].as_i64().unwrap()
+                + breakdown.body["missing"].as_i64().unwrap(),
+            3
+        );
+        assert_eq!(list.body["events"].as_array().unwrap().len(), 2);
+        let cursor = list.body["next_after"].as_str().unwrap();
+        let rest = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(with(json!({"limit": 2, "after": cursor}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(rest.body["events"].as_array().unwrap().len(), 1);
+        assert!(rest.body["next_after"].is_null());
+        assert_eq!(exported.status, StatusCode::OK);
+        assert_eq!(
+            exported.headers[header::CONTENT_TYPE],
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(exported.text.lines().count(), 1 + 3);
+        // Members see the PII property masked in the list and the export.
+        let first = &member_list.body["events"][0];
+        assert!(
+            first["properties"]["email"].is_null() || first["properties"].get("email").is_none()
+        );
+        assert!(!member_list.body.to_string().contains("a@example.com"));
+        assert!(!member_export.text.contains("a@example.com"));
+        // The export is audited with its shape and row count, no values.
+        let audited = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let entry = audited
+            .iter()
+            .find(|row| row.action == "events.exported")
+            .unwrap();
+        assert_eq!(entry.summary["rows"], 3);
+        assert_eq!(entry.summary["filter_ops"], json!(["gte"]));
+        let summary = entry.summary.to_string();
+        assert!(!summary.contains("order") && !summary.contains("total"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_explorer_refuses_pii_probes_for_members_and_bad_input_for_everyone(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        seed_explorer(&pool, &router, &owner, &ws).await;
+        let by_email = with_range(json!({"name": "order", "property": "email"}));
+        let prefix = with_range(json!({"name": "order", "bucket": "day",
+            "filters": [{"key": "email", "op": "prefix", "value": "a"}]}));
+
+        let member_breakdown = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "breakdown"),
+            Some(by_email.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let owner_breakdown = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "breakdown"),
+            Some(by_email),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member_prefix = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(prefix),
+            Auth::Session(&member),
+        )
+        .await;
+        let bad_bucket = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with_range(json!({"bucket": "year"}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        let too_wide = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(json!({"bucket": "day", "from": "2024-01-01T00:00:00Z", "to": "2026-01-01T00:00:00Z"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad_limit = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(with_range(json!({"limit": 0}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with_range(json!({"bucket": "day"}))),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+
+        assert_eq!(member_breakdown.status, StatusCode::FORBIDDEN);
+        assert_eq!(member_breakdown.body["code"], "pii_property_not_explorable");
+        assert_eq!(
+            owner_breakdown.status,
+            StatusCode::OK,
+            "{:?}",
+            owner_breakdown.body
+        );
+        assert_eq!(member_prefix.status, StatusCode::FORBIDDEN);
+        assert_eq!(bad_bucket.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(too_wide.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explorer_query_past_the_timeout_is_a_503_query_timeout(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let hurried = app_limits(crate::ExplorerLimits {
+            interactive_timeout: std::time::Duration::from_millis(1),
+            ..crate::ExplorerLimits::default()
+        })(&pool);
+        let owner = owner(&pool, &hurried).await;
+        let ws = workspace(&hurried, &owner, "Alpha").await;
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record("a@example.com", "seen", None, 1, json!({}))],
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO events \
+                (id, workspace_id, person_id, name, occurred_at, received_at, properties, \
+                 source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), e.workspace_id, e.person_id, 'bulk', \
+                    e.occurred_at - make_interval(secs => n), e.received_at, \
+                    jsonb_build_object('n', n), 'web', gen_random_uuid(), 'unplanned' \
+             FROM (SELECT * FROM events LIMIT 1) e, generate_series(1, 200000) AS n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = with_range(json!({"bucket": "hour",
+            "filters": [{"key": "n", "op": "prefix", "value": "99"}]}));
+
+        let reply = call(
+            &hurried,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(body),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "query_timeout");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_past_the_row_limit_ends_with_a_comment_line(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let small = app_limits(crate::ExplorerLimits {
+            export_row_limit: 2,
+            ..crate::ExplorerLimits::default()
+        })(&pool);
+        let owner = owner(&pool, &small).await;
+        let ws = workspace(&small, &owner, "Alpha").await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..4)
+                .map(|n| inv_record("a@example.com", "seen", None, n, json!({})))
+                .collect(),
+        )
+        .await;
+
+        let reply = call_text(
+            &small,
+            "POST",
+            &explore_uri(&ws, "export"),
+            Some("application/json"),
+            explore_range().to_string(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let lines: Vec<&str> = reply.text.lines().collect();
+        assert_eq!(lines.len(), 1 + 2 + 1, "{}", reply.text);
+        assert!(lines[3].starts_with("# truncated"));
+        let audited = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let entry = audited
+            .iter()
+            .find(|row| row.action == "events.exported")
+            .unwrap();
+        assert_eq!(entry.summary["rows"], json!(2));
+        assert_eq!(entry.summary["truncated"], json!(true));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_is_for_admins_previews_without_writing_and_enqueues_an_audited_job(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        publish_order(&router, &owner, &ws, "block").await;
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record(
+                "a@example.com",
+                "order",
+                Some("m-0"),
+                5,
+                json!({"total": 1}),
+            )],
+        )
+        .await;
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record(
+                "a@example.com",
+                "order",
+                Some("m-1"),
+                5,
+                json!({"total": "ten"}),
+            )],
+        )
+        .await;
+        let rejects = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/ingest-rejects"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let reject = rejects.body["rejects"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let uri = format!("/api/v1/workspaces/{ws}/ingest-rejects/replay");
+        let fixed = call(
+            &router,
+            "PUT",
+            &format!("{}/order/draft", schemas_uri(&ws)),
+            Some(json!({"properties": [{"name": "total", "type": "string", "required": true}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(fixed.status, StatusCode::OK, "{:?}", fixed.body);
+        call(
+            &router,
+            "POST",
+            &format!("{}/order/versions", schemas_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let request = |dry_run: bool| json!({"ids": [reject], "cause": "definition_change", "dry_run": dry_run});
+
+        let as_member = call(
+            &router,
+            "POST",
+            &uri,
+            Some(request(true)),
+            Auth::Session(&member),
+        )
+        .await;
+        let as_read_key = call(
+            &router,
+            "POST",
+            &uri,
+            Some(request(true)),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &uri,
+            Some(request(true)),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let both = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"ids": [reject], "filter": {}, "cause": "manual"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad_cause = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"ids": [reject], "cause": "whim"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let preview = call(
+            &router,
+            "POST",
+            &uri,
+            Some(request(true)),
+            Auth::Session(&owner),
+        )
+        .await;
+        let jobs_before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.replay'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let queued = call(
+            &router,
+            "POST",
+            &uri,
+            Some(request(false)),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(as_read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(both.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad_cause.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["rejects"][0]["outcome"], "accept");
+        assert_eq!(preview.body["totals"]["accept"], 1);
+        assert_eq!(jobs_before, 0);
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1);
+        assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+        assert_eq!(queued.body["selected"], 1);
+        assert_eq!(queued.body["trace_id"].as_str().unwrap().len(), 32);
+        let (kind, cause): (String, String) =
+            sqlx::query_as("SELECT kind, cause_kind FROM jobs WHERE kind = 'ingest.replay'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (kind.as_str(), cause.as_str()),
+            ("ingest.replay", "definition_change")
+        );
+        let audited = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let entries: Vec<_> = audited
+            .iter()
+            .filter(|row| row.action == "ingest_rejects.replayed")
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].summary["selected"], 1);
+        assert_eq!(entries[0].summary["cause"], "definition_change");
+        assert_eq!(entries[0].summary["emit_triggers"], false);
+    }
 }

@@ -13,8 +13,9 @@ mod schemas;
 pub(crate) use apply::{EventBatch, FailedItem, apply_event_record, reject_apply_failed};
 pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 pub use debugger::{
-    DEBUGGER_CHANNEL, FEED_RETENTION_MINUTES, FeedFilter, FeedItem, WATCH_SECONDS,
-    debugger_feed_head, prune_debugger_feed, read_debugger_feed, touch_debugger_watch,
+    DEBUGGER_CHANNEL, DebuggerListener, FEED_RETENTION_MINUTES, FeedFilter, FeedItem,
+    WATCH_SECONDS, debugger_feed_head, listen_for_debugger, prune_debugger_feed,
+    read_debugger_feed, touch_debugger_watch,
 };
 pub use explore::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, ExploreError, ExploreFilter, ExploreLimits,
