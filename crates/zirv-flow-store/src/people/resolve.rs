@@ -22,6 +22,9 @@ use crate::StoreError;
 /// How many times a record's resolution runs when identity inserts keep losing races.
 const MAX_ATTEMPTS: u32 = 3;
 
+/// The longest chain of merges a lookup follows.
+const MAX_MERGE_HOPS: u32 = 8;
+
 /// An identifier that points at a person other than the one the record attached to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Conflict {
@@ -163,6 +166,34 @@ pub(crate) async fn resolve_person(
             split_from,
         });
     }
+}
+
+/// The person `identifiers` already belong to, chosen like [`resolve_person`] chooses and
+/// followed through `merged_into`; nothing is created or attached.
+pub(crate) async fn find_known_person(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    identifiers: &[Identifier],
+) -> Result<Option<Uuid>, StoreError> {
+    let owners = lookup_owners(connection, workspace, identifiers).await?;
+    let Some(mut person) = choose(identifiers, &owners, None) else {
+        return Ok(None);
+    };
+    for _ in 0..MAX_MERGE_HOPS {
+        let next: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(person)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        match next.flatten() {
+            Some(target) => person = target,
+            None => break,
+        }
+    }
+    Ok(Some(person))
 }
 
 async fn lookup_owners(

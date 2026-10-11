@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 21] = [
+const CONFIG_KEYS: [&str; 25] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -32,6 +32,10 @@ const CONFIG_KEYS: [&str; 21] = [
     "worker.concurrency",
     "worker.lease_seconds",
     "worker.max_running_per_workspace",
+    "events.retention_days",
+    "events.min_retention_days",
+    "events.max_retention_days",
+    "events.reject_retention_days",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -53,6 +57,7 @@ pub(crate) struct Config {
     master_key: MasterKeyConfig,
     database: DatabaseConfig,
     worker: WorkerConfig,
+    events: EventsConfig,
     log: LogConfig,
 }
 
@@ -222,6 +227,19 @@ struct WorkerConfig {
     max_running_per_workspace: Option<u32>,
 }
 
+/// How long the event store keeps what it holds, in days.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventsConfig {
+    /// How long events are kept unless their name has an override.
+    retention_days: u32,
+    /// The shortest and the longest per-name override a workspace may set.
+    min_retention_days: u32,
+    max_retention_days: u32,
+    /// How long ingest rejects are kept.
+    reject_retention_days: u32,
+}
+
 struct SecretUrl(Url);
 
 impl SecretUrl {
@@ -351,6 +369,10 @@ impl Config {
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32))
             .merge(Serialized::default("worker.lease_seconds", 30_u32))
+            .merge(Serialized::default("events.retention_days", 760_u32))
+            .merge(Serialized::default("events.min_retention_days", 30_u32))
+            .merge(Serialized::default("events.max_retention_days", 1095_u32))
+            .merge(Serialized::default("events.reject_retention_days", 30_u32))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -389,6 +411,19 @@ impl Config {
             ("database.max_connections", config.database.max_connections),
             ("worker.concurrency", config.worker.concurrency),
             ("worker.lease_seconds", config.worker.lease_seconds),
+            ("events.retention_days", config.events.retention_days),
+            (
+                "events.min_retention_days",
+                config.events.min_retention_days,
+            ),
+            (
+                "events.max_retention_days",
+                config.events.max_retention_days,
+            ),
+            (
+                "events.reject_retention_days",
+                config.events.reject_retention_days,
+            ),
         ]
         .into_iter()
         .chain(
@@ -405,6 +440,8 @@ impl Config {
                 ));
             }
         }
+
+        config.validate_events(path, &env_sources)?;
 
         if !crate::log::is_valid_filter(&config.log.filter) {
             return Err(ConfigError::new(
@@ -440,6 +477,32 @@ impl Config {
 
         config.validate_auth(path, &env_sources)?;
         Ok(config)
+    }
+
+    /// The retention bounds must be ordered, and the default must lie within them.
+    fn validate_events(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        let events = &self.events;
+        let fail = |key: &str, reason: &str| {
+            ConfigError::new(key, reason, source_for(key, path, env_sources))
+        };
+        if events.min_retention_days > events.max_retention_days {
+            return Err(fail(
+                "events.min_retention_days",
+                "must not exceed events.max_retention_days",
+            ));
+        }
+        if !(events.min_retention_days..=events.max_retention_days).contains(&events.retention_days)
+        {
+            return Err(fail(
+                "events.retention_days",
+                "must lie between events.min_retention_days and events.max_retention_days",
+            ));
+        }
+        Ok(())
     }
 
     /// The checks that need more than a type: the OIDC URLs and the public URL they rely on.
@@ -582,6 +645,16 @@ impl Config {
     /// How long a claimed job's lease lasts without a heartbeat.
     pub(crate) fn worker_lease_seconds(&self) -> u32 {
         self.worker.lease_seconds
+    }
+
+    /// What the event store keeps and for how long.
+    pub(crate) fn events_retention(&self) -> zirv_flow_store::EventRetention {
+        zirv_flow_store::EventRetention {
+            default_days: self.events.retention_days,
+            min_days: self.events.min_retention_days,
+            max_days: self.events.max_retention_days,
+            reject_days: self.events.reject_retention_days,
+        }
     }
 
     /// The most jobs of one workspace that run at once; none means unlimited.
@@ -968,6 +1041,73 @@ cookie_secure = false
         assert_eq!(config.worker_lease_seconds(), 30);
         assert_eq!(config.worker_max_running_per_workspace(), None);
         assert!(!toml::to_string(&config).unwrap().contains("max_running"));
+    }
+
+    #[test]
+    fn the_event_retention_defaults_are_25_months_and_30_to_1095_day_overrides() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(
+            config.events_retention(),
+            zirv_flow_store::EventRetention::default()
+        );
+        let shown = toml::to_string(&config).unwrap();
+        assert!(shown.contains("[events]") && shown.contains("retention_days = 760"));
+    }
+
+    #[test]
+    fn the_event_retention_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        for (key, value) in [
+            ("RETENTION_DAYS", "100"),
+            ("MIN_RETENTION_DAYS", "10"),
+            ("MAX_RETENTION_DAYS", "200"),
+            ("REJECT_RETENTION_DAYS", "7"),
+        ] {
+            env.push((format!("ZIRV_FLOW_EVENTS__{key}").into(), value.into()));
+        }
+
+        let retention = Config::load(None, env).unwrap().events_retention();
+
+        assert_eq!(
+            (
+                retention.default_days,
+                retention.min_days,
+                retention.max_days,
+                retention.reject_days
+            ),
+            (100, 10, 200, 7)
+        );
+    }
+
+    #[test]
+    fn the_event_retention_must_be_positive_ordered_and_contain_the_default() {
+        let cases = [
+            (
+                "ZIRV_FLOW_EVENTS__REJECT_RETENTION_DAYS",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_EVENTS__MIN_RETENTION_DAYS",
+                "2000",
+                "must not exceed events.max_retention_days",
+            ),
+            ("ZIRV_FLOW_EVENTS__RETENTION_DAYS", "10", "must lie between"),
+            (
+                "ZIRV_FLOW_EVENTS__RETENTION_DAYS",
+                "2000",
+                "must lie between",
+            ),
+        ];
+        for (key, value, expected) in cases {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{key}: {error}");
+        }
     }
 
     #[test]

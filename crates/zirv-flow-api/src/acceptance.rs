@@ -2818,4 +2818,489 @@ mod tests {
                 .starts_with("conflict_changed")
         );
     }
+
+    fn schemas_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/event-schemas")
+    }
+
+    fn total_property() -> Value {
+        json!({"name": "total", "type": "number", "required": true})
+    }
+
+    async fn make_schema(router: &Router, owner: &Login, ws: &str, name: &str) {
+        let reply = call(
+            router,
+            "POST",
+            &schemas_uri(ws),
+            Some(json!({"name": name, "mode": "block", "properties": [total_property()]})),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_schema_is_created_drafted_published_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let created = call(
+            &router,
+            "POST",
+            &schemas_uri(&ws),
+            Some(
+                json!({"name": "Order Completed", "mode": "block", "description": "secret words",
+                        "properties": [total_property()]}),
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(created.body["schema"]["mode"], "block");
+        assert_eq!(created.body["schema"]["has_draft"], true);
+        assert_eq!(created.body["schema"]["current_version"], Value::Null);
+        assert_eq!(created.body["draft"][0]["name"], "total");
+        let uri = format!("{}/Order%20Completed", schemas_uri(&ws));
+
+        let duplicate = call(
+            &router,
+            "POST",
+            &schemas_uri(&ws),
+            Some(json!({"name": "Order Completed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let saved = call(
+            &router,
+            "PUT",
+            &format!("{uri}/draft"),
+            Some(json!({"properties": [total_property(),
+                {"name": "tier", "type": "string", "enum": ["free", "pro"], "pii": true}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let first = call(
+            &router,
+            "POST",
+            &format!("{uri}/versions"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &format!("{uri}/versions"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        call(
+            &router,
+            "PUT",
+            &format!("{uri}/draft"),
+            Some(json!({"properties": []})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let second = call(
+            &router,
+            "POST",
+            &format!("{uri}/versions"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let fetched = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["draft"][1]["enum"], json!(["free", "pro"]));
+        assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+        assert_eq!(first.body["schema"]["current_version"], 1);
+        assert_eq!(first.body["draft"], Value::Null);
+        assert_eq!(
+            first.body["versions"][0]["properties"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(second.body["schema"]["current_version"], 2);
+        assert_eq!(fetched.body["versions"].as_array().unwrap().len(), 2);
+        assert_eq!(fetched.body["versions"][0]["version"], 2);
+        assert_eq!(fetched.body["versions"][0]["properties"], json!([]));
+        assert_eq!(
+            fetched.body["versions"][1]["properties"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        for action in ["created", "draft_saved", "published"] {
+            let name = format!("event_schema.{action}");
+            assert!(audit.iter().any(|row| row.action == name), "{name}");
+        }
+        let published = audit
+            .iter()
+            .find(|row| row.action == "event_schema.published")
+            .unwrap();
+        assert_eq!(published.summary["name"], "Order Completed");
+        let text = serde_json::to_string(&audit.iter().map(|row| &row.summary).collect::<Vec<_>>())
+            .unwrap();
+        assert!(!text.contains("secret words") && !text.contains("free"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn invalid_schemas_and_missing_ones_are_refused(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        for bad in [
+            json!({"name": ""}),
+            json!({"name": "bad\nname"}),
+            json!({"name": "."}),
+            json!({"name": ".."}),
+            json!({"name": "ok", "mode": "strict"}),
+            json!({"name": "ok", "properties": [{"name": "a", "type": "money"}]}),
+            json!({"name": "ok", "properties": [{"name": "a", "type": "number", "enum": ["x"]}]}),
+            json!({"name": "ok", "properties": [{"name": "a", "type": "string"}, {"name": "a", "type": "string"}]}),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &schemas_uri(&ws),
+                Some(bad.clone()),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bad}: {:?}",
+                reply.body
+            );
+        }
+        let missing = format!("{}/nothing", schemas_uri(&ws));
+
+        let get = call(&router, "GET", &missing, None, Auth::Session(&owner)).await;
+        let draft = call(
+            &router,
+            "PUT",
+            &format!("{missing}/draft"),
+            Some(json!({"properties": []})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let publish = call(
+            &router,
+            "POST",
+            &format!("{missing}/versions"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let patch = call(
+            &router,
+            "PATCH",
+            &missing,
+            Some(json!({"mode": "allow"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        for reply in [get, draft, publish, patch] {
+            assert_eq!(reply.status, StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn mode_and_retention_are_updated_within_the_operators_bounds(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        make_schema(&router, &owner, &ws, "order").await;
+        let uri = format!("{}/order", schemas_uri(&ws));
+        let patch = |body: Value| call(&router, "PATCH", &uri, Some(body), Auth::Session(&owner));
+
+        let set = patch(json!({"mode": "allow", "retention_days": 90})).await;
+        let too_short = patch(json!({"retention_days": 29})).await;
+        let too_long = patch(json!({"retention_days": 1096})).await;
+        let bad_mode = patch(json!({"mode": "strict"})).await;
+        let empty = patch(json!({})).await;
+        let cleared = patch(json!({"retention_days": null})).await;
+
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+        assert_eq!(set.body["schema"]["mode"], "allow");
+        assert_eq!(set.body["schema"]["retention_days"], 90);
+        for refused in [too_short, too_long, bad_mode, empty] {
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                refused.body
+            );
+        }
+        assert_eq!(cleared.body["schema"]["retention_days"], Value::Null);
+        assert_eq!(cleared.body["schema"]["mode"], "allow");
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let updated = audit
+            .iter()
+            .filter(|row| row.action == "event_schema.updated")
+            .map(|row| row.summary.clone())
+            .collect::<Vec<_>>();
+        assert!(updated.contains(&json!({"name": "order", "fields": ["retention_days"]})));
+        assert!(updated.contains(&json!({"name": "order", "fields": ["mode", "retention_days"]})));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn non_admins_read_events_but_cannot_change_them_and_other_workspaces_are_404(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &mine, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
+        make_schema(&router, &owner, &mine, "order").await;
+        make_schema(&router, &owner, &theirs, "other").await;
+        let policy = format!("/api/v1/workspaces/{mine}/event-policy");
+        let rejects = format!("/api/v1/workspaces/{mine}/ingest-rejects");
+        let uri = format!("{}/order", schemas_uri(&mine));
+
+        for path in [schemas_uri(&mine), uri.clone(), policy.clone(), rejects] {
+            let by_member = call(&router, "GET", &path, None, Auth::Session(&member)).await;
+            let by_key = call(&router, "GET", &path, None, Auth::Key(&read_key)).await;
+            assert_eq!(by_member.status, StatusCode::OK, "{path}");
+            assert_eq!(by_key.status, StatusCode::OK, "{path}");
+        }
+        let policy_body = json!({"unplanned": "draft", "future_skew_seconds": 1,
+                                 "lateness_seconds": 1, "redaction": {}});
+        let writes = [
+            ("POST", schemas_uri(&mine), Some(json!({"name": "x"}))),
+            (
+                "PUT",
+                format!("{uri}/draft"),
+                Some(json!({"properties": []})),
+            ),
+            ("POST", format!("{uri}/versions"), None),
+            ("PATCH", uri.clone(), Some(json!({"mode": "allow"}))),
+            ("PUT", policy, Some(policy_body)),
+        ];
+        for (method, path, body) in writes {
+            let by_member =
+                call(&router, method, &path, body.clone(), Auth::Session(&member)).await;
+            let by_key = call(&router, method, &path, body, Auth::Key(&read_key)).await;
+            assert_eq!(by_member.status, StatusCode::FORBIDDEN, "{method} {path}");
+            assert_eq!(by_key.status, StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        let foreign = format!("{}/other", schemas_uri(&theirs));
+        for path in [schemas_uri(&theirs), foreign] {
+            let by_member = call(&router, "GET", &path, None, Auth::Session(&member)).await;
+            let by_key = call(&router, "GET", &path, None, Auth::Key(&read_key)).await;
+            assert_eq!(by_member.status, StatusCode::NOT_FOUND);
+            assert_eq!(by_key.status, StatusCode::NOT_FOUND);
+        }
+        let no_csrf = call(
+            &router,
+            "POST",
+            &schemas_uri(&mine),
+            Some(json!({"name": "x"})),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_policy_defaults_is_replaced_whole_validated_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let uri = format!("/api/v1/workspaces/{ws}/event-policy");
+
+        let defaults = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        let saved = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(
+                json!({"unplanned": "reject", "future_skew_seconds": 60, "lateness_seconds": 7200,
+                        "redaction": {"drop": ["card"], "hash": ["email"], "truncate_ip": ["ip"]}}),
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        let mut refused = Vec::new();
+        for bad in [
+            json!({"unplanned": "ignore", "future_skew_seconds": 1, "lateness_seconds": 1, "redaction": {}}),
+            json!({"unplanned": "draft", "future_skew_seconds": -1, "lateness_seconds": 1, "redaction": {}}),
+            json!({"unplanned": "draft", "future_skew_seconds": 90000, "lateness_seconds": 1, "redaction": {}}),
+            json!({"unplanned": "draft", "future_skew_seconds": 1, "lateness_seconds": 99999999, "redaction": {}}),
+            json!({"unplanned": "draft", "future_skew_seconds": 1, "lateness_seconds": 1, "redaction": {"drop": [""]}}),
+        ] {
+            let reply = call(&router, "PUT", &uri, Some(bad), Auth::Session(&owner)).await;
+            refused.push(reply.status);
+        }
+
+        assert_eq!(defaults.body["unplanned"], "draft");
+        assert_eq!(defaults.body["future_skew_seconds"], 300);
+        assert_eq!(defaults.body["lateness_seconds"], 86_400);
+        assert_eq!(
+            defaults.body["redaction"]["truncate_ip"],
+            json!(["ip", "context.ip"])
+        );
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(again.body, saved.body);
+        assert_eq!(again.body["redaction"]["hash"], json!(["email"]));
+        assert!(
+            refused
+                .iter()
+                .all(|status| *status == StatusCode::UNPROCESSABLE_ENTITY),
+            "{refused:?}"
+        );
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let row = audit
+            .iter()
+            .find(|row| row.action == "event_policy.updated")
+            .unwrap();
+        assert_eq!(
+            row.summary,
+            json!({"fields": ["unplanned", "future_skew_seconds", "lateness_seconds", "redaction"]})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rejects_list_newest_first_in_pages_with_filters_and_never_the_payload(pool: PgPool) {
+        use zirv_flow_core::{Cause, HmacPurpose, MasterKey, TraceContext};
+        use zirv_flow_store::{EventRecord, apply_event_batch};
+
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        make_schema(&router, &owner, &ws, "order").await;
+        call(
+            &router,
+            "POST",
+            &format!("{}/order/versions", schemas_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let workspace_id = ws.parse().unwrap();
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let received = time::macros::datetime!(2026-06-01 12:00 UTC);
+        let events: Vec<EventRecord> = [
+            ("order", "order-total-1", 1),
+            ("order", "order-total-2", 2),
+            ("unknown", "unknown-total", 3),
+        ]
+        .into_iter()
+        .map(|(name, value, minute)| EventRecord {
+            source: "web".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            name: name.into(),
+            properties: json!({"total": value, "card": "card-secret"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            timestamp: None,
+            received_at: received + time::Duration::minutes(minute),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("t")),
+        })
+        .collect();
+        let policy = format!("/api/v1/workspaces/{ws}/event-policy");
+        call(
+            &router,
+            "PUT",
+            &policy,
+            Some(json!({"unplanned": "reject", "future_skew_seconds": 300,
+                        "lateness_seconds": 86400, "redaction": {}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        apply_event_batch(&pool, workspace_id, &key, &events)
+            .await
+            .unwrap();
+        let uri = format!("/api/v1/workspaces/{ws}/ingest-rejects");
+
+        let first = call(
+            &router,
+            "GET",
+            &format!("{uri}?limit=2"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let second = call(
+            &router,
+            "GET",
+            &format!("{uri}?limit=2&before={cursor}"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let named = call(
+            &router,
+            "GET",
+            &format!("{uri}?name=order"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let unplanned = call(
+            &router,
+            "GET",
+            &format!("{uri}?reason=unplanned_event"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad_limit = call(
+            &router,
+            "GET",
+            &format!("{uri}?limit=0"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        let rejects = first.body["rejects"].as_array().unwrap();
+        assert_eq!(rejects.len(), 2);
+        assert_eq!(rejects[0]["name"], "unknown");
+        assert_eq!(rejects[0]["reason"], "unplanned_event");
+        assert_eq!(
+            rejects[1]["reasons"],
+            json!([{"property": "total", "reason": "wrong_type"},
+                   {"property": "card", "reason": "unplanned_property"}])
+        );
+        assert_eq!(second.body["rejects"].as_array().unwrap().len(), 1);
+        assert_eq!(second.body["next_before"], Value::Null);
+        assert_eq!(named.body["rejects"].as_array().unwrap().len(), 2);
+        assert_eq!(unplanned.body["rejects"].as_array().unwrap().len(), 1);
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+        for reply in [&first, &second, &named, &unplanned] {
+            let text = reply.body.to_string();
+            assert!(!text.contains("card-secret"), "{text}");
+            assert!(!text.contains("unknown-total"), "{text}");
+            assert!(!text.contains("payload"), "{text}");
+        }
+        assert_eq!(rejects[1]["sample"]["properties"]["total"], Value::Null);
+    }
 }

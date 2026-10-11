@@ -1,0 +1,19 @@
+//! The pure rules of the governed event store (architecture section 12.1 and 12.2): schema
+//! properties, validation and inference, time rules, redaction and masking.
+
+mod mask;
+mod property;
+mod redact;
+mod time_rules;
+mod validate;
+
+pub use mask::{Masked, mask, mask_sample};
+pub use property::{
+    EventMode, PropertyType, SchemaProperty, UnplannedPolicy, validate_event_name,
+    validate_properties,
+};
+pub use redact::{RedactionRules, redact, validate_rules};
+pub use time_rules::{EventFlag, Timing, apply_time_rules};
+pub use validate::{
+    Reason, ReasonCode, ValidationState, check_properties, evaluate, infer_properties,
+};

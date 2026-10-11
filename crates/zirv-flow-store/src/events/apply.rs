@@ -1,0 +1,1279 @@
+//! The event path of apply-batch (architecture sections 12.1 and 12.2): drop a repeated
+//! `messageId`, validate against the published schema or the unplanned-name policy, then
+//! store an ingest reject (naming the person only if the identifiers already belong to one)
+//! or resolve the person and store a redacted event, with a decision either way.
+//!
+//! Decision records carry static strings and ids only: never an event name, a property or a
+//! value.
+
+use std::collections::{HashMap, HashSet};
+
+use serde_json::{Map, Value, json};
+use sqlx::types::Json;
+use sqlx::{Connection, PgConnection};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use uuid::Uuid;
+use zirv_flow_core::events::{
+    EventFlag, Reason, UnplannedPolicy, ValidationState, apply_time_rules, check_properties,
+    evaluate, infer_properties, mask_sample, redact, validate_event_name,
+};
+use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
+
+use super::schemas::{
+    EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
+};
+use crate::people::{
+    find_known_person, mark_changed, normalize_identifiers, record_resolution, resolve_person,
+};
+use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
+
+const MAX_MESSAGE_ID_CHARS: usize = 256;
+
+/// One event, as the event path receives it.
+#[derive(Clone, Debug)]
+pub struct EventRecord {
+    pub source: String,
+    /// `(kind, value)` pairs, not yet normalized.
+    pub identifiers: Vec<(String, String)>,
+    pub name: String,
+    pub properties: Map<String, Value>,
+    /// The client timestamp, when it sent one.
+    pub timestamp: Option<OffsetDateTime>,
+    pub received_at: OffsetDateTime,
+    /// The client's retry key.
+    pub message_id: Option<String>,
+    pub trace: TraceContext,
+}
+
+/// What happened to one event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EventOutcome {
+    Accepted {
+        event_id: Uuid,
+        person_id: Uuid,
+        state: ValidationState,
+        flags: Vec<EventFlag>,
+    },
+    /// The `messageId` already produced an event: nothing was written but the counter.
+    Duplicate { original_event_id: Uuid },
+    /// The event was refused. A resend of an already rejected message reports the reject
+    /// that exists.
+    Rejected {
+        reject_id: Uuid,
+        reason: &'static str,
+    },
+}
+
+/// Applies `records` in one transaction. Callers chunk their input.
+///
+/// When the error is [`StoreError::is_retryable`] nothing was committed, and the caller
+/// retries the whole batch.
+pub async fn apply_event_batch(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    records: &[EventRecord],
+) -> Result<Vec<EventOutcome>, StoreError> {
+    let mut tx = begin(pool).await?;
+    let mut batch = Batch::default();
+    let mut outcomes = Vec::with_capacity(records.len());
+    for record in records {
+        outcomes.push(apply_event(&mut tx, workspace, key, &mut batch, record).await?);
+    }
+    commit(tx).await?;
+    Ok(outcomes)
+}
+
+/// What one batch loads once.
+#[derive(Default)]
+struct Batch {
+    policy: Option<EventPolicy>,
+    schemas: HashMap<String, Option<PublishedSchema>>,
+    drafted: HashSet<String>,
+}
+
+impl Batch {
+    async fn policy(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<EventPolicy, StoreError> {
+        if let Some(policy) = &self.policy {
+            return Ok(policy.clone());
+        }
+        let policy = get_event_policy(connection, workspace).await?;
+        self.policy = Some(policy.clone());
+        Ok(policy)
+    }
+
+    async fn schema(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<PublishedSchema>, StoreError> {
+        if let Some(found) = self.schemas.get(name) {
+            return Ok(found.clone());
+        }
+        let found = find_published_schema(connection, workspace, name).await?;
+        self.schemas.insert(name.to_owned(), found.clone());
+        Ok(found)
+    }
+}
+
+/// Why an event is refused, with what the reject row keeps of it.
+struct Refusal<'a> {
+    reason: &'static str,
+    reasons: &'a [Reason],
+    published: Option<&'a PublishedSchema>,
+    person_id: Option<Uuid>,
+}
+
+async fn apply_event(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut Batch,
+    record: &EventRecord,
+) -> Result<EventOutcome, StoreError> {
+    let identifiers = match checked_input(record) {
+        Ok(identifiers) => identifiers,
+        Err(reason) => {
+            let refusal = Refusal {
+                reason,
+                reasons: &[],
+                published: None,
+                person_id: None,
+            };
+            return refuse(connection, workspace, key, batch, record, &refusal).await;
+        }
+    };
+
+    if let Some(message_id) = &record.message_id
+        && let Some(original) = count_duplicate(connection, workspace, message_id).await?
+    {
+        return Ok(EventOutcome::Duplicate {
+            original_event_id: original,
+        });
+    }
+
+    let policy = batch.policy(connection, workspace).await?;
+    let published = batch.schema(connection, workspace, &record.name).await?;
+    let (state, schema_version, reasons) = match &published {
+        None => match policy.unplanned {
+            UnplannedPolicy::Reject => {
+                let refusal = Refusal {
+                    reason: "unplanned_event",
+                    reasons: &[],
+                    published: None,
+                    person_id: find_known_person(connection, workspace, &identifiers).await?,
+                };
+                return refuse(connection, workspace, key, batch, record, &refusal).await;
+            }
+            UnplannedPolicy::Draft => {
+                if batch.drafted.insert(record.name.clone()) {
+                    draft_inferred_schema(
+                        connection,
+                        workspace,
+                        &record.name,
+                        &infer_properties(&record.properties),
+                    )
+                    .await?;
+                }
+                (ValidationState::Unplanned, None, Vec::new())
+            }
+        },
+        Some(schema) => {
+            let reasons = check_properties(&record.properties, &schema.properties);
+            let Some(state) = evaluate(schema.mode, &reasons) else {
+                let refusal = Refusal {
+                    reason: "validation_failed",
+                    reasons: &reasons,
+                    published: Some(schema),
+                    person_id: find_known_person(connection, workspace, &identifiers).await?,
+                };
+                return refuse(connection, workspace, key, batch, record, &refusal).await;
+            };
+            (state, Some(schema.version), reasons)
+        }
+    };
+
+    let timing = apply_time_rules(
+        record.timestamp,
+        record.received_at,
+        i64::from(policy.future_skew_seconds),
+        i64::from(policy.lateness_seconds),
+    );
+    let event_id = Uuid::now_v7();
+
+    // Only an accepted event creates or attaches anything. If a concurrent batch claims the
+    // `messageId` first, the person writes are rolled back with the savepoint.
+    let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
+    let resolution =
+        resolve_person(&mut savepoint, workspace, &identifiers, None, &record.trace).await?;
+    let person_id = resolution.person_id;
+    if resolution.created {
+        decide(
+            &mut savepoint,
+            workspace,
+            record,
+            "person.created",
+            "created",
+            None,
+            vec![("person", person_id)],
+        )
+        .await?;
+    }
+    record_resolution(
+        &mut savepoint,
+        workspace,
+        &record.trace,
+        person_id,
+        &resolution,
+        None,
+    )
+    .await?;
+    if let Some(message_id) = &record.message_id {
+        let claimed = sqlx::query(
+            "INSERT INTO event_dedupe \
+                (workspace_id, message_id, event_id, event_occurred_at, person_id) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id, message_id) DO NOTHING",
+        )
+        .bind(workspace.as_uuid())
+        .bind(message_id)
+        .bind(event_id)
+        .bind(timing.occurred_at)
+        .bind(person_id)
+        .execute(&mut *savepoint)
+        .await
+        .map_err(StoreError::query)?;
+        if claimed.rows_affected() == 0 {
+            savepoint.rollback().await.map_err(StoreError::query)?;
+            let original = count_duplicate(connection, workspace, message_id)
+                .await?
+                .ok_or_else(StoreError::retryable_race)?;
+            return Ok(EventOutcome::Duplicate {
+                original_event_id: original,
+            });
+        }
+    }
+    savepoint.commit().await.map_err(StoreError::query)?;
+
+    let mut properties = record.properties.clone();
+    redact(&mut properties, &policy.redaction, workspace, key);
+    let flags: Vec<&str> = timing.flags.iter().map(|flag| flag.as_str()).collect();
+    sqlx::query(
+        "INSERT INTO events \
+            (id, workspace_id, person_id, name, schema_version, occurred_at, received_at, \
+             properties, source, message_id, trace_id, validation_state, validation_reasons, \
+             flags) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+    )
+    .bind(event_id)
+    .bind(workspace.as_uuid())
+    .bind(person_id)
+    .bind(&record.name)
+    .bind(schema_version)
+    .bind(timing.occurred_at)
+    .bind(record.received_at)
+    .bind(Json(&properties))
+    .bind(&record.source)
+    .bind(record.message_id.as_deref())
+    .bind(record.trace.trace_id.as_uuid())
+    .bind(state.as_str())
+    .bind(Json(&reasons))
+    .bind(&flags)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    mark_changed(
+        connection,
+        workspace,
+        person_id,
+        timing.is_late().then_some(timing.occurred_at),
+    )
+    .await?;
+    decide(
+        connection,
+        workspace,
+        record,
+        "event.accepted",
+        state.as_str(),
+        None,
+        vec![("event", event_id), ("person", person_id)],
+    )
+    .await?;
+    Ok(EventOutcome::Accepted {
+        event_id,
+        person_id,
+        state,
+        flags: timing.flags,
+    })
+}
+
+/// The checks that need no database: the name, the message id and the identifiers.
+fn checked_input(
+    record: &EventRecord,
+) -> Result<Vec<zirv_flow_core::people::Identifier>, &'static str> {
+    if validate_event_name(&record.name).is_err() {
+        return Err("invalid_event_name");
+    }
+    if let Some(message_id) = &record.message_id {
+        let length = message_id.chars().count();
+        if !(1..=MAX_MESSAGE_ID_CHARS).contains(&length) || message_id.chars().any(char::is_control)
+        {
+            return Err("invalid_message_id");
+        }
+    }
+    normalize_identifiers(&record.identifiers)
+}
+
+/// Counts a repeat of `message_id` and returns the id of the event it repeats.
+async fn count_duplicate(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    message_id: &str,
+) -> Result<Option<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "UPDATE event_dedupe SET duplicates = duplicates + 1 \
+         WHERE workspace_id = $1 AND message_id = $2 RETURNING event_id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(message_id)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Writes the reject with its masked sample and redacted payload, and the decision. A
+/// message that already has an open reject writes nothing more.
+async fn refuse(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut Batch,
+    record: &EventRecord,
+    refusal: &Refusal<'_>,
+) -> Result<EventOutcome, StoreError> {
+    let policy = batch.policy(connection, workspace).await?;
+    let mut redacted = record.properties.clone();
+    redact(&mut redacted, &policy.redaction, workspace, key);
+    let sample = mask_sample(
+        &redacted,
+        refusal.published.map(|schema| &schema.properties[..]),
+    );
+    let payload = json!({
+        "properties": redacted,
+        "timestamp": record.timestamp.and_then(|at| at.format(&Rfc3339).ok()),
+    });
+    let sample = json!({ "properties": sample.properties, "masked": sample.masked });
+    let name = validate_event_name(&record.name)
+        .is_ok()
+        .then_some(record.name.as_str());
+    let message_id = (refusal.reason != "invalid_message_id")
+        .then_some(record.message_id.as_deref())
+        .flatten();
+    let reject_id = Uuid::now_v7();
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO ingest_rejects \
+            (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, payload, \
+             person_id, message_id, trace_id) \
+         VALUES ($1, $2, $3, $4, 'event', $5, $6, $7, $8, $9, $10, $11, $12) \
+         ON CONFLICT (workspace_id, message_id) \
+            WHERE message_id IS NOT NULL AND replayed_at IS NULL DO NOTHING \
+         RETURNING id",
+    )
+    .bind(reject_id)
+    .bind(workspace.as_uuid())
+    .bind(record.received_at)
+    .bind(&record.source)
+    .bind(name)
+    .bind(refusal.reason)
+    .bind(Json(refusal.reasons))
+    .bind(Json(&sample))
+    .bind(Json(&payload))
+    .bind(refusal.person_id)
+    .bind(message_id)
+    .bind(record.trace.trace_id.as_uuid())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if inserted.is_none() {
+        let existing: Uuid = sqlx::query_scalar(
+            "SELECT id FROM ingest_rejects \
+             WHERE workspace_id = $1 AND message_id = $2 AND replayed_at IS NULL",
+        )
+        .bind(workspace.as_uuid())
+        .bind(message_id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        return Ok(EventOutcome::Rejected {
+            reject_id: existing,
+            reason: refusal.reason,
+        });
+    }
+    let mut subjects = vec![("reject", reject_id)];
+    subjects.extend(refusal.person_id.map(|person| ("person", person)));
+    decide(
+        connection,
+        workspace,
+        record,
+        "event.rejected",
+        "rejected",
+        Some(refusal.reason),
+        subjects,
+    )
+    .await?;
+    Ok(EventOutcome::Rejected {
+        reject_id,
+        reason: refusal.reason,
+    })
+}
+
+async fn decide(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &EventRecord,
+    action: &'static str,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+    subject_ids: Vec<(&'static str, Uuid)>,
+) -> Result<(), StoreError> {
+    append_decision(
+        connection,
+        &NewDecision {
+            workspace_id: workspace,
+            trace: record.trace.clone(),
+            action,
+            outcome,
+            reason,
+            subject_ids,
+            job: None,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use time::Duration;
+    use time::macros::datetime;
+    use zirv_flow_core::events::{EventMode, PropertyType, RedactionRules, SchemaProperty};
+    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, WorkspaceName};
+
+    use super::*;
+    use crate::events::{
+        EventPolicy, NewEventSchema, create_event_schema, find_event_schema, publish_schema_draft,
+        set_event_policy,
+    };
+    use crate::{create_workspace, list_trace};
+
+    const NOW: OffsetDateTime = datetime!(2026-06-01 12:00 UTC);
+
+    async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let name = WorkspaceName::parse(slug).unwrap();
+        let slug = Slug::parse(slug).unwrap();
+        create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    fn key() -> HmacKey {
+        MasterKey::generate().hmac_key(HmacPurpose::Redaction)
+    }
+
+    fn property(
+        name: &str,
+        property_type: PropertyType,
+        required: bool,
+        pii: bool,
+    ) -> SchemaProperty {
+        SchemaProperty {
+            name: name.to_owned(),
+            property_type,
+            required,
+            enum_values: None,
+            description: String::new(),
+            pii,
+        }
+    }
+
+    async fn publish(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        name: &str,
+        mode: EventMode,
+        properties: Vec<SchemaProperty>,
+    ) {
+        create_event_schema(
+            pool,
+            ws,
+            &NewEventSchema {
+                name: name.to_owned(),
+                mode,
+                description: String::new(),
+                properties,
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(pool).await.unwrap();
+        publish_schema_draft(&mut tx, ws, name, None).await.unwrap();
+        commit(tx).await.unwrap();
+    }
+
+    fn event(name: &str, properties: Value) -> EventRecord {
+        EventRecord {
+            source: "web".to_owned(),
+            identifiers: vec![("email".to_owned(), "ada@example.com".to_owned())],
+            name: name.to_owned(),
+            properties: properties.as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: NOW,
+            message_id: None,
+            trace: TraceContext::root(Cause::api("test")),
+        }
+    }
+
+    async fn count(pool: &PgPool, table: &str) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn apply_one(pool: &PgPool, ws: WorkspaceId, record: EventRecord) -> EventOutcome {
+        apply_event_batch(pool, ws, &key(), &[record])
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_mode_wrong_type_is_rejected_with_a_masked_sample_and_no_event(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![
+                property("total", PropertyType::Number, true, false),
+                property("email", PropertyType::String, false, true),
+            ],
+        )
+        .await;
+
+        let outcome = apply_one(
+            &pool,
+            ws,
+            event(
+                "order",
+                json!({"total": "free", "email": "ada@example.com", "extra": "x"}),
+            ),
+        )
+        .await;
+
+        let EventOutcome::Rejected { reject_id, reason } = outcome else {
+            panic!("not rejected: {outcome:?}");
+        };
+        assert_eq!(reason, "validation_failed");
+        assert_eq!(count(&pool, "events").await, 0);
+        let (reasons, sample, stored_reason): (Value, Value, String) =
+            sqlx::query_as("SELECT reasons, sample, reason FROM ingest_rejects WHERE id = $1")
+                .bind(reject_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_reason, "validation_failed");
+        assert_eq!(
+            reasons,
+            json!([
+                {"property": "total", "reason": "wrong_type"},
+                {"property": "extra", "reason": "unplanned_property"}
+            ])
+        );
+        assert_eq!(
+            sample,
+            json!({
+                "properties": {"total": null, "email": null, "extra": null},
+                "masked": ["email", "extra", "total"]
+            })
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn warn_flags_and_allow_keeps_the_reasons_without_flagging(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let schema = vec![property("total", PropertyType::Number, true, false)];
+        publish(&pool, ws, "warned", EventMode::Warn, schema.clone()).await;
+        publish(&pool, ws, "allowed", EventMode::Allow, schema).await;
+
+        let warned = apply_one(&pool, ws, event("warned", json!({}))).await;
+        let allowed = apply_one(&pool, ws, event("allowed", json!({}))).await;
+
+        assert!(matches!(
+            warned,
+            EventOutcome::Accepted {
+                state: ValidationState::Flagged,
+                ..
+            }
+        ));
+        assert!(matches!(
+            allowed,
+            EventOutcome::Accepted {
+                state: ValidationState::Valid,
+                ..
+            }
+        ));
+        let rows: Vec<(String, String, Value, Option<i32>)> = sqlx::query_as(
+            "SELECT name, validation_state, validation_reasons, schema_version FROM events \
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let reasons = json!([{"property": "total", "reason": "missing_required"}]);
+        assert_eq!(
+            rows[0],
+            ("allowed".into(), "valid".into(), reasons.clone(), Some(1))
+        );
+        assert_eq!(
+            rows[1],
+            ("warned".into(), "flagged".into(), reasons, Some(1))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_duplicated_message_id_stores_one_event_and_counts_the_repeat(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut record = event("anything", json!({"a": 1}));
+        record.message_id = Some("m-1".to_owned());
+
+        let first = apply_one(&pool, ws, record.clone()).await;
+        let second = apply_one(&pool, ws, record.clone()).await;
+        let within_batch = apply_event_batch(&pool, ws, &key(), &[record.clone(), record])
+            .await
+            .unwrap();
+
+        let EventOutcome::Accepted { event_id, .. } = first else {
+            panic!("not accepted");
+        };
+        assert_eq!(
+            second,
+            EventOutcome::Duplicate {
+                original_event_id: event_id
+            }
+        );
+        assert!(within_batch.iter().all(|o| *o == second));
+        assert_eq!(count(&pool, "events").await, 1);
+        let duplicates: i32 = sqlx::query_scalar("SELECT duplicates FROM event_dedupe")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(duplicates, 3);
+        let decisions = count(&pool, "decision_records").await;
+        assert_eq!(decisions, 2, "one person.created and one event.accepted");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_message_id_in_another_workspace_is_not_a_duplicate(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let mut record = event("anything", json!({}));
+        record.message_id = Some("m-1".to_owned());
+
+        apply_one(&pool, one, record.clone()).await;
+        let other = apply_one(&pool, two, record).await;
+
+        assert!(matches!(other, EventOutcome::Accepted { .. }));
+        assert_eq!(count(&pool, "events").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_excessive_future_timestamp_is_clamped_and_flagged(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut record = event("anything", json!({}));
+        record.timestamp = Some(NOW + Duration::hours(2));
+
+        let outcome = apply_one(&pool, ws, record).await;
+
+        assert!(
+            matches!(&outcome, EventOutcome::Accepted { flags, .. } if *flags == [EventFlag::Clamped])
+        );
+        let (occurred_at, flags): (OffsetDateTime, Vec<String>) =
+            sqlx::query_as("SELECT occurred_at, flags FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(occurred_at, NOW);
+        assert_eq!(flags, ["clamped"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_late_event_is_flagged_and_keeps_the_earliest_late_from(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let day = |days: i64| NOW - Duration::days(days);
+        let mut batch = Vec::new();
+        for (index, at) in [day(3), day(5), day(4)].into_iter().enumerate() {
+            let mut record = event("anything", json!({"n": index}));
+            record.timestamp = Some(at);
+            batch.push(record);
+        }
+
+        let outcomes = apply_event_batch(&pool, ws, &key(), &batch).await.unwrap();
+
+        assert!(outcomes.iter().all(
+            |o| matches!(o, EventOutcome::Accepted { flags, .. } if *flags == [EventFlag::Late])
+        ));
+        let late_from: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT late_from FROM person_changes")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(late_from, Some(day(5)));
+        let on_time = apply_one(&pool, ws, event("anything", json!({}))).await;
+        assert!(matches!(on_time, EventOutcome::Accepted { flags, .. } if flags.is_empty()));
+        let still: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT late_from FROM person_changes")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(still, Some(day(5)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_draft_policy_accepts_unplanned_names_and_infers_without_publishing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+
+        let outcome = apply_one(
+            &pool,
+            ws,
+            event("new thing", json!({"n": 1, "tags": ["a"]})),
+        )
+        .await;
+        apply_one(&pool, ws, event("new thing", json!({"other": true}))).await;
+
+        assert!(matches!(
+            outcome,
+            EventOutcome::Accepted {
+                state: ValidationState::Unplanned,
+                ..
+            }
+        ));
+        let schema = find_event_schema(&pool, ws, "new thing")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(schema.inferred);
+        assert_eq!(schema.current_version, None);
+        let draft = schema.draft.unwrap();
+        let names: Vec<&str> = draft.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["n", "tags"], "the first event's shape is kept");
+        assert_eq!(count(&pool, "event_schema_versions").await, 0);
+        let state: String = sqlx::query_scalar("SELECT DISTINCT validation_state FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "unplanned");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reject_policy_refuses_unplanned_names_and_drafts_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                unplanned: UnplannedPolicy::Reject,
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcome = apply_one(&pool, ws, event("new", json!({"secret": "hunter2"}))).await;
+
+        let EventOutcome::Rejected { reject_id, reason } = outcome else {
+            panic!("not rejected");
+        };
+        assert_eq!(reason, "unplanned_event");
+        assert_eq!(count(&pool, "events").await, 0);
+        assert_eq!(count(&pool, "event_schemas").await, 0);
+        let sample: Value = sqlx::query_scalar("SELECT sample FROM ingest_rejects WHERE id = $1")
+            .bind(reject_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            sample,
+            json!({"properties": {"secret": null}, "masked": ["secret"]})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_schema_with_only_a_draft_is_unplanned(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        create_event_schema(
+            &pool,
+            ws,
+            &NewEventSchema {
+                name: "drafty".into(),
+                mode: EventMode::Block,
+                description: String::new(),
+                properties: vec![property("a", PropertyType::Number, true, false)],
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcome = apply_one(&pool, ws, event("drafty", json!({}))).await;
+
+        assert!(matches!(
+            outcome,
+            EventOutcome::Accepted {
+                state: ValidationState::Unplanned,
+                ..
+            }
+        ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn properties_are_validated_before_and_stored_after_redaction(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "signup",
+            EventMode::Block,
+            vec![
+                property("email", PropertyType::String, true, true),
+                property("card", PropertyType::String, false, true),
+                property("ip", PropertyType::String, false, false),
+            ],
+        )
+        .await;
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                redaction: RedactionRules {
+                    drop: vec!["card".into()],
+                    hash: vec!["email".into()],
+                    truncate_ip: vec!["ip".into()],
+                },
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcome = apply_one(
+            &pool,
+            ws,
+            event(
+                "signup",
+                json!({"email": "ada@example.com", "card": "4111", "ip": "203.0.113.9"}),
+            ),
+        )
+        .await;
+
+        assert!(matches!(outcome, EventOutcome::Accepted { .. }));
+        let stored: Value = sqlx::query_scalar("SELECT properties FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(stored.get("card").is_none());
+        assert_eq!(stored["ip"], "203.0.113.0");
+        let hashed = stored["email"].as_str().unwrap();
+        assert_eq!(hashed.len(), 64);
+        assert!(!stored.to_string().contains("ada@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reject_payload_is_redacted_too(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                redaction: RedactionRules {
+                    drop: vec!["card".into()],
+                    ..RedactionRules::default()
+                },
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        apply_one(
+            &pool,
+            ws,
+            event("order", json!({"card": "4111", "ip": "203.0.113.9"})),
+        )
+        .await;
+
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM ingest_rejects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(payload["properties"], json!({"ip": "203.0.113.0"}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_without_a_usable_identifier_is_rejected_without_a_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut none = event("anything", json!({}));
+        none.identifiers = Vec::new();
+        let mut bad = event("anything", json!({}));
+        bad.identifiers = vec![("email".into(), "nope".into())];
+        let mut nameless = event("", json!({"a": 1}));
+        nameless.name = "bad\nname".into();
+
+        let outcomes = apply_event_batch(&pool, ws, &key(), &[none, bad, nameless])
+            .await
+            .unwrap();
+
+        let reasons: Vec<&str> = outcomes
+            .iter()
+            .map(|o| match o {
+                EventOutcome::Rejected { reason, .. } => *reason,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            ["no_identifier", "invalid_email", "invalid_event_name"]
+        );
+        assert_eq!(count(&pool, "people").await, 0);
+        let nulls: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ingest_rejects WHERE person_id IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(nulls, 3);
+        let name_stored: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ingest_rejects WHERE name IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name_stored, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rejected_message_id_can_later_be_accepted(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+        let mut bad = event("order", json!({"total": "x"}));
+        bad.message_id = Some("m-1".into());
+        let mut fixed = event("order", json!({"total": 5}));
+        fixed.message_id = Some("m-1".into());
+
+        let rejected = apply_one(&pool, ws, bad).await;
+        let accepted = apply_one(&pool, ws, fixed.clone()).await;
+        let repeated = apply_one(&pool, ws, fixed).await;
+
+        assert!(matches!(rejected, EventOutcome::Rejected { .. }));
+        let EventOutcome::Accepted { event_id, .. } = accepted else {
+            panic!("not accepted: {accepted:?}");
+        };
+        assert_eq!(
+            repeated,
+            EventOutcome::Duplicate {
+                original_event_id: event_id
+            }
+        );
+        assert_eq!(count(&pool, "events").await, 1);
+        assert_eq!(count(&pool, "event_dedupe").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_repeated_reject_writes_one_row_and_one_decision(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+        let mut bad = event("order", json!({"total": "x"}));
+        bad.message_id = Some("m-1".into());
+
+        let first = apply_one(&pool, ws, bad.clone()).await;
+        let second = apply_one(&pool, ws, bad.clone()).await;
+        let third = apply_event_batch(&pool, ws, &key(), &[bad.clone(), bad])
+            .await
+            .unwrap();
+
+        let EventOutcome::Rejected { reject_id, .. } = first else {
+            panic!("not rejected");
+        };
+        assert!(matches!(second, EventOutcome::Rejected { reject_id: id, .. } if id == reject_id));
+        assert!(third.iter().all(
+            |o| matches!(o, EventOutcome::Rejected { reject_id: id, .. } if *id == reject_id)
+        ));
+        assert_eq!(count(&pool, "ingest_rejects").await, 1);
+        let rejected_decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'event.rejected'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rejected_decisions, 1);
+
+        sqlx::query("UPDATE ingest_rejects SET replayed_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut again = event("order", json!({"total": "x"}));
+        again.message_id = Some("m-1".into());
+        apply_one(&pool, ws, again).await;
+        assert_eq!(
+            count(&pool, "ingest_rejects").await,
+            2,
+            "a replayed reject is no longer open"
+        );
+    }
+
+    async fn block_schema(pool: &PgPool, ws: WorkspaceId) {
+        publish(
+            pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reject_with_a_new_identifier_creates_no_person_and_no_identity(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        block_schema(&pool, ws).await;
+        let mut bad = event("order", json!({"total": "x"}));
+        bad.identifiers = vec![("anonymous_id".into(), "anon-1".into())];
+        let mut unplanned = event("nothing", json!({}));
+        unplanned.identifiers = vec![("anonymous_id".into(), "anon-2".into())];
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                unplanned: UnplannedPolicy::Reject,
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcomes = apply_event_batch(&pool, ws, &key(), &[bad, unplanned])
+            .await
+            .unwrap();
+
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| matches!(o, EventOutcome::Rejected { .. }))
+        );
+        assert_eq!(count(&pool, "people").await, 0);
+        assert_eq!(count(&pool, "identities").await, 0);
+        let with_person: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ingest_rejects WHERE person_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(with_person, 0);
+        let created: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'person.created'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(created, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reject_with_a_known_identifier_records_the_person_and_attaches_nothing(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        block_schema(&pool, ws).await;
+        let EventOutcome::Accepted { person_id, .. } =
+            apply_one(&pool, ws, event("order", json!({"total": 1}))).await
+        else {
+            panic!("not accepted");
+        };
+        let mut bad = event("order", json!({"total": "x"}));
+        bad.identifiers
+            .push(("anonymous_id".into(), "anon-1".into()));
+
+        let outcome = apply_one(&pool, ws, bad).await;
+
+        let EventOutcome::Rejected { reject_id, .. } = outcome else {
+            panic!("not rejected");
+        };
+        let stored: Option<Uuid> =
+            sqlx::query_scalar("SELECT person_id FROM ingest_rejects WHERE id = $1")
+                .bind(reject_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, Some(person_id));
+        assert_eq!(count(&pool, "people").await, 1);
+        assert_eq!(count(&pool, "identities").await, 1);
+        let subjects: Value = sqlx::query_scalar(
+            "SELECT subject_ids FROM decision_records WHERE action = 'event.rejected'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(subjects["person"], person_id.to_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_duplicate_with_other_identifiers_changes_no_people_or_identities(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut first = event("anything", json!({}));
+        first.message_id = Some("m-1".into());
+        apply_one(&pool, ws, first.clone()).await;
+        let mut again = first;
+        again.identifiers = vec![
+            ("email".into(), "other@example.com".into()),
+            ("anonymous_id".into(), "anon-9".into()),
+        ];
+
+        let outcome = apply_one(&pool, ws, again).await;
+
+        assert!(matches!(outcome, EventOutcome::Duplicate { .. }));
+        assert_eq!(count(&pool, "people").await, 1);
+        assert_eq!(count(&pool, "identities").await, 1);
+        assert_eq!(count(&pool, "decision_records").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_whose_identifiers_belong_to_two_people_records_the_conflict(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut by_phone = event("anything", json!({}));
+        by_phone.identifiers = vec![("phone".into(), "+4512345678".into())];
+        let EventOutcome::Accepted { person_id: p2, .. } = apply_one(&pool, ws, by_phone).await
+        else {
+            panic!("not accepted");
+        };
+        let EventOutcome::Accepted { person_id: p1, .. } =
+            apply_one(&pool, ws, event("anything", json!({}))).await
+        else {
+            panic!("not accepted");
+        };
+        let mut both = event("anything", json!({}));
+        both.identifiers = vec![
+            ("email".into(), "ada@example.com".into()),
+            ("phone".into(), "+4512345678".into()),
+        ];
+
+        let first = apply_one(&pool, ws, both.clone()).await;
+        apply_one(&pool, ws, both).await;
+
+        assert!(matches!(first, EventOutcome::Accepted { person_id, .. } if person_id == p1));
+        let rows: Vec<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+            "SELECT person_id, other_person_id, source_record_id, reason FROM identity_conflicts",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, [(p1, p2, None, "merge_deferred".to_owned())]);
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'identity.conflict'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decisions, 1);
+        assert_eq!(count(&pool, "people").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn decisions_name_ids_and_codes_only(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+        let accepted = event("anything", json!({"secret": "hunter2"}));
+        let trace = accepted.trace.trace_id;
+        let mut rejected = event("order", json!({"total": "hunter2"}));
+        rejected.trace = TraceContext::root(Cause::api("other"));
+        let rejected_trace = rejected.trace.trace_id;
+
+        apply_event_batch(&pool, ws, &key(), &[accepted, rejected])
+            .await
+            .unwrap();
+
+        let (ok, _) = list_trace(&pool, ws, trace, 10).await.unwrap();
+        let (refused, _) = list_trace(&pool, ws, rejected_trace, 10).await.unwrap();
+        let mut actions: Vec<&str> = ok.iter().map(|d| d.action.as_str()).collect();
+        actions.sort_unstable();
+        assert_eq!(actions, ["event.accepted", "person.created"]);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(
+            (
+                refused[0].action.as_str(),
+                refused[0].outcome.as_str(),
+                refused[0].reason.as_deref()
+            ),
+            ("event.rejected", "rejected", Some("validation_failed"))
+        );
+        let everything = serde_json::to_string(
+            &sqlx::query_scalar::<_, Value>(
+                "SELECT jsonb_agg(to_jsonb(d)) FROM decision_records d",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        for leaked in ["hunter2", "order", "anything", "ada@example.com"] {
+            assert!(!everything.contains(leaked), "{leaked}");
+        }
+    }
+}

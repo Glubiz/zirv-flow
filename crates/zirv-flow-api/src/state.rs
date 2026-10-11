@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
-use zirv_flow_store::{PgPool, SchemaState, StoreError};
+use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
 use crate::oidc;
 
@@ -22,6 +22,8 @@ pub struct AppState {
     pub(crate) cookie_secure: bool,
     pub(crate) local_sign_in: bool,
     pub(crate) oidc: Option<OidcState>,
+    /// The bounds a per-name event retention override must respect.
+    pub(crate) event_retention: EventRetention,
     /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
 }
@@ -48,6 +50,7 @@ impl AppState {
             cookie_secure: true,
             local_sign_in: true,
             oidc: None,
+            event_retention: EventRetention::default(),
             setup_token: Arc::default(),
         }
     }
@@ -62,6 +65,12 @@ impl AppState {
     /// Whether `POST /api/v1/session` (e-mail and password) is available. On by default.
     pub fn with_local_sign_in(mut self, enabled: bool) -> Self {
         self.local_sign_in = enabled;
+        self
+    }
+
+    /// The operator's event retention settings; their bounds limit per-name overrides.
+    pub fn with_event_retention(mut self, settings: EventRetention) -> Self {
+        self.event_retention = settings;
         self
     }
 
@@ -115,6 +124,23 @@ mod tests {
         *clone.setup_token() = Some([7; 32]);
 
         assert_eq!(*state.setup_token(), Some([7; 32]));
+    }
+
+    #[tokio::test]
+    async fn event_retention_bounds_default_and_can_be_set() {
+        let settings = EventRetention {
+            min_days: 5,
+            ..EventRetention::default()
+        };
+
+        assert_eq!(state().event_retention, EventRetention::default());
+        assert_eq!(
+            state()
+                .with_event_retention(settings)
+                .event_retention
+                .min_days,
+            5
+        );
     }
 
     #[tokio::test]

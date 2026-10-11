@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router";
 
 import { ApiKeysPage } from "../features/api-keys";
+import { EventSchemaPage, EventSettingsPage, EventsPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
 import { JobsPage } from "../features/jobs";
 import { MembersPage } from "../features/members";
@@ -109,6 +110,10 @@ export function AppRoutes() {
           <Route path="w/:ws/members" element={<MembersPage />} />
           <Route path="w/:ws/traits" element={<TraitsPage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
+          <Route path="w/:ws/events" element={<EventsPage />} />
+          <Route path="w/:ws/events/rejects" element={<RejectsPage />} />
+          <Route path="w/:ws/events/settings" element={<EventSettingsPage />} />
+          <Route path="w/:ws/events/schemas/:name" element={<EventSchemaPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />

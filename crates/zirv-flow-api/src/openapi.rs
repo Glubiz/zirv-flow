@@ -1,6 +1,11 @@
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
+use crate::events::{
+    self, CreateEventSchemaRequest, EventPolicyBody, EventSchemaBody, EventSchemaDetailBody,
+    IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
+    SchemaVersionBody, UpdateEventSchemaRequest,
+};
 use crate::health::{self, StatusBody};
 use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
@@ -51,6 +56,15 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         people::conflicts::list,
         people::conflicts::get,
         people::conflicts::resolve,
+        events::schemas::list,
+        events::schemas::create,
+        events::schemas::get,
+        events::schemas::put_draft,
+        events::schemas::publish,
+        events::schemas::update,
+        events::policy::get,
+        events::policy::put,
+        events::rejects::list,
         traces::get,
         setup::status,
         setup::complete,
@@ -84,6 +98,18 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         people::conflicts::PersonIdentitiesBody,
         people::conflicts::IdentityBody,
         people::conflicts::ResolveRequest,
+        PropertyBody,
+        EventSchemaBody,
+        EventSchemaDetailBody,
+        SchemaVersionBody,
+        CreateEventSchemaRequest,
+        SaveDraftRequest,
+        UpdateEventSchemaRequest,
+        EventPolicyBody,
+        RedactionBody,
+        IngestRejectBody,
+        IngestRejectsBody,
+        ReasonBody,
         TraceBody,
         DecisionBody,
         CauseBody,

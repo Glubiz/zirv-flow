@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -94,6 +94,10 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `worker.concurrency` | u32 | 4 | at least 1 |
 | `worker.lease_seconds` | u32 | 30 | at least 1 |
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
+| `events.retention_days` | u32 | 760 | at least 1; how long events are kept unless their name has an override; within the two bounds below |
+| `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
+| `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
+| `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -206,7 +210,7 @@ use it:
 | Command | What it does |
 |---------|--------------|
 | `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time. Run as many as you like. |
-| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue and exports queue gauges. |
+| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
 A running job holds a lease of `worker.lease_seconds`, which its worker extends
@@ -444,6 +448,63 @@ Sending `null` for a field removes that source's value, and the next source's va
 Changing a field's precedence, source order or archived flag also re-evaluates the people
 who already hold a value for it, through a background job. An archived field is no longer
 shown on people; unarchiving brings its values back.
+
+## Events
+
+The event store holds the typed events people produce. Each event name has a schema; the
+store checks every incoming event against it before it is kept. Ingestion over HTTP is not
+available yet, so for now the store is exercised through its Rust API and the schemas,
+settings and rejects are the parts you can use, under **Events** in the web UI.
+
+**Schemas and versions.** A schema lists the properties of one event name: each has a type
+(`string`, `number`, `integer`, `boolean`, `timestamp`, `date`, `string_list` or `object`),
+may be required, may list allowed values (text only) and may be marked as personal data.
+Admins edit a *draft* and *publish* it as the next version; a published version never
+changes (the database refuses it), and publishing clears the draft. Until a version is
+published the schema is not in force. Admins manage schemas through
+`GET` and `POST /api/v1/workspaces/{ws}/event-schemas`, `GET` and `PATCH .../event-schemas/{name}`,
+`PUT .../event-schemas/{name}/draft` and `POST .../event-schemas/{name}/versions`; any member
+can read them. Event names in paths are percent-encoded.
+
+**Modes.** A schema is in one mode. `allow` accepts an event that breaks it without flagging
+it, `warn` accepts and flags it (`validation_state = flagged`), `block` rejects it. The
+reasons name the property and the problem (`missing_required`, `wrong_type`, `not_in_enum`,
+`unplanned_property`), never a value. Validation sees the values as they were sent, before
+redaction.
+
+**Unplanned names.** An event whose name has no published version follows the workspace
+policy (`GET` and `PUT .../event-policy`): `draft` (the default) stores it as `unplanned` and
+drafts a schema from the observed shape, marked inferred; `reject` refuses it. Inference never
+publishes.
+
+**Time.** `occurred_at` is the client timestamp, or the receipt time when there is none. A
+timestamp more than `future_skew_seconds` (default 300) ahead of the receipt time is replaced
+by it and flagged `clamped`. One more than `lateness_seconds` (default 86400) behind is kept
+and flagged `late`, and the person's pending change records the earliest such time
+(`late_from`) so time-window segments can be recomputed from it.
+
+**Repeats.** A client `messageId` gives effectively-once storage: only an accepted event
+claims it, a repeat is counted and linked to the original rather than stored, and a rejected
+message can be sent again once fixed. A message that already has an open reject writes no
+second reject.
+
+**Redaction.** Before an event or a reject payload is stored, the policy's rules drop
+properties, replace them with a keyed hash (derived from the master key; equal values stay
+equal inside one workspace) and truncate IP addresses (the last IPv4 octet is zeroed, an IPv6
+address keeps its first 48 bits; `ip` and `context.ip` by default). Paths are dot-separated.
+
+**Rejects.** A refused event is listed under **Rejects** (`GET .../ingest-rejects`, newest
+first, filtered by `name` and `reason`, paged with `before`) with its reasons and a masked
+sample: only the values of properties the published schema marks as not personal data are
+shown, and every value of an event without a published schema is hidden. The stored payload
+is kept for a later replay and is never returned.
+
+**Retention.** Events are kept for `events.retention_days`, or a per-name number of days an
+admin sets within `events.min_retention_days` and `events.max_retention_days`; rejects for
+`events.reject_retention_days`. A daily job (03:17 UTC) deletes what is past its limit in
+batches, drops whole monthly partitions older than the longest limit and removes the repeat
+records of events that no longer exist. The scheduler leader creates the partitions for this
+and next month.
 
 ## Web UI
 

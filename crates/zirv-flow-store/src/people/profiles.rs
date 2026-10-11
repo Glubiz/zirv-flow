@@ -63,7 +63,8 @@ pub struct IdentityConflict {
     pub person_id: Uuid,
     pub other_person_id: Uuid,
     pub kind: String,
-    pub source_record_id: Uuid,
+    /// Null for a conflict found while storing an event.
+    pub source_record_id: Option<Uuid>,
     pub reason: String,
     /// The shared identity; absent on conflicts recorded before merges existed.
     pub identity_id: Option<Uuid>,

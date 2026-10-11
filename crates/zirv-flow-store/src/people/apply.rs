@@ -19,7 +19,7 @@ use zirv_flow_core::token::sha256;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
-use super::resolve::resolve_person;
+use super::resolve::{Resolution, resolve_person};
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
@@ -194,72 +194,15 @@ async fn apply_record(
         )
         .await?;
     }
-    if let Some(previous) = resolution.split_from {
-        record_decision(
-            connection,
-            workspace,
-            &record.trace,
-            "identity.split",
-            "new_person",
-            Some("unique_kind"),
-            vec![
-                ("person", person_id),
-                ("previous_person", previous),
-                ("source_record", record_id),
-            ],
-        )
-        .await?;
-    }
-    if resolution.skipped > 0 {
-        record_decision(
-            connection,
-            workspace,
-            &record.trace,
-            "identity.limit",
-            "skipped",
-            Some("max_per_person"),
-            vec![("person", person_id), ("source_record", record_id)],
-        )
-        .await?;
-    }
-    for conflict in &resolution.conflicts {
-        let inserted = sqlx::query(
-            "INSERT INTO identity_conflicts \
-                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason, \
-                 identity_id) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8 \
-             WHERE NOT EXISTS (SELECT 1 FROM identity_conflicts \
-                               WHERE workspace_id = $2 AND person_id = $3 AND other_person_id = $4 \
-                                 AND source_record_id = $6 AND reason = $7 \
-                                 AND resolved_at IS NULL)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(workspace.as_uuid())
-        .bind(person_id)
-        .bind(conflict.other_person_id)
-        .bind(&conflict.kind)
-        .bind(record_id)
-        .bind(conflict.reason)
-        .bind(conflict.identity_id)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-        if inserted.rows_affected() == 1 {
-            record_decision(
-                connection,
-                workspace,
-                &record.trace,
-                "identity.conflict",
-                "recorded",
-                Some(conflict.reason),
-                vec![
-                    ("person", person_id),
-                    ("other_person", conflict.other_person_id),
-                ],
-            )
-            .await?;
-        }
-    }
+    record_resolution(
+        connection,
+        workspace,
+        &record.trace,
+        person_id,
+        &resolution,
+        Some(record_id),
+    )
+    .await?;
 
     // A record that moved to another person takes its traits away from the previous one.
     if let Some(row) = &existing
@@ -310,7 +253,90 @@ async fn apply_record(
     })
 }
 
-fn normalize_identifiers(raw: &[(String, String)]) -> Result<Vec<Identifier>, &'static str> {
+/// Records what a resolution did beyond picking a person: the split from the person the
+/// record would have joined, identifiers left off a full person, and the identifiers shared
+/// with people it could not merge into. A conflict is one open row per person pair and
+/// source record, with a decision for each new one. The source record is absent for an event.
+pub(crate) async fn record_resolution(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    trace: &TraceContext,
+    person_id: Uuid,
+    resolution: &Resolution,
+    source_record_id: Option<Uuid>,
+) -> Result<(), StoreError> {
+    let with_source = |mut subjects: Vec<(&'static str, Uuid)>| {
+        subjects.extend(source_record_id.map(|id| ("source_record", id)));
+        subjects
+    };
+    if let Some(previous) = resolution.split_from {
+        record_decision(
+            connection,
+            workspace,
+            trace,
+            "identity.split",
+            "new_person",
+            Some("unique_kind"),
+            with_source(vec![("person", person_id), ("previous_person", previous)]),
+        )
+        .await?;
+    }
+    if resolution.skipped > 0 {
+        record_decision(
+            connection,
+            workspace,
+            trace,
+            "identity.limit",
+            "skipped",
+            Some("max_per_person"),
+            with_source(vec![("person", person_id)]),
+        )
+        .await?;
+    }
+    for conflict in &resolution.conflicts {
+        let inserted: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO identity_conflicts \
+                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason, \
+                 identity_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (workspace_id, person_id, other_person_id, \
+                          (COALESCE(source_record_id, '00000000-0000-0000-0000-000000000000'::uuid))) \
+                WHERE resolved_at IS NULL DO NOTHING \
+             RETURNING id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace.as_uuid())
+        .bind(person_id)
+        .bind(conflict.other_person_id)
+        .bind(&conflict.kind)
+        .bind(source_record_id)
+        .bind(conflict.reason)
+        .bind(conflict.identity_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        if inserted.is_some() {
+            record_decision(
+                connection,
+                workspace,
+                trace,
+                "identity.conflict",
+                "recorded",
+                Some(conflict.reason),
+                vec![
+                    ("person", person_id),
+                    ("other_person", conflict.other_person_id),
+                ],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_identifiers(
+    raw: &[(String, String)],
+) -> Result<Vec<Identifier>, &'static str> {
     let mut identifiers = Vec::with_capacity(raw.len());
     for (kind, value) in raw {
         identifiers.push(Identifier::parse(kind, value).map_err(|error| error.reason())?);
@@ -699,12 +725,26 @@ pub(super) async fn mark_dirty(
     workspace: WorkspaceId,
     person_id: Uuid,
 ) -> Result<(), StoreError> {
+    mark_changed(connection, workspace, person_id, None).await
+}
+
+/// Marks the person dirty. `late_from` is the `occurred_at` of a late event: the mark keeps
+/// the earliest one until it is consumed.
+pub(crate) async fn mark_changed(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person_id: Uuid,
+    late_from: Option<OffsetDateTime>,
+) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO person_changes (workspace_id, person_id) VALUES ($1, $2) \
-         ON CONFLICT (workspace_id, person_id) DO UPDATE SET changed_at = now()",
+        "INSERT INTO person_changes (workspace_id, person_id, late_from) VALUES ($1, $2, $3) \
+         ON CONFLICT (workspace_id, person_id) DO UPDATE \
+         SET changed_at = now(), \
+             late_from = LEAST(person_changes.late_from, EXCLUDED.late_from)",
     )
     .bind(workspace.as_uuid())
     .bind(person_id)
+    .bind(late_from)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;

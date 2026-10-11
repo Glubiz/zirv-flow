@@ -337,6 +337,7 @@ async fn run_roles_reporting(
             zirv_flow_jobs::WorkerConfig::new(config.worker_concurrency() as usize);
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
+        worker_config.event_retention = config.events_retention();
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
             zirv_flow_jobs::Registry::built_in(),
@@ -547,7 +548,8 @@ fn http_state(
 ) -> Result<zirv_flow_api::AppState, u8> {
     let state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
-        .with_local_sign_in(config.auth_local_enabled());
+        .with_local_sign_in(config.auth_local_enabled())
+        .with_event_retention(config.events_retention());
     match config.oidc() {
         Some((settings, auto_create_users)) => state
             .with_oidc(settings, auto_create_users)
@@ -1758,7 +1760,7 @@ endpoint = \"http://collector:4318/\""
                 "timed out after 60s waiting for the scheduler and worker to finish"
             );
             let done: bool = sqlx::query_scalar(
-                "SELECT (SELECT next_run_at > now() FROM schedules) \
+                "SELECT (SELECT next_run_at > now() FROM schedules WHERE kind = 'maintenance.noop') \
                     AND NOT EXISTS (SELECT 1 FROM jobs)",
             )
             .fetch_one(&pool)

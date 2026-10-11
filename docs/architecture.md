@@ -815,6 +815,16 @@ rules. Property values flagged as PII are masked without `view_pii`; until M8
 adds that grant, only owners and admins can view them. Per-event-name retention
 may shorten or extend the deployment default within operator-set bounds.
 
+**As built.** The store ships the registry, validation and storage of this section; HTTP
+ingestion, the debugger, explorer and replay come later. Versions are immutable
+(a trigger refuses an update), an unplanned name drafts a schema only when it has no entry yet,
+and a reject sample keeps a value only when the published schema marks the property as
+non-PII and not an `object`. Only an accepted event claims its `message_id`, so a rejected
+message can be resent; a second reject for the same open `message_id` is not written.
+Events are partitioned by month on `occurred_at` like the decision log, with the leader
+creating this and next month and the `events.retention` job dropping old ones. Merging people
+does not yet rewrite events.
+
 ### 12.2 Delivery, time and replay semantics
 
 - The ingestion API returns `202` only after the inbox append is durable. A

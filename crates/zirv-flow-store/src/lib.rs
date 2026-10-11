@@ -4,6 +4,7 @@ mod accounts;
 mod api_keys;
 mod audit;
 mod decisions;
+mod events;
 mod identities;
 mod jobs;
 mod migrations;
@@ -26,6 +27,14 @@ pub use api_keys::{
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
 pub use decisions::{
     Decision, NewDecision, append_decision, ensure_decision_partitions, list_trace,
+};
+pub use events::{
+    EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
+    IngestReject, NewEventSchema, PublishOutcome, RETENTION_BATCH, RejectCursor, RejectFilter,
+    RetentionReport, SchemaVersion, apply_event_batch, apply_event_retention, create_event_schema,
+    ensure_event_partitions, find_event_schema, get_event_policy, list_event_schemas,
+    list_ingest_rejects, list_schema_versions, publish_schema_draft, save_schema_draft,
+    set_event_policy, update_event_schema,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -59,8 +68,9 @@ pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, list_members,
     list_workspaces_for_user, membership_role, remove_membership, set_membership,
 };
-/// The operator master key, re-exported so the binary reaches it through the store.
-pub use zirv_flow_core::MasterKey;
+/// The operator master key and its derived keys, re-exported so the binary reaches them
+/// through the store.
+pub use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 
 #[derive(Debug)]
 pub struct StoreError {

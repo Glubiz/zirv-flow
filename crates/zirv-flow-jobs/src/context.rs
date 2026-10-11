@@ -3,7 +3,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
-use zirv_flow_store::{ClaimedJob, NewDecision, NewJob, PgConnection};
+use zirv_flow_store::{ClaimedJob, EventRetention, NewDecision, NewJob, PgConnection};
 
 use crate::JobError;
 
@@ -15,11 +15,27 @@ use crate::JobError;
 pub struct JobContext<'a> {
     connection: &'a mut PgConnection,
     job: &'a ClaimedJob,
+    event_retention: EventRetention,
 }
 
 impl<'a> JobContext<'a> {
     pub(crate) fn new(connection: &'a mut PgConnection, job: &'a ClaimedJob) -> Self {
-        Self { connection, job }
+        Self {
+            connection,
+            job,
+            event_retention: EventRetention::default(),
+        }
+    }
+
+    /// Gives the handler the operator's event retention settings.
+    pub(crate) fn with_event_retention(mut self, settings: EventRetention) -> Self {
+        self.event_retention = settings;
+        self
+    }
+
+    /// The operator's event retention settings.
+    pub fn event_retention(&self) -> &EventRetention {
+        &self.event_retention
     }
 
     /// The handler's transaction.

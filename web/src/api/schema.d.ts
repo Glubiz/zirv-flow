@@ -273,6 +273,97 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/event-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's event policy, or the defaults while none was saved. */
+        get: operations["get_event_policy"];
+        /** Replaces the policy. */
+        put: operations["put_event_policy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/event-schemas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's event schemas. */
+        get: operations["list_event_schemas"];
+        put?: never;
+        /** Creates a schema with its first draft. Nothing is in force until it is published. */
+        post: operations["create_event_schema"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/event-schemas/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A schema with its draft and its published versions. */
+        get: operations["get_event_schema"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Changes the mode, the description or the retention override. */
+        patch: operations["update_event_schema"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/event-schemas/{name}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Replaces the draft. */
+        put: operations["save_event_schema_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/event-schemas/{name}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next version, which never changes afterwards, and clears the
+         *     draft.
+         */
+        post: operations["publish_event_schema"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/identity-conflicts": {
         parameters: {
             query?: never;
@@ -326,6 +417,26 @@ export interface paths {
          *     decision.
          */
         post: operations["resolve_identity_conflict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/ingest-rejects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ingest rejects, newest first, with their masked samples and reasons. The payload is never
+         *     returned.
+         */
+        get: operations["list_ingest_rejects"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -548,6 +659,18 @@ export interface components {
              */
             scopes: string[];
         };
+        CreateEventSchemaRequest: {
+            description?: string;
+            /** @description One of `allow`, `warn` (the default), `block`. */
+            mode?: string | null;
+            /**
+             * @description 1 to 128 characters without control characters.
+             * @example order_completed
+             */
+            name: string;
+            /** @description The first draft. */
+            properties?: components["schemas"]["PropertyBody"][];
+        };
         CreateTraitRequest: {
             channel_address?: boolean;
             /** @description At most 500 characters. */
@@ -622,6 +745,59 @@ export interface components {
             /** @description Sorted by kind. */
             kinds: components["schemas"]["KindDepthBody"][];
         };
+        EventPolicyBody: {
+            /**
+             * Format: int32
+             * @description Seconds a timestamp may lie ahead of the receipt time before it is clamped, 0 to 86400.
+             */
+            future_skew_seconds: number;
+            /**
+             * Format: int32
+             * @description Seconds before an event counts as late, 0 to 31536000.
+             */
+            lateness_seconds: number;
+            redaction: components["schemas"]["RedactionBody"];
+            /**
+             * @description What happens to an event whose name has no published schema: `draft` accepts it and
+             *     drafts a schema from its shape; `reject` refuses it.
+             * @example draft
+             */
+            unplanned: string;
+        };
+        EventSchemaBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: int32
+             * @description The latest published version; null until one is published.
+             */
+            current_version?: number | null;
+            description: string;
+            /** @description True while a draft exists, which is not yet in force. */
+            has_draft: boolean;
+            /** @description The draft was inferred from observed events rather than written by a person. */
+            inferred: boolean;
+            /**
+             * @description One of `allow`, `warn`, `block`.
+             * @example warn
+             */
+            mode: string;
+            name: string;
+            /**
+             * Format: int32
+             * @description Days events of this name are kept; null means the deployment default.
+             */
+            retention_days?: number | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        EventSchemaDetailBody: {
+            /** @description The editable property list; null when there is none. */
+            draft?: components["schemas"]["PropertyBody"][] | null;
+            schema: components["schemas"]["EventSchemaBody"];
+            /** @description Published versions, newest first. A version never changes. */
+            versions: components["schemas"]["SchemaVersionBody"][];
+        };
         IdentityBody: {
             /** @example email */
             kind: string;
@@ -630,6 +806,38 @@ export interface components {
             shared: boolean;
             /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
             value?: string | null;
+        };
+        IngestRejectBody: {
+            /** Format: uuid */
+            id: string;
+            /** @description `event` today. */
+            kind: string;
+            message_id?: string | null;
+            /** @description Null when the name itself was invalid. */
+            name?: string | null;
+            /** Format: uuid */
+            person_id?: string | null;
+            /** @description `validation_failed`, `unplanned_event`, `no_identifier` or another static code. */
+            reason: string;
+            reasons: components["schemas"]["ReasonBody"][];
+            /** Format: date-time */
+            received_at: string;
+            /** Format: date-time */
+            replayed_at?: string | null;
+            /**
+             * @description `{properties, masked}`: the values of PII-flagged properties, of unplanned properties
+             *     and of every property of an unplanned event are null and listed in `masked`.
+             */
+            sample: Record<string, never>;
+            source: string;
+            /** @description The trace of the ingest call: 32 lowercase hex characters. */
+            trace_id: string;
+        };
+        IngestRejectsBody: {
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+            /** @description Newest first. */
+            rejects: components["schemas"]["IngestRejectBody"][];
         };
         /** @description A job without its payload. */
         JobBody: {
@@ -717,6 +925,48 @@ export interface components {
              */
             type: string;
         };
+        /** @description One property of a schema. */
+        PropertyBody: {
+            /** @description At most 500 characters. */
+            description?: string;
+            /** @description The allowed values; for `string` properties only. */
+            enum?: string[] | null;
+            /**
+             * @description A top-level key of the event's properties: 1 to 128 characters.
+             * @example total
+             */
+            name: string;
+            /** @description Values are masked for viewers without access to personal data. */
+            pii?: boolean;
+            required?: boolean;
+            /**
+             * @description One of `string`, `number`, `integer`, `boolean`, `timestamp`, `date`, `string_list`,
+             *     `object`.
+             * @example number
+             */
+            type: string;
+        };
+        ReasonBody: {
+            /** @description The property that failed; never its value. */
+            property: string;
+            /** @description `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`. */
+            reason: string;
+        };
+        /**
+         * @description Which properties are redacted before storage. Paths are dot-separated and reach into
+         *     nested objects.
+         */
+        RedactionBody: {
+            /** @description Removed. */
+            drop?: string[];
+            /** @description Replaced by a keyed hash. */
+            hash?: string[];
+            /**
+             * @description IP addresses with the host part zeroed: the last IPv4 octet, or all but the first
+             *     48 bits of an IPv6 address. A value that is not an address is removed.
+             */
+            truncate_ip?: string[];
+        };
         /** @description How to close a conflict. */
         ResolveRequest: {
             /** @enum {string} */
@@ -732,6 +982,19 @@ export interface components {
             role: string;
             /** Format: uuid */
             user_id: string;
+        };
+        SaveDraftRequest: {
+            /** @description Replaces the draft. */
+            properties: components["schemas"]["PropertyBody"][];
+        };
+        SchemaVersionBody: {
+            properties: components["schemas"]["PropertyBody"][];
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
         };
         SessionBody: {
             /** @description Send this as `x-csrf-token` on every POST, PUT, PATCH and DELETE made with the cookie. */
@@ -794,6 +1057,16 @@ export interface components {
             type: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        UpdateEventSchemaRequest: {
+            description?: string | null;
+            mode?: string | null;
+            /**
+             * Format: int32
+             * @description Days events of this name are kept, within the operator's bounds; `null` goes back to
+             *     the deployment default.
+             */
+            retention_days?: number | null;
         };
         UpdateTraitRequest: {
             archived?: boolean | null;
@@ -1695,6 +1968,484 @@ export interface operations {
             };
         };
     };
+    get_event_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventPolicyBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_event_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EventPolicyBody"];
+            };
+        };
+        responses: {
+            /** @description The saved policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventPolicyBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid policy value, time limit or redaction path */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_event_schemas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schemas, ordered by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_event_schema: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateEventSchemaRequest"];
+            };
+        };
+        responses: {
+            /** @description The new schema */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, mode or property */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_event_schema: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Event name, percent-encoded */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schema */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or schema, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_event_schema: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Event name, percent-encoded */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEventSchemaRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated schema */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or schema, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid mode, a retention outside the operator's bounds, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_event_schema_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Event name, percent-encoded */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The schema with its new draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or schema, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid property */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_event_schema: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Event name, percent-encoded */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schema with its new version */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSchemaDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or schema, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The schema has no draft to publish */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_identity_conflicts: {
         parameters: {
             query?: {
@@ -1878,6 +2629,74 @@ export interface operations {
             };
             /** @description to_person_id is not one of the conflict's two people */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_ingest_rejects: {
+        parameters: {
+            query?: {
+                /** @description Rejects per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description Only rejects of this event name */
+                name?: string;
+                /** @description Only rejects with this reason code */
+                reason?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of rejects */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestRejectsBody"];
+                };
+            };
+            /** @description limit is out of range or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

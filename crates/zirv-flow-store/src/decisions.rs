@@ -171,13 +171,13 @@ pub async fn ensure_decision_partitions(pool: &PgPool, today: Date) -> Result<()
     first_error.map_or(Ok(()), Err)
 }
 
-fn next_month(first_of_month: Date) -> Date {
+pub(crate) fn next_month(first_of_month: Date) -> Date {
     let month = first_of_month.month().next();
     let year = first_of_month.year() + i32::from(u8::from(month) == 1);
     Date::from_calendar_date(year, month, 1).expect("the first of a month exists")
 }
 
-fn bound(date: Date) -> String {
+pub(crate) fn bound(date: Date) -> String {
     format!(
         "{:04}-{:02}-{:02} 00:00:00+00",
         date.year(),

@@ -4,6 +4,7 @@ pub mod admin;
 mod auth;
 mod cookies;
 mod credentials;
+mod events;
 mod health;
 mod jobs_admin;
 mod json;
@@ -111,6 +112,30 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve",
             axum::routing::post(people::conflicts::resolve),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/event-schemas",
+            get(events::schemas::list).post(events::schemas::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/event-schemas/{name}",
+            get(events::schemas::get).patch(events::schemas::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/event-schemas/{name}/draft",
+            put(events::schemas::put_draft),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/event-schemas/{name}/versions",
+            axum::routing::post(events::schemas::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/event-policy",
+            get(events::policy::get).put(events::policy::put),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ingest-rejects",
+            get(events::rejects::list),
         )
         .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",

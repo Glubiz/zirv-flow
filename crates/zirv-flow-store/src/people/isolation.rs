@@ -191,4 +191,112 @@ mod tests {
             Some(holder_one)
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_event_read_returns_only_its_own_workspaces_rows(pool: PgPool) {
+        use zirv_flow_core::events::{EventMode, PropertyType, SchemaProperty};
+        use zirv_flow_core::{HmacPurpose, MasterKey};
+
+        use crate::{
+            EventPolicy, EventRecord, NewEventSchema, RejectFilter, apply_event_batch, begin,
+            commit, create_event_schema, find_event_schema, get_event_policy, list_event_schemas,
+            list_ingest_rejects, list_schema_versions, publish_schema_draft, set_event_policy,
+        };
+
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        for (ws, name) in [(one, "order"), (two, "order")] {
+            create_event_schema(
+                &pool,
+                ws,
+                &NewEventSchema {
+                    name: name.into(),
+                    mode: EventMode::Block,
+                    description: String::new(),
+                    properties: vec![SchemaProperty {
+                        name: "total".into(),
+                        property_type: PropertyType::Number,
+                        required: true,
+                        enum_values: None,
+                        description: String::new(),
+                        pii: false,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+            let mut tx = begin(&pool).await.unwrap();
+            publish_schema_draft(&mut tx, ws, name, None).await.unwrap();
+            commit(tx).await.unwrap();
+            let rejected = EventRecord {
+                source: "web".into(),
+                identifiers: vec![("email".into(), "a@example.com".into())],
+                name: name.into(),
+                properties: json!({"total": "x"}).as_object().cloned().unwrap(),
+                timestamp: None,
+                received_at: datetime!(2026-01-01 00:00 UTC),
+                message_id: None,
+                trace: TraceContext::root(Cause::api("t")),
+            };
+            apply_event_batch(&pool, ws, &key, &[rejected])
+                .await
+                .unwrap();
+        }
+        set_event_policy(
+            &pool,
+            one,
+            &EventPolicy {
+                future_skew_seconds: 1,
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        for ws in [one, two] {
+            let schemas = list_event_schemas(&pool, ws).await.unwrap();
+            assert_eq!(schemas.len(), 1);
+            assert_eq!(schemas[0].workspace_id, ws);
+            assert_eq!(
+                list_schema_versions(&pool, ws, "order")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let (rejects, _) = list_ingest_rejects(&pool, ws, RejectFilter::default(), None, 10)
+                .await
+                .unwrap();
+            assert_eq!(rejects.len(), 1);
+        }
+        assert!(
+            find_event_schema(&pool, one, "other")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            get_event_policy(&pool, one)
+                .await
+                .unwrap()
+                .future_skew_seconds,
+            1
+        );
+        assert_eq!(
+            get_event_policy(&pool, two)
+                .await
+                .unwrap()
+                .future_skew_seconds,
+            300
+        );
+        let (ids_one, _) = list_ingest_rejects(&pool, one, RejectFilter::default(), None, 10)
+            .await
+            .unwrap();
+        let (ids_two, _) = list_ingest_rejects(&pool, two, RejectFilter::default(), None, 10)
+            .await
+            .unwrap();
+        assert_ne!(ids_one[0].id, ids_two[0].id);
+    }
 }
