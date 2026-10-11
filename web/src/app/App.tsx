@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from "react-router";
 
 import { ApiKeysPage } from "../features/api-keys";
-import { EventSchemaPage, EventSettingsPage, EventsPage, RejectsPage } from "../features/events";
+import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
 import { JobsPage } from "../features/jobs";
@@ -122,6 +122,8 @@ export function AppRoutes() {
           <Route path="w/:ws/imports/new" element={<NewImportPage />} />
           <Route path="w/:ws/imports/:importId" element={<ImportPage />} />
           <Route path="w/:ws/events" element={<EventsPage />} />
+          <Route path="w/:ws/events/debugger" element={<DebuggerPage />} />
+          <Route path="w/:ws/events/explorer" element={<ExplorerPage />} />
           <Route path="w/:ws/events/rejects" element={<RejectsPage />} />
           <Route path="w/:ws/events/settings" element={<EventSettingsPage />} />
           <Route path="w/:ws/events/schemas/:name" element={<EventSchemaPage />} />

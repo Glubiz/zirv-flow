@@ -1224,6 +1224,37 @@ main:focus {
 }
 
 .advanced summary {
+.chart {
+  margin: 0;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 280px;
+}
+
+.chart-axis {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.chart-bar {
+  fill: var(--night);
+}
+
+.chart-bar:hover {
+  fill: var(--link);
+}
+
+.chart-label {
+  fill: var(--ink-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-table summary {
   min-height: 44px;
   display: flex;
   align-items: center;
@@ -1266,4 +1297,43 @@ main:focus {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
+}
+
+.filter-builder {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.filter-row {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+}
+
+.filter-row .field {
+  flex: 1 1 180px;
+}
+
+@media (max-width: 560px) {
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (forced-colors: active) {
+  .chart-bar {
+    fill: CanvasText;
+  }
+
+  .chart-axis {
+    stroke: CanvasText;
+  }
 }
