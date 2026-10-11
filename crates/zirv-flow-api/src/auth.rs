@@ -332,6 +332,8 @@ mod tests {
         assert!(scopes_allow(&[Scope::Admin], Need::ReadMembers));
         assert!(scopes_allow(&[Scope::Read], Need::ReadMembers));
         assert!(!scopes_allow(&[Scope::Write], Need::ReadMembers));
+        assert!(scopes_allow(&[Scope::Write], Need::Write));
+        assert!(!scopes_allow(&[Scope::Read, Scope::Admin], Need::Write));
         assert!(scopes_allow(&[Scope::Admin], Need::Admin));
         assert!(!scopes_allow(&[Scope::Read, Scope::Write], Need::Admin));
         assert!(!scopes_allow(&[], Need::Read));
@@ -368,6 +370,7 @@ mod tests {
     fn members_read_but_only_admins_manage() {
         assert!(role_allows(Role::Member, Need::Read));
         assert!(role_allows(Role::Member, Need::ReadMembers));
+        assert!(role_allows(Role::Member, Need::Write));
         assert!(!role_allows(Role::Member, Need::Admin));
         assert!(role_allows(Role::Admin, Need::Admin));
     }

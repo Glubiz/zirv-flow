@@ -38,6 +38,14 @@ pub struct NewSuppression<'a> {
     pub created_by: Option<Uuid>,
 }
 
+/// One suppression of a batch.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchEntry<'a> {
+    pub identifier_hash: [u8; 32],
+    pub kind: &'a str,
+    pub note: Option<&'a str>,
+}
+
 /// What [`add_suppression`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddOutcome {
@@ -134,7 +142,7 @@ pub async fn add_suppression<'e>(
 pub async fn add_suppressions<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
-    entries: &[([u8; 32], &str)],
+    entries: &[BatchEntry<'_>],
     reason: SuppressionReason,
     source: &str,
     created_by: Option<Uuid>,
@@ -142,12 +150,17 @@ pub async fn add_suppressions<'e>(
     if entries.is_empty() {
         return Ok(0);
     }
-    let hashes: Vec<&[u8]> = entries.iter().map(|(hash, _)| hash.as_slice()).collect();
-    let kinds: Vec<&str> = entries.iter().map(|(_, kind)| *kind).collect();
+    let hashes: Vec<&[u8]> = entries
+        .iter()
+        .map(|entry| entry.identifier_hash.as_slice())
+        .collect();
+    let kinds: Vec<&str> = entries.iter().map(|entry| entry.kind).collect();
+    let notes: Vec<Option<&str>> = entries.iter().map(|entry| entry.note).collect();
     let added = sqlx::query(
         "INSERT INTO suppressions \
-            (workspace_id, identifier_hash, kind, reason, source, created_by) \
-         SELECT $1, hash, kind, $4, $5, $6 FROM unnest($2::bytea[], $3::text[]) AS t(hash, kind) \
+            (workspace_id, identifier_hash, kind, reason, source, note, created_by) \
+         SELECT $1, hash, kind, $4, $5, note, $6 \
+         FROM unnest($2::bytea[], $3::text[], $7::text[]) AS t(hash, kind, note) \
          ON CONFLICT (workspace_id, identifier_hash) DO NOTHING",
     )
     .bind(workspace.as_uuid())
@@ -156,6 +169,7 @@ pub async fn add_suppressions<'e>(
     .bind(reason.as_str())
     .bind(source)
     .bind(created_by)
+    .bind(notes)
     .execute(executor)
     .await
     .map_err(StoreError::query)?
@@ -572,7 +586,23 @@ mod tests {
         let added = add_suppressions(
             &pool,
             ws,
-            &[(ada, "email"), (bob, "email"), (cy, "phone")],
+            &[
+                BatchEntry {
+                    identifier_hash: ada,
+                    kind: "email",
+                    note: None,
+                },
+                BatchEntry {
+                    identifier_hash: bob,
+                    kind: "email",
+                    note: Some("from the old list"),
+                },
+                BatchEntry {
+                    identifier_hash: cy,
+                    kind: "phone",
+                    note: None,
+                },
+            ],
             SuppressionReason::Manual,
             "import",
             None,
@@ -589,6 +619,15 @@ mod tests {
                 .unwrap()
                 .source,
             "api"
+        );
+        assert_eq!(
+            find_suppression(&pool, ws, &bob)
+                .await
+                .unwrap()
+                .unwrap()
+                .note
+                .as_deref(),
+            Some("from the old list")
         );
         assert_eq!(
             find_suppression(&pool, ws, &cy)

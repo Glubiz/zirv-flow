@@ -246,8 +246,7 @@ mod tests {
         ws: WorkspaceId,
         person: Uuid,
     ) -> Vec<(Option<String>, String, OffsetDateTime)> {
-        let mut connection = pool.acquire().await.unwrap();
-        consent_for(&mut connection, ws, person)
+        consent_for(pool, ws, person)
             .await
             .unwrap()
             .unwrap()
@@ -288,8 +287,7 @@ mod tests {
             states(&pool, ws, p1).await,
             [(Some("newsletter".to_owned()), "unsubscribed".to_owned(), T1)]
         );
-        let mut connection = pool.acquire().await.unwrap();
-        let (history, _) = consent_history(&mut connection, ws, p1, 10, None)
+        let (history, _) = consent_history(&pool, ws, p1, 10, None)
             .await
             .unwrap()
             .unwrap();

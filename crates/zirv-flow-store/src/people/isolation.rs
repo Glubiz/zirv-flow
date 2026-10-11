@@ -24,7 +24,8 @@ mod tests {
 
     use crate::{
         ConsentChange, ConsentOutcome, NewSuppression, NewTopic, add_suppression, consent_for,
-        consent_history, create_topic, find_suppression, find_topic, is_suppressed, list_suppressions, list_topics, set_consent,
+        consent_history, create_topic, find_suppression, find_topic, is_suppressed,
+        list_suppressions, list_topics, set_consent,
     };
     use zirv_flow_core::consent::{
         ChangeSource, Channel, ConsentStatus, SuppressionReason, TopicPolicy,
@@ -513,32 +514,22 @@ mod tests {
             assert_eq!(topics[0].id, own);
             assert!(find_topic(&pool, ws, foreign).await.unwrap().is_none());
         }
-        let mut connection = pool.acquire().await.unwrap();
+        assert!(consent_for(&pool, one, person_two).await.unwrap().is_none());
         assert!(
-            consent_for(&mut connection, one, person_two)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            consent_history(&mut connection, two, person_one, 10, None)
+            consent_history(&pool, two, person_one, 10, None)
                 .await
                 .unwrap()
                 .is_none()
         );
         for (ws, person) in [(one, person_one), (two, person_two)] {
-            let states = consent_for(&mut connection, ws, person)
-                .await
-                .unwrap()
-                .unwrap();
+            let states = consent_for(&pool, ws, person).await.unwrap().unwrap();
             assert_eq!(states.len(), 2);
-            let (history, _) = consent_history(&mut connection, ws, person, 10, None)
+            let (history, _) = consent_history(&pool, ws, person, 10, None)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(history.len(), 2);
         }
-        drop(connection);
 
         let mut tx = begin(&pool).await.unwrap();
         let trace = TraceContext::root(Cause::api("t"));

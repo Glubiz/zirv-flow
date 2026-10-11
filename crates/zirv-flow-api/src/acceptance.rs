@@ -52,7 +52,61 @@ mod tests {
 
     async fn app(pool: &PgPool) -> Router {
         zirv_flow_store::migrate(pool).await.unwrap();
-        router(AppState::new(pool.clone(), Arc::new(String::new)))
+        router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_master_key(&zirv_flow_core::MasterKey::generate()),
+        )
+    }
+
+    fn with_auth(
+        request: axum::http::request::Builder,
+        auth: Auth<'_>,
+    ) -> axum::http::request::Builder {
+        match auth {
+            Auth::Anonymous => request,
+            Auth::Session(login) => request
+                .header(header::COOKIE, &login.cookie)
+                .header("x-csrf-token", &login.csrf),
+            Auth::SessionWithoutCsrf(login) => request.header(header::COOKIE, &login.cookie),
+            Auth::SessionWithCsrf(login, csrf) => request
+                .header(header::COOKIE, &login.cookie)
+                .header("x-csrf-token", csrf),
+            Auth::Key(key) => request.header(header::AUTHORIZATION, format!("Bearer {key}")),
+        }
+    }
+
+    struct TextReply {
+        status: StatusCode,
+        headers: HeaderMap,
+        text: String,
+    }
+
+    /// A request with a plain-text body and the given content type, and the reply as text.
+    async fn call_text(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        content_type: Option<&str>,
+        body: String,
+        auth: Auth<'_>,
+    ) -> TextReply {
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let response = router
+            .clone()
+            .oneshot(with_auth(request, auth).body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        TextReply {
+            status,
+            headers,
+            text: String::from_utf8(bytes.to_vec()).unwrap(),
+        }
     }
 
     async fn call(
@@ -66,25 +120,7 @@ mod tests {
             .method(method)
             .uri(uri)
             .header("x-request-id", "test-request");
-        match auth {
-            Auth::Anonymous => {}
-            Auth::Session(login) => {
-                request = request
-                    .header(header::COOKIE, &login.cookie)
-                    .header("x-csrf-token", &login.csrf);
-            }
-            Auth::SessionWithoutCsrf(login) => {
-                request = request.header(header::COOKIE, &login.cookie);
-            }
-            Auth::SessionWithCsrf(login, csrf) => {
-                request = request
-                    .header(header::COOKIE, &login.cookie)
-                    .header("x-csrf-token", csrf);
-            }
-            Auth::Key(key) => {
-                request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
-            }
-        }
+        request = with_auth(request, auth);
         let body = match body {
             Some(body) => {
                 request = request.header(header::CONTENT_TYPE, "application/json");
@@ -4157,5 +4193,1025 @@ mod tests {
         assert_eq!(rows.len(), 1000);
         assert_eq!(rows[0]["row"], 2);
         assert_eq!(rows[999]["row"], 1001);
+    }
+
+    fn topics_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/topics")
+    }
+
+    fn consent_uri(ws: &str, person: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/people/{person}/consent")
+    }
+
+    fn suppressions_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/suppressions{rest}")
+    }
+
+    const SUPPRESSION_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    async fn keyed_app(pool: &PgPool) -> Router {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_master_key(&zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap()),
+        )
+    }
+
+    async fn seed_person(pool: &PgPool, ws: &str, email: &str) -> String {
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            pool,
+            ws.parse().unwrap(),
+            &[profile(email, &[("email", email)])],
+        )
+        .await
+        .unwrap();
+        match &outcomes[0] {
+            zirv_flow_store::ProfileOutcome::Applied { person_id, .. } => person_id.to_string(),
+            other => panic!("not applied: {other:?}"),
+        }
+    }
+
+    async fn create_topic(router: &Router, owner: &Login, ws: &str, key: &str, policy: &str) {
+        let reply = call(
+            router,
+            "POST",
+            &topics_uri(ws),
+            Some(json!({"key": key, "name": key, "channel": "email", "policy": policy})),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn topics_are_created_listed_updated_archived_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let created = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(json!({"key": "news", "name": "News", "description": "Monthly", "channel": "email", "policy": "opt_out"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(created.body["policy"], "opt_out");
+        assert_eq!(created.body["archived"], false);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let duplicate = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(json!({"key": "news", "name": "Again", "channel": "email", "policy": "opt_in"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        for bad in [
+            json!({"key": "News", "name": "n", "channel": "email", "policy": "opt_in"}),
+            json!({"key": "ok", "name": "", "channel": "email", "policy": "opt_in"}),
+            json!({"key": "ok", "name": "n", "channel": "sms", "policy": "opt_in"}),
+            json!({"key": "ok", "name": "n", "channel": "email", "policy": "always"}),
+            json!({"key": "ok", "name": "n", "description": "d".repeat(501), "channel": "email", "policy": "opt_in"}),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &topics_uri(&ws),
+                Some(bad),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+        }
+
+        let patched = call(
+            &router,
+            "PATCH",
+            &format!("{}/{id}", topics_uri(&ws)),
+            Some(json!({"policy": "opt_in", "archived": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        assert_eq!(patched.body["policy"], "opt_in");
+        assert_eq!(patched.body["archived"], true);
+        let visible = call(
+            &router,
+            "GET",
+            &topics_uri(&ws),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let all = call(
+            &router,
+            "GET",
+            &format!("{}?archived=true", topics_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad_flag = call(
+            &router,
+            "GET",
+            &format!("{}?archived=maybe", topics_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(visible.body.as_array().unwrap().len(), 0);
+        assert_eq!(all.body.as_array().unwrap().len(), 1);
+        assert_eq!(bad_flag.status, StatusCode::BAD_REQUEST);
+        for empty in [json!({}), json!({"policy": "never"}), json!({"name": " "})] {
+            let reply = call(
+                &router,
+                "PATCH",
+                &format!("{}/{id}", topics_uri(&ws)),
+                Some(empty),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let missing = call(
+            &router,
+            "PATCH",
+            &format!("{}/{}", topics_uri(&ws), uuid::Uuid::now_v7()),
+            Some(json!({"name": "x"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let created_row = audit
+            .iter()
+            .find(|row| row.action == "topic.created")
+            .unwrap();
+        assert_eq!(created_row.summary, json!({"key": "news"}));
+        assert_eq!(created_row.object_kind.as_deref(), Some("topic"));
+        let updated_row = audit
+            .iter()
+            .find(|row| row.action == "topic.updated")
+            .unwrap();
+        assert_eq!(
+            updated_row.summary,
+            json!({"key": "news", "fields": ["policy", "archived"]})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_admins_change_topics_and_other_workspaces_see_none(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let body = json!({"key": "x", "name": "x", "channel": "email", "policy": "opt_in"});
+
+        let member_read = call(
+            &router,
+            "GET",
+            &topics_uri(&ws),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let key_read = call(&router, "GET", &topics_uri(&ws), None, Auth::Key(&read_key)).await;
+        let member_create = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(body.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let read_key_create = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(body.clone()),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(body.clone()),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let admin_key_create = call(
+            &router,
+            "POST",
+            &topics_uri(&ws),
+            Some(body),
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let foreign = call(
+            &router,
+            "GET",
+            &topics_uri(&other),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let anonymous = call(&router, "GET", &topics_uri(&ws), None, Auth::Anonymous).await;
+        let in_other = call(
+            &router,
+            "GET",
+            &topics_uri(&other),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(member_read.status, StatusCode::OK);
+        assert_eq!(key_read.status, StatusCode::OK);
+        assert_eq!(member_create.status, StatusCode::FORBIDDEN);
+        assert_eq!(read_key_create.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(admin_key_create.status, StatusCode::CREATED);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(in_other.body.as_array().unwrap().len(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_is_set_read_and_its_history_shows_source_and_evidence(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let evidence = json!({"form": "footer", "ip": "203.0.113.9"});
+
+        let subscribed = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "topic_key": "news", "status": "subscribed", "evidence": evidence})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(subscribed.status, StatusCode::OK, "{:?}", subscribed.body);
+        assert_eq!(subscribed.body["person_id"], person);
+        assert_eq!(subscribed.body["states"][0]["topic_key"], "news");
+        assert_eq!(subscribed.body["states"][0]["status"], "subscribed");
+        assert_eq!(subscribed.body["states"][0]["explicit"], true);
+        let repeated = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "topic_key": "news", "status": "subscribed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(repeated.status, StatusCode::OK);
+        let unsubscribed = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "status": "unsubscribed"})),
+            Auth::Key(&write_key),
+        )
+        .await;
+        assert_eq!(
+            unsubscribed.status,
+            StatusCode::OK,
+            "{:?}",
+            unsubscribed.body
+        );
+        let states = unsubscribed.body["states"].as_array().unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0]["topic_key"], serde_json::Value::Null);
+        assert_eq!(states[0]["status"], "unsubscribed");
+
+        let read = call(
+            &router,
+            "GET",
+            &consent_uri(&ws, &person),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(read.body, unsubscribed.body);
+        let history = call(
+            &router,
+            "GET",
+            &format!("{}/history", consent_uri(&ws, &person)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(history.status, StatusCode::OK, "{:?}", history.body);
+        let entries = history.body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "the repeated write left no history");
+        assert_eq!(entries[0]["source"], "api");
+        assert_eq!(entries[0]["actor_user_id"], serde_json::Value::Null);
+        assert_eq!(entries[0]["from_status"], serde_json::Value::Null);
+        assert_eq!(entries[0]["to_status"], "unsubscribed");
+        assert_eq!(entries[1]["source"], "ui");
+        assert!(entries[1]["actor_user_id"].is_string());
+        assert_eq!(entries[1]["topic_key"], "news");
+        assert_eq!(entries[1]["evidence"], evidence);
+        assert_eq!(history.body["next_before"], serde_json::Value::Null);
+
+        let first_page = call(
+            &router,
+            "GET",
+            &format!("{}/history?limit=1", consent_uri(&ws, &person)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first_page.body["next_before"].as_str().unwrap();
+        let second_page = call(
+            &router,
+            "GET",
+            &format!(
+                "{}/history?limit=1&before={cursor}",
+                consent_uri(&ws, &person)
+            ),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(first_page.body["entries"][0]["source"], "api");
+        assert_eq!(second_page.body["entries"][0]["source"], "ui");
+        assert_eq!(second_page.body["next_before"], serde_json::Value::Null);
+        let bad_limit = call(
+            &router,
+            "GET",
+            &format!("{}/history?limit=0", consent_uri(&ws, &person)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_writes_are_validated_and_follow_the_write_rules(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let put = |body: serde_json::Value| {
+            let router = router.clone();
+            let uri = consent_uri(&ws, &person);
+            let owner = &owner;
+            async move { call(&router, "PUT", &uri, Some(body), Auth::Session(owner)).await }
+        };
+
+        for bad in [
+            json!({"channel": "email", "status": "unknown"}),
+            json!({"channel": "email", "status": "maybe"}),
+            json!({"channel": "sms", "status": "subscribed"}),
+            json!({"channel": "email", "topic_key": "nope", "status": "subscribed"}),
+            json!({"channel": "email", "status": "subscribed", "evidence": ["x"]}),
+            json!({"channel": "email", "status": "subscribed", "evidence": {"text": "x".repeat(5000)}}),
+        ] {
+            let reply = put(bad.clone()).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bad}: {:?}",
+                reply.body
+            );
+        }
+        let pending = put(json!({"channel": "email", "status": "pending_confirmation"})).await;
+        assert_eq!(pending.status, StatusCode::OK);
+        assert_eq!(pending.body["states"][0]["explicit"], false);
+
+        let by_member = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "status": "subscribed"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let by_read_key = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "status": "unsubscribed"})),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "status": "unsubscribed"})),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let read_by_read_key = call(
+            &router,
+            "GET",
+            &consent_uri(&ws, &person),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let stranger = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &uuid::Uuid::now_v7().to_string()),
+            Some(json!({"channel": "email", "status": "subscribed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let wrong_workspace = call(
+            &router,
+            "GET",
+            &consent_uri(&other, &person),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let wrong_workspace_history = call(
+            &router,
+            "GET",
+            &format!("{}/history", consent_uri(&other, &person)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(by_member.status, StatusCode::OK);
+        assert_eq!(by_read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(read_by_read_key.status, StatusCode::OK);
+        assert_eq!(read_by_read_key.body["states"][0]["status"], "subscribed");
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+        assert_eq!(wrong_workspace.status, StatusCode::NOT_FOUND);
+        assert_eq!(wrong_workspace_history.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_suppression_is_added_checked_listed_and_removed_and_no_value_is_stored(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let added = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, ""),
+            Some(json!({"kind": "email", "value": " Ada@Example.COM ", "note": "asked by phone"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, ""),
+            Some(json!({"kind": "email", "value": "ada@example.com"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(added.status, StatusCode::OK, "{:?}", added.body);
+        assert_eq!(added.body, json!({"added": true}));
+        assert_eq!(again.body, json!({"added": false}));
+
+        let check = |value: &'static str| {
+            let router = router.clone();
+            let uri = suppressions_uri(&ws, "/check");
+            let owner = &owner;
+            async move {
+                call(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some(json!({"kind": "email", "value": value})),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            check("ADA@example.com").await.body,
+            json!({"suppressed": true, "reason": "manual"})
+        );
+        assert_eq!(
+            check("bob@example.com").await.body,
+            json!({"suppressed": false, "reason": null})
+        );
+
+        let list = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, ""),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::OK);
+        let entries = list.body["suppressions"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["hash_prefix"].as_str().unwrap().len(), 8);
+        assert_eq!(entries[0]["kind"], "email");
+        assert_eq!(entries[0]["reason"], "manual");
+        assert_eq!(entries[0]["source"], "ui");
+        assert_eq!(entries[0]["note"], "asked by phone");
+        assert!(entries[0].get("hash").is_none() && entries[0].get("value").is_none());
+        let hits = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "?reason=hard_bounce"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(hits.body["suppressions"].as_array().unwrap().len(), 0);
+        let bad_reason = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "?reason=rude"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(bad_reason.status, StatusCode::BAD_REQUEST);
+
+        let stored: String = sqlx::query_scalar("SELECT s::text FROM suppressions s")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored.to_lowercase().contains("ada@") && !stored.contains("example.com"));
+
+        for bad in [
+            json!({"kind": "email", "value": "nope"}),
+            json!({"kind": "phone", "value": "12"}),
+            json!({"kind": "anonymous_id", "value": "x"}),
+            json!({"kind": "email", "value": "cy@example.com", "note": "this is Cy@Example.com"}),
+            json!({"kind": "email", "value": "cy@example.com", "note": "n".repeat(501)}),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &suppressions_uri(&ws, ""),
+                Some(bad.clone()),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+            assert!(!reply.body["detail"].as_str().unwrap().contains('@'));
+        }
+
+        let removed = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/remove"),
+            Some(json!({"kind": "email", "value": "ada@example.com"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let removed_again = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/remove"),
+            Some(json!({"kind": "email", "value": "ada@example.com"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+        assert_eq!(removed_again.status, StatusCode::NOT_FOUND);
+        assert_eq!(check("ada@example.com").await.body["suppressed"], false);
+
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let actions: Vec<&str> = audit
+            .iter()
+            .map(|row| row.action.as_str())
+            .filter(|action| action.starts_with("suppression."))
+            .collect();
+        assert_eq!(actions, ["suppression.removed", "suppression.added"]);
+        let text = serde_json::to_string(&audit.iter().map(|row| &row.summary).collect::<Vec<_>>())
+            .unwrap();
+        assert!(!text.to_lowercase().contains("ada@") && !text.contains("asked by phone"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn suppressions_follow_the_admin_and_read_rules(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let identifier = json!({"kind": "email", "value": "ada@example.com"});
+
+        for (method, rest) in [("POST", ""), ("POST", "/remove")] {
+            for auth in [
+                Auth::Session(&member),
+                Auth::Key(&read_key),
+                Auth::SessionWithoutCsrf(&owner),
+            ] {
+                let reply = call(
+                    &router,
+                    method,
+                    &suppressions_uri(&ws, rest),
+                    Some(identifier.clone()),
+                    auth,
+                )
+                .await;
+                assert_eq!(reply.status, StatusCode::FORBIDDEN, "{method} {rest}");
+            }
+        }
+        let import_as_member = call_text(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/import"),
+            Some("text/csv"),
+            "kind,value\n".into(),
+            Auth::Session(&member),
+        )
+        .await;
+        let export_as_member = call_text(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "/export"),
+            None,
+            String::new(),
+            Auth::Session(&member),
+        )
+        .await;
+        let export_as_read_key = call_text(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "/export"),
+            None,
+            String::new(),
+            Auth::Key(&read_key),
+        )
+        .await;
+        assert_eq!(import_as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(export_as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(export_as_read_key.status, StatusCode::FORBIDDEN);
+
+        let member_check = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/check"),
+            Some(identifier.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let member_list = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, ""),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let key_check = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/check"),
+            Some(identifier.clone()),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let key_add = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, ""),
+            Some(identifier.clone()),
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let foreign = call(
+            &router,
+            "POST",
+            &suppressions_uri(&other, "/check"),
+            Some(identifier.clone()),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let in_other = call(
+            &router,
+            "POST",
+            &suppressions_uri(&other, "/check"),
+            Some(identifier),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(member_check.status, StatusCode::OK);
+        assert_eq!(member_list.status, StatusCode::OK);
+        assert_eq!(key_check.status, StatusCode::OK);
+        assert_eq!(key_add.status, StatusCode::OK);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(in_other.body["suppressed"], false);
+        let source: String = sqlx::query_scalar("SELECT source FROM suppressions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source, "api");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erased_suppression_cannot_be_removed_or_replaced(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let key = zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY)
+            .unwrap()
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let identifier =
+            zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap();
+        zirv_flow_store::add_suppression(
+            &pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewSuppression {
+                identifier_hash: zirv_flow_core::people::identifier_hash(&key, &identifier),
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Erased,
+                source: "erasure",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let body = json!({"kind": "email", "value": "ada@example.com"});
+
+        let removed = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/remove"),
+            Some(body.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let added = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, ""),
+            Some(body.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let checked = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/check"),
+            Some(body),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(removed.status, StatusCode::CONFLICT);
+        assert_eq!(added.body, json!({"added": false}));
+        assert_eq!(
+            checked.body,
+            json!({"suppressed": true, "reason": "erased"})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_previews_with_a_dry_run_commits_and_reports_bad_rows_by_number(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let csv = "kind,value,note\n\
+                   email,a@example.com,\n\
+                   email,b@example.com,from the old list\n\
+                   email,secret-typo,\n\
+                   email,a@example.com,\n\
+                   phone,+4512345678,\n";
+        let post = |query: &'static str, content_type: Option<&'static str>, body: &'static str| {
+            let router = router.clone();
+            let uri = suppressions_uri(&ws, &format!("/import{query}"));
+            let owner = &owner;
+            async move {
+                call_text(
+                    &router,
+                    "POST",
+                    &uri,
+                    content_type,
+                    body.to_owned(),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+        let count = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM suppressions")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        let dry = post("?dry_run=true", Some("text/csv; charset=utf-8"), csv).await;
+
+        assert_eq!(dry.status, StatusCode::OK, "{}", dry.text);
+        let dry_body: serde_json::Value = serde_json::from_str(&dry.text).unwrap();
+        assert_eq!(
+            dry_body,
+            json!({"dry_run": true, "added": 3, "existing": 1,
+                   "invalid": [{"row": 4, "reason": "invalid_email"}]})
+        );
+        assert!(!dry.text.contains("secret-typo"));
+        assert_eq!(count().await, 0);
+
+        let committed = post("", Some("text/csv"), csv).await;
+        let committed_body: serde_json::Value = serde_json::from_str(&committed.text).unwrap();
+        assert_eq!(committed_body["dry_run"], false);
+        assert_eq!(committed_body["added"], 3);
+        assert_eq!(count().await, 3);
+        let again = post("", Some("text/csv"), csv).await;
+        let again_body: serde_json::Value = serde_json::from_str(&again.text).unwrap();
+        assert_eq!(
+            (
+                again_body["added"].as_u64(),
+                again_body["existing"].as_u64()
+            ),
+            (Some(0), Some(4))
+        );
+        let dry_after = post("?dry_run=true", Some("text/csv"), csv).await;
+        let dry_after_body: serde_json::Value = serde_json::from_str(&dry_after.text).unwrap();
+        assert_eq!(
+            (
+                dry_after_body["added"].as_u64(),
+                dry_after_body["existing"].as_u64()
+            ),
+            (Some(0), Some(4))
+        );
+        let sources: Vec<String> = sqlx::query_scalar("SELECT DISTINCT source FROM suppressions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sources, ["import"]);
+
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let imports: Vec<&serde_json::Value> = audit
+            .iter()
+            .filter(|row| row.action == "suppression.imported")
+            .map(|row| &row.summary)
+            .collect();
+        assert_eq!(
+            imports,
+            [
+                &json!({"added": 0, "existing": 4, "invalid": 1}),
+                &json!({"added": 3, "existing": 1, "invalid": 1})
+            ]
+        );
+
+        let wrong_type = post("", Some("application/json"), csv).await;
+        let no_type = post("", None, csv).await;
+        let bad_header = post("", Some("text/csv"), "value,kind\na@x.com,email\n").await;
+        let bad_flag = post("?dry_run=maybe", Some("text/csv"), csv).await;
+        assert_eq!(wrong_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(no_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(bad_header.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad_flag.status, StatusCode::BAD_REQUEST);
+        assert_eq!(count().await, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_over_ten_mebibytes_is_413(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let body = format!("kind,value\n{}", "x".repeat(10 * 1024 * 1024));
+
+        let reply = call_text(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/import"),
+            Some("text/csv"),
+            body,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_export_is_csv_of_hashes_only(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        for (uri, value) in [
+            (&ws, "a@example.com"),
+            (&ws, "b@example.com"),
+            (&other, "c@example.com"),
+        ] {
+            call(
+                &router,
+                "POST",
+                &suppressions_uri(uri, ""),
+                Some(json!({"kind": "email", "value": value, "note": "kept out of the export"})),
+                Auth::Session(&owner),
+            )
+            .await;
+        }
+
+        let export = call_text(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "/export"),
+            None,
+            String::new(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(export.status, StatusCode::OK);
+        assert!(
+            export.headers[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/csv")
+        );
+        assert!(
+            export.headers[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("suppressions.csv")
+        );
+        let lines: Vec<&str> = export.text.lines().collect();
+        assert_eq!(lines[0], "hash,kind,reason,source,created_at");
+        assert_eq!(lines.len(), 3, "{}", export.text);
+        for line in &lines[1..] {
+            let fields: Vec<&str> = line.split(',').collect();
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields[0].len(), 64);
+            assert!(fields[0].bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(&fields[1..4], ["email", "manual", "ui"]);
+        }
+        assert!(!export.text.contains('@') && !export.text.contains("kept out"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn suppressions_are_unavailable_without_a_master_key(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(AppState::new(pool.clone(), Arc::new(String::new)));
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let check = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/check"),
+            Some(json!({"kind": "email", "value": "a@example.com"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let list = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, ""),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(check.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(list.status, StatusCode::OK);
     }
 }

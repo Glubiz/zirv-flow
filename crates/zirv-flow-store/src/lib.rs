@@ -80,9 +80,9 @@ pub use sessions::{
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{
-    AddOutcome, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression, SuppressionCursor,
-    add_suppression, add_suppressions, count_suppressed, find_suppression, is_suppressed,
-    list_suppressions, remove_suppression,
+    AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
+    SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,
+    is_suppressed, list_suppressions, remove_suppression,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, list_members,

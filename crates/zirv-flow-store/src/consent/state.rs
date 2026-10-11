@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, State};
@@ -246,11 +246,11 @@ pub(super) async fn write_state(
 /// The current states of a person, the channel-wide one first and then by topic key. The
 /// person is followed through `merged_into`. `None` when the workspace has no such person.
 pub async fn consent_for(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Option<Vec<ConsentEntry>>, StoreError> {
-    let Some(person) = current_person(&mut *connection, workspace, person).await? else {
+    let Some(person) = current_person(pool, workspace, person).await? else {
         return Ok(None);
     };
     let entries = sqlx::query_as(
@@ -262,7 +262,7 @@ pub async fn consent_for(
     )
     .bind(workspace.as_uuid())
     .bind(person)
-    .fetch_all(&mut *connection)
+    .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
     Ok(Some(entries))
@@ -273,23 +273,17 @@ pub async fn consent_for(
 /// `merged_into`; the history of a merged person moved to the survivor. `None` when the
 /// workspace has no such person.
 pub async fn consent_history(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     workspace: WorkspaceId,
     person: Uuid,
     limit: u32,
     before: Option<(OffsetDateTime, Uuid)>,
 ) -> Result<Option<(Vec<ConsentHistoryEntry>, bool)>, StoreError> {
-    let Some(person) = current_person(&mut *connection, workspace, person).await? else {
+    let Some(person) = current_person(pool, workspace, person).await? else {
         return Ok(None);
     };
-    let mut rows: Vec<ConsentHistoryEntry> = history_page(
-        &mut *connection,
-        workspace,
-        person,
-        i64::from(limit) + 1,
-        before,
-    )
-    .await?;
+    let mut rows: Vec<ConsentHistoryEntry> =
+        history_page(pool, workspace, person, i64::from(limit) + 1, before).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     Ok(Some((rows, more)))
@@ -441,17 +435,13 @@ mod tests {
             panic!("{outcome:?}");
         };
         assert_eq!(person_id, ada);
-        let mut connection = pool.acquire().await.unwrap();
-        let entries = consent_for(&mut connection, ws, ada)
-            .await
-            .unwrap()
-            .unwrap();
+        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
         assert_eq!(entries[0].status, "subscribed");
         assert!(entries[0].explicit);
         assert_eq!(entries[0].changed_at, T1);
-        let (history, more) = consent_history(&mut connection, ws, ada, 10, None)
+        let (history, more) = consent_history(&pool, ws, ada, 10, None)
             .await
             .unwrap()
             .unwrap();
@@ -526,9 +516,8 @@ mod tests {
         let mut second = change(ada, None, ConsentStatus::Unsubscribed, T2);
         second.source = ChangeSource::UnsubscribeLink;
         set(&pool, ws, &second, &trace).await;
-        let mut connection = pool.acquire().await.unwrap();
 
-        let (page, more) = consent_history(&mut connection, ws, ada, 1, None)
+        let (page, more) = consent_history(&pool, ws, ada, 1, None)
             .await
             .unwrap()
             .unwrap();
@@ -537,16 +526,11 @@ mod tests {
         assert_eq!(page[0].to_status, "unsubscribed");
         assert_eq!(page[0].from_status.as_deref(), Some("subscribed"));
         assert_eq!(page[0].source, "unsubscribe_link");
-        let (rest, more) = consent_history(
-            &mut connection,
-            ws,
-            ada,
-            1,
-            Some((page[0].occurred_at, page[0].id)),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (rest, more) =
+            consent_history(&pool, ws, ada, 1, Some((page[0].occurred_at, page[0].id)))
+                .await
+                .unwrap()
+                .unwrap();
         assert!(!more);
         assert_eq!(rest[0].to_status, "subscribed");
     }
@@ -574,11 +558,7 @@ mod tests {
         )
         .await;
 
-        let mut connection = pool.acquire().await.unwrap();
-        let entries = consent_for(&mut connection, ws, ada)
-            .await
-            .unwrap()
-            .unwrap();
+        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
         let shown: Vec<(Option<&str>, &str)> = entries
             .iter()
             .map(|entry| (entry.topic_key.as_deref(), entry.status.as_str()))
@@ -624,15 +604,9 @@ mod tests {
         assert_eq!(wrong_person, ConsentOutcome::NoSuchPerson);
         assert_eq!(nobody, ConsentOutcome::NoSuchPerson);
         assert_eq!(count(&pool, "consent").await, 0);
-        let mut connection = pool.acquire().await.unwrap();
+        assert!(consent_for(&pool, two, ada).await.unwrap().is_none());
         assert!(
-            consent_for(&mut connection, two, ada)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            consent_history(&mut connection, two, ada, 5, None)
+            consent_history(&pool, two, ada, 5, None)
                 .await
                 .unwrap()
                 .is_none()
@@ -664,11 +638,7 @@ mod tests {
         assert!(
             matches!(outcome, ConsentOutcome::Changed { person_id, .. } if person_id == survivor)
         );
-        let mut connection = pool.acquire().await.unwrap();
-        let through_merged = consent_for(&mut connection, ws, merged)
-            .await
-            .unwrap()
-            .unwrap();
+        let through_merged = consent_for(&pool, ws, merged).await.unwrap().unwrap();
         assert_eq!(through_merged.len(), 1);
         let owner: Uuid = sqlx::query_scalar("SELECT person_id FROM consent")
             .fetch_one(&pool)
