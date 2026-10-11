@@ -909,8 +909,8 @@ from the checkpoint when the job is retried and neither skips nor repeats a row.
 import for progress: `rows_done` of `rows_total`, `rows_applied`, `rows_unchanged` (the row
 repeats what is stored, so nothing was written) and `rows_rejected`. `POST .../imports/{id}/cancel`
 stops it at the next batch boundary; the batches already applied stay applied. One run per
-import: starting a second is a 409. A run whose job ran out of attempts stays `running` and
-shows under **Jobs**, where the owner can retry it to resume.
+import: starting a second is a 409. A run whose job ran out of attempts is marked `failed` with `job_failed` (rows already
+applied stay applied); upload the file again to finish, which changes only what is missing.
 
 **Idempotency.** Records are written under the import's `source` (default `csv`) and `stream`
 (default the file name without its extension). A row's record key is the value of the
@@ -929,7 +929,7 @@ than 1,000 rows are done and more than 5% of them were rejected, the run stops a
 `error_code` `reject_threshold`, so a broken mapping cannot flood a workspace. The batches
 applied before it stopped stay applied; fix the mapping and run the file again, which changes
 only what is still missing. Other failure codes: `list_not_found` (a mapped list was
-deleted), `file_missing` (the file was already deleted) and `file_unreadable`.
+deleted), `file_missing` (the file was already deleted), `file_unreadable`, `job_failed` and `abandoned`.
 
 `GET .../imports/{id}/rejects?phase=&limit=&after=` pages through the rejects in row order
 with `row_number` and the codes (`limit` 1 to 200). `GET .../imports/{id}/rejects.csv?phase=` downloads them as

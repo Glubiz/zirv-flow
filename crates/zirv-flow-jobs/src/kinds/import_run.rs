@@ -99,8 +99,34 @@ pub(super) async fn run_import(
     run_import_probed(ctx, payload, &Probe::stopping_after(stop_after)).await
 }
 
-/// [`run_import`] with the test hooks of `probe`.
+/// [`run_import`] with the test hooks of `probe`. When the attempt fails and no attempt is left,
+/// the import is marked `failed` with `job_failed`, so it never stays `running` without a job.
 pub(super) async fn run_import_probed(
+    ctx: &mut JobContext<'_>,
+    payload: &Value,
+    probe: &Probe,
+) -> Result<(), JobError> {
+    let last = ctx.attempts() >= ctx.max_attempts();
+    let (pool, workspace) = (ctx.pool().cloned(), ctx.workspace_id());
+    let result = run_import_pass(ctx, payload, probe).await;
+    if result.is_err() && last {
+        fail_last_attempt(pool, workspace, payload).await;
+    }
+    result
+}
+
+/// Ends the import of a job that has no attempt left; best effort, since the job is dead anyway.
+pub(super) async fn fail_last_attempt(
+    pool: Option<PgPool>,
+    workspace: Option<WorkspaceId>,
+    payload: &Value,
+) {
+    if let (Some(pool), Some(workspace), Ok(id)) = (pool, workspace, import_id(payload)) {
+        let _ = fail(&pool, workspace, id, "job_failed").await;
+    }
+}
+
+async fn run_import_pass(
     ctx: &mut JobContext<'_>,
     payload: &Value,
     probe: &Probe,
@@ -365,12 +391,22 @@ mod tests {
     }
 
     async fn attempt_probed(pool: &PgPool, import: &Import, probe: &Probe) -> Result<(), JobError> {
+        attempt_number(pool, import, probe, 1).await
+    }
+
+    /// Like [`attempt_probed`], as attempt `attempts` of 5.
+    async fn attempt_number(
+        pool: &PgPool,
+        import: &Import,
+        probe: &Probe,
+        attempts: i32,
+    ) -> Result<(), JobError> {
         let claimed = zirv_flow_store::ClaimedJob {
             id: Uuid::now_v7(),
             workspace_id: Some(import.workspace_id),
             kind: ImportRun::KIND.to_owned(),
             payload: json!({ "import_id": import.id }),
-            attempts: 1,
+            attempts,
             max_attempts: 5,
             lease_token: Uuid::now_v7(),
             unique_key: None,
@@ -607,6 +643,32 @@ mod tests {
             "every row was applied exactly once"
         );
         assert_eq!(snapshot(&pool, ws).await.1, 1200);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_whose_last_attempt_fails_is_marked_failed_instead_of_left_running(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let import = start(&pool, ws, &file(3000, 0), 3000, None).await;
+        let crash = Probe::stopping_after(Some(1));
+
+        // Attempts 1 to 4 fail and leave the import to the retry.
+        for attempts in 1..5 {
+            assert!(
+                attempt_number(&pool, &import, &crash, attempts)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(reread(&pool, &import).await.status, ImportStatus::Running);
+        }
+        assert!(attempt_number(&pool, &import, &crash, 5).await.is_err());
+
+        let done = reread(&pool, &import).await;
+        assert_eq!(done.status, ImportStatus::Failed);
+        assert_eq!(done.error_code.as_deref(), Some("job_failed"));
+        assert!(done.finished_at.is_some());
+        assert_eq!(done.rows_done, 2500, "the applied batches stay");
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

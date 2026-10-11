@@ -72,6 +72,8 @@ export function errorText(code: string | null | undefined): string {
   switch (code) {
     case "reject_threshold":
       return "Too many rows were rejected, so the import stopped. Rows applied before it stopped stay applied.";
+    case "job_failed":
+      return "The job that ran the import failed on every attempt. Rows applied before it stopped stay applied.";
     case "list_not_found":
       return "A list in the mapping no longer exists. Rows applied before it stopped stay applied.";
     case "file_missing":

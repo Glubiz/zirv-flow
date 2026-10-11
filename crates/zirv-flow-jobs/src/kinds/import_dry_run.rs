@@ -14,7 +14,7 @@ use zirv_flow_store::{
 };
 
 use super::import_rows::{BATCH_ROWS, Planner, Probe, RowReader, hex, load_catalog};
-use super::import_run::{fail, import_id, unreadable};
+use super::import_run::{fail, fail_last_attempt, import_id, unreadable};
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct ImportDryRun;
@@ -36,8 +36,23 @@ pub(super) async fn dry_run_import(
     dry_run_import_probed(ctx, payload, &Probe::stopping_after(stop_after)).await
 }
 
-/// [`dry_run_import`] with the test hooks of `probe`.
+/// [`dry_run_import`] with the test hooks of `probe`. When the attempt fails and no attempt is
+/// left, the import is marked `failed` with `job_failed`.
 pub(super) async fn dry_run_import_probed(
+    ctx: &mut JobContext<'_>,
+    payload: &Value,
+    probe: &Probe,
+) -> Result<(), JobError> {
+    let last = ctx.attempts() >= ctx.max_attempts();
+    let (pool, workspace) = (ctx.pool().cloned(), ctx.workspace_id());
+    let result = dry_run_import_pass(ctx, payload, probe).await;
+    if result.is_err() && last {
+        fail_last_attempt(pool, workspace, payload).await;
+    }
+    result
+}
+
+async fn dry_run_import_pass(
     ctx: &mut JobContext<'_>,
     payload: &Value,
     probe: &Probe,
@@ -228,12 +243,22 @@ mod tests {
     }
 
     async fn attempt_probed(pool: &PgPool, import: &Import, probe: &Probe) -> Result<(), JobError> {
+        attempt_number(pool, import, probe, 1).await
+    }
+
+    /// Like [`attempt_probed`], as attempt `attempts` of 5.
+    async fn attempt_number(
+        pool: &PgPool,
+        import: &Import,
+        probe: &Probe,
+        attempts: i32,
+    ) -> Result<(), JobError> {
         let claimed = zirv_flow_store::ClaimedJob {
             id: Uuid::now_v7(),
             workspace_id: Some(import.workspace_id),
             kind: ImportDryRun::KIND.to_owned(),
             payload: json!({ "import_id": import.id }),
-            attempts: 1,
+            attempts,
             max_attempts: 5,
             lease_token: Uuid::now_v7(),
             unique_key: None,
@@ -358,6 +383,28 @@ mod tests {
             .unwrap();
         let rows: Vec<i64> = rejects.iter().map(|reject| reject.row_number).collect();
         assert_eq!(rows, [3, 6]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dry_run_whose_last_attempt_fails_is_marked_failed(pool: PgPool) {
+        let (ws, import) = dry_running(&pool, 1100, 10).await;
+        let crash = Probe::stopping_after(Some(1));
+
+        assert!(attempt_number(&pool, &import, &crash, 4).await.is_err());
+        assert_eq!(
+            find_import(&pool, ws, import.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            ImportStatus::DryRunning
+        );
+        assert!(attempt_number(&pool, &import, &crash, 5).await.is_err());
+
+        let done = find_import(&pool, ws, import.id).await.unwrap().unwrap();
+        assert_eq!(done.status, ImportStatus::Failed);
+        assert_eq!(done.error_code.as_deref(), Some("job_failed"));
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

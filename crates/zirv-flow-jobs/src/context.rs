@@ -103,6 +103,11 @@ impl<'a> JobContext<'a> {
         self.job.attempts
     }
 
+    /// How many attempts the job has in all before it is buried as dead.
+    pub fn max_attempts(&self) -> i32 {
+        self.job.max_attempts
+    }
+
     pub fn unique_key(&self) -> Option<&str> {
         self.job.unique_key.as_deref()
     }
