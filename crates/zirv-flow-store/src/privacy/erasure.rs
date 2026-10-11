@@ -369,11 +369,14 @@ pub async fn replay_erasures(
         .await
         .map_err(StoreError::query)?;
         let mut all_hashes: HashSet<Vec<u8>> = HashSet::new();
-        for (person, hashes, kinds, _people) in entries {
+        for (person, hashes, kinds, people) in entries {
             report.requests += 1;
             report.suppressions += suppress(&mut tx, ws, &hashes, &kinds).await?;
-            if delete_person(&mut tx, ws, person, DeleteReason::Erasure, trace).await? {
-                report.people += 1;
+            // Every id the erased group had: a backup from before a merge restores them apart.
+            for id in std::iter::once(person).chain(people) {
+                if delete_person(&mut tx, ws, id, DeleteReason::Erasure, trace).await? {
+                    report.people += 1;
+                }
             }
             all_hashes.extend(hashes);
         }
@@ -1045,5 +1048,32 @@ mod tests {
         );
         assert_eq!(inbox_messages(&pool).await, ["i-2"]);
         assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_erases_every_id_the_group_had_when_a_backup_predates_the_merge(pool: PgPool) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+        // The backup is from before the merge: both people are back, apart.
+        for id in [person, merged] {
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(id)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let report = replay_erasures(&pool, Some(ws), None, &trace())
+            .await
+            .unwrap();
+
+        assert_eq!(report.people, 2);
+        assert_eq!(rows_referencing_person(&pool, person).await, []);
+        assert_eq!(rows_referencing_person(&pool, merged).await, []);
     }
 }
