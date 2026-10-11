@@ -4574,7 +4574,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-loadgen"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "clap",
  "reqwest 0.13.5",
