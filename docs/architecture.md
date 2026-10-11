@@ -172,6 +172,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-ai` | `zirv-flow-core` |
 | `zirv-flow-identity` | `zirv-flow-core` |
 | `zirv-flow-templates` | `zirv-flow-core` |
+| `zirv-flow-loadgen` (tools/loadgen) | none |
 | `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates` |
 | `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
 
