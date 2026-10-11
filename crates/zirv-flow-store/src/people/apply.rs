@@ -13,8 +13,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 use zirv_flow_core::people::{
-    Contribution, DropReason, Identifier, RawValue, TraitValue, coerce, infer_type, resolve,
-    validate_key,
+    Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
 use zirv_flow_core::token::sha256;
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -306,13 +305,12 @@ async fn prepare_traits(
             drop(DropReason::Archived);
             continue;
         }
-        let raw = to_raw(value);
-        if raw == RawValue::Null {
+        if value.is_null() {
             updates.push((key.clone(), None));
             continue;
         }
         if definition.is_none() {
-            let inferred = match infer_type(&raw) {
+            let inferred = match infer_type(value) {
                 Ok(inferred) => inferred,
                 Err(reason) => {
                     drop(reason);
@@ -330,23 +328,12 @@ async fn prepare_traits(
             drop(DropReason::Archived);
             continue;
         }
-        match coerce(definition.trait_type, &raw) {
+        match coerce(definition.trait_type, value) {
             Ok(accepted) => updates.push((key.clone(), Some(to_json(&accepted)))),
             Err(reason) => drop(reason),
         }
     }
     Ok((updates, dropped))
-}
-
-fn to_raw(value: &Value) -> RawValue {
-    match value {
-        Value::Null => RawValue::Null,
-        Value::Bool(flag) => RawValue::Bool(*flag),
-        Value::Number(number) => number.as_f64().map_or(RawValue::Object, RawValue::Number),
-        Value::String(text) => RawValue::String(text.clone()),
-        Value::Array(items) => RawValue::Array(items.iter().map(to_raw).collect()),
-        Value::Object(_) => RawValue::Object,
-    }
 }
 
 fn to_json(value: &TraitValue) -> Value {

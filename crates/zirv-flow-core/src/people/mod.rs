@@ -7,4 +7,4 @@ mod traits;
 
 pub use identifier::{Identifier, IdentifierError, IdentifierKind};
 pub use precedence::{Contribution, Precedence, resolve};
-pub use traits::{DropReason, RawValue, TraitType, TraitValue, coerce, infer_type, validate_key};
+pub use traits::{DropReason, TraitType, TraitValue, coerce, infer_type, validate_key};

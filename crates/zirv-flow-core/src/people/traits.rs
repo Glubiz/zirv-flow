@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat};
+use serde_json::Value;
 
 use crate::ValidationError;
 
@@ -73,18 +74,6 @@ impl FromStr for TraitType {
     }
 }
 
-/// An incoming value, shaped like JSON without depending on a JSON library.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RawValue {
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(String),
-    Array(Vec<RawValue>),
-    /// A JSON object, which no trait type accepts.
-    Object,
-}
-
 /// A value that passed its type's rules, normalized.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TraitValue {
@@ -121,38 +110,37 @@ impl DropReason {
 }
 
 /// The type an unregistered key is registered with. Timestamp and date are never inferred.
-pub fn infer_type(value: &RawValue) -> Result<TraitType, DropReason> {
+pub fn infer_type(value: &Value) -> Result<TraitType, DropReason> {
     match value {
-        RawValue::String(_) => Ok(TraitType::String),
-        RawValue::Number(_) => Ok(TraitType::Number),
-        RawValue::Bool(_) => Ok(TraitType::Boolean),
-        RawValue::Array(items) if items.iter().all(|item| matches!(item, RawValue::String(_))) => {
-            Ok(TraitType::StringList)
-        }
+        Value::String(_) => Ok(TraitType::String),
+        Value::Number(_) => Ok(TraitType::Number),
+        Value::Bool(_) => Ok(TraitType::Boolean),
+        Value::Array(items) if items.iter().all(Value::is_string) => Ok(TraitType::StringList),
         _ => Err(DropReason::NotInferable),
     }
 }
 
 /// Checks `value` against `kind` and normalizes it. `Null` is not a value; callers handle it.
-pub fn coerce(kind: TraitType, value: &RawValue) -> Result<TraitValue, DropReason> {
+pub fn coerce(kind: TraitType, value: &Value) -> Result<TraitValue, DropReason> {
     match (kind, value) {
-        (TraitType::String, RawValue::String(text)) => {
+        (TraitType::String, Value::String(text)) => {
             if text.len() > MAX_STRING_BYTES {
                 Err(DropReason::TooLong)
             } else {
                 Ok(TraitValue::String(text.clone()))
             }
         }
-        (TraitType::Number, RawValue::Number(number)) if number.is_finite() => {
-            Ok(TraitValue::Number(*number))
-        }
-        (TraitType::Boolean, RawValue::Bool(flag)) => Ok(TraitValue::Boolean(*flag)),
-        (TraitType::Timestamp, RawValue::String(text)) => DateTime::parse_from_rfc3339(text)
+        (TraitType::Number, Value::Number(number)) => number
+            .as_f64()
+            .map(TraitValue::Number)
+            .ok_or(DropReason::WrongType),
+        (TraitType::Boolean, Value::Bool(flag)) => Ok(TraitValue::Boolean(*flag)),
+        (TraitType::Timestamp, Value::String(text)) => DateTime::parse_from_rfc3339(text)
             .map(|parsed| {
                 TraitValue::Timestamp(parsed.to_utc().to_rfc3339_opts(SecondsFormat::AutoSi, true))
             })
             .map_err(|_| DropReason::WrongType),
-        (TraitType::Date, RawValue::String(text)) => {
+        (TraitType::Date, Value::String(text)) => {
             let well_formed = text.len() == 10
                 && text.bytes().enumerate().all(|(i, byte)| {
                     if i == 4 || i == 7 {
@@ -168,17 +156,17 @@ pub fn coerce(kind: TraitType, value: &RawValue) -> Result<TraitValue, DropReaso
                 .map(|_| TraitValue::Date(text.clone()))
                 .map_err(|_| DropReason::WrongType)
         }
-        (TraitType::StringList, RawValue::Array(items)) => {
+        (TraitType::StringList, Value::Array(items)) => {
             if items.len() > MAX_LIST_ITEMS {
                 return Err(DropReason::TooLong);
             }
             let mut texts = Vec::with_capacity(items.len());
             for item in items {
                 match item {
-                    RawValue::String(text) if text.len() <= MAX_LIST_ITEM_BYTES => {
+                    Value::String(text) if text.len() <= MAX_LIST_ITEM_BYTES => {
                         texts.push(text.clone());
                     }
-                    RawValue::String(_) => return Err(DropReason::TooLong),
+                    Value::String(_) => return Err(DropReason::TooLong),
                     _ => return Err(DropReason::WrongType),
                 }
             }
@@ -190,10 +178,12 @@ pub fn coerce(kind: TraitType, value: &RawValue) -> Result<TraitValue, DropReaso
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
-    fn text(value: &str) -> RawValue {
-        RawValue::String(value.to_owned())
+    fn text(value: &str) -> Value {
+        Value::String(value.to_owned())
     }
 
     #[test]
@@ -229,20 +219,16 @@ mod tests {
             Err(DropReason::TooLong)
         );
         assert_eq!(
-            coerce(TraitType::String, &RawValue::Bool(true)),
+            coerce(TraitType::String, &json!(true)),
             Err(DropReason::WrongType)
         );
     }
 
     #[test]
-    fn number_must_be_finite() {
+    fn number_takes_only_numbers() {
         assert_eq!(
-            coerce(TraitType::Number, &RawValue::Number(1.5)),
+            coerce(TraitType::Number, &json!(1.5)),
             Ok(TraitValue::Number(1.5))
-        );
-        assert_eq!(
-            coerce(TraitType::Number, &RawValue::Number(f64::NAN)),
-            Err(DropReason::WrongType)
         );
         assert_eq!(
             coerce(TraitType::Number, &text("1")),
@@ -253,7 +239,7 @@ mod tests {
     #[test]
     fn boolean_takes_only_booleans() {
         assert_eq!(
-            coerce(TraitType::Boolean, &RawValue::Bool(false)),
+            coerce(TraitType::Boolean, &json!(false)),
             Ok(TraitValue::Boolean(false))
         );
         assert_eq!(
@@ -297,9 +283,8 @@ mod tests {
 
     #[test]
     fn string_list_is_bounded() {
-        let list = |n: usize, len: usize| {
-            RawValue::Array((0..n).map(|_| text(&"a".repeat(len))).collect())
-        };
+        let list =
+            |n: usize, len: usize| Value::Array((0..n).map(|_| text(&"a".repeat(len))).collect());
         assert!(coerce(TraitType::StringList, &list(100, 256)).is_ok());
         assert_eq!(
             coerce(TraitType::StringList, &list(101, 1)),
@@ -310,10 +295,7 @@ mod tests {
             Err(DropReason::TooLong)
         );
         assert_eq!(
-            coerce(
-                TraitType::StringList,
-                &RawValue::Array(vec![RawValue::Bool(true)])
-            ),
+            coerce(TraitType::StringList, &json!([true])),
             Err(DropReason::WrongType)
         );
     }
@@ -321,25 +303,19 @@ mod tests {
     #[test]
     fn inference_picks_the_plain_types_and_never_timestamp_or_date() {
         assert_eq!(infer_type(&text("2026-05-01")), Ok(TraitType::String));
-        assert_eq!(infer_type(&RawValue::Number(1.0)), Ok(TraitType::Number));
-        assert_eq!(infer_type(&RawValue::Bool(true)), Ok(TraitType::Boolean));
-        assert_eq!(
-            infer_type(&RawValue::Array(vec![text("a")])),
-            Ok(TraitType::StringList)
-        );
-        assert_eq!(
-            infer_type(&RawValue::Array(vec![])),
-            Ok(TraitType::StringList)
-        );
+        assert_eq!(infer_type(&json!(1.0)), Ok(TraitType::Number));
+        assert_eq!(infer_type(&json!(true)), Ok(TraitType::Boolean));
+        assert_eq!(infer_type(&json!(["a"])), Ok(TraitType::StringList));
+        assert_eq!(infer_type(&json!([])), Ok(TraitType::StringList));
     }
 
     #[test]
     fn objects_and_mixed_arrays_are_not_inferable() {
-        assert_eq!(infer_type(&RawValue::Object), Err(DropReason::NotInferable));
+        assert_eq!(infer_type(&json!({})), Err(DropReason::NotInferable));
         assert_eq!(
-            infer_type(&RawValue::Array(vec![text("a"), RawValue::Number(1.0)])),
+            infer_type(&json!(["a", 1.0])),
             Err(DropReason::NotInferable)
         );
-        assert_eq!(infer_type(&RawValue::Null), Err(DropReason::NotInferable));
+        assert_eq!(infer_type(&Value::Null), Err(DropReason::NotInferable));
     }
 }
