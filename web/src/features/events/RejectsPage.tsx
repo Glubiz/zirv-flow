@@ -5,6 +5,7 @@ import { client, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, PageHeader, Panel, Pill, ResourceView, TextField, formatDateTime } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { EventsNav } from "./EventsNav";
+import { PropertyFacts } from "./PropertyFacts";
 import { ReplayDialog, type ReplayTarget } from "./ReplayDialog";
 import { reasonLabel, rejectReasonLabel } from "./labels";
 
@@ -169,8 +170,6 @@ interface RejectRowProps {
 
 function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
   const sample = reject.sample as { properties?: Record<string, unknown>; masked?: string[] };
-  const properties = Object.entries(sample.properties ?? {});
-  const masked = new Set(sample.masked ?? []);
   return (
     <tr>
       {selectable ? (
@@ -207,18 +206,7 @@ function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
           <summary>
             Show sample <span className="visually-hidden">of the {reject.name ?? "rejected"} event</span>
           </summary>
-          {properties.length === 0 ? (
-            <p className="faint">No properties.</p>
-          ) : (
-            <dl className="facts">
-              {properties.map(([key, value]) => (
-                <div key={key} className="fact">
-                  <dt className="mono">{key}</dt>
-                  <dd>{masked.has(key) ? <span className="faint">masked</span> : <span className="mono">{JSON.stringify(value)}</span>}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
+          <PropertyFacts properties={sample.properties ?? {}} masked={sample.masked ?? []} />
         </details>
       </td>
     </tr>
