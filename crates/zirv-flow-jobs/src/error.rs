@@ -1,0 +1,78 @@
+//! The error a job handler returns.
+
+use std::fmt;
+
+use zirv_flow_store::StoreError;
+
+/// Why a handler failed. The message is stored as the job's `last_error` and shown to
+/// operators, so it is always a fixed description and never carries payload values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JobError {
+    message: &'static str,
+}
+
+impl JobError {
+    pub const fn new(message: &'static str) -> Self {
+        Self { message }
+    }
+
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+impl fmt::Display for JobError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for JobError {}
+
+// Database errors can quote the values involved (a duplicate key names the key), so only
+// a fixed description survives the conversion.
+impl From<sqlx::Error> for JobError {
+    fn from(_: sqlx::Error) -> Self {
+        Self::new("database query failed")
+    }
+}
+
+impl From<StoreError> for JobError {
+    fn from(error: StoreError) -> Self {
+        if error.is_conflict() {
+            Self::new("database write conflicted with an existing value")
+        } else {
+            Self::new("database query failed")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_display_is_the_fixed_message() {
+        let error = JobError::new("the upstream refused the request");
+
+        assert_eq!(error.to_string(), "the upstream refused the request");
+        assert_eq!(error.message(), "the upstream refused the request");
+    }
+
+    #[test]
+    fn a_database_error_does_not_carry_its_detail() {
+        let error = JobError::from(sqlx::Error::Protocol("Key (email)=(a@b.c) exists".into()));
+
+        assert_eq!(error.to_string(), "database query failed");
+    }
+
+    #[tokio::test]
+    async fn a_store_error_becomes_a_fixed_message() {
+        let store_error = zirv_flow_store::connect("not a database url", 1)
+            .await
+            .unwrap_err();
+        let error = JobError::from(store_error);
+
+        assert_eq!(error.to_string(), "database query failed");
+    }
+}

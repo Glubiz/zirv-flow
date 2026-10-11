@@ -84,38 +84,12 @@ async fn run(
         return run_admin(admin_command, &pool, &password, stdout, stderr).await;
     }
 
-    if matches!(
-        command,
-        Command::All | Command::Serve | Command::Worker | Command::Scheduler
-    ) {
+    if let Some(roles) = Roles::of(&command) {
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
             Err(message) => return database_error(stderr, message),
         };
-
-        // `all` also serves HTTP until the worker and scheduler roles exist (#7).
-        if matches!(command, Command::All | Command::Serve) {
-            let handle = match PrometheusBuilder::new()
-                .set_buckets(&HTTP_DURATION_BUCKETS)
-                .and_then(|builder| builder.install_recorder())
-            {
-                Ok(handle) => handle,
-                Err(error) => {
-                    let _ = writeln!(stderr, "error: metrics: {error}");
-                    return 1;
-                }
-            };
-            let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
-            return serve_http(
-                pool,
-                render,
-                config.server_bind(),
-                config.server_cookie_secure(),
-                stderr,
-                shutdown_signal(),
-            )
-            .await;
-        }
+        return run_roles(roles, &config, pool, stderr, shutdown_signal()).await;
     }
 
     let _ = writeln!(
@@ -124,6 +98,133 @@ async fn run(
         command.name()
     );
     1
+}
+
+/// The long-running roles a command starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Roles {
+    serve: bool,
+    worker: bool,
+    scheduler: bool,
+}
+
+impl Roles {
+    /// The roles of a long-running command, or none for a one-off one.
+    fn of(command: &Command) -> Option<Self> {
+        let (serve, worker, scheduler) = match command {
+            Command::All => (true, true, true),
+            Command::Serve => (true, false, false),
+            Command::Worker => (false, true, false),
+            Command::Scheduler => (false, false, true),
+            _ => return None,
+        };
+        Some(Self {
+            serve,
+            worker,
+            scheduler,
+        })
+    }
+}
+
+/// Runs the roles in one process until `shutdown` completes, then drains them: the server
+/// finishes its requests, workers stop claiming and finish running jobs, and the scheduler
+/// gives up its lock. Whatever is still running after [`SHUTDOWN_GRACE`] is left to its
+/// lease to expire.
+async fn run_roles(
+    roles: Roles,
+    config: &Config,
+    pool: PgPool,
+    stderr: &mut impl Write,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> u8 {
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let stop = Arc::new(stop);
+    tokio::spawn({
+        let stop = Arc::clone(&stop);
+        async move {
+            shutdown.await;
+            let _ = stop.send(true);
+        }
+    });
+
+    let mut background = tokio::task::JoinSet::new();
+    if roles.worker {
+        let mut worker_config =
+            zirv_flow_jobs::WorkerConfig::new(config.worker_concurrency() as usize);
+        worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
+        worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
+        let worker = zirv_flow_jobs::Worker::new(
+            pool.clone(),
+            zirv_flow_jobs::Registry::built_in(),
+            worker_config,
+        );
+        background.spawn(worker.run(stopped.clone()));
+        let _ = writeln!(
+            stderr,
+            "worker: running up to {} jobs at once",
+            config.worker_concurrency()
+        );
+    }
+    if roles.scheduler {
+        let scheduler = zirv_flow_jobs::Scheduler::new(
+            pool.clone(),
+            zirv_flow_jobs::SchedulerConfig::default(),
+        );
+        background.spawn(scheduler.run(stopped.clone()));
+        let _ = writeln!(stderr, "scheduler: standing for leadership");
+    }
+
+    let code = if roles.serve {
+        let handle = match PrometheusBuilder::new()
+            .set_buckets(&HTTP_DURATION_BUCKETS)
+            .and_then(|builder| builder.install_recorder())
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = writeln!(stderr, "error: metrics: {error}");
+                let _ = stop.send(true);
+                return 1;
+            }
+        };
+        let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
+        let mut draining = stopped.clone();
+        let code = serve_http(
+            pool,
+            render,
+            config.server_bind(),
+            config.server_cookie_secure(),
+            stderr,
+            async move {
+                let _ = draining.wait_for(|stopped| *stopped).await;
+            },
+        )
+        .await;
+        // A server that failed to start or stopped on its own takes the other roles down.
+        let _ = stop.send(true);
+        code
+    } else {
+        let mut waiting = stopped.clone();
+        let _ = waiting.wait_for(|stopped| *stopped).await;
+        0
+    };
+
+    let drained = async { while background.join_next().await.is_some() {} };
+    let timeout = tokio::time::timeout(SHUTDOWN_GRACE, drained);
+    tokio::select! {
+        result = timeout => {
+            if result.is_err() {
+                let _ = writeln!(
+                    stderr,
+                    "warning: jobs still running after {}s; leaving them to lease expiry",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            let _ = writeln!(stderr, "warning: interrupted while draining jobs");
+        }
+    }
+    code
 }
 
 /// Binds `addr` and serves the API until `shutdown` completes.
@@ -649,6 +750,83 @@ mod tests {
             String::from_utf8(stderr)
                 .unwrap()
                 .contains("listening on 127.0.0.1:")
+        );
+    }
+
+    #[test]
+    fn long_running_commands_map_to_their_roles() {
+        let roles = |command| Roles::of(&command).map(|r| (r.serve, r.worker, r.scheduler));
+
+        assert_eq!(roles(Command::All), Some((true, true, true)));
+        assert_eq!(roles(Command::Serve), Some((true, false, false)));
+        assert_eq!(roles(Command::Worker), Some((false, true, false)));
+        assert_eq!(roles(Command::Scheduler), Some((false, false, true)));
+        assert_eq!(roles(Command::Migrate), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_worker_and_scheduler_roles_do_their_work_and_drain_on_shutdown(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        zirv_flow_store::enqueue(&pool, &zirv_flow_store::NewJob::new("maintenance.noop"))
+            .await
+            .unwrap();
+        // A schedule that is due, so the scheduler has a slot to fire.
+        zirv_flow_store::create_schedule(
+            &pool,
+            &zirv_flow_store::NewSchedule {
+                workspace_id: None,
+                kind: "maintenance.noop".into(),
+                cron: "0 0 1 1 *".into(),
+                timezone: "UTC".into(),
+                next_run_at: zirv_flow_store::database_now(&pool).await.unwrap()
+                    - time::Duration::hours(1),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        let (shutdown, shut_down) = tokio::sync::oneshot::channel::<()>();
+        let roles = Roles {
+            serve: false,
+            worker: true,
+            scheduler: true,
+        };
+        let run = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut stderr = Vec::new();
+                let code = run_roles(roles, &config, pool, &mut stderr, async move {
+                    let _ = shut_down.await;
+                })
+                .await;
+                (code, String::from_utf8(stderr).unwrap())
+            }
+        });
+
+        // The scheduler fires the due slot (moving the schedule into the future) and the
+        // worker runs both jobs.
+        loop {
+            let done: bool = sqlx::query_scalar(
+                "SELECT (SELECT next_run_at > now() FROM schedules)                     AND NOT EXISTS (SELECT 1 FROM jobs)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        shutdown.send(()).unwrap();
+        let (code, stderr) = run.await.unwrap();
+
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.contains("worker: running up to 4 jobs"), "{stderr}");
+        assert!(
+            stderr.contains("scheduler: standing for leadership"),
+            "{stderr}"
         );
     }
 }
