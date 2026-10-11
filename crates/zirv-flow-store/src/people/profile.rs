@@ -112,8 +112,13 @@ pub async fn load_profile(
             .await
             .map_err(StoreError::bounded)?;
     let merges: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(
-        "SELECT merged_person_id, created_at FROM person_merges \
-         WHERE workspace_id = $1 AND survivor_person_id = $2 ORDER BY created_at, id",
+        "SELECT p.id, COALESCE(m.created_at, p.updated_at) AS merged_at \
+         FROM people p \
+         LEFT JOIN LATERAL (SELECT min(created_at) AS created_at FROM person_merges \
+                            WHERE workspace_id = p.workspace_id AND merged_person_id = p.id) m \
+                ON true \
+         WHERE p.workspace_id = $1 AND p.merged_into = $2 \
+         ORDER BY merged_at, p.id",
     )
     .bind(workspace.as_uuid())
     .bind(found.id)
@@ -425,6 +430,84 @@ mod tests {
         let direct = load_profile(&pool, ws, survivor).await.unwrap().unwrap();
         assert_eq!(direct.merged_from, None);
         assert_eq!(direct.merges, through_loser.merges);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_chain_of_merges_lists_every_person_now_pointing_at_the_survivor(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let b = apply(
+            &pool,
+            ws,
+            "crm",
+            "1",
+            &[("external:crm", "1")],
+            json!({}),
+            at,
+        )
+        .await;
+        let c = apply(
+            &pool,
+            ws,
+            "web",
+            "2",
+            &[("anonymous_id", "c")],
+            json!({}),
+            at,
+        )
+        .await;
+        let d = apply(
+            &pool,
+            ws,
+            "web",
+            "3",
+            &[("anonymous_id", "d")],
+            json!({}),
+            at,
+        )
+        .await;
+        // D merges into C, then C merges into B, which re-points D at B.
+        assert_eq!(
+            apply(
+                &pool,
+                ws,
+                "app",
+                "4",
+                &[("anonymous_id", "c"), ("anonymous_id", "d")],
+                json!({}),
+                at
+            )
+            .await,
+            c
+        );
+        assert_eq!(
+            apply(
+                &pool,
+                ws,
+                "app",
+                "5",
+                &[("external:crm", "1"), ("anonymous_id", "c")],
+                json!({}),
+                at
+            )
+            .await,
+            b
+        );
+
+        let profile = load_profile(&pool, ws, b).await.unwrap().unwrap();
+
+        let mut merged: Vec<Uuid> = profile.merges.iter().map(|m| m.merged_person_id).collect();
+        merged.sort();
+        let mut expected = vec![c, d];
+        expected.sort();
+        assert_eq!(merged, expected);
+        assert!(
+            profile
+                .merges
+                .windows(2)
+                .all(|pair| pair[0].merged_at <= pair[1].merged_at)
+        );
     }
 
     #[sqlx::test]
