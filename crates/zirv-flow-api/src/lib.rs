@@ -22,6 +22,7 @@ mod trace;
 mod traces;
 mod users;
 mod version;
+mod web;
 mod workspaces;
 
 #[cfg(test)]
@@ -66,6 +67,7 @@ fn routes() -> Router<AppState> {
                 .post(session::sign_in)
                 .delete(session::sign_out),
         )
+        .route("/api/v1/session/methods", get(session::methods))
         .route("/api/v1/session/oidc/start", get(oidc::start))
         .route("/api/v1/session/oidc/callback", get(oidc::callback))
         .route("/api/v1/users", get(users::list).post(users::create))
@@ -91,7 +93,7 @@ fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{ws}/traces/{trace_id}",
             get(traces::get),
         )
-        .fallback(problem::not_found)
+        .fallback(web::fallback)
         .method_not_allowed_fallback(problem::method_not_allowed)
 }
 
@@ -291,7 +293,7 @@ mod tests {
         recorder();
         let state = AppState::new(unreachable_pool(), Arc::new(|| recorder().render()));
         get(state.clone(), "/healthz").await;
-        get(state.clone(), "/no/such/path/1234").await;
+        get(state.clone(), "/api/no/such/path/1234").await;
         router(state.clone())
             .oneshot(
                 Request::builder()

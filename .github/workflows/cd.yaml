@@ -56,6 +56,22 @@ jobs:
             | sed -E 's/version *= *"([^"]+)".*/\1/')
           echo "version=$VER" >> $GITHUB_OUTPUT
 
+      - name: Set up Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # The server embeds web/dist at compile time, so the web UI is built
+      # before any cargo build --release below.
+      - name: Build web UI
+        shell: bash
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 

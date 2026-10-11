@@ -353,6 +353,30 @@
         ]
       }
     },
+    "/api/v1/session/methods": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Which sign-in methods this instance accepts, for the sign-in screen.",
+        "operationId": "methods",
+        "responses": {
+          "200": {
+            "description": "The enabled sign-in methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MethodsBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/api/v1/session/oidc/callback": {
       "get": {
         "tags": [
@@ -1880,6 +1904,23 @@
           "user_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "MethodsBody": {
+        "type": "object",
+        "required": [
+          "local",
+          "oidc"
+        ],
+        "properties": {
+          "local": {
+            "type": "boolean",
+            "description": "True when e-mail and password sign-in is accepted."
+          },
+          "oidc": {
+            "type": "boolean",
+            "description": "True when sign-in through the identity provider is configured."
           }
         }
       },

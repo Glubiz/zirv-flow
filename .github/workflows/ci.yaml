@@ -145,6 +145,42 @@ jobs:
       - name: Run Clippy Lint (Windows target)
         run: cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type Check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Generated API Client Is Current
+        run: npm run gen:api:check
+
+      - name: Build
+        run: npm run build
+
   postgres:
     name: PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-latest
@@ -356,6 +392,9 @@ jobs:
 
       - name: Check Readiness
         run: curl -fsS http://localhost:8080/readyz
+
+      - name: Check The Web UI Is Served
+        run: curl -fsS http://localhost:8080/ | grep -q 'id="root"'
 
       - name: Print Logs On Failure
         if: failure()

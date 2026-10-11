@@ -122,10 +122,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub(crate) async fn not_found() -> ApiError {
-    ApiError::new(StatusCode::NOT_FOUND, "no such resource")
-}
-
 pub(crate) async fn method_not_allowed() -> ApiError {
     ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
 }
