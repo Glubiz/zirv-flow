@@ -89,6 +89,21 @@ async fn run(
     }
 
     if let Command::Admin(admin_command) = &command {
+        if let AdminCommand::ReplayErasures { workspace } = admin_command {
+            // Replaying needs the master key to hash identifiers, and no password.
+            let key = match load_master_key(&config) {
+                Ok(key) => key,
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: admin: {message}");
+                    return 2;
+                }
+            };
+            let pool = match open_database(&config).await {
+                Ok(pool) => pool,
+                Err(message) => return database_error(stderr, message),
+            };
+            return run_replay_erasures(workspace.as_deref(), &key, &pool, stdout, stderr).await;
+        }
         // The password is read first so a missing one fails without touching the database.
         let password = match read_password(stdin) {
             Ok(password) => password,
@@ -753,10 +768,39 @@ async fn run_admin(
         AdminCommand::GenerateMasterKey { .. } => {
             unreachable!("generate-master-key is handled before the database is opened")
         }
+        AdminCommand::ReplayErasures { .. } => {
+            unreachable!("replay-erasures is handled before the password is read")
+        }
     };
     match result {
         Ok(message) => {
             let _ = writeln!(stdout, "{message}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "error: admin: {error}");
+            1
+        }
+    }
+}
+
+/// Re-applies the erasure ledger after a restore and prints counts only.
+async fn run_replay_erasures(
+    workspace: Option<&str>,
+    key: &zirv_flow_store::MasterKey,
+    pool: &PgPool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let context = zirv_flow_api::admin::Context::system();
+    match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, key).await {
+        Ok(report) => {
+            let _ = writeln!(
+                stdout,
+                "replayed {} erasure request(s): {} suppression(s) added, {} person(s) erased, \
+                 {} pending inbox row(s) removed",
+                report.requests, report.suppressions, report.people, report.inbox_rows
+            );
             0
         }
         Err(error) => {
@@ -1173,6 +1217,85 @@ endpoint = \"http://collector:4318/\""
                 "{output}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn replay_erasures_needs_the_master_key_and_asks_for_no_password() {
+        let (code, output) = start_without_database(
+            Command::Admin(AdminCommand::ReplayErasures { workspace: None }),
+            None,
+        )
+        .await;
+
+        assert_eq!(code, 2, "{output}");
+        assert!(
+            output.contains("error: admin: the master key is required"),
+            "{output}"
+        );
+        assert!(!output.contains("no password"), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_erasures_prints_counts_only_and_refuses_an_unknown_workspace(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let key = zirv_flow_store::MasterKey::generate();
+        let context = zirv_flow_api::admin::Context::system();
+        let ws = zirv_flow_api::admin::create_workspace(&pool, &context, "ours", None)
+            .await
+            .unwrap()
+            .id;
+        // A ledger entry for a person who is back after a restore.
+        let person = sqlx::types::Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO erasure_requests \
+                (id, workspace_id, person_id, identifier_hashes, identifier_kinds, status, \
+                 completed_at, trace_id) \
+             VALUES (gen_random_uuid(), $1, $2, $3, ARRAY['email'], 'completed', now(), \
+                     gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(vec![vec![7_u8; 32]])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_replay_erasures(Some("ours"), &key, &pool, &mut stdout, &mut stderr).await;
+        let unknown =
+            run_replay_erasures(Some("nope"), &key, &pool, &mut stdout, &mut stderr).await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "replayed 1 erasure request(s): 1 suppression(s) added, 1 person(s) erased, \
+             0 pending inbox row(s) removed\n"
+        );
+        assert_eq!(unknown, 1);
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "error: admin: no such workspace\n"
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 0);
+        let audited: Vec<String> = zirv_flow_store::list_audit(&pool, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.action)
+            .collect();
+        assert!(audited.contains(&"privacy.erasures_replayed".to_owned()));
     }
 
     #[tokio::test]
