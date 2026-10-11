@@ -49,6 +49,8 @@ pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, list_members,
     list_workspaces_for_user, membership_role, remove_membership, set_membership,
 };
+/// The operator master key, re-exported so the binary reaches it through the store.
+pub use zirv_flow_core::MasterKey;
 
 #[derive(Debug)]
 pub struct StoreError {

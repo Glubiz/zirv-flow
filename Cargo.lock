@@ -4432,7 +4432,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zirv-flow-api",
- "zirv-flow-core",
  "zirv-flow-jobs",
  "zirv-flow-store",
 ]

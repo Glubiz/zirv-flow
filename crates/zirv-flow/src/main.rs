@@ -144,19 +144,19 @@ async fn run(
 
 /// Reads the operator master key from the configured file or inline value. The error is the
 /// message to report; it names the source but never the key.
-fn load_master_key(config: &Config) -> Result<zirv_flow_core::MasterKey, String> {
+fn load_master_key(config: &Config) -> Result<zirv_flow_store::MasterKey, String> {
     const INVALID: &str = "not a base64 32-byte key";
     match config.master_key_source() {
         MasterKeySource::Unset => Err("the master key is required for serve and worker: set \
              secrets.master_key_file or ZIRV_FLOW_SECRETS__MASTER_KEY; create one with \
              zirv-flow admin generate-master-key --out <path>"
             .into()),
-        MasterKeySource::Inline(text) => zirv_flow_core::MasterKey::parse(text)
+        MasterKeySource::Inline(text) => zirv_flow_store::MasterKey::parse(text)
             .map_err(|_| format!("secrets.master_key: {INVALID}")),
         MasterKeySource::File(path) => {
             let text = fs::read_to_string(path)
                 .map_err(|_| format!("secrets.master_key_file {}: not readable", path.display()))?;
-            zirv_flow_core::MasterKey::parse(&text)
+            zirv_flow_store::MasterKey::parse(&text)
                 .map_err(|_| format!("secrets.master_key_file {}: {INVALID}", path.display()))
         }
     }
@@ -179,7 +179,7 @@ fn generate_master_key(
     {
         return fail(format!("could not create {}: {error}", parent.display()));
     }
-    let key = zirv_flow_core::MasterKey::generate();
+    let key = zirv_flow_store::MasterKey::generate();
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -204,7 +204,7 @@ fn generate_master_key(
             let existing = fs::read_to_string(out)
                 .map_err(|_| "not readable")
                 .and_then(|text| {
-                    zirv_flow_core::MasterKey::parse(&text).map_err(|_| "not a base64 32-byte key")
+                    zirv_flow_store::MasterKey::parse(&text).map_err(|_| "not a base64 32-byte key")
                 });
             match existing {
                 Ok(existing) => {
@@ -1034,7 +1034,7 @@ endpoint = \"http://collector:4318/\""
 
     #[test]
     fn the_test_key_is_a_valid_master_key() {
-        assert!(zirv_flow_core::MasterKey::parse(TEST_MASTER_KEY).is_ok());
+        assert!(zirv_flow_store::MasterKey::parse(TEST_MASTER_KEY).is_ok());
     }
 
     #[test]
@@ -1047,7 +1047,7 @@ endpoint = \"http://collector:4318/\""
         assert_eq!(code, 0, "{stderr}");
         let contents = fs::read_to_string(&out).unwrap();
         assert!(contents.ends_with('\n'));
-        let key = zirv_flow_core::MasterKey::parse(&contents).unwrap();
+        let key = zirv_flow_store::MasterKey::parse(&contents).unwrap();
         assert_eq!(stdout, format!("master key written: {}\n", key.key_id()));
         assert!(!stdout.contains(contents.trim()));
         #[cfg(unix)]
@@ -1200,7 +1200,7 @@ endpoint = \"http://collector:4318/\""
         let out = dir.0.join("master.key");
         generate(&out, false);
         let text = fs::read_to_string(&out).unwrap();
-        let id = zirv_flow_core::MasterKey::parse(&text).unwrap().key_id();
+        let id = zirv_flow_store::MasterKey::parse(&text).unwrap().key_id();
 
         let (code, output) = start_without_database(
             Command::Serve,

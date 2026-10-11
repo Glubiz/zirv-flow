@@ -114,7 +114,8 @@ The command writes the file readable only by its owner (mode 0600 on Unix),
 refuses to overwrite an existing file, prints the key id (the first 8 bytes of
 its SHA-256 as hex, also logged at start as `master key loaded`) and never
 prints the key. `--if-missing` keeps an existing valid key and succeeds.
-Back the key up together with your database backups. Losing or replacing it
+Keep the key and back it up separately from your database backups (a dump and
+the key together defeat the point of having a key). Losing or replacing it
 breaks suppression matching against hashes already stored; rotation will be
 an explicit migration, not a config change.
 
