@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -332,6 +332,36 @@ describe("privacy", () => {
       expect(await screen.findByText("Erased")).toBeInTheDocument();
       expect(screen.queryByText("Internal Server Error")).not.toBeInTheDocument();
       expect(erasures).toBe(3);
+    });
+
+    it("skips a beat while a refresh is still in flight, so a slow refresh settles", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let erasures = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: async () => {
+            erasures += 1;
+            if (erasures === 1) {
+              return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_before: null });
+            }
+            // Slower than two beats.
+            await new Promise((resolve) => setTimeout(resolve, 12000));
+            return json({ erasures: [DONE], next_before: null });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      expect(await screen.findByText("Waiting to run")).toBeInTheDocument();
+
+      // One beat at a time, each flushed, so a render never lags the next beat.
+      for (let beat = 0; beat < 4; beat += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5000);
+        });
+      }
+
+      expect(await screen.findByText("Erased")).toBeInTheDocument();
+      expect(erasures).toBe(2);
     });
 
     it("does not poll while the tab is hidden", async () => {

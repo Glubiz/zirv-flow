@@ -65,7 +65,8 @@ struct LockedPerson {
 /// person the record is already attached to, which wins ties and receives a record whose
 /// identifiers are all unknown. An identity insert that loses a unique race, or a person that
 /// was merged away while it was being locked, re-runs the resolution, up to three attempts
-/// in all, and then fails with a retryable error.
+/// in all, and then fails with a retryable error. A person deleted while it was being locked
+/// fails with a retryable error at once, for the caller to run the batch again.
 pub(crate) async fn resolve_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -81,7 +82,14 @@ pub(crate) async fn resolve_person(
         owner_people.dedup();
         let mut to_lock = owner_people.clone();
         to_lock.extend(existing);
+        to_lock.sort();
+        to_lock.dedup();
         let locked = lock_people(connection, workspace, &to_lock).await?;
+        if locked.len() < to_lock.len() {
+            // A person was deleted (erased) while this waited for the lock. Retrying the
+            // batch looks the identifiers up again and resolves into a new person.
+            return Err(StoreError::retryable_race());
+        }
         if locked.iter().any(|person| person.merged_into.is_some()) {
             // A merge committed after the lookup: the identities now name the survivor.
             attempt += 1;

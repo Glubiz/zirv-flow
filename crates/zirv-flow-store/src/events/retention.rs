@@ -95,14 +95,7 @@ pub async fn apply_event_retention(
     )
     .await?;
 
-    let longest_days: i32 = sqlx::query_scalar(
-        "SELECT GREATEST($1, COALESCE(MAX(retention_days), 0)) FROM event_schemas",
-    )
-    .bind(default_days)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let longest_cutoff = now - Duration::days(i64::from(longest_days));
+    let longest_cutoff = longest_cutoff(connection, default_days, now).await?;
 
     report.dedupe_deleted = delete_in_batches(
         connection,
@@ -115,7 +108,7 @@ pub async fn apply_event_retention(
     .await?;
 
     // Last, so the lock a drop takes is held briefly.
-    report.partitions_dropped = drop_old_partitions(connection, longest_cutoff).await?;
+    report.partitions_dropped = drop_old_partitions(connection, default_days, now).await?;
     Ok(report)
 }
 
@@ -140,14 +133,49 @@ async fn delete_in_batches<'q>(
     }
 }
 
-/// Drops the monthly partitions whose whole range ends at or before `cutoff`. The DEFAULT
-/// partition is never dropped.
+/// The instant before which no event is kept under any rule: `now` less the longest of the
+/// default and every override, read as it is now.
+async fn longest_cutoff(
+    connection: &mut PgConnection,
+    default_days: i32,
+    now: OffsetDateTime,
+) -> Result<OffsetDateTime, StoreError> {
+    let overrides: Vec<i32> = sqlx::query_scalar(
+        "SELECT retention_days FROM event_schemas WHERE retention_days IS NOT NULL",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let longest = overrides.into_iter().fold(default_days, i32::max);
+    Ok(now - Duration::days(i64::from(longest)))
+}
+
+/// Takes the lock that serialises an override change with a partition drop, until the
+/// transaction ends. A row lock cannot do it: it neither covers a NULL that becomes a number
+/// nor a schema that is inserted.
+pub(crate) async fn lock_retention_overrides(
+    connection: &mut PgConnection,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('event_retention_overrides', 0))")
+        .execute(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// Drops the monthly partitions whose whole range ends at or before the longest retention
+/// cutoff. The DEFAULT partition is never dropped. Run it inside a transaction: the overrides
+/// are read under `lock_retention_overrides`, which every change to one takes first, so a
+/// change waits for the drops and an earlier one is seen.
 async fn drop_old_partitions(
     connection: &mut PgConnection,
-    cutoff: OffsetDateTime,
+    default_days: i32,
+    now: OffsetDateTime,
 ) -> Result<u64, StoreError> {
+    lock_retention_overrides(connection).await?;
+    let cutoff = longest_cutoff(connection, default_days, now).await?;
     let names: Vec<String> = sqlx::query_scalar(
-        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid 
          WHERE i.inhparent = 'events'::regclass",
     )
     .fetch_all(&mut *connection)
@@ -192,10 +220,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::create_workspace;
     use crate::events::{
         EventOutcome, EventRecord, EventSchemaUpdate, apply_event_batch, update_event_schema,
     };
+    use crate::{begin, commit, create_workspace};
 
     const NOW: OffsetDateTime = datetime!(2026-06-01 12:00 UTC);
 
@@ -300,7 +328,7 @@ mod tests {
         }
         for (name, days) in [("short", 10), ("long", 500)] {
             update_event_schema(
-                &pool,
+                &mut pool.acquire().await.unwrap(),
                 ws,
                 name,
                 &EventSchemaUpdate {
@@ -333,7 +361,7 @@ mod tests {
         }
         store(&pool, ws, "plain", 790, None).await;
         update_event_schema(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             ws,
             "kept_long",
             &EventSchemaUpdate {
@@ -386,7 +414,7 @@ mod tests {
                     retention_days: Some(days),
                     ..Default::default()
                 };
-                update_event_schema(&pool, ws, "tuned", &update).await
+                update_event_schema(&mut pool.acquire().await.unwrap(), ws, "tuned", &update).await
             }
         };
         let batch = |size: i64| {
@@ -459,7 +487,7 @@ mod tests {
         .unwrap();
         store(&pool, ws, "keeper", 170, None).await;
         update_event_schema(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             ws,
             "keeper",
             &EventSchemaUpdate {
@@ -473,6 +501,52 @@ mod tests {
         let report = run(&pool).await;
 
         assert_eq!((report.events_deleted, report.partitions_dropped), (0, 0));
+        assert_eq!(remaining(&pool, "keeper").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drop_waits_for_an_override_set_on_a_schema_without_one(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS events_y2025m12 PARTITION OF events \
+             FOR VALUES FROM ('2025-12-01 00:00:00+00') TO ('2026-01-01 00:00:00+00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The schema has no override, so the default of 100 days alone would drop the month.
+        store(&pool, ws, "keeper", 170, None).await;
+        let mut writer = begin(&pool).await.unwrap();
+        update_event_schema(
+            &mut writer,
+            ws,
+            "keeper",
+            &EventSchemaUpdate {
+                retention_days: Some(Some(900)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let drop = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let dropped = drop_old_partitions(&mut tx, 100, NOW).await.unwrap();
+                commit(tx).await.unwrap();
+                dropped
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !drop.is_finished(),
+            "the drop did not wait for the override change"
+        );
+
+        commit(writer).await.unwrap();
+
+        assert_eq!(drop.await.unwrap(), 0);
         assert_eq!(remaining(&pool, "keeper").await, 1);
     }
 

@@ -267,7 +267,8 @@ pub async fn erase_person(
 
     // Lock in the drain's order: the pending inbox rows, then the people. An identity insert takes
     // a key-share lock on its person, so once the group is locked a concurrent attach waits, and
-    // after this commits it fails on the foreign key and the drain retries into a new person.
+    // after this commits the drain finds its locked person gone, which is a retryable race, and the
+    // batch retries into a new person.
     let inbox = lock_inbox(connection, workspace, key).await?;
     if let Some(group) = lock_group(connection, workspace, person).await? {
         for &id in &group.ids {
@@ -1238,6 +1239,39 @@ mod tests {
         assert!(
             inbox.is_err(),
             "the erasure waited on the people without holding the inbox"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resolution_that_waited_on_an_erased_person_retries_instead_of_failing(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let request = request(&pool, ws, person).await;
+        // The erasure has run but not committed; a drain has found the owner and waits for it.
+        let mut eraser = begin(&pool).await.unwrap();
+        erase_person(&mut eraser, ws, request.id, &identifier_key(), &trace())
+            .await
+            .unwrap();
+        let drain = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let identifiers = [Identifier::parse("email", EMAIL).unwrap()];
+                crate::people::resolve_person(&mut tx, ws, &identifiers, None, &trace()).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !drain.is_finished(),
+            "the drain did not wait for the person"
+        );
+
+        commit(eraser).await.unwrap();
+        let outcome = drain.await.unwrap();
+
+        assert!(
+            matches!(&outcome, Err(error) if error.is_retryable()),
+            "{outcome:?}"
         );
     }
 }

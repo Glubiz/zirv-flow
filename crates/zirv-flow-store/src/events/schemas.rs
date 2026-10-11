@@ -293,13 +293,17 @@ pub async fn publish_schema_draft(
     Ok(PublishOutcome::Published(row.into_schema()?))
 }
 
-/// Applies the given fields. `None` when there is no such schema.
-pub async fn update_event_schema<'e>(
-    executor: impl PgExecutor<'e>,
+/// Applies the given fields. `None` when there is no such schema. A change to the retention
+/// override first takes the lock a partition drop holds, so it waits for the drop to finish.
+pub async fn update_event_schema(
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     name: &str,
     update: &EventSchemaUpdate,
 ) -> Result<Option<EventSchema>, StoreError> {
+    if update.retention_days.is_some() {
+        super::retention::lock_retention_overrides(connection).await?;
+    }
     let row: Option<SchemaRow> = sqlx::query_as(concat!(
         "UPDATE event_schemas SET \
             mode = COALESCE($3, mode), \
@@ -315,7 +319,7 @@ pub async fn update_event_schema<'e>(
     .bind(update.description.as_deref())
     .bind(update.retention_days.is_some())
     .bind(update.retention_days.flatten())
-    .fetch_optional(executor)
+    .fetch_optional(connection)
     .await
     .map_err(StoreError::query)?;
     row.map(SchemaRow::into_schema).transpose()
@@ -574,7 +578,7 @@ mod tests {
             .unwrap();
 
         let set = update_event_schema(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             ws,
             "signup",
             &EventSchemaUpdate {
@@ -587,7 +591,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let untouched = update_event_schema(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             ws,
             "signup",
             &EventSchemaUpdate {
@@ -599,7 +603,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let cleared = update_event_schema(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             ws,
             "signup",
             &EventSchemaUpdate {
@@ -610,9 +614,14 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let missing = update_event_schema(&pool, ws, "nope", &EventSchemaUpdate::default())
-            .await
-            .unwrap();
+        let missing = update_event_schema(
+            &mut pool.acquire().await.unwrap(),
+            ws,
+            "nope",
+            &EventSchemaUpdate::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!((set.mode, set.retention_days), (EventMode::Allow, Some(90)));
         assert_eq!(
