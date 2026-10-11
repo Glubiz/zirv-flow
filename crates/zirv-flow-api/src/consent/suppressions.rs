@@ -130,7 +130,7 @@ pub(crate) struct InvalidRowBody {
 }
 
 #[derive(Serialize, ToSchema)]
-pub(crate) struct ImportBody {
+pub(crate) struct SuppressionImportBody {
     /// True when nothing was written.
     dry_run: bool,
     /// Identifiers that were, or on a dry run would be, newly suppressed.
@@ -359,7 +359,7 @@ pub(crate) async fn import(
     text: &str,
     dry_run: bool,
     created_by: Option<Uuid>,
-) -> Result<ImportBody, AdminError> {
+) -> Result<SuppressionImportBody, AdminError> {
     let parsed = parse_import(text, key)?;
     let distinct = parsed.entries.len();
     let added = if dry_run {
@@ -408,7 +408,7 @@ pub(crate) async fn import(
         zirv_flow_store::commit(tx).await?;
         added
     };
-    Ok(ImportBody {
+    Ok(SuppressionImportBody {
         dry_run,
         added,
         existing: distinct - added + parsed.repeats,
@@ -620,7 +620,7 @@ pub(crate) async fn remove_handler(
     ),
     request_body(content = String, content_type = "text/csv", description = "kind,value[,note] rows"),
     responses(
-        (status = 200, description = "What was, or on a dry run would be, imported", body = ImportBody),
+        (status = 200, description = "What was, or on a dry run would be, imported", body = SuppressionImportBody),
         (status = 400, description = "dry_run is not true or false, or the body is not UTF-8", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
@@ -639,7 +639,7 @@ pub(crate) async fn import_handler(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Body,
-) -> Result<Json<ImportBody>, ApiError> {
+) -> Result<Json<SuppressionImportBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let key = identifier_key(&state)?;
     let dry_run = bool_param(query.as_deref().unwrap_or_default(), "dry_run")?;

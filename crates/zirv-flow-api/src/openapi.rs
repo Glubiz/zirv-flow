@@ -166,7 +166,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         suppressions::AddSuppressionRequest,
         suppressions::AddedBody,
         suppressions::CheckBody,
-        suppressions::ImportBody,
+        suppressions::SuppressionImportBody,
         suppressions::InvalidRowBody,
         TraceBody,
         DecisionBody,

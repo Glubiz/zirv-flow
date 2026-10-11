@@ -4,7 +4,7 @@ import { client, describeError, unwrap, type components, type ErrorSummary } fro
 import { Button, Dialog, InlineError, TextAreaField } from "../../ui";
 import { rowProblemLabel } from "./labels";
 
-type Outcome = components["schemas"]["ImportBody"];
+type Outcome = components["schemas"]["SuppressionImportBody"];
 
 interface ImportDialogProps {
   workspaceId: string;
