@@ -581,9 +581,15 @@ else's data.
   precedence, consent, suppression, segments and erasure work unchanged.
 - **Writes over HTTPS.** `/api/v1/workspaces/{ws}/contacts` offers create,
   read, list and search, full replace, partial update and delete by contact
-  key, plus a bulk upsert. Writes are idempotent (an idempotency key, else the
-  key plus a payload hash) and go through the inbox and apply-batch like
-  `identify`. The UI edits contacts through the same API. A delete removes the
+  key, plus a bulk upsert. A single-contact write is **synchronous**: it
+  validates against the definition and applies in the request, through the
+  shared apply-batch store function in one transaction, and answers `201`,
+  `200`, `204` or `422` with the stored contact. A bulk upsert is
+  **asynchronous**: it is validated at the edge, appended to the inbox and
+  answered `202`, and `ingest.drain` applies it like `identify`. Single writes
+  are idempotent through an `Idempotency-Key` header, stored without field
+  values; an identical repeat without the header is a no-op through the
+  content hash. The UI edits contacts through the same API. A delete removes the
   `native` contributions under the orphan policy (7.4); erasure stays separate.
 - **Writes over Kafka.** A Kafka source consumes one or more topics with a
   consumer group. Each message is mapped like any other stream to contact
@@ -595,6 +601,28 @@ else's data.
   client certificates) use secrets encryption (16.1), and connections pass the
   egress policy. JSON values come first; Avro and Protobuf with a schema
   registry follow (OQ-31).
+
+As built (native contacts, issue 43): a contact is a live `source_records` row with source
+`native`, stream `contacts` and `record_key` equal to the contact key, which is also the
+identity `external:contact_key` (the keys `search` and `bulk` are reserved because they name
+endpoints). `contact_definitions` holds one row per workspace, a list of `{key, required,
+identifier}` over registry keys; `core::contacts` validates a write against it with the event
+rules (`check_properties`), and the fields of an identifier field are kept as traits of the
+native record as well as becoming identities, so a read returns exactly what was written.
+A workspace without a saved definition needs only the key; with one, a contact holds only
+its fields. `store::contacts` applies a single write through `apply_profile_record` in a
+savepoint of the caller's transaction, so the API commits the data and its audit entry
+together, and a registry rejection (a dropped trait) rolls the write back as a `422`. A
+write takes two advisory locks, the idempotency key and then the contact, so concurrent
+requests with either run in turn. `contact_idempotency (workspace_id, key, request_hash,
+status, contact_key, created_at)` holds no field value and no person id: a replay answers
+the stored status with the contact as it is now (`404` once it is gone, `204` for a delete),
+a different request under the key is `422 idempotency_key_reused`, and the leader's
+hourly upkeep deletes rows older than 24 hours. `delete_person` deletes the rows of the
+contact keys the group held, so erasure leaves none. The bulk path appends inbox kind
+`contact` items (the migration extends the kind check) and the drain maps them to native
+records that replace the stored fields, tallying them as `contact` in
+`zirv_flow_ingest_applied_total`. The endpoints are in the README's Contacts section.
 
 ## 8. Segmentation engine
 
