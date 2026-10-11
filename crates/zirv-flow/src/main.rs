@@ -129,7 +129,14 @@ async fn run(
                 return 1;
             }
         };
-        let code = run_roles(roles, &config, pool, shutdown_signal()).await;
+        let code = run_roles(
+            roles,
+            &config,
+            pool,
+            master_key.map(Arc::new),
+            shutdown_signal(),
+        )
+        .await;
         flush_traces(export).await;
         return code;
     }
@@ -262,9 +269,10 @@ async fn run_roles(
     roles: Roles,
     config: &Config,
     pool: PgPool,
+    master_key: Option<Arc<zirv_flow_store::MasterKey>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
-    run_roles_reporting(roles, config, pool, shutdown, None).await
+    run_roles_reporting(roles, config, pool, master_key, shutdown, None).await
 }
 
 /// [`run_roles`], sending the address the ops listener bound to `ops_bound` when it starts.
@@ -272,6 +280,7 @@ async fn run_roles_reporting(
     roles: Roles,
     config: &Config,
     pool: PgPool,
+    master_key: Option<Arc<zirv_flow_store::MasterKey>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     ops_bound: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> u8 {
@@ -286,7 +295,12 @@ async fn run_roles_reporting(
         None
     };
     let state = match (roles.serve, &render) {
-        (true, Some(render)) => match http_state(config, pool.clone(), Arc::clone(render)) {
+        (true, Some(render)) => match http_state(
+            config,
+            pool.clone(),
+            Arc::clone(render),
+            master_key.as_deref(),
+        ) {
             Ok(state) => Some(state),
             Err(code) => return code,
         },
@@ -545,11 +559,16 @@ fn http_state(
     config: &Config,
     pool: PgPool,
     render: Render,
+    master_key: Option<&zirv_flow_store::MasterKey>,
 ) -> Result<zirv_flow_api::AppState, u8> {
-    let state = zirv_flow_api::AppState::new(pool, render)
+    let mut state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
         .with_local_sign_in(config.auth_local_enabled())
         .with_event_retention(config.events_retention());
+    if let Some(key) = master_key {
+        state = state.with_master_key(key);
+    }
+
     match config.oidc() {
         Some((settings, auto_create_users)) => state
             .with_oidc(settings, auto_create_users)
@@ -1647,7 +1666,7 @@ endpoint = \"http://collector:4318/\""
             scheduler: true,
         };
 
-        let code = run_roles(roles, &config, lazy_pool(), std::future::ready(())).await;
+        let code = run_roles(roles, &config, lazy_pool(), None, std::future::ready(())).await;
 
         assert_eq!(code, 0);
         let lines = logs.json_lines();
@@ -1744,7 +1763,7 @@ endpoint = \"http://collector:4318/\""
         let run = tokio::spawn({
             let pool = pool.clone();
             async move {
-                run_roles(roles, &config, pool, async move {
+                run_roles(roles, &config, pool, None, async move {
                     let _ = shut_down.await;
                 })
                 .await
@@ -1921,6 +1940,7 @@ endpoint = \"http://collector:4318/\""
                     WORKER_ONLY,
                     &config,
                     pool,
+                    None,
                     async move {
                         let _ = shut_down.await;
                     },

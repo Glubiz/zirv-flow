@@ -580,6 +580,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/people/{id}/consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A person's consent: the channel-wide state and the state of each topic. */
+        get: operations["get_person_consent"];
+        /**
+         * Records a decision: subscribe, unsubscribe or mark pending, for the channel or one
+         *     topic. Writing the status already held changes nothing and leaves no history. The source
+         *     is `ui` for a session and `api` for a key.
+         */
+        put: operations["set_person_consent"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}/consent/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A person's consent history, newest first: every change with its source and evidence.
+         *     Evidence is shown to the owner, workspace admins and `admin` keys, and masked for
+         *     everyone else.
+         */
+        get: operations["get_person_consent_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/people/{id}/lists": {
         parameters: {
             query?: never;
@@ -618,6 +661,147 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/suppressions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The suppressions of the workspace, newest first, as hash prefixes. Values and full
+         *     hashes are never returned.
+         */
+        get: operations["list_suppressions"];
+        put?: never;
+        /**
+         * Suppresses an address or number with the reason `manual`. Audited as
+         *     `suppression.added`.
+         */
+        post: operations["add_suppression"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/suppressions/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Whether an address or number is suppressed. A POST so the value never sits in a URL. */
+        post: operations["check_suppression"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/suppressions/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every suppression as CSV, `hash,kind,reason,source,created_at`, streamed page by page.
+         *     Values are never stored, so the file holds hashes only.
+         */
+        get: operations["export_suppressions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/suppressions/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Imports suppressions from a CSV body (`text/csv`, at most 10 MiB and 100,000 rows) with
+         *     the header `kind,value` or `kind,value,note`. With `dry_run=true` nothing is written and
+         *     the answer says what a commit would do. Invalid rows are reported by line number and
+         *     code, never by value. Audited as `suppression.imported` with counts only.
+         */
+        post: operations["import_suppressions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/suppressions/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lifts a suppression. An `erased` suppression is permanent and answers 409. Audited as
+         *     `suppression.removed`.
+         */
+        post: operations["remove_suppression"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/topics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's topics ordered by key. Archived ones are included with `archived=true`. */
+        get: operations["list_topics"];
+        put?: never;
+        /** Creates a topic. */
+        post: operations["create_topic"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/topics/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Changes a topic's name, description or policy, or archives it. The key and the channel
+         *     never change.
+         */
+        patch: operations["update_topic"];
         trace?: never;
     };
     "/api/v1/workspaces/{ws}/traces/{trace_id}": {
@@ -729,6 +913,21 @@ export interface components {
             /** @description People by id. Together with `identifiers`, at most 1000. */
             person_ids?: string[];
         };
+        AddSuppressionRequest: {
+            /**
+             * @description `email` or `phone`.
+             * @example email
+             */
+            kind: string;
+            /** @description At most 500 characters. It must not contain the address or number. */
+            note?: string | null;
+            /** @description The address or number. It is hashed and not stored. */
+            value: string;
+        };
+        AddedBody: {
+            /** @description False when the identifier was suppressed already. */
+            added: boolean;
+        };
         ApiKeyBody: {
             /** Format: date-time */
             created_at: string;
@@ -757,6 +956,11 @@ export interface components {
              * @example api
              */
             kind: string;
+        };
+        CheckBody: {
+            /** @description The reason it is suppressed. */
+            reason?: string | null;
+            suppressed: boolean;
         };
         ConflictBody: {
             /** Format: date-time */
@@ -803,6 +1007,35 @@ export interface components {
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
         };
+        ConsentBody: {
+            /**
+             * Format: uuid
+             * @description The person the states belong to: the survivor when the requested person was merged.
+             */
+            person_id: string;
+            /** @description The channel-wide state first, then topics by key. */
+            states: components["schemas"]["ConsentStateBody"][];
+        };
+        ConsentStateBody: {
+            /** Format: date-time */
+            changed_at: string;
+            /**
+             * @description `email`.
+             * @example email
+             */
+            channel: string;
+            /** @description Whether the person decided: `subscribed` and `unsubscribed` are explicit. */
+            explicit: boolean;
+            /**
+             * @description `subscribed`, `unsubscribed` or `pending_confirmation`. A state that is not listed is
+             *     `unknown`.
+             * @example subscribed
+             */
+            status: string;
+            /** @description Null for the channel as a whole. */
+            topic_key?: string | null;
+            topic_name?: string | null;
+        };
         CreateApiKeyRequest: {
             /**
              * @description 1 to 100 characters.
@@ -837,6 +1070,27 @@ export interface components {
              * @example Newsletter
              */
             name: string;
+        };
+        CreateTopicRequest: {
+            /**
+             * @description `email`. It cannot be changed.
+             * @example email
+             */
+            channel: string;
+            /** @description At most 500 characters. */
+            description?: string;
+            /**
+             * @description 1 to 64 lowercase letters, digits, underscores or hyphens. It cannot be changed.
+             * @example newsletter
+             */
+            key: string;
+            /** @description 1 to 100 characters. */
+            name: string;
+            /**
+             * @description `opt_in` or `opt_out`.
+             * @example opt_out
+             */
+            policy: string;
         };
         CreateTraitRequest: {
             channel_address?: boolean;
@@ -965,6 +1219,37 @@ export interface components {
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
         };
+        HistoryBody: {
+            /** @description Newest first. */
+            entries: components["schemas"]["HistoryEntryBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
+        HistoryEntryBody: {
+            /** Format: uuid */
+            actor_user_id?: string | null;
+            /** @example email */
+            channel: string;
+            /**
+             * @description Null when `masked`: only workspace admins, the owner and `admin` keys see evidence,
+             *     which can hold an IP address or user agent.
+             */
+            evidence?: Record<string, never> | null;
+            /** @description Null on the first decision. */
+            from_status?: string | null;
+            /** Format: uuid */
+            id: string;
+            masked: boolean;
+            /** Format: date-time */
+            occurred_at: string;
+            /**
+             * @description `api`, `ui`, `import`, `merge`, `unsubscribe_link` or `ingest`.
+             * @example ui
+             */
+            source: string;
+            to_status: string;
+            topic_key?: string | null;
+        };
         IdentifierInput: {
             /**
              * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
@@ -972,6 +1257,15 @@ export interface components {
              */
             kind: string;
             /** @example ada@example.com */
+            value: string;
+        };
+        IdentifierRequest: {
+            /**
+             * @description `email` or `phone`.
+             * @example email
+             */
+            kind: string;
+            /** @description The address or number. It is hashed and not stored. */
             value: string;
         };
         IdentityBody: {
@@ -1026,6 +1320,18 @@ export interface components {
             next_before?: string | null;
             /** @description Newest first. */
             rejects: components["schemas"]["IngestRejectBody"][];
+        };
+        InvalidRowBody: {
+            /**
+             * @description A stable code, never the value: `malformed_row`, `unsupported_kind`,
+             *     `invalid_email`, `invalid_phone`, `note_too_long` or `note_contains_value`.
+             */
+            reason: string;
+            /**
+             * @description The 1-based line of the file the row starts on, the header being line 1. Blank lines are
+             *     skipped but counted, and a line break inside a quoted value counts as a line.
+             */
+            row: number;
         };
         /** @description A job without its payload. */
         JobBody: {
@@ -1302,6 +1608,25 @@ export interface components {
             csrf_token: string;
             user: components["schemas"]["UserBody"];
         };
+        SetConsentRequest: {
+            /**
+             * @description `email`.
+             * @example email
+             */
+            channel: string;
+            /**
+             * @description What proves the decision, such as `ip`, `user_agent`, `form` or `text`. A JSON object
+             *     of at most 4 KiB as compact JSON.
+             */
+            evidence?: Record<string, never> | null;
+            /**
+             * @description `subscribed`, `unsubscribed` or `pending_confirmation`. `unknown` cannot be set.
+             * @example unsubscribed
+             */
+            status: string;
+            /** @description The topic to change; absent changes the channel as a whole. */
+            topic_key?: string | null;
+        };
         SetRoleRequest: {
             /** @description `admin` or `member`. */
             role: string;
@@ -1325,6 +1650,75 @@ export interface components {
         StatusBody: {
             /** @example ok */
             status: string;
+        };
+        SuppressionBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The first 8 hex characters of the identifier hash. The full hash and the value are
+             *     never returned here.
+             * @example 9f2a41c7
+             */
+            hash_prefix: string;
+            /**
+             * @description `email` or `phone`.
+             * @example email
+             */
+            kind: string;
+            note?: string | null;
+            /**
+             * @description `hard_bounce`, `complaint`, `manual` or `erased`.
+             * @example manual
+             */
+            reason: string;
+            /**
+             * @description Where it came from, such as `api`, `ui`, `import` or `erasure`.
+             * @example ui
+             */
+            source: string;
+        };
+        SuppressionImportBody: {
+            /** @description Identifiers that were, or on a dry run would be, newly suppressed. */
+            added: number;
+            /** @description True when nothing was written. */
+            dry_run: boolean;
+            /** @description Identifiers already suppressed, and repeats within the file. */
+            existing: number;
+            invalid: components["schemas"]["InvalidRowBody"][];
+        };
+        SuppressionsBody: {
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+            /** @description Newest first. */
+            suppressions: components["schemas"]["SuppressionBody"][];
+        };
+        TopicBody: {
+            archived: boolean;
+            /** Format: date-time */
+            archived_at?: string | null;
+            /**
+             * @description `email`.
+             * @example email
+             */
+            channel: string;
+            /** Format: date-time */
+            created_at: string;
+            description: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description Lowercase letters, digits, underscores and hyphens; unique in the workspace.
+             * @example newsletter
+             */
+            key: string;
+            name: string;
+            /**
+             * @description `opt_in`: allowed only when subscribed. `opt_out`: allowed unless unsubscribed.
+             * @example opt_out
+             */
+            policy: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         TraceBody: {
             /** @description Oldest first. */
@@ -1384,6 +1778,12 @@ export interface components {
         UpdateListRequest: {
             description?: string | null;
             name?: string | null;
+        };
+        UpdateTopicRequest: {
+            archived?: boolean | null;
+            description?: string | null;
+            name?: string | null;
+            policy?: string | null;
         };
         UpdateTraitRequest: {
             archived?: boolean | null;
@@ -3805,6 +4205,189 @@ export interface operations {
             };
         };
     };
+    get_person_consent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The states held for the person */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    set_person_consent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetConsentRequest"];
+            };
+        };
+        responses: {
+            /** @description The states held for the person afterwards */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unknown channel, status or topic, `unknown` as the status, or bad evidence */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_person_consent_history: {
+        parameters: {
+            query?: {
+                /** @description Entries per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of changes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryBody"];
+                };
+            };
+            /** @description limit is out of range, or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_person_lists: {
         parameters: {
             query?: never;
@@ -3914,6 +4497,647 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_suppressions: {
+        parameters: {
+            query?: {
+                /** @description Suppressions per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description Only this reason: hard_bounce, complaint, manual or erased */
+                reason?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of suppressions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuppressionsBody"];
+                };
+            };
+            /** @description limit or reason is out of range, or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    add_suppression: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddSuppressionRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether it was newly suppressed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unsupported kind, an invalid value, or a note that is too long or holds the value */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    check_suppression: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentifierRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether it is suppressed, and why */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unsupported kind or an invalid value */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    export_suppressions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The suppressions as CSV, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    import_suppressions: {
+        parameters: {
+            query?: {
+                /** @description Only report what an import would do; default false */
+                dry_run?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        /** @description kind,value[,note] rows */
+        requestBody: {
+            content: {
+                "text/csv": string;
+            };
+        };
+        responses: {
+            /** @description What was, or on a dry run would be, imported */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuppressionImportBody"];
+                };
+            };
+            /** @description dry_run is not true or false, or the body is not UTF-8 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over 10 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not text/csv */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A wrong header, or more than 100,000 rows */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    remove_suppression: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentifierRequest"];
+            };
+        };
+        responses: {
+            /** @description The suppression was lifted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or suppression, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The suppression is erased and permanent */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unsupported kind or an invalid value */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_topics: {
+        parameters: {
+            query?: {
+                /** @description Include archived topics; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The topics, ordered by key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_topic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTopicRequest"];
+            };
+        };
+        responses: {
+            /** @description The new topic */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The key already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid key, name, description, channel or policy */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_topic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Topic id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTopicRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated topic */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or topic, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, or no field at all */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers and field registry, static lists and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, and the governed event store's schemas, rejects and retention, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -505,6 +505,68 @@ admin sets within `events.min_retention_days` and `events.max_retention_days`; r
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
 records of events that no longer exist. The scheduler leader creates the partitions for this
 and next month.
+## Consent and suppressions
+
+The profile store also holds what people have agreed to receive, and the addresses that must
+never receive anything. Nothing sends messages yet, so this is the data the send checks of a
+later milestone will read.
+
+**Consent** is kept per person, channel and topic. The only channel is `email`. A state is
+`subscribed`, `unsubscribed`, `pending_confirmation` or `unknown` (no row: nobody has said
+anything); `subscribed` and `unsubscribed` are the explicit ones. A person has a
+**channel-wide** state and a state per **topic**. A channel-wide `unsubscribed` blocks every
+topic. Otherwise a topic's own state is read through its policy: an `opt_in` topic needs
+`subscribed`, an `opt_out` topic reaches everyone who is not `unsubscribed`.
+
+Every change is appended to a history with its source (`api`, `ui`, `import`, `merge`,
+`unsubscribe_link` or `ingest`), the user behind it, when it happened and free-form evidence
+(for example `ip`, `user_agent`, `form` or `text`; a JSON object of at most 4096 bytes written compactly). Writing
+the status a person already has changes nothing and leaves no history. History rows cannot be
+edited. Read and write a person's consent with
+`GET` and `PUT /api/v1/workspaces/{ws}/people/{id}/consent` (`{"channel": "email",
+"topic_key": "newsletter", "status": "unsubscribed", "evidence": {...}}`; leave out
+`topic_key` for the channel as a whole; `unknown` cannot be set) and read the history with
+`GET .../consent/history?limit&before`. Any member or `write` key can record a decision;
+the source is `ui` for a session and `api` for a key.
+
+**Merging people** combines their consent for each channel and topic: the most recent
+explicit decision wins, and `unsubscribed` wins a tie at the same moment. An explicit
+decision beats a state that is not explicit. If the survivor's state changes, the history
+gets a `merge` entry naming the merged person, and the merged person's history moves to the
+survivor.
+
+**Topics** are what people can subscribe to. Admins manage them under **Topics** in the web
+UI or with `GET` and `POST /api/v1/workspaces/{ws}/topics` and `PATCH .../topics/{id}`
+(`?archived=true` lists archived ones too). A key is 1 to 64 lowercase letters, digits,
+underscores or hyphens and never changes, and neither does the channel; the name, the
+description, the policy and the archived flag can change. Every change is audited.
+
+**Suppressions** block an email address or phone number whatever anyone has consented to.
+Each reason is one of `hard_bounce`, `complaint`, `manual` or `erased`, and suppression is
+per workspace. The value is never stored: a suppression is kept under an HMAC-SHA256 of
+`<kind>:<normalized value>`, keyed from the master key (the `identifier` purpose), so it
+survives the erasure of the person it came from. This needs the master key; without one the
+suppression endpoints answer 503.
+
+- Adding an address that is already suppressed keeps its first reason, except that `erased`
+  replaces any other. An `erased` suppression can never be removed (409).
+- `POST .../suppressions/check`, `POST .../suppressions` (add) and `POST .../suppressions/remove`
+  take `{"kind": "email", "value": "..."}`; they are POSTs so a value never sits in a URL. Checking
+  is open to anyone who can read the workspace, changing needs an admin. Notes are at most
+  500 characters and must not contain the address.
+- `GET .../suppressions?limit&before&reason` lists newest first as the first 8 hex characters
+  of the hash, never the full hash or the value.
+- `POST .../suppressions/import` takes `text/csv` (at most 10 MiB and 100,000 rows) with the
+  header `kind,value` or `kind,value,note`. Add `?dry_run=true` to preview. The answer is
+  `{added, existing, invalid: [{row, reason}]}`, where `row` is the line of the file the row
+  starts on (the header is line 1; blank lines are skipped but counted, and a line break inside
+  a quoted value counts) and `reason` a code such as `invalid_email`; values are never echoed.
+- `GET .../suppressions/export` (admin) streams `hash,kind,reason,source,created_at`. Because
+  values are not stored, the export holds hashes only.
+
+The web UI has a **Topics** page and a **Suppressions** page (check an address, add, import
+with a dry-run preview, export, filter by reason). Non-admins see both read-only. A
+per-person consent view comes with the profile page.
 
 ## Lists
 

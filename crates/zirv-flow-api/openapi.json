@@ -3430,6 +3430,297 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/people/{id}/consent": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "A person's consent: the channel-wide state and the state of each topic.",
+        "operationId": "get_person_consent",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The states held for the person",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Records a decision: subscribe, unsubscribe or mark pending, for the channel or one\ntopic. Writing the status already held changes nothing and leaves no history. The source\nis `ui` for a session and `api` for a key.",
+        "operationId": "set_person_consent",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetConsentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The states held for the person afterwards",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown channel, status or topic, `unknown` as the status, or bad evidence",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/people/{id}/consent/history": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "A person's consent history, newest first: every change with its source and evidence.\nEvidence is shown to the owner, workspace admins and `admin` keys, and masked for\neveryone else.",
+        "operationId": "get_person_consent_history",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Entries per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/people/{id}/lists": {
       "get": {
         "tags": [
@@ -3606,6 +3897,925 @@
           },
           "404": {
             "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/suppressions": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "The suppressions of the workspace, newest first, as hash prefixes. Values and full\nhashes are never returned.",
+        "operationId": "list_suppressions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Suppressions per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "Only this reason: hard_bounce, complaint, manual or erased",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of suppressions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuppressionsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit or reason is out of range, or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Suppresses an address or number with the reason `manual`. Audited as\n`suppression.added`.",
+        "operationId": "add_suppression",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddSuppressionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Whether it was newly suppressed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unsupported kind, an invalid value, or a note that is too long or holds the value",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/suppressions/check": {
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Whether an address or number is suppressed. A POST so the value never sits in a URL.",
+        "operationId": "check_suppression",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Whether it is suppressed, and why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unsupported kind or an invalid value",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/suppressions/export": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Every suppression as CSV, `hash,kind,reason,source,created_at`, streamed page by page.\nValues are never stored, so the file holds hashes only.",
+        "operationId": "export_suppressions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The suppressions as CSV, newest first",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/suppressions/import": {
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Imports suppressions from a CSV body (`text/csv`, at most 10 MiB and 100,000 rows) with\nthe header `kind,value` or `kind,value,note`. With `dry_run=true` nothing is written and\nthe answer says what a commit would do. Invalid rows are reported by line number and\ncode, never by value. Audited as `suppression.imported` with counts only.",
+        "operationId": "import_suppressions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "Only report what an import would do; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "kind,value[,note] rows",
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What was, or on a dry run would be, imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuppressionImportBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "dry_run is not true or false, or the body is not UTF-8",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 10 MiB",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not text/csv",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A wrong header, or more than 100,000 rows",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/suppressions/remove": {
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Lifts a suppression. An `erased` suppression is permanent and answers 409. Audited as\n`suppression.removed`.",
+        "operationId": "remove_suppression",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The suppression was lifted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or suppression, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The suppression is erased and permanent",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unsupported kind or an invalid value",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/topics": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "The workspace's topics ordered by key. Archived ones are included with `archived=true`.",
+        "operationId": "list_topics",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived topics; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The topics, ordered by key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TopicBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Creates a topic.",
+        "operationId": "create_topic",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTopicRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new topic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid key, name, description, channel or policy",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/topics/{id}": {
+      "patch": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Changes a topic's name, description or policy, or archives it. The key and the channel\nnever change.",
+        "operationId": "update_topic",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Topic id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTopicRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated topic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or topic, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, or no field at all",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4096,6 +5306,43 @@
           }
         }
       },
+      "AddSuppressionRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`email` or `phone`.",
+            "example": "email"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "At most 500 characters. It must not contain the address or number."
+          },
+          "value": {
+            "type": "string",
+            "description": "The address or number. It is hashed and not stored."
+          }
+        }
+      },
+      "AddedBody": {
+        "type": "object",
+        "required": [
+          "added"
+        ],
+        "properties": {
+          "added": {
+            "type": "boolean",
+            "description": "False when the identifier was suppressed already."
+          }
+        }
+      },
       "ApiKeyBody": {
         "type": "object",
         "required": [
@@ -4164,6 +5411,24 @@
             "type": "string",
             "description": "`event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`.",
             "example": "api"
+          }
+        }
+      },
+      "CheckBody": {
+        "type": "object",
+        "required": [
+          "suppressed"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reason it is suppressed."
+          },
+          "suppressed": {
+            "type": "boolean"
           }
         }
       },
@@ -4263,6 +5528,69 @@
           }
         }
       },
+      "ConsentBody": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "states"
+        ],
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The person the states belong to: the survivor when the requested person was merged."
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentStateBody"
+            },
+            "description": "The channel-wide state first, then topics by key."
+          }
+        }
+      },
+      "ConsentStateBody": {
+        "type": "object",
+        "required": [
+          "channel",
+          "status",
+          "explicit",
+          "changed_at"
+        ],
+        "properties": {
+          "changed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "channel": {
+            "type": "string",
+            "description": "`email`.",
+            "example": "email"
+          },
+          "explicit": {
+            "type": "boolean",
+            "description": "Whether the person decided: `subscribed` and `unsubscribed` are explicit."
+          },
+          "status": {
+            "type": "string",
+            "description": "`subscribed`, `unsubscribed` or `pending_confirmation`. A state that is not listed is\n`unknown`.",
+            "example": "subscribed"
+          },
+          "topic_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null for the channel as a whole."
+          },
+          "topic_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CreateApiKeyRequest": {
         "type": "object",
         "required": [
@@ -4331,6 +5659,40 @@
             "type": "string",
             "description": "1 to 128 characters after trimming; unique in the workspace, ignoring case.",
             "example": "Newsletter"
+          }
+        }
+      },
+      "CreateTopicRequest": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "channel",
+          "policy"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "`email`. It cannot be changed.",
+            "example": "email"
+          },
+          "description": {
+            "type": "string",
+            "description": "At most 500 characters."
+          },
+          "key": {
+            "type": "string",
+            "description": "1 to 64 lowercase letters, digits, underscores or hyphens. It cannot be changed.",
+            "example": "newsletter"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters."
+          },
+          "policy": {
+            "type": "string",
+            "description": "`opt_in` or `opt_out`.",
+            "example": "opt_out"
           }
         }
       },
@@ -4642,6 +6004,91 @@
           }
         }
       },
+      "HistoryBody": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntryBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "HistoryEntryBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel",
+          "to_status",
+          "source",
+          "masked",
+          "occurred_at"
+        ],
+        "properties": {
+          "actor_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "channel": {
+            "type": "string",
+            "example": "email"
+          },
+          "evidence": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see evidence,\nwhich can hold an IP address or user agent."
+          },
+          "from_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null on the first decision."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string",
+            "description": "`api`, `ui`, `import`, `merge`, `unsubscribe_link` or `ingest`.",
+            "example": "ui"
+          },
+          "to_status": {
+            "type": "string"
+          },
+          "topic_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "IdentifierInput": {
         "type": "object",
         "required": [
@@ -4657,6 +6104,24 @@
           "value": {
             "type": "string",
             "example": "ada@example.com"
+          }
+        }
+      },
+      "IdentifierRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`email` or `phone`.",
+            "example": "email"
+          },
+          "value": {
+            "type": "string",
+            "description": "The address or number. It is hashed and not stored."
           }
         }
       },
@@ -4821,6 +6286,24 @@
               "$ref": "#/components/schemas/IngestRejectBody"
             },
             "description": "Newest first."
+          }
+        }
+      },
+      "InvalidRowBody": {
+        "type": "object",
+        "required": [
+          "row",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "A stable code, never the value: `malformed_row`, `unsupported_kind`,\n`invalid_email`, `invalid_phone`, `note_too_long` or `note_contains_value`."
+          },
+          "row": {
+            "type": "integer",
+            "description": "The 1-based line of the file the row starts on, the header being line 1. Blank lines are\nskipped but counted, and a line break inside a quoted value counts as a line.",
+            "minimum": 0
           }
         }
       },
@@ -5529,6 +7012,39 @@
           }
         }
       },
+      "SetConsentRequest": {
+        "type": "object",
+        "required": [
+          "channel",
+          "status"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "`email`.",
+            "example": "email"
+          },
+          "evidence": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What proves the decision, such as `ip`, `user_agent`, `form` or `text`. A JSON object\nof at most 4 KiB as compact JSON."
+          },
+          "status": {
+            "type": "string",
+            "description": "`subscribed`, `unsubscribed` or `pending_confirmation`. `unknown` cannot be set.",
+            "example": "unsubscribed"
+          },
+          "topic_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The topic to change; absent changes the channel as a whole."
+          }
+        }
+      },
       "SetRoleRequest": {
         "type": "object",
         "required": [
@@ -5598,6 +7114,160 @@
           "status": {
             "type": "string",
             "example": "ok"
+          }
+        }
+      },
+      "SuppressionBody": {
+        "type": "object",
+        "required": [
+          "hash_prefix",
+          "kind",
+          "reason",
+          "source",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hash_prefix": {
+            "type": "string",
+            "description": "The first 8 hex characters of the identifier hash. The full hash and the value are\nnever returned here.",
+            "example": "9f2a41c7"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`email` or `phone`.",
+            "example": "email"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "`hard_bounce`, `complaint`, `manual` or `erased`.",
+            "example": "manual"
+          },
+          "source": {
+            "type": "string",
+            "description": "Where it came from, such as `api`, `ui`, `import` or `erasure`.",
+            "example": "ui"
+          }
+        }
+      },
+      "SuppressionImportBody": {
+        "type": "object",
+        "required": [
+          "dry_run",
+          "added",
+          "existing",
+          "invalid"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "description": "Identifiers that were, or on a dry run would be, newly suppressed.",
+            "minimum": 0
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "True when nothing was written."
+          },
+          "existing": {
+            "type": "integer",
+            "description": "Identifiers already suppressed, and repeats within the file.",
+            "minimum": 0
+          },
+          "invalid": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InvalidRowBody"
+            }
+          }
+        }
+      },
+      "SuppressionsBody": {
+        "type": "object",
+        "required": [
+          "suppressions"
+        ],
+        "properties": {
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          },
+          "suppressions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuppressionBody"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "TopicBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "name",
+          "description",
+          "channel",
+          "policy",
+          "archived",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "channel": {
+            "type": "string",
+            "description": "`email`.",
+            "example": "email"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits, underscores and hyphens; unique in the workspace.",
+            "example": "newsletter"
+          },
+          "name": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string",
+            "description": "`opt_in`: allowed only when subscribed. `opt_out`: allowed unless unsubscribed.",
+            "example": "opt_out"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -5742,6 +7412,35 @@
             ]
           },
           "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateTopicRequest": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy": {
             "type": [
               "string",
               "null"

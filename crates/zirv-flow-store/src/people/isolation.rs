@@ -22,6 +22,15 @@ mod tests {
         find_list, list_lists, lists_for, members, membership_history, remove_members, update_list,
     };
 
+    use crate::{
+        ConsentChange, ConsentOutcome, NewSuppression, NewTopic, add_suppression, consent_for,
+        consent_history, create_topic, find_suppression, find_topic, is_suppressed,
+        list_suppressions, list_topics, set_consent,
+    };
+    use zirv_flow_core::consent::{
+        ChangeSource, Channel, ConsentStatus, SuppressionReason, TopicPolicy,
+    };
+
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
         let slug = Slug::parse(slug).unwrap();
@@ -423,5 +432,127 @@ mod tests {
                 .member_count,
             1
         );
+    }
+
+    /// Seeds a person with a channel-wide and a topic consent, a topic and a suppression, and
+    /// returns the person, the topic and the suppressed hash.
+    async fn seed_consent(pool: &PgPool, ws: WorkspaceId) -> (Uuid, Uuid, [u8; 32]) {
+        let (person, _) = seed(pool, ws).await;
+        let topic = create_topic(
+            pool,
+            ws,
+            &NewTopic {
+                key: "news".into(),
+                name: "News".into(),
+                description: String::new(),
+                channel: Channel::Email,
+                policy: TopicPolicy::OptOut,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let mut tx = begin(pool).await.unwrap();
+        for (topic, status) in [
+            (None, ConsentStatus::Unsubscribed),
+            (Some(topic), ConsentStatus::Subscribed),
+        ] {
+            let outcome = set_consent(
+                &mut tx,
+                ws,
+                &consent_change(person, topic, status),
+                &TraceContext::root(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(outcome, ConsentOutcome::Changed { .. }));
+        }
+        commit(tx).await.unwrap();
+        let hash = [9_u8; 32];
+        add_suppression(
+            pool,
+            ws,
+            &NewSuppression {
+                identifier_hash: hash,
+                kind: "email",
+                reason: SuppressionReason::Manual,
+                source: "api",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        (person, topic, hash)
+    }
+
+    fn consent_change(person: Uuid, topic: Option<Uuid>, status: ConsentStatus) -> ConsentChange {
+        ConsentChange {
+            person,
+            channel: Channel::Email,
+            topic,
+            status,
+            source: ChangeSource::Api,
+            evidence: json!({}),
+            occurred_at: datetime!(2026-01-01 00:00 UTC),
+            actor: None,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_topics_and_suppressions_are_private_to_their_workspace(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let (person_one, topic_one, hash) = seed_consent(&pool, one).await;
+        let (person_two, topic_two, _) = seed_consent(&pool, two).await;
+        assert_ne!(topic_one, topic_two);
+
+        for (ws, own, foreign) in [(one, topic_one, topic_two), (two, topic_two, topic_one)] {
+            let topics = list_topics(&pool, ws, true).await.unwrap();
+            assert_eq!(topics.len(), 1);
+            assert_eq!(topics[0].id, own);
+            assert!(find_topic(&pool, ws, foreign).await.unwrap().is_none());
+        }
+        assert!(consent_for(&pool, one, person_two).await.unwrap().is_none());
+        assert!(
+            consent_history(&pool, two, person_one, 10, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for (ws, person) in [(one, person_one), (two, person_two)] {
+            let states = consent_for(&pool, ws, person).await.unwrap().unwrap();
+            assert_eq!(states.len(), 2);
+            let (history, _) = consent_history(&pool, ws, person, 10, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(history.len(), 2);
+        }
+
+        let mut tx = begin(&pool).await.unwrap();
+        let trace = TraceContext::root(Cause::api("t"));
+        let foreign_topic = consent_change(person_one, Some(topic_two), ConsentStatus::Subscribed);
+        let foreign_person = consent_change(person_two, None, ConsentStatus::Subscribed);
+        assert_eq!(
+            set_consent(&mut tx, one, &foreign_topic, &trace)
+                .await
+                .unwrap(),
+            ConsentOutcome::NoSuchTopic
+        );
+        assert_eq!(
+            set_consent(&mut tx, one, &foreign_person, &trace)
+                .await
+                .unwrap(),
+            ConsentOutcome::NoSuchPerson
+        );
+        drop(tx);
+
+        assert!(is_suppressed(&pool, one, &hash).await.unwrap());
+        assert!(find_suppression(&pool, one, &hash).await.unwrap().is_some());
+        assert!(!is_suppressed(&pool, two, &[1; 32]).await.unwrap());
+        let (listed, _) = list_suppressions(&pool, one, 10, None, None).await.unwrap();
+        assert_eq!(listed.len(), 1);
     }
 }

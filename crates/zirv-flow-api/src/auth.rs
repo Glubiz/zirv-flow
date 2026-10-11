@@ -237,8 +237,9 @@ pub(crate) async fn authorize(
         .ok_or_else(ApiError::not_found)
 }
 
-/// Whether the caller may see identifier values: the owner, a workspace admin or an `admin`
-/// key. Everyone else who may read the workspace sees them masked.
+/// Whether the caller may see personal values such as identifiers and consent evidence: the
+/// owner, a workspace admin or an `admin` key. Everyone else who may read the workspace sees
+/// them masked.
 pub(crate) async fn may_see_values(
     state: &AppState,
     principal: &Principal,
@@ -332,6 +333,8 @@ mod tests {
         assert!(scopes_allow(&[Scope::Admin], Need::ReadMembers));
         assert!(scopes_allow(&[Scope::Read], Need::ReadMembers));
         assert!(!scopes_allow(&[Scope::Write], Need::ReadMembers));
+        assert!(scopes_allow(&[Scope::Write], Need::Write));
+        assert!(!scopes_allow(&[Scope::Read, Scope::Admin], Need::Write));
         assert!(scopes_allow(&[Scope::Admin], Need::Admin));
         assert!(!scopes_allow(&[Scope::Read, Scope::Write], Need::Admin));
         assert!(!scopes_allow(&[], Need::Read));
@@ -368,6 +371,7 @@ mod tests {
     fn members_read_but_only_admins_manage() {
         assert!(role_allows(Role::Member, Need::Read));
         assert!(role_allows(Role::Member, Need::ReadMembers));
+        assert!(role_allows(Role::Member, Need::Write));
         assert!(!role_allows(Role::Member, Need::Admin));
         assert!(role_allows(Role::Admin, Need::Admin));
     }

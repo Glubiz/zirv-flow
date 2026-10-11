@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
@@ -26,6 +27,8 @@ pub struct AppState {
     pub(crate) event_retention: EventRetention,
     /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
+    /// Hashes identifiers for suppressions; absent until the master key is given.
+    pub(crate) identifier_key: Option<Arc<HmacKey>>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -52,6 +55,7 @@ impl AppState {
             oidc: None,
             event_retention: EventRetention::default(),
             setup_token: Arc::default(),
+            identifier_key: None,
         }
     }
 
@@ -71,6 +75,13 @@ impl AppState {
     /// The operator's event retention settings; their bounds limit per-name overrides.
     pub fn with_event_retention(mut self, settings: EventRetention) -> Self {
         self.event_retention = settings;
+        self
+    }
+
+    /// Derives the identifier-hashing key from the operator's master key. Without it the
+    /// suppression endpoints answer 503.
+    pub fn with_master_key(mut self, key: &MasterKey) -> Self {
+        self.identifier_key = Some(Arc::new(key.hmac_key(HmacPurpose::Identifier)));
         self
     }
 
@@ -140,6 +151,19 @@ mod tests {
                 .event_retention
                 .min_days,
             5
+        );
+    }
+
+    #[tokio::test]
+    async fn the_identifier_key_comes_from_the_master_key_and_is_off_until_given() {
+        let key = MasterKey::generate();
+
+        assert!(state().identifier_key.is_none());
+        let with = state().with_master_key(&key);
+        let derived = key.hmac_key(HmacPurpose::Identifier);
+        assert_eq!(
+            with.identifier_key.unwrap().digest(b"x"),
+            derived.digest(b"x")
         );
     }
 

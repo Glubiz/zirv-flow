@@ -270,4 +270,70 @@ mod tests {
             .map(|(_, count)| *count);
         assert!(decisions >= Some(2), "{found:?}");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_scan_finds_consent_and_its_history_but_not_suppressions(pool: PgPool) {
+        use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, SuppressionReason};
+
+        use crate::{ConsentChange, NewSuppression, add_suppression, begin, commit, set_consent};
+
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let record = ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: "1".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            traits: json!({}).as_object().cloned().unwrap(),
+            observed_at: datetime!(2026-01-01 00:00 UTC),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        let outcomes = apply_profile_batch(&pool, ws, &[record]).await.unwrap();
+        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        let mut tx = begin(&pool).await.unwrap();
+        set_consent(
+            &mut tx,
+            ws,
+            &ConsentChange {
+                person: person_id,
+                channel: Channel::Email,
+                topic: None,
+                status: ConsentStatus::Subscribed,
+                source: ChangeSource::Api,
+                evidence: json!({}),
+                occurred_at: datetime!(2026-01-01 00:00 UTC),
+                actor: None,
+            },
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        add_suppression(
+            &pool,
+            ws,
+            &NewSuppression {
+                identifier_hash: [1; 32],
+                kind: "email",
+                reason: SuppressionReason::Erased,
+                source: "erasure",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let found = rows_referencing_person(&pool, person_id).await;
+
+        let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"consent.person_id"));
+        assert!(names.contains(&"consent_changes.person_id"));
+        assert!(names.contains(&"decision_records.subject_ids"));
+        assert!(names.iter().all(|name| !name.starts_with("suppressions")));
+    }
 }

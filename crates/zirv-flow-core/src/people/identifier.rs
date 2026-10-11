@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::HmacKey;
+
 const MAX_VALUE_CHARS: usize = 256;
 const MAX_NAMESPACE_CHARS: usize = 64;
 
@@ -134,6 +136,13 @@ impl Identifier {
     }
 }
 
+/// The keyed hash that stands in for an identifier where its value must not be stored, such
+/// as a suppression: the `Identifier`-purpose HMAC of `<kind>:<normalized value>`. The
+/// workspace is not part of the message, so a hash can be reused across workspaces.
+pub fn identifier_hash(key: &HmacKey, identifier: &Identifier) -> [u8; 32] {
+    key.digest(format!("{}:{}", identifier.kind.as_text(), identifier.value).as_bytes())
+}
+
 fn normalize_email(value: &str) -> Result<String, IdentifierError> {
     crate::Email::parse(value)
         .map(|email| email.as_str().to_owned())
@@ -177,6 +186,41 @@ mod tests {
 
     fn value(kind: &str, input: &str) -> Result<String, IdentifierError> {
         Identifier::parse(kind, input).map(|identifier| identifier.value().to_owned())
+    }
+
+    fn hash_of(kind: &str, input: &str) -> [u8; 32] {
+        let master =
+            crate::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
+        let key = master.hmac_key(crate::HmacPurpose::Identifier);
+        identifier_hash(&key, &Identifier::parse(kind, input).unwrap())
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn the_identifier_hash_matches_the_known_answer() {
+        assert_eq!(
+            hex(&hash_of("email", "person@example.com")),
+            "7c325dbca9868e8788b135375bda17ca42f6d51e2380d660b2b16a291dd8c844"
+        );
+    }
+
+    #[test]
+    fn the_identifier_hash_is_taken_after_normalization_and_depends_on_the_kind() {
+        assert_eq!(
+            hash_of("email", "  Person@Example.COM "),
+            hash_of("email", "person@example.com")
+        );
+        assert_eq!(
+            hash_of("phone", "+45 12 34 56 78"),
+            hash_of("phone", "0045-12345678")
+        );
+        assert_ne!(
+            hash_of("anonymous_id", "person@example.com"),
+            hash_of("external:crm", "person@example.com")
+        );
     }
 
     #[test]

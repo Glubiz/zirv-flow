@@ -2,6 +2,7 @@
 
 pub mod admin;
 mod auth;
+mod consent;
 mod cookies;
 mod credentials;
 mod events;
@@ -138,6 +139,42 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/ingest-rejects",
             get(events::rejects::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/topics",
+            get(consent::topics::list).post(consent::topics::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/topics/{id}",
+            patch(consent::topics::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/consent",
+            get(consent::person::get).put(consent::person::set),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/consent/history",
+            get(consent::person::history),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/suppressions",
+            get(consent::suppressions::list).post(consent::suppressions::add),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/suppressions/check",
+            post(consent::suppressions::check),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/suppressions/remove",
+            post(consent::suppressions::remove_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/suppressions/import",
+            post(consent::suppressions::import_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/suppressions/export",
+            get(consent::suppressions::export),
         )
         .route(
             "/api/v1/workspaces/{ws}/lists",

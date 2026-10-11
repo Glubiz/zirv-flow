@@ -1,13 +1,14 @@
 //! Merging people (architecture section 7.3): what moves to the survivor in the transaction
 //! of the record that joined them, and the job that re-points the rest afterwards.
 //!
-//! List memberships move in [`merge_people`] too; consent will once it exists.
+//! List memberships and consent move in [`merge_people`] too.
 
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute, record_decision};
+use crate::consent;
 use crate::lists::{lock_lists_for_merge, move_on_merge};
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
 
@@ -127,6 +128,7 @@ pub(super) async fn merge_people(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+        consent::move_on_merge(connection, workspace, loser, survivor, trace).await?;
         record_decision(
             connection,
             workspace,
