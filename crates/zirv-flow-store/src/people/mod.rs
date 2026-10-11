@@ -18,10 +18,10 @@ pub(crate) mod erasure;
 #[cfg(test)]
 mod isolation;
 
-pub(crate) use apply::apply_profile_record;
 pub use apply::{
     DroppedTrait, ProfileOutcome, ProfileRecord, apply_profile_batch, remove_contribution,
 };
+pub(crate) use apply::{apply_profile_record, apply_profile_records};
 pub(crate) use apply::{mark_changed, normalize_identifiers, record_resolution};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
