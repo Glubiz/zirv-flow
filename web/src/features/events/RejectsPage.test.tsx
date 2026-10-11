@@ -120,13 +120,14 @@ describe("replay", () => {
     dry_run: true,
     selected: 2,
     rejects: [
-      { reject_id: "r1", outcome: "accept", reason: null, reasons: [], redacted_type_changed: [] },
+      { reject_id: "r1", outcome: "accept", reason: null, reasons: [], redacted_type_changed: [], redaction_changed: true },
       {
         reject_id: "r2",
         outcome: "still_rejected",
         reason: "validation_failed",
         reasons: [{ property: "total", reason: "wrong_type" }],
         redacted_type_changed: ["total"],
+        redaction_changed: false,
       },
     ],
     totals: { accept: 1, flag: 0, still_rejected: 1, duplicate: 0, already_replayed: 0 },
@@ -158,6 +159,7 @@ describe("replay", () => {
     expect(await within(dialog).findByText("Will be stored")).toBeInTheDocument();
     expect(within(dialog).getByText("Still rejected")).toBeInTheDocument();
     expect(within(dialog).getByText(/Redaction changed the type of/)).toBeInTheDocument();
+    expect(within(dialog).getAllByText(/redaction rules changed since this was rejected/)).toHaveLength(1);
     const preview = calls.filter((call) => call.path === REPLAY_URI).at(-1)?.body as Record<string, unknown>;
     expect(preview).toMatchObject({ ids: ["r1"], dry_run: true });
     const triggers = within(dialog).getByLabelText(/Emit downstream triggers/);

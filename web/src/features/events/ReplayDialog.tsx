@@ -207,6 +207,9 @@ function Preview({
                       pass a schema that expects another type.
                     </p>
                   ) : null}
+                  {reject.redaction_changed ? (
+                    <p className="faint">The redaction rules changed since this was rejected. Storing it applies the current ones.</p>
+                  ) : null}
                 </td>
               </tr>
             ))}
