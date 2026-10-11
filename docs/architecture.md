@@ -131,7 +131,7 @@ fails, loops back off and ingestion returns `503`; v1 does not buffer locally.
 ## 5. Module and crate layout
 
 M0 is a single crate. The Cargo workspace arrives in M1: `crates/<name>` for
-each crate below (`zirv-flow-ai` joins in M3 and `zirv-flow-templates` in M6), plus `web/` (TypeScript +
+each crate below (`zirv-flow-ai` joins in M3, `zirv-flow-identity` in M1 with OIDC sign-in and `zirv-flow-templates` in M6), plus `web/` (TypeScript +
 React SPA, Vite, React Flow canvas).
 
 | Crate | Contents | Independent reason to exist |
@@ -142,6 +142,7 @@ React SPA, Vite, React Flow canvas).
 | `zirv-flow-segments` | AST to parameterized SQL compiler, dependency analysis, reference evaluator | Most correctness-critical code, own golden corpus. Pure: emits SQL + params that `store` executes. Used by `api` (preview, explain) and `jobs` (recompute). |
 | `zirv-flow-engine` | Deterministic flow interpreter, simulation harness | Pure, so simulation needs no I/O. Used by `api` (test mode) and `jobs`. |
 | `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email transport | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
+| `zirv-flow-identity` | OIDC discovery, JWKS and the authorization-code exchange with ID-token verification (`openidconnect`, rustls) | Every outbound call to the operator-configured identity provider lives here, so `api` stays inbound-only. Depends on `core` only. The issuer is operator-configured, so the M3 egress policy does not apply to it. |
 | `zirv-flow-ai` | Provider trait and OpenAI-compatible and Anthropic adapters; structured tool-call orchestration, bounded repair, budgets, audit inputs and deterministic fake provider | Optional outbound protocols and HTTP dependencies change independently from the deterministic domain crates. The crate coordinates existing typed tools and validators but neither defines nor bypasses them. |
 | `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
 | `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving, assistant tools (`AiTool` implementations and their registry) | HTTP surface; neither `api` nor `jobs` depends on the other |
@@ -150,9 +151,9 @@ React SPA, Vite, React Flow canvas).
 ```mermaid
 flowchart LR
   bin[zirv-flow] --> api & jobs & store
-  api --> segments & engine & templates & connectors & ai & store & core
+  api --> segments & engine & templates & connectors & ai & identity & store & core
   jobs --> segments & engine & templates & connectors & ai & store & core
-  segments & engine & templates & connectors & ai & store --> core
+  segments & engine & templates & connectors & ai & identity & store --> core
 ```
 
 ### 5.1 Allowed crate dependencies
@@ -169,14 +170,15 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-engine` | `zirv-flow-core` |
 | `zirv-flow-connectors` | `zirv-flow-core` |
 | `zirv-flow-ai` | `zirv-flow-core` |
+| `zirv-flow-identity` | `zirv-flow-core` |
 | `zirv-flow-templates` | `zirv-flow-core` |
-| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
+| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates` |
 | `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
 
 `api` and `jobs` never depend on each other, and no crate depends on the binary.
 The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
 I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
-`connectors` and `ai` are the outbound-I/O crates.
+`connectors`, `ai` and `identity` are the outbound-I/O crates.
 
 ### 5.2 Feature modules inside crates
 
@@ -960,7 +962,12 @@ POSTs. After 1.0, `/api/v1` changes only additively.
 **Authentication:** local accounts (argon2id), server-side sessions in
 HttpOnly SameSite cookies with CSRF tokens on mutations; API keys random, stored
 as SHA-256 hashes, workspace-scoped, with scopes `ingest` (write-only), `read`,
-`write`, `admin`. OIDC SSO later (OQ-16). **Public endpoints:**
+`write`, `admin`. OIDC SSO works with any compliant provider, with Keycloak as
+the reference: the authorization-code flow with PKCE, a state cookie bound to a
+single-use server-side login, and ID-token verification in `zirv-flow-identity`.
+An identity links to a user by issuer and subject, or by a verified e-mail
+address; provider roles are not mapped, so an admin grants workspace access.
+Local sign-in can be turned off. **Public endpoints:**
 `/api/v1/ingest/{identify,track,batch}` (ingestion key implies workspace; size
 and per-key rate limits; schema validation; `202` after durable append),
 `/hooks/{id}` (HMAC signature), `/t/*` and `/u/*` (signed tokens), `/a/*`
@@ -1204,7 +1211,7 @@ they were ruled as their capabilities were added to the plan.
 | OQ-12 | Bounce handling for SMTP-only setups without provider webhooks (VERP, DSN mailbox polling)? | M6 |
 | OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
 | OQ-14 | Should flows pause sends automatically when an input source is stale? | M5 |
-| OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? | M8 |
+| OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? Decided in M1: OIDC SSO through any compliant provider, with Keycloak as the reference. | Closed (M1) |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
 | OQ-19 | Suppression scope: per workspace only, or also organization-wide across brands? | M6 |

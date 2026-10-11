@@ -180,7 +180,7 @@ async fn create_account(
     if is_owner && zirv_flow_store::count_owners(&mut *tx).await? > 0 {
         return Err(AdminError::Conflict("an owner already exists"));
     }
-    let user = zirv_flow_store::create_user(&mut *tx, &email, &hash, is_owner)
+    let user = zirv_flow_store::create_user(&mut *tx, &email, Some(&hash), is_owner)
         .await
         .map_err(|error| {
             if error.is_conflict() {
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(owner.email, "owner@example.com");
         assert!(zirv_flow_core::password::verify(
             PASSWORD,
-            &owner.password_hash
+            owner.password_hash.as_deref().unwrap()
         ));
         assert!(matches!(second, AdminError::Conflict(_)), "{second}");
     }
@@ -529,7 +529,7 @@ mod tests {
             .unwrap();
         assert!(zirv_flow_core::password::verify(
             "another long password",
-            &user.password_hash
+            user.password_hash.as_deref().unwrap()
         ));
         assert!(user.locked_until.is_none());
         assert!(

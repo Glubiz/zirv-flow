@@ -211,7 +211,7 @@ mod tests {
     use crate::create_user;
 
     async fn user(pool: &PgPool, email: &str) -> UserId {
-        create_user(pool, &Email::parse(email).unwrap(), "hash", false)
+        create_user(pool, &Email::parse(email).unwrap(), Some("hash"), false)
             .await
             .unwrap()
             .id

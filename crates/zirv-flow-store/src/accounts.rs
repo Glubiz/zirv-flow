@@ -26,7 +26,8 @@ const MAX_LOCK_SECONDS: f64 = 900.0;
 pub struct User {
     pub id: UserId,
     pub email: String,
-    pub password_hash: String,
+    /// `None` for a user who signs in only through an identity provider.
+    pub password_hash: Option<String>,
     pub is_owner: bool,
     pub failed_sign_ins: i32,
     pub locked_until: Option<OffsetDateTime>,
@@ -48,7 +49,7 @@ impl fmt::Debug for User {
 pub(crate) struct UserRow {
     pub(crate) id: Uuid,
     pub(crate) email: String,
-    pub(crate) password_hash: String,
+    pub(crate) password_hash: Option<String>,
     pub(crate) is_owner: bool,
     pub(crate) failed_sign_ins: i32,
     pub(crate) locked_until: Option<OffsetDateTime>,
@@ -69,11 +70,12 @@ impl From<UserRow> for User {
     }
 }
 
-/// Creates a user. A taken address (compared case-insensitively) or a second owner is a conflict.
+/// Creates a user, with no password when `password_hash` is `None`. A taken address
+/// (compared case-insensitively) or a second owner is a conflict.
 pub async fn create_user<'e>(
     executor: impl PgExecutor<'e>,
     email: &Email,
-    password_hash: &str,
+    password_hash: Option<&str>,
     is_owner: bool,
 ) -> Result<User, StoreError> {
     let row: UserRow = sqlx::query_as(concat!(
@@ -225,7 +227,7 @@ mod tests {
         let user = User {
             id: UserId::new(),
             email: "jane@example.com".into(),
-            password_hash: "$argon2id$secret".into(),
+            password_hash: Some("$argon2id$secret".into()),
             is_owner: false,
             failed_sign_ins: 0,
             locked_until: None,
@@ -241,7 +243,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_created_user_can_be_found_by_id_and_by_any_casing_of_the_address(pool: PgPool) {
-        let user = create_user(&pool, &email("Jane@Example.com"), "hash", false)
+        let user = create_user(&pool, &email("Jane@Example.com"), Some("hash"), false)
             .await
             .unwrap();
 
@@ -265,12 +267,24 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_duplicate_address_is_a_conflict(pool: PgPool) {
-        create_user(&pool, &email("a@example.com"), "hash", false)
+    async fn a_user_can_be_created_without_a_password(pool: PgPool) {
+        let user = create_user(&pool, &email("a@example.com"), None, false)
             .await
             .unwrap();
 
-        let error = create_user(&pool, &email("A@example.com"), "hash", false)
+        assert!(user.password_hash.is_none());
+        let found = find_user(&pool, user.id).await.unwrap().unwrap();
+        assert!(found.password_hash.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_duplicate_address_is_a_conflict(pool: PgPool) {
+        create_user(&pool, &email("a@example.com"), Some("hash"), false)
+            .await
+            .unwrap();
+
+        let error = create_user(&pool, &email("A@example.com"), Some("hash"), false)
             .await
             .unwrap_err();
 
@@ -280,11 +294,11 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_database_allows_only_one_owner(pool: PgPool) {
-        create_user(&pool, &email("a@example.com"), "hash", true)
+        create_user(&pool, &email("a@example.com"), Some("hash"), true)
             .await
             .unwrap();
 
-        let error = create_user(&pool, &email("b@example.com"), "hash", true)
+        let error = create_user(&pool, &email("b@example.com"), Some("hash"), true)
             .await
             .unwrap_err();
 
@@ -295,7 +309,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn four_failures_do_not_lock_but_the_fifth_does(pool: PgPool) {
-        let user = create_user(&pool, &email("a@example.com"), "hash", false)
+        let user = create_user(&pool, &email("a@example.com"), Some("hash"), false)
             .await
             .unwrap();
 
@@ -315,7 +329,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_lock_grows_exponentially_and_is_capped_at_fifteen_minutes(pool: PgPool) {
-        let user = create_user(&pool, &email("a@example.com"), "hash", false)
+        let user = create_user(&pool, &email("a@example.com"), Some("hash"), false)
             .await
             .unwrap();
         let seconds_locked = |pool: PgPool| async move {
@@ -351,7 +365,7 @@ mod tests {
     async fn an_account_is_locked_only_while_the_database_clock_is_before_locked_until(
         pool: PgPool,
     ) {
-        let user = create_user(&pool, &email("a@example.com"), "hash", false)
+        let user = create_user(&pool, &email("a@example.com"), Some("hash"), false)
             .await
             .unwrap();
         assert!(!is_locked(&pool, user.id).await.unwrap());
@@ -373,7 +387,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_successful_sign_in_resets_the_counter_and_the_lock(pool: PgPool) {
-        let user = create_user(&pool, &email("a@example.com"), "hash", false)
+        let user = create_user(&pool, &email("a@example.com"), Some("hash"), false)
             .await
             .unwrap();
         for _ in 0..6 {
@@ -390,7 +404,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn setting_a_password_clears_the_lock_and_reports_missing_users(pool: PgPool) {
-        let user = create_user(&pool, &email("a@example.com"), "old", false)
+        let user = create_user(&pool, &email("a@example.com"), Some("old"), false)
             .await
             .unwrap();
         for _ in 0..5 {
@@ -401,7 +415,7 @@ mod tests {
         assert!(!set_password(&pool, UserId::new(), "new").await.unwrap());
 
         let user = find_user(&pool, user.id).await.unwrap().unwrap();
-        assert_eq!(user.password_hash, "new");
+        assert_eq!(user.password_hash.as_deref(), Some("new"));
         assert_eq!(user.failed_sign_ins, 0);
         assert!(user.locked_until.is_none());
     }

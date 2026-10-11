@@ -13,9 +13,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 8] = [
+const CONFIG_KEYS: [&str; 15] = [
     "server.bind",
     "server.cookie_secure",
+    "server.public_url",
+    "auth.local.enabled",
+    "auth.oidc.issuer_url",
+    "auth.oidc.client_id",
+    "auth.oidc.client_secret",
+    "auth.oidc.scopes",
+    "auth.oidc.auto_create_users",
     "database.url",
     "database.max_connections",
     "database.migrate_on_start",
@@ -28,6 +35,7 @@ const CONFIG_KEYS: [&str; 8] = [
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     server: ServerConfig,
+    auth: AuthConfig,
     database: DatabaseConfig,
     worker: WorkerConfig,
 }
@@ -37,6 +45,72 @@ pub(crate) struct Config {
 struct ServerConfig {
     bind: SocketAddr,
     cookie_secure: bool,
+    /// The URL users reach the server at; the OIDC redirect URI is built from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthConfig {
+    local: LocalAuthConfig,
+    /// OIDC sign-in is off while this section is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oidc: Option<OidcConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalAuthConfig {
+    /// Whether e-mail and password sign-in is available.
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OidcConfig {
+    issuer_url: String,
+    client_id: String,
+    client_secret: SecretValue,
+    #[serde(default = "default_scopes")]
+    scopes: Vec<String>,
+    #[serde(default)]
+    auto_create_users: bool,
+}
+
+fn default_scopes() -> Vec<String> {
+    ["openid", "email", "profile"].map(str::to_owned).into()
+}
+
+/// A secret that is never printed, serialised or put in a Debug dump.
+struct SecretValue(String);
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("\"***\"")
+    }
+}
+
+impl Serialize for SecretValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str("***")
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            return Err(serde::de::Error::custom("must not be empty"));
+        }
+        Ok(Self(value))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,6 +169,10 @@ impl SecretUrl {
 
         url.to_string()
     }
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 fn is_password_param(name: &str) -> bool {
@@ -166,6 +244,7 @@ impl Config {
         let mut figment = Figment::new()
             .merge(Serialized::default("server.bind", "127.0.0.1:8080"))
             .merge(Serialized::default("server.cookie_secure", true))
+            .merge(Serialized::default("auth.local.enabled", true))
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32))
@@ -223,7 +302,54 @@ impl Config {
             }
         }
 
+        config.validate_auth(path, &env_sources)?;
         Ok(config)
+    }
+
+    /// The checks that need more than a type: the OIDC URLs and the public URL they rely on.
+    fn validate_auth(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        let fail = |key: &str, reason: &str| {
+            ConfigError::new(key, reason, source_for(key, path, env_sources))
+        };
+        if let Some(public_url) = &self.server.public_url {
+            match Url::parse(public_url) {
+                Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => {}
+                _ => {
+                    return Err(fail("server.public_url", "must be an http or https URL"));
+                }
+            }
+        }
+        let Some(oidc) = &self.auth.oidc else {
+            return Ok(());
+        };
+        if self.server.public_url.is_none() {
+            return Err(fail(
+                "server.public_url",
+                "is required when auth.oidc is configured",
+            ));
+        }
+        let issuer = Url::parse(&oidc.issuer_url).ok().filter(|url| {
+            url.has_host()
+                && match url.scheme() {
+                    "https" => true,
+                    "http" => url.host_str().is_some_and(is_loopback),
+                    _ => false,
+                }
+        });
+        if issuer.is_none() {
+            return Err(fail(
+                "auth.oidc.issuer_url",
+                "must be an https URL (http is allowed only for localhost)",
+            ));
+        }
+        if oidc.client_id.trim().is_empty() {
+            return Err(fail("auth.oidc.client_id", "must not be empty"));
+        }
+        Ok(())
     }
 
     pub(crate) fn server_bind(&self) -> SocketAddr {
@@ -233,6 +359,32 @@ impl Config {
     /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn server_cookie_secure(&self) -> bool {
         self.server.cookie_secure
+    }
+
+    /// Whether e-mail and password sign-in is available.
+    pub(crate) fn auth_local_enabled(&self) -> bool {
+        self.auth.local.enabled
+    }
+
+    /// The OIDC settings and whether unknown users are created, when OIDC is configured.
+    pub(crate) fn oidc(&self) -> Option<(zirv_flow_api::OidcSettings, bool)> {
+        let oidc = self.auth.oidc.as_ref()?;
+        let public_url = self.server.public_url.as_deref()?;
+        // `openid` is always requested, first.
+        let mut scopes = vec!["openid".to_owned()];
+        for scope in &oidc.scopes {
+            if !scopes.contains(scope) {
+                scopes.push(scope.clone());
+            }
+        }
+        let settings = zirv_flow_api::OidcSettings {
+            issuer_url: oidc.issuer_url.clone(),
+            client_id: oidc.client_id.clone(),
+            client_secret: zirv_flow_api::SecretString::new(oidc.client_secret.0.clone()),
+            scopes,
+            redirect_url: zirv_flow_api::oidc_redirect_url(public_url),
+        };
+        Some((settings, oidc.auto_create_users))
     }
 
     pub(crate) fn database_url(&self) -> &str {
@@ -634,5 +786,180 @@ cookie_secure = false
         let output = format!("{config:?}");
         assert!(!output.contains("hunter2"));
         assert!(output.contains("***"));
+    }
+
+    const OIDC_FILE: &str = "[database]
+url = \"postgres://localhost/database\"
+[server]
+public_url = \"https://flow.example.com/\"
+[auth.local]
+enabled = false
+[auth.oidc]
+issuer_url = \"https://idp.example.com/realms/main\"
+client_id = \"zirv-flow\"
+client_secret = \"file-secret\"
+scopes = [\"email\", \"groups\"]
+auto_create_users = true
+";
+
+    #[test]
+    fn local_sign_in_is_on_and_oidc_is_off_by_default() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert!(config.auth_local_enabled());
+        assert!(config.oidc().is_none());
+    }
+
+    #[test]
+    fn the_oidc_keys_load_from_a_file() {
+        let file = TestFile::new(OIDC_FILE);
+
+        let config = Config::load(Some(&file.0), []).unwrap();
+
+        assert!(!config.auth_local_enabled());
+        let (settings, auto_create_users) = config.oidc().unwrap();
+        assert!(auto_create_users);
+        assert_eq!(settings.issuer_url, "https://idp.example.com/realms/main");
+        assert_eq!(settings.client_id, "zirv-flow");
+        assert_eq!(
+            settings.redirect_url,
+            "https://flow.example.com/api/v1/session/oidc/callback"
+        );
+        assert_eq!(settings.scopes, ["openid", "email", "groups"]);
+    }
+
+    #[test]
+    fn the_oidc_keys_load_from_the_environment_with_defaults() {
+        let mut env = database_env("postgres://localhost/database");
+        env.extend([
+            (
+                "ZIRV_FLOW_SERVER__PUBLIC_URL".into(),
+                "http://localhost:8080".into(),
+            ),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__ISSUER_URL".into(),
+                "http://localhost:8081/realms/main".into(),
+            ),
+            ("ZIRV_FLOW_AUTH__OIDC__CLIENT_ID".into(), "zirv-flow".into()),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET".into(),
+                "env-secret".into(),
+            ),
+            ("ZIRV_FLOW_AUTH__LOCAL__ENABLED".into(), "false".into()),
+        ]);
+
+        let config = Config::load(None, env).unwrap();
+
+        let (settings, auto_create_users) = config.oidc().unwrap();
+        assert!(!auto_create_users);
+        assert!(!config.auth_local_enabled());
+        assert_eq!(settings.scopes, ["openid", "email", "profile"]);
+        assert_eq!(
+            settings.redirect_url,
+            "http://localhost:8080/api/v1/session/oidc/callback"
+        );
+    }
+
+    #[test]
+    fn the_environment_can_supply_just_the_secret_of_a_file_section() {
+        let file = TestFile::new(&OIDC_FILE.replace(
+            "client_secret = \"file-secret\"
+",
+            "",
+        ));
+
+        let missing = Config::load(Some(&file.0), []).unwrap_err().to_string();
+        let supplied = Config::load(
+            Some(&file.0),
+            [(
+                "ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET".into(),
+                "env-secret".into(),
+            )],
+        );
+
+        assert!(missing.contains("auth.oidc.client_secret: is required"));
+        assert!(supplied.is_ok());
+    }
+
+    #[test]
+    fn oidc_without_a_public_url_names_the_key() {
+        let mut env = database_env("postgres://localhost/database");
+        env.extend([
+            (
+                "ZIRV_FLOW_AUTH__OIDC__ISSUER_URL".into(),
+                "https://idp.example.com".into(),
+            ),
+            ("ZIRV_FLOW_AUTH__OIDC__CLIENT_ID".into(), "zirv-flow".into()),
+            ("ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET".into(), "s".into()),
+        ]);
+
+        let error = Config::load(None, env).unwrap_err().to_string();
+
+        assert!(error.contains("server.public_url: is required when auth.oidc is configured"));
+    }
+
+    #[test]
+    fn a_bad_public_url_or_issuer_names_its_key() {
+        let file = TestFile::new(&OIDC_FILE.replace("https://flow.example.com/", "ftp://flow"));
+        let public = Config::load(Some(&file.0), []).unwrap_err().to_string();
+        let file =
+            TestFile::new(&OIDC_FILE.replace("https://idp.example.com", "http://idp.example.com"));
+        let issuer = Config::load(Some(&file.0), []).unwrap_err().to_string();
+        let file =
+            TestFile::new(&OIDC_FILE.replace("https://idp.example.com", "http://localhost:8081"));
+        let local = Config::load(Some(&file.0), []);
+
+        assert!(
+            public.contains("server.public_url: must be an http or https URL"),
+            "{public}"
+        );
+        assert!(
+            issuer.contains("auth.oidc.issuer_url: must be an https URL"),
+            "{issuer}"
+        );
+        assert!(local.is_ok());
+    }
+
+    #[test]
+    fn an_empty_client_secret_or_id_is_refused() {
+        let file = TestFile::new(&OIDC_FILE.replace("file-secret", ""));
+        let secret = Config::load(Some(&file.0), []).unwrap_err().to_string();
+        let file =
+            TestFile::new(&OIDC_FILE.replace("client_id = \"zirv-flow\"", "client_id = \" \""));
+        let id = Config::load(Some(&file.0), []).unwrap_err().to_string();
+
+        assert!(secret.contains("auth.oidc.client_secret"), "{secret}");
+        assert!(
+            id.contains("auth.oidc.client_id: must not be empty"),
+            "{id}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_oidc_key_is_refused() {
+        let file = TestFile::new(&format!(
+            "{OIDC_FILE}group_claim = \"groups\"
+"
+        ));
+
+        let error = Config::load(Some(&file.0), []).unwrap_err().to_string();
+
+        assert!(error.contains("auth.oidc.group_claim"), "{error}");
+    }
+
+    #[test]
+    fn the_client_secret_is_redacted_in_debug_and_serialised_output() {
+        let file = TestFile::new(OIDC_FILE);
+        let config = Config::load(Some(&file.0), []).unwrap();
+
+        let output = format!(
+            "{config:?}
+{}",
+            toml::to_string(&config).unwrap()
+        );
+
+        assert!(!output.contains("file-secret"));
+        assert!(output.contains("client_secret = \"***\""));
+        assert!(output.contains("https://idp.example.com/realms/main"));
     }
 }

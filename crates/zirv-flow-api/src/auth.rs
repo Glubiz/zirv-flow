@@ -242,7 +242,7 @@ mod tests {
         User {
             id: UserId::new(),
             email: "a@example.com".into(),
-            password_hash: String::new(),
+            password_hash: None,
             is_owner,
             failed_sign_ins: 0,
             locked_until: None,

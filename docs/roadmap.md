@@ -111,8 +111,8 @@ functional milestone; at its end, releases switch to every merge.
 - **CI.** Postgres service container for integration tests, SPA type check and tests, image build, a `cargo metadata` dependency-direction check against section 5.1, the `cargo tree` purity check, and frontend lint for feature import boundaries.
 - **CD switch.** The last change of M1 switches `cd.yaml` to publish on every merge to `main` (ADR-005). OQ-15 (minimum Postgres version) is decided.
 
-**Out of scope.** Profile data, connectors, segments, flows, OIDC, the full RBAC
-matrix, secrets encryption (no credentials are stored yet).
+**Out of scope.** Profile data, connectors, segments, flows, provider role and group mapping
+for OIDC sign-in, the full RBAC matrix, secrets encryption (no credentials are stored yet).
 
 **Exit criteria.**
 - [ ] From a clean checkout, `docker compose up` serves the UI and `/readyz` returns 200. A new owner signs in, creates a workspace and an API key, through both UI and `/api/v1`.
@@ -357,9 +357,9 @@ against the scalability targets, and release v1.0.
 - **Security.** Threat model review, dependency audit, fuzzing of the AST, manifest and template document parsers, SSRF, template sandbox, sanitizer and preview-isolation tests; assistant prompt-injection, cross-workspace, PII-context and server-side draft-only review.
 - **User docs.** Getting started, sources, segments, flows, templates, channels, and a compliance guide stating what Zirv Flow enforces and what stays the operator's responsibility.
 - **API stability.** `/api/v1` frozen: additive changes only after 1.0. A beta period with release candidates.
-- **Decisions.** OQ-8 validated under load; OQ-16 (OIDC for 1.0) decided.
+- **Decisions.** OQ-8 validated under load; OIDC sign-in itself shipped in M1 (OQ-16 closed).
 
-**Out of scope.** New features; M9 themes unless OQ-16 pulls OIDC in.
+**Out of scope.** New features; M9 themes.
 
 **Exit criteria.**
 - [ ] The RBAC matrix test covers every endpoint and role; a viewer without `view_pii` sees personal data masked.
@@ -391,7 +391,7 @@ milestone (M10, M11, ...) with full scope and exit criteria, before work starts.
 | WASM component plugins | Sandboxed third-party connectors (ADR-004) | ADR-004's reversal evidence |
 | Event analytics store | Optional add-on for the explorer, high-volume traces, event-heavy segments and reporting (ADR-003, OQ-29) | M8 event/explorer benchmarks miss targets after measured Postgres tuning |
 | Reporting and attribution | Flow and campaign performance, conversion attribution | v1.0 users needing more than per-node counters |
-| Identity and access | OIDC SSO (unless done in M8), SCIM provisioning | Team deployments asking for it |
+| Identity and access | OIDC role and group mapping (sign-in itself shipped in M1), SCIM provisioning | Team deployments asking for it |
 | Assistant interoperability | MCP server exposing the same workspace-scoped, RBAC-checked read-and-draft tool layer (OQ-30) | External clients need supported draft tooling and the authentication model is decided |
 | Further assistant capabilities | Additional read, draft or explanation tools; never autonomous product actions | Golden-prompt and usage evidence for a specific user task |
 | Platform | Custom objects (OQ-4), rolling upgrades (OQ-17), flow version migration (OQ-7), transactional API (OQ-11) | Each open question's decision |

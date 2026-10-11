@@ -137,6 +137,16 @@ async fn run_roles(
     stderr: &mut impl Write,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
+    // A bad server configuration stops the process before any role starts.
+    let state = if roles.serve {
+        match http_state(config, pool.clone(), stderr) {
+            Ok(state) => Some(state),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
+
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let stop = Arc::new(stop);
     let deadline = Arc::new(ShutdownDeadline::default());
@@ -177,31 +187,11 @@ async fn run_roles(
         let _ = writeln!(stderr, "scheduler: standing for leadership");
     }
 
-    let code = if roles.serve {
-        let handle = match PrometheusBuilder::new()
-            .set_buckets(&HTTP_DURATION_BUCKETS)
-            .and_then(|builder| builder.install_recorder())
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                let _ = writeln!(stderr, "error: metrics: {error}");
-                let _ = stop.send(true);
-                return 1;
-            }
-        };
-        let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
+    let code = if let Some(state) = state {
         let mut draining = stopped.clone();
-        let code = serve_http(
-            pool,
-            render,
-            config.server_bind(),
-            config.server_cookie_secure(),
-            stderr,
-            &deadline,
-            async move {
-                let _ = draining.wait_for(|stopped| *stopped).await;
-            },
-        )
+        let code = serve_http(state, config.server_bind(), stderr, &deadline, async move {
+            let _ = draining.wait_for(|stopped| *stopped).await;
+        })
         .await;
         // A server that failed to start or stopped on its own takes the other roles down.
         deadline.start();
@@ -215,6 +205,35 @@ async fn run_roles(
 
     drain(background, deadline.start(), stderr).await;
     code
+}
+
+/// The API state for the `serve` role: the metrics recorder, cookie and sign-in settings.
+/// On failure it reports the problem and returns the exit code.
+fn http_state(
+    config: &Config,
+    pool: PgPool,
+    stderr: &mut impl Write,
+) -> Result<zirv_flow_api::AppState, u8> {
+    let handle = PrometheusBuilder::new()
+        .set_buckets(&HTTP_DURATION_BUCKETS)
+        .and_then(|builder| builder.install_recorder())
+        .map_err(|error| {
+            let _ = writeln!(stderr, "error: metrics: {error}");
+            1
+        })?;
+    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
+    let state = zirv_flow_api::AppState::new(pool, render)
+        .with_cookie_secure(config.server_cookie_secure())
+        .with_local_sign_in(config.auth_local_enabled());
+    match config.oidc() {
+        Some((settings, auto_create_users)) => state
+            .with_oidc(settings, auto_create_users)
+            .map_err(|error| {
+                let _ = writeln!(stderr, "error: auth.oidc: {error}");
+                2
+            }),
+        None => Ok(state),
+    }
 }
 
 /// The one deadline of a shutdown, shared by every role: it starts when the shutdown does.
@@ -255,10 +274,8 @@ async fn drain(
 
 /// Binds `addr` and serves the API until `shutdown` completes.
 async fn serve_http(
-    pool: PgPool,
-    render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
+    state: zirv_flow_api::AppState,
     addr: SocketAddr,
-    cookie_secure: bool,
     stderr: &mut impl Write,
     deadline: &ShutdownDeadline,
     shutdown: impl Future<Output = ()> + Send + 'static,
@@ -273,8 +290,6 @@ async fn serve_http(
     let bound = listener.local_addr().unwrap_or(addr);
     let _ = writeln!(stderr, "listening on {bound}");
 
-    let state =
-        zirv_flow_api::AppState::new(pool, render_metrics).with_cookie_secure(cookie_secure);
     let (drain, draining) = tokio::sync::watch::channel(false);
     let server = zirv_flow_api::serve(listener, state, async move {
         let mut draining = draining;
@@ -493,6 +508,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_check_redacts_the_oidc_client_secret() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Config(ConfigCommand::Check)),
+        };
+        let mut env = database_env("postgres://localhost/database");
+        env.extend([
+            (
+                "ZIRV_FLOW_SERVER__PUBLIC_URL".into(),
+                "https://flow.example.com".into(),
+            ),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__ISSUER_URL".into(),
+                "https://idp.example.com".into(),
+            ),
+            ("ZIRV_FLOW_AUTH__OIDC__CLIENT_ID".into(), "zirv-flow".into()),
+            (
+                "ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET".into(),
+                "oidc-secret-value".into(),
+            ),
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut stderr).await;
+        let output = String::from_utf8(stdout).unwrap();
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(!output.contains("oidc-secret-value"));
+        assert!(output.contains("client_secret = \"***\""));
+        assert!(output.contains("public_url = \"https://flow.example.com\""));
+    }
+
+    #[tokio::test]
     async fn a_configuration_error_exits_with_code_two() {
         let cli = Cli {
             config: None,
@@ -596,7 +645,13 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert!(users[0].is_owner);
         assert_eq!(users[0].email, "owner@example.com");
-        assert!(!users[0].password_hash.contains("correct horse battery"));
+        assert!(
+            !users[0]
+                .password_hash
+                .as_deref()
+                .unwrap()
+                .contains("correct horse battery")
+        );
     }
 
     #[sqlx::test]
@@ -672,6 +727,7 @@ mod tests {
             .password_hash
             .clone();
         assert_ne!(before, after);
+        let after = after.unwrap();
         assert!(after.starts_with("$argon2id$"));
         assert!(!after.contains("another long password"));
     }
@@ -734,6 +790,10 @@ mod tests {
             .unwrap()
     }
 
+    fn state() -> zirv_flow_api::AppState {
+        zirv_flow_api::AppState::new(lazy_pool(), Arc::new(String::new))
+    }
+
     #[tokio::test]
     async fn a_bind_failure_is_reported_with_exit_code_one() {
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -741,10 +801,8 @@ mod tests {
         let mut stderr = Vec::new();
 
         let code = serve_http(
-            lazy_pool(),
-            Arc::new(String::new),
+            state(),
             addr,
-            true,
             &mut stderr,
             &ShutdownDeadline::default(),
             std::future::ready(()),
@@ -764,10 +822,8 @@ mod tests {
         let mut stderr = Vec::new();
 
         let code = serve_http(
-            lazy_pool(),
-            Arc::new(String::new),
+            state(),
             "127.0.0.1:0".parse().unwrap(),
-            true,
             &mut stderr,
             &ShutdownDeadline::default(),
             std::future::ready(()),

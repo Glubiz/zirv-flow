@@ -75,6 +75,9 @@ pub(crate) async fn sign_in(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
+    if !state.local_sign_in {
+        return Err(ApiError::not_found());
+    }
     let email = Email::parse(&body.email)?;
     let invalid = || ApiError::new(StatusCode::UNAUTHORIZED, INVALID_CREDENTIALS);
     let anonymous = admin::Context::anonymous().with_request_id(request_id::current());
@@ -93,12 +96,16 @@ pub(crate) async fn sign_in(
         return Err(invalid());
     }
 
-    // An over-long password cannot be valid, but it spends the same time as any other.
-    let verified = if body.password.chars().count() <= MAX_PASSWORD_CHARS {
-        passwords::verify(body.password, user.password_hash.clone()).await
-    } else {
-        passwords::dummy_verify().await;
-        false
+    // An over-long password cannot be valid, and a user who signs in only through an
+    // identity provider has none to match; both spend the same time as any other attempt.
+    let verified = match &user.password_hash {
+        Some(hash) if body.password.chars().count() <= MAX_PASSWORD_CHARS => {
+            passwords::verify(body.password, hash.clone()).await
+        }
+        _ => {
+            passwords::dummy_verify().await;
+            false
+        }
     };
     if !verified {
         record_failure(
@@ -110,17 +117,51 @@ pub(crate) async fn sign_in(
         .await?;
         return Err(invalid());
     }
-    let context = admin::Context::user(user.id).with_request_id(request_id::current());
+    let new = start(&state, user.id, "password").await?;
 
+    Ok((
+        [
+            (
+                header::SET_COOKIE,
+                cookies::session(&new.token, state.cookie_secure),
+            ),
+            (
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-store"),
+            ),
+        ],
+        Json(SessionBody {
+            user: UserBody::from(&user),
+            csrf_token: new.csrf,
+        }),
+    )
+        .into_response())
+}
+
+/// A freshly started session: the cookie value and the CSRF token that goes with it.
+pub(crate) struct NewSession {
+    pub(crate) token: String,
+    pub(crate) csrf: String,
+}
+
+/// Starts a session for a user who has just proved who they are, whichever way (`method` is
+/// `"password"` or `"oidc"`): resets their failure counter, sweeps expired sessions, stores
+/// the new one and audits the sign-in. Every method makes identical sessions.
+pub(crate) async fn start(
+    state: &AppState,
+    user: UserId,
+    method: &'static str,
+) -> Result<NewSession, ApiError> {
+    let context = admin::Context::user(user).with_request_id(request_id::current());
     let token = random_token(32);
     let csrf = credentials::csrf_token(&token);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::record_successful_sign_in(&mut *tx, user.id).await?;
+    zirv_flow_store::record_successful_sign_in(&mut *tx, user).await?;
     zirv_flow_store::delete_expired_sessions(&mut *tx, SESSION_IDLE_SECONDS).await?;
     zirv_flow_store::create_session(
         &mut *tx,
         &sha256(&token),
-        user.id,
+        user,
         &sha256(&csrf),
         SESSION_ABSOLUTE_SECONDS,
     )
@@ -130,29 +171,12 @@ pub(crate) async fn sign_in(
         &context,
         None,
         "session.signed_in",
-        Some(("user", user.id.as_uuid())),
-        json!({}),
+        Some(("user", user.as_uuid())),
+        json!({ "method": method }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-
-    Ok((
-        [
-            (
-                header::SET_COOKIE,
-                cookies::session(&token, state.cookie_secure),
-            ),
-            (
-                header::CACHE_CONTROL,
-                header::HeaderValue::from_static("no-store"),
-            ),
-        ],
-        Json(SessionBody {
-            user: UserBody::from(&user),
-            csrf_token: csrf,
-        }),
-    )
-        .into_response())
+    Ok(NewSession { token, csrf })
 }
 
 /// Audits a failed sign-in, and counts it against the account when `account` is
@@ -249,7 +273,7 @@ mod tests {
         let user = User {
             id: UserId::new(),
             email: "a@example.com".into(),
-            password_hash: "$argon2id$secret".into(),
+            password_hash: Some("$argon2id$secret".into()),
             is_owner: true,
             failed_sign_ins: 0,
             locked_until: None,

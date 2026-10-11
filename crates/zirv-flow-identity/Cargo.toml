@@ -1,0 +1,30 @@
+[package]
+name = "zirv-flow-identity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# An in-process mock identity provider, for tests of crates that sign in through this one.
+test-support = ["dep:axum", "dep:chrono", "dep:rand", "dep:rsa", "dep:serde_json", "dep:tokio"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+openidconnect.workspace = true
+rand = { workspace = true, optional = true }
+rsa = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+url.workspace = true
+zirv-flow-core.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+chrono.workspace = true
+rand.workspace = true
+rsa.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
