@@ -56,8 +56,7 @@ pub(super) struct RowReader<'a> {
     next_chunk: i32,
     ended: bool,
     header_pending: bool,
-    next_number: i64,
-    ready: VecDeque<Vec<String>>,
+    ready: VecDeque<(i64, Vec<String>)>,
 }
 
 impl<'a> RowReader<'a> {
@@ -69,7 +68,6 @@ impl<'a> RowReader<'a> {
             next_chunk: 0,
             ended: false,
             header_pending: true,
-            next_number: 2,
             ready: VecDeque::new(),
         }
     }
@@ -81,9 +79,8 @@ impl<'a> RowReader<'a> {
         }
         let take = limit.min(self.ready.len());
         let mut rows = Vec::with_capacity(take);
-        for cells in self.ready.drain(..take) {
-            rows.push((self.next_number, cells));
-            self.next_number += 1;
+        for (number, cells) in self.ready.drain(..take) {
+            rows.push((number, cells));
         }
         Ok(rows)
     }
@@ -107,11 +104,11 @@ impl<'a> RowReader<'a> {
         let first = self.next_chunk == 0;
         let ready = &mut self.ready;
         let header_pending = &mut self.header_pending;
-        let mut take = |record: Vec<String>| {
+        let mut take = |row: u64, record: Vec<String>| {
             if *header_pending {
                 *header_pending = false;
             } else {
-                ready.push_back(record);
+                ready.push_back((i64::try_from(row).unwrap_or(i64::MAX), record));
             }
         };
         match chunk {

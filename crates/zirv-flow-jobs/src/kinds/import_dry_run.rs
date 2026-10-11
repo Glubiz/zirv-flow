@@ -158,13 +158,6 @@ mod tests {
     }
 
     async fn dry_running(pool: &PgPool, rows: usize, bad_every: usize) -> (WorkspaceId, Import) {
-        zirv_flow_store::migrate(pool).await.unwrap();
-        let name = WorkspaceName::parse("one").unwrap();
-        let slug = Slug::parse("one").unwrap();
-        let ws = zirv_flow_store::create_workspace(pool, &name, &slug)
-            .await
-            .unwrap()
-            .id;
         let mut text = String::from("email\n");
         for n in 0..rows {
             if n % bad_every == bad_every - 1 {
@@ -173,6 +166,18 @@ mod tests {
                 text.push_str(&format!("u{n}@example.com\n"));
             }
         }
+        dry_running_text(pool, &text, rows).await
+    }
+
+    /// A dry-running import of `text`, which holds `rows` data rows.
+    async fn dry_running_text(pool: &PgPool, text: &str, rows: usize) -> (WorkspaceId, Import) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = zirv_flow_store::create_workspace(pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
         let header = vec!["email".to_owned()];
         let trace = TraceContext::root(Cause::api("t"));
         let mut upload = ImportUpload::begin(pool, ws).await.unwrap();
@@ -332,6 +337,24 @@ mod tests {
             (done.rows_done, done.rows_applied, done.rows_rejected),
             (1100, 990, 110)
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rejects_carry_the_row_a_spreadsheet_shows_with_blank_lines_and_multi_line_values_counted(
+        pool: PgPool,
+    ) {
+        // Rows: header 1, blank 2, "nope" 3, one record over two lines 4, blank 5, "bad" 6.
+        let text = "email\n\nnope\n\"ada@example.com\n\"\n\nbad\nok@example.com\n";
+        let (ws, import) = dry_running_text(&pool, text, 4).await;
+
+        attempt(&pool, &import, None).await.unwrap();
+
+        let (rejects, _) = list_import_rejects(&pool, ws, import.id, None, None, 10, false)
+            .await
+            .unwrap();
+        let rows: Vec<i64> = rejects.iter().map(|reject| reject.row_number).collect();
+        assert_eq!(rows, [3, 6]);
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

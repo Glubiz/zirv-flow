@@ -5,6 +5,7 @@
 //!
 //! Errors name the rule that was broken and never quote the file.
 
+use std::collections::VecDeque;
 use std::fmt;
 
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder};
@@ -54,6 +55,18 @@ impl fmt::Display for CsvError {
 
 impl std::error::Error for CsvError {}
 
+/// Where the line-and-row scan is within the file. It exists only to number rows: the reader
+/// itself skips blank lines without saying so.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Scan {
+    /// At the start of a line, before any byte of it.
+    LineStart,
+    FieldStart,
+    Unquoted,
+    Quoted,
+    QuoteInQuoted,
+}
+
 /// Reads records from bytes fed in pieces of any size.
 pub struct CsvParser {
     reader: Reader,
@@ -65,6 +78,14 @@ pub struct CsvParser {
     /// Bytes of the file's start held back until it is clear whether they are a BOM.
     prefix: Vec<u8>,
     started: bool,
+    delimiter: u8,
+    scan: Scan,
+    /// A carriage return ended the last line, so a line feed straight after it is the same line end.
+    after_cr: bool,
+    /// The row number of the last row or blank line seen: the header is row 1.
+    rows_seen: u64,
+    /// The row numbers of the records the scan has started and the reader has not returned.
+    pending: VecDeque<u64>,
 }
 
 impl CsvParser {
@@ -77,14 +98,20 @@ impl CsvParser {
             ends_used: 0,
             prefix: Vec::new(),
             started: false,
+            delimiter,
+            scan: Scan::LineStart,
+            after_cr: false,
+            rows_seen: 0,
+            pending: VecDeque::new(),
         }
     }
 
-    /// Feeds `bytes`, handing each completed record to `on_record`.
+    /// Feeds `bytes`, handing each completed record to `on_record` with its row number: the header is
+    /// row 1, every blank line counts as a row, and a quoted value that spans lines is one row.
     pub fn push(
         &mut self,
         bytes: &[u8],
-        on_record: &mut impl FnMut(Vec<String>),
+        on_record: &mut impl FnMut(u64, Vec<String>),
     ) -> Result<(), CsvError> {
         if self.started {
             return if bytes.is_empty() {
@@ -102,7 +129,7 @@ impl CsvParser {
     }
 
     /// Ends the file: a last record without a line end is handed over.
-    pub fn finish(&mut self, on_record: &mut impl FnMut(Vec<String>)) -> Result<(), CsvError> {
+    pub fn finish(&mut self, on_record: &mut impl FnMut(u64, Vec<String>)) -> Result<(), CsvError> {
         if !self.started {
             self.start(on_record)?;
         }
@@ -110,7 +137,7 @@ impl CsvParser {
     }
 
     /// Reads the held-back start of the file, without its byte order mark.
-    fn start(&mut self, on_record: &mut impl FnMut(Vec<String>)) -> Result<(), CsvError> {
+    fn start(&mut self, on_record: &mut impl FnMut(u64, Vec<String>)) -> Result<(), CsvError> {
         self.started = true;
         let held = std::mem::take(&mut self.prefix);
         let body = held.strip_prefix(&BOM).unwrap_or(&held);
@@ -124,8 +151,9 @@ impl CsvParser {
     fn read(
         &mut self,
         mut input: &[u8],
-        on_record: &mut impl FnMut(Vec<String>),
+        on_record: &mut impl FnMut(u64, Vec<String>),
     ) -> Result<(), CsvError> {
+        self.number_rows(input);
         loop {
             let (result, read, written, ended) = self.reader.read_record(
                 input,
@@ -155,10 +183,60 @@ impl CsvParser {
                     let record = fields(&self.output, &self.ends[..self.ends_used])?;
                     self.output_used = 0;
                     self.ends_used = 0;
-                    on_record(record);
+                    let row = self.pending.pop_front().unwrap_or(self.rows_seen);
+                    on_record(row, record);
                 }
                 ReadRecordResult::End => return Ok(()),
             }
+        }
+    }
+}
+
+impl CsvParser {
+    /// Numbers the rows in `input`: each blank line and each record takes the next number.
+    fn number_rows(&mut self, input: &[u8]) {
+        for &byte in input {
+            let line_end = matches!(byte, b'\n' | b'\r');
+            let continues_crlf = byte == b'\n' && self.after_cr;
+            let was = self.scan;
+            self.scan = match (self.scan, byte) {
+                (Scan::LineStart, _) if line_end => {
+                    if !continues_crlf {
+                        self.rows_seen += 1;
+                    }
+                    Scan::LineStart
+                }
+                (Scan::LineStart, other) => {
+                    self.rows_seen += 1;
+                    self.pending.push_back(self.rows_seen);
+                    self.field_start(other)
+                }
+                (Scan::FieldStart, other) => self.field_start(other),
+                (Scan::Unquoted, other) => self.after_unquoted(other),
+                (Scan::Quoted, b'"') => Scan::QuoteInQuoted,
+                (Scan::Quoted, _) => Scan::Quoted,
+                (Scan::QuoteInQuoted, b'"') => Scan::Quoted,
+                (Scan::QuoteInQuoted, other) => self.after_unquoted(other),
+            };
+            self.after_cr = byte == b'\r' && was != Scan::Quoted;
+        }
+    }
+
+    fn field_start(&self, byte: u8) -> Scan {
+        if byte == b'"' {
+            Scan::Quoted
+        } else {
+            self.after_unquoted(byte)
+        }
+    }
+
+    fn after_unquoted(&self, byte: u8) -> Scan {
+        if byte == self.delimiter {
+            Scan::FieldStart
+        } else if matches!(byte, b'\n' | b'\r') {
+            Scan::LineStart
+        } else {
+            Scan::Unquoted
         }
     }
 }
@@ -221,12 +299,66 @@ mod tests {
     fn parse_in(pieces: &[&[u8]], delimiter: u8) -> Result<Vec<Vec<String>>, CsvError> {
         let mut parser = CsvParser::new(delimiter);
         let mut records = Vec::new();
-        let mut take = |record: Vec<String>| records.push(record);
+        let mut take = |_row: u64, record: Vec<String>| records.push(record);
         for piece in pieces {
             parser.push(piece, &mut take)?;
         }
         parser.finish(&mut take)?;
         Ok(records)
+    }
+
+    fn numbered_in(pieces: &[&[u8]]) -> Vec<(u64, Vec<String>)> {
+        let mut parser = CsvParser::new(b',');
+        let mut records = Vec::new();
+        let mut take = |row: u64, record: Vec<String>| records.push((row, record));
+        for piece in pieces {
+            parser.push(piece, &mut take).unwrap();
+        }
+        parser.finish(&mut take).unwrap();
+        records
+    }
+
+    fn numbers(pieces: &[&[u8]]) -> Vec<u64> {
+        numbered_in(pieces)
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    #[test]
+    fn the_header_is_row_one_and_a_blank_line_counts_as_a_row() {
+        let records = numbered_in(&[b"a,b\n\n1,2\n"]);
+
+        assert_eq!(records[0], (1, vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(records[1], (3, vec!["1".to_owned(), "2".to_owned()]));
+    }
+
+    #[test]
+    fn a_quoted_value_over_several_lines_is_one_row_even_beside_blank_lines() {
+        let text = b"a,b\n\n\n\"x\ny\n\nz\",1\n\n3,4\r\n\r\n5,6";
+
+        // Rows: header 1, blanks 2 and 3, the quoted record 4 (it spans lines), blank 5, 6, blank 7, 8.
+        assert_eq!(numbers(&[text]), [1, 4, 6, 8]);
+    }
+
+    #[test]
+    fn numbering_does_not_depend_on_where_the_body_is_cut() {
+        let text = b"a,b\r\n\r\n\"1\r\n\",2\n\n\n3,4";
+        let whole = numbers(&[text]);
+
+        for cut in 1..text.len() {
+            assert_eq!(
+                numbers(&[&text[..cut], &text[cut..]]),
+                whole,
+                "cut at {cut}"
+            );
+        }
+        assert_eq!(whole, [1, 3, 6]);
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_shift_the_numbers() {
+        assert_eq!(numbers(&[b"\xEF\xBB\xBFa\n\n1\n"]), [1, 3]);
     }
 
     fn rows(records: Vec<Vec<String>>) -> Vec<Vec<&'static str>> {

@@ -179,7 +179,7 @@ impl FileScan {
         let mut parser = CsvParser::new(self.delimiter);
         let head = std::mem::take(&mut self.head);
         let mut records = Vec::new();
-        parser.push(&head, &mut |record| records.push(record))?;
+        parser.push(&head, &mut |_, record| records.push(record))?;
         for record in records {
             self.take(record);
         }
@@ -197,7 +197,7 @@ impl FileScan {
         }
         let mut records = Vec::new();
         if let Some(parser) = self.parser.as_mut() {
-            parser.push(bytes, &mut |record| records.push(record))?;
+            parser.push(bytes, &mut |_, record| records.push(record))?;
         }
         for record in records {
             self.take(record);
@@ -211,7 +211,7 @@ impl FileScan {
         }
         let mut records = Vec::new();
         if let Some(parser) = self.parser.as_mut() {
-            parser.finish(&mut |record| records.push(record))?;
+            parser.finish(&mut |_, record| records.push(record))?;
         }
         for record in records {
             self.take(record);

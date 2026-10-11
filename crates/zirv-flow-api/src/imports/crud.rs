@@ -92,14 +92,14 @@ async fn sample_rows(pool: &PgPool, import: &Import) -> Result<Vec<Vec<String>>,
         };
         seq += 1;
         if parser
-            .push(&chunk, &mut |record| records.push(record))
+            .push(&chunk, &mut |_, record| records.push(record))
             .is_err()
         {
             return Ok(Vec::new());
         }
     }
     if records.len() <= SAMPLE_ROWS {
-        let _ = parser.finish(&mut |record| records.push(record));
+        let _ = parser.finish(&mut |_, record| records.push(record));
     }
     // The first record is the header.
     Ok(records.into_iter().skip(1).take(SAMPLE_ROWS).collect())

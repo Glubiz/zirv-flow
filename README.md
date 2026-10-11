@@ -863,7 +863,7 @@ blank or repeated name or a file that is not UTF-8 is a 422, and a refused or in
 upload keeps nothing. `serve` holds one database connection for the length of an upload. The
 answer is the import with its header and the first 20 rows; the cells of those rows are null
 and `samples_masked` is true for callers who may not see values (members and `read` keys).
-Row numbers are the ones a spreadsheet shows: the header is row 1.
+Row numbers are the ones a spreadsheet shows: the header is row 1, every blank line counts as a row, and a quoted value over several lines is one row.
 
 **The mapping.** `PUT .../imports/{id}/mapping` saves it and moves the import to `mapped`:
 
