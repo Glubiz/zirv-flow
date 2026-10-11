@@ -623,7 +623,16 @@ mod tests {
             );
 
             let (one, two) = (one.unwrap(), two.unwrap());
-            assert_eq!(person_of(&one[0]), person_of(&two[0]));
+            // Whichever transaction commits first returns a person the other may merge away.
+            let survivor = current_person(&pool, ws, person_of(&one[0]))
+                .await
+                .unwrap()
+                .unwrap();
+            let other = current_person(&pool, ws, person_of(&two[0]))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(survivor, other);
             let survivors: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM people WHERE workspace_id = $1 AND merged_into IS NULL",
             )
@@ -636,7 +645,7 @@ mod tests {
                 "SELECT count(*) FROM identities WHERE workspace_id = $1 AND person_id = $2",
             )
             .bind(ws.as_uuid())
-            .bind(person_of(&one[0]))
+            .bind(survivor)
             .fetch_one(&pool)
             .await
             .unwrap();

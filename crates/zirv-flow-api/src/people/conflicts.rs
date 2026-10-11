@@ -101,7 +101,10 @@ pub(crate) enum ResolveRequest {
     MoveIdentifier { to_person_id: Uuid },
 }
 
-fn parse_page(query: &str) -> Result<(bool, u32, Option<(OffsetDateTime, Uuid)>), ApiError> {
+/// Whether to list resolved conflicts, the page size and the cursor of the previous page.
+type PageQuery = (bool, u32, Option<(OffsetDateTime, Uuid)>);
+
+fn parse_page(query: &str) -> Result<PageQuery, ApiError> {
     let (mut resolved, mut limit, mut before) = (false, DEFAULT_LIMIT, None);
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
