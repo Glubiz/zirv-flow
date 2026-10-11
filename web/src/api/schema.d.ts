@@ -273,6 +273,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/identity-conflicts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Identity conflicts, newest first: those still open (the default) or already resolved. */
+        get: operations["list_identity_conflicts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/identity-conflicts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One conflict and the identities of its two people. Values are shown to the owner,
+         *     workspace admins and `admin` keys, and masked for everyone else.
+         */
+        get: operations["get_identity_conflict"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Closes an open conflict: keep the two people separate, or move the shared identifier to
+         *     one of them. There is no unmerge. Audited as `identity_conflict.kept_separate` or
+         *     `identity_conflict.identifier_moved`, and recorded as an `identity.conflict.resolved`
+         *     decision.
+         */
+        post: operations["resolve_identity_conflict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/members": {
         parameters: {
             query?: never;
@@ -430,6 +489,51 @@ export interface components {
              */
             kind: string;
         };
+        ConflictBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description The identifier kind the two people share, such as `email`.
+             * @example email
+             */
+            kind: string;
+            /**
+             * Format: uuid
+             * @description The other person that owns the shared identifier.
+             */
+            other_person_id: string;
+            /**
+             * Format: uuid
+             * @description The person the record attached to.
+             */
+            person_id: string;
+            /**
+             * @description Why the people were not merged: `unique_kind`, `max_per_person`, or `merge_deferred`
+             *     on conflicts recorded before merges existed.
+             * @example unique_kind
+             */
+            reason: string;
+            /** @description `merged`, `kept_separate` or `identifier_moved`; null while open. */
+            resolution?: string | null;
+            /** Format: date-time */
+            resolved_at?: string | null;
+        };
+        ConflictDetailBody: {
+            conflict: components["schemas"]["ConflictBody"];
+            /**
+             * @description The conflict's person first, then the other person; one entry when they have since
+             *     been merged into one.
+             */
+            people: components["schemas"]["PersonIdentitiesBody"][];
+        };
+        ConflictsBody: {
+            /** @description Newest first. */
+            conflicts: components["schemas"]["ConflictBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
         CreateApiKeyRequest: {
             /**
              * @description 1 to 100 characters.
@@ -518,6 +622,15 @@ export interface components {
             /** @description Sorted by kind. */
             kinds: components["schemas"]["KindDepthBody"][];
         };
+        IdentityBody: {
+            /** @example email */
+            kind: string;
+            masked: boolean;
+            /** @description The identifier the conflict is about. */
+            shared: boolean;
+            /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
+            value?: string | null;
+        };
         /** @description A job without its payload. */
         JobBody: {
             /** Format: int32 */
@@ -580,6 +693,11 @@ export interface components {
             /** @description True when sign-in through the identity provider is configured. */
             oidc: boolean;
         };
+        PersonIdentitiesBody: {
+            identities: components["schemas"]["IdentityBody"][];
+            /** Format: uuid */
+            person_id: string;
+        };
         /** @description An RFC 9457 problem document. */
         Problem: {
             detail: string;
@@ -598,6 +716,16 @@ export interface components {
              * @example about:blank
              */
             type: string;
+        };
+        /** @description How to close a conflict. */
+        ResolveRequest: {
+            /** @enum {string} */
+            outcome: "keep_separate";
+        } | {
+            /** @enum {string} */
+            outcome: "move_identifier";
+            /** Format: uuid */
+            to_person_id: string;
         };
         RoleBody: {
             /** @example member */
@@ -1558,6 +1686,198 @@ export interface operations {
             };
             /** @description No such workspace or live key, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_identity_conflicts: {
+        parameters: {
+            query?: {
+                /** @description `open` (default) or `resolved` */
+                status?: string;
+                /** @description Conflicts per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of conflicts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConflictsBody"];
+                };
+            };
+            /** @description status or limit is out of range, or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key with neither the read nor the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_identity_conflict: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Conflict id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The conflict with both people's identities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConflictDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key with neither the read nor the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or conflict, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    resolve_identity_conflict: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Conflict id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description The closed conflict */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConflictBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or conflict, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Already resolved, or the move would break an identity rule */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description to_person_id is not one of the conflict's two people */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

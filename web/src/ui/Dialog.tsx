@@ -13,10 +13,12 @@ const FOCUSABLE = [
 interface DialogProps {
   title: string;
   onClose: () => void;
+  /** Room for content laid out in columns. */
+  wide?: boolean;
   children: ReactNode;
 }
 
-export function Dialog({ title, onClose, children }: DialogProps) {
+export function Dialog({ title, onClose, wide = false, children }: DialogProps) {
   const titleId = useId();
   const panel = useRef<HTMLDivElement>(null);
 
@@ -60,7 +62,7 @@ export function Dialog({ title, onClose, children }: DialogProps) {
     <div className="dialog-backdrop">
       <div
         ref={panel}
-        className="dialog"
+        className={wide ? "dialog dialog-wide" : "dialog"}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

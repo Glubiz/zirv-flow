@@ -42,6 +42,24 @@ describe("dialog", () => {
   });
 });
 
+describe("wide dialog", () => {
+  it("is wider only when asked to be", () => {
+    render(
+      <>
+        <Dialog title="Plain" onClose={() => undefined}>
+          <p>Narrow</p>
+        </Dialog>
+        <Dialog title="Columns" onClose={() => undefined} wide>
+          <p>Wide</p>
+        </Dialog>
+      </>,
+    );
+
+    expect(screen.getByRole("dialog", { name: "Plain" })).not.toHaveClass("dialog-wide");
+    expect(screen.getByRole("dialog", { name: "Columns" })).toHaveClass("dialog-wide");
+  });
+});
+
 describe("menu", () => {
   it("opens with the keyboard, moves with arrows and closes on Escape with focus back on the button", async () => {
     const user = userEvent.setup();

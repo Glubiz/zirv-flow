@@ -4,7 +4,7 @@ import { ApiKeysPage } from "../features/api-keys";
 import { HealthPage } from "../features/health";
 import { JobsPage } from "../features/jobs";
 import { MembersPage } from "../features/members";
-import { TraitsPage } from "../features/people";
+import { ConflictsPage, TraitsPage } from "../features/people";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
@@ -108,6 +108,7 @@ export function AppRoutes() {
           <Route path="w/:ws" element={<Navigate to="members" replace />} />
           <Route path="w/:ws/members" element={<MembersPage />} />
           <Route path="w/:ws/traits" element={<TraitsPage />} />
+          <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />

@@ -9,6 +9,7 @@ const TITLES: Record<string, string> = {
   w: "Workspaces",
   members: "Members",
   traits: "Fields",
+  people: "Identity conflicts",
   "api-keys": "API keys",
   traces: "Traces",
   jobs: "Jobs",
@@ -64,6 +65,7 @@ export function Shell() {
             </NavLink>
             <WorkspaceItem base={base} segment="members">Members</WorkspaceItem>
             <WorkspaceItem base={base} segment="traits">Fields</WorkspaceItem>
+            <WorkspaceItem base={base} segment="people/conflicts">Conflicts</WorkspaceItem>
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}
