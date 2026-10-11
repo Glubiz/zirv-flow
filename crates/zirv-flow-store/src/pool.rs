@@ -27,25 +27,49 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, StoreErr
 }
 
 /// A separate pool to the same database, with its own `max_connections`,
-/// `min_connections` and `acquire_timeout`. It connects lazily, so building it cannot
-/// fail; `min_connections` are opened in the background and kept warm, so an acquire
-/// need not pay for a new connection. What it holds never counts against `pool`.
+/// `min_connections` and `acquire_timeout`. Building it cannot fail. What it holds never
+/// counts against `pool`.
+///
+/// With `min_connections` above zero the pool is warm: those connections open in the
+/// background straight away and are kept, so an acquire need not pay for a new one.
+/// sqlx opens them at start only when no idle or lifetime reaper runs, so a warm pool
+/// has neither.
 pub fn sized_like(
     pool: &PgPool,
     max_connections: u32,
     min_connections: u32,
     acquire_timeout: Duration,
 ) -> PgPool {
-    PgPoolOptions::new()
+    let mut options = PgPoolOptions::new()
         .max_connections(max_connections)
         .min_connections(min_connections)
-        .acquire_timeout(acquire_timeout)
-        .connect_lazy_with((*pool.connect_options()).clone())
+        .acquire_timeout(acquire_timeout);
+    if min_connections > 0 {
+        options = options.idle_timeout(None).max_lifetime(None);
+    }
+    options.connect_lazy_with((*pool.connect_options()).clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_warm_pool_opens_its_minimum_without_being_asked(pool: PgPool) {
+        let warm = sized_like(&pool, 3, 2, Duration::from_secs(5));
+        let cold = sized_like(&pool, 3, 0, Duration::from_secs(5));
+
+        let opened = tokio::time::timeout(Duration::from_secs(60), async {
+            while warm.size() < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        assert!(opened.is_ok(), "the warm pool never opened its connections");
+        assert_eq!(cold.size(), 0);
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

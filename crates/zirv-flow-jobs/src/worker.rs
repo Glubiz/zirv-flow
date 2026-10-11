@@ -90,8 +90,8 @@ impl Worker {
         let shared = Arc::new(Shared {
             kinds: self.registry.kinds(),
             pool: sized_like(&self.pool, slots.saturating_add(1), 0, ACQUIRE_TIMEOUT),
-            // Warm connections keep connecting off the heartbeat's path; a beat may wait
-            // one period, and a failed one is retried on the next, before the lease ends.
+            // A warm pool keeps connecting off the heartbeat's path; a beat may wait one
+            // period, and a failed one is retried on the next, before the lease ends.
             heartbeat_pool: sized_like(&self.pool, slots, slots, self.config.lease / 3),
             listener_pool: self.pool,
             registry: self.registry,
