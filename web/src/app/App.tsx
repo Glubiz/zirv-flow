@@ -4,6 +4,7 @@ import { ApiKeysPage } from "../features/api-keys";
 import { EventSchemaPage, EventSettingsPage, EventsPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
 import { JobsPage } from "../features/jobs";
+import { ListDetailPage, ListsPage } from "../features/lists";
 import { MembersPage } from "../features/members";
 import { ConflictsPage, TraitsPage } from "../features/people";
 import { TracesPage } from "../features/traces";
@@ -109,6 +110,8 @@ export function AppRoutes() {
           <Route path="w/:ws" element={<Navigate to="members" replace />} />
           <Route path="w/:ws/members" element={<MembersPage />} />
           <Route path="w/:ws/traits" element={<TraitsPage />} />
+          <Route path="w/:ws/lists" element={<ListsPage />} />
+          <Route path="w/:ws/lists/:listId" element={<ListDetailPage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
           <Route path="w/:ws/events" element={<EventsPage />} />
           <Route path="w/:ws/events/rejects" element={<RejectsPage />} />

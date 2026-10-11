@@ -222,4 +222,52 @@ mod tests {
             ]
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_scan_finds_list_memberships_history_and_decisions(pool: PgPool) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let record = ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: "1".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            traits: json!({}).as_object().cloned().unwrap(),
+            observed_at: datetime!(2026-01-01 00:00 UTC),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        let outcomes = apply_profile_batch(&pool, ws, &[record]).await.unwrap();
+        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        let list = crate::create_list(&pool, ws, "VIPs", "", None)
+            .await
+            .unwrap();
+        let mut tx = crate::begin(&pool).await.unwrap();
+        crate::add_members(
+            &mut tx,
+            ws,
+            list.id,
+            &[person_id],
+            crate::ListSource::Api,
+            None,
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let found = rows_referencing_person(&pool, person_id).await;
+
+        for place in ["list_members.person_id", "list_member_changes.person_id"] {
+            assert!(found.contains(&(place.to_owned(), 1)), "{place}: {found:?}");
+        }
+        let decisions = found
+            .iter()
+            .find(|(place, _)| place == "decision_records.subject_ids")
+            .map(|(_, count)| *count);
+        assert!(decisions >= Some(2), "{found:?}");
+    }
 }

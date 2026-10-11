@@ -262,7 +262,7 @@ pub(crate) async fn update_trait(
         || before.source_order != definition.source_order
         || before.archived != definition.archived
     {
-        let mut job = NewJob::new("traits.recompute", super::request_trace());
+        let mut job = NewJob::new("traits.recompute", crate::trace::request_trace());
         job.workspace_id = Some(workspace);
         job.payload = json!({ "workspace_id": workspace, "key": definition.key });
         zirv_flow_store::enqueue(&mut *tx, &job).await?;

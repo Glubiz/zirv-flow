@@ -11,6 +11,7 @@ const TITLES: Record<string, string> = {
   traits: "Fields",
   people: "Identity conflicts",
   events: "Events",
+  lists: "Lists",
   "api-keys": "API keys",
   traces: "Traces",
   jobs: "Jobs",
@@ -66,6 +67,7 @@ export function Shell() {
             </NavLink>
             <WorkspaceItem base={base} segment="members">Members</WorkspaceItem>
             <WorkspaceItem base={base} segment="traits">Fields</WorkspaceItem>
+            <WorkspaceItem base={base} segment="lists">Lists</WorkspaceItem>
             <WorkspaceItem base={base} segment="people/conflicts">Conflicts</WorkspaceItem>
             <WorkspaceItem base={base} segment="events">Events</WorkspaceItem>
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>

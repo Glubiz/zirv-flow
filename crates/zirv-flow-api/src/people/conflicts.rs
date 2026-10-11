@@ -14,7 +14,7 @@ use zirv_flow_store::{ConflictResolution, IdentityConflict, PgPool, ResolveError
 
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -136,14 +136,6 @@ fn parse_page(query: &str) -> Result<PageQuery, ApiError> {
     Ok((resolved, limit, before))
 }
 
-/// Whether the caller may see identifier values: the owner, a workspace admin or an `admin`
-/// key. Everyone else who may read the workspace sees them masked.
-async fn may_see_values(state: &AppState, principal: &Principal, workspace: WorkspaceId) -> bool {
-    authorize(state, principal, workspace, Need::Admin)
-        .await
-        .is_ok()
-}
-
 /// The detail of the 409 for a conflict whose people were merged since the caller looked. The
 /// code is the text before the colon.
 pub(crate) const CHANGED: &str = "conflict_changed: the people of this conflict changed, reload it";
@@ -185,7 +177,7 @@ pub(crate) async fn resolve_identity_conflict(
         workspace,
         id,
         resolution,
-        &super::request_trace(),
+        &crate::trace::request_trace(),
     )
     .await
     .map_err(|error| match error {

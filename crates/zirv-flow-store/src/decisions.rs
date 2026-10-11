@@ -6,12 +6,15 @@
 
 use serde_json::{Map, Value};
 use sqlx::prelude::FromRow;
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, QueryBuilder};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::StoreError;
+
+/// Records per statement of [`append_decisions`]: 11 binds each stay far below PostgreSQL's limit.
+const MAX_BATCH: usize = 1000;
 
 /// A record to append.
 #[derive(Clone, Debug)]
@@ -109,6 +112,43 @@ pub async fn append_decision<'e>(
     .execute(executor)
     .await
     .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// Appends many records in one statement, at most [`MAX_BATCH`] at a time; the same rules as
+/// [`append_decision`] apply to each.
+pub async fn append_decisions(
+    connection: &mut PgConnection,
+    decisions: &[NewDecision],
+) -> Result<(), StoreError> {
+    for chunk in decisions.chunks(MAX_BATCH) {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
+        );
+        query.push_values(chunk, |mut row, decision| {
+            let subjects: Map<String, Value> = decision
+                .subject_ids
+                .iter()
+                .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
+                .collect();
+            row.push_bind(Uuid::new_v4())
+                .push_bind(decision.workspace_id.as_uuid())
+                .push_bind(decision.trace.trace_id.as_uuid())
+                .push_bind(decision.action)
+                .push_bind(decision.outcome)
+                .push_bind(decision.reason)
+                .push_bind(decision.trace.cause.kind.as_str())
+                .push_bind(decision.trace.cause.id.clone())
+                .push_bind(Value::Object(subjects))
+                .push_bind(decision.job.map(|(id, _)| id))
+                .push_bind(decision.job.map(|(_, attempt)| attempt));
+        });
+        query
+            .build()
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
     Ok(())
 }
 
@@ -276,6 +316,35 @@ mod tests {
             records[0].subject_ids,
             serde_json::json!({"segment_id": subject.to_string()})
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_appends_every_record_with_its_own_subjects(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let subjects: Vec<Uuid> = (0..MAX_BATCH + 5).map(|_| Uuid::new_v4()).collect();
+        let batch: Vec<NewDecision> = subjects
+            .iter()
+            .map(|subject| {
+                let mut record = decision(ws, &trace, "bulk");
+                record.subject_ids = vec![("person", *subject)];
+                record
+            })
+            .collect();
+        let mut connection = pool.acquire().await.unwrap();
+
+        append_decisions(&mut connection, &batch).await.unwrap();
+        append_decisions(&mut connection, &[]).await.unwrap();
+
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT subject_ids ->> 'person') FROM decision_records              WHERE workspace_id = $1 AND action = 'bulk'",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, i64::try_from(subjects.len()).unwrap());
     }
 
     #[sqlx::test]

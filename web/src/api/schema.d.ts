@@ -443,6 +443,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/lists": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's lists with their member counts, ordered by name. */
+        get: operations["list_lists"];
+        put?: never;
+        /** Creates an empty list. Audited as `list.created`. */
+        post: operations["create_list"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/lists/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One list. */
+        get: operations["get_list"];
+        put?: never;
+        post?: never;
+        /** Deletes a list together with its members and their history. Audited as `list.deleted`. */
+        delete: operations["delete_list"];
+        options?: never;
+        head?: never;
+        /** Renames a list or changes its description. Audited as `list.updated`. */
+        patch: operations["update_list"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/lists/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A page of the members, newest first, with each one's strongest identifier. Values are shown
+         *     to the owner, workspace admins and `admin` keys, and masked for everyone else.
+         */
+        get: operations["list_list_members"];
+        put?: never;
+        /**
+         * Adds people by id or by identifier. Adding a member again changes nothing. Identifiers
+         *     that no person owns come back in `not_found` and never create a person. Membership changes
+         *     go to the people's history and the decision log, not the audit log.
+         */
+        post: operations["add_list_members"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/lists/{id}/members/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and
+         *     the answer says what a real import would do. Rows no person owns, and rows that are
+         *     malformed, come back as line numbers (the header is line 1) with a reason code; values are never echoed. At most
+         *     10 MiB and 100,000 rows. Membership changes go to the people's history and the decision
+         *     log, not the audit log.
+         */
+        post: operations["import_list_members"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/lists/{id}/members/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Removes people by id. Removing someone who is not a member changes nothing. */
+        post: operations["remove_list_members"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/members": {
         parameters: {
             query?: never;
@@ -473,6 +575,46 @@ export interface paths {
         post?: never;
         /** Removes a user from the workspace. Workspace admins and the owner only. */
         delete: operations["remove_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}/lists": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The lists a person is in, ordered by name. A person merged into another is read as the
+         *     person they were merged into.
+         */
+        get: operations["list_person_lists"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}/lists/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every time a person was added to or removed from a list, newest first. Merges keep the
+         *     history of both people under the survivor.
+         */
+        get: operations["list_person_list_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -571,6 +713,22 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddMembersBody: {
+            /** @description People newly added. */
+            added: number;
+            /** @description People who were members already, duplicates in the request included. */
+            already_member: number;
+            /** @description The first 1000 inputs that named no person. */
+            not_found: components["schemas"]["NotFoundBody"][];
+            /** @description How many inputs named no person, however many `not_found` lists. */
+            not_found_count: number;
+        };
+        AddMembersRequest: {
+            /** @description People by identifier; one that no person owns is reported, never created. */
+            identifiers?: components["schemas"]["IdentifierInput"][];
+            /** @description People by id. Together with `identifiers`, at most 1000. */
+            person_ids?: string[];
+        };
         ApiKeyBody: {
             /** Format: date-time */
             created_at: string;
@@ -670,6 +828,15 @@ export interface components {
             name: string;
             /** @description The first draft. */
             properties?: components["schemas"]["PropertyBody"][];
+        };
+        CreateListRequest: {
+            /** @description At most 500 characters. */
+            description?: string;
+            /**
+             * @description 1 to 128 characters after trimming; unique in the workspace, ignoring case.
+             * @example Newsletter
+             */
+            name: string;
         };
         CreateTraitRequest: {
             channel_address?: boolean;
@@ -798,6 +965,15 @@ export interface components {
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
         };
+        IdentifierInput: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
+             * @example email
+             */
+            kind: string;
+            /** @example ada@example.com */
+            value: string;
+        };
         IdentityBody: {
             /** @example email */
             kind: string;
@@ -806,6 +982,18 @@ export interface components {
             shared: boolean;
             /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
             value?: string | null;
+        };
+        ImportBody: {
+            /** @description People newly added; on a dry run, the people that would be. */
+            added: number;
+            /** @description Matched rows whose person was a member already or appears earlier in the file. */
+            already_member: number;
+            /** @description Rows that named an existing person. */
+            matched: number;
+            /** @description The first 1000 rows that were skipped, in file order. */
+            unmatched: components["schemas"]["UnmatchedRow"][];
+            /** @description How many rows were skipped, however many `unmatched` lists. */
+            unmatched_count: number;
         };
         IngestRejectBody: {
             /** Format: uuid */
@@ -883,6 +1071,45 @@ export interface components {
             /** Format: int64 */
             running: number;
         };
+        ListBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            description: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description How many people are in the list.
+             */
+            member_count: number;
+            /** @example Newsletter */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ListMemberBody: {
+            /** Format: date-time */
+            added_at: string;
+            identifier?: null | components["schemas"]["MemberIdentifierBody"];
+            /** Format: uuid */
+            person_id: string;
+            /**
+             * @description `ui`, `api`, `import`, `merge` or `flow`.
+             * @example ui
+             */
+            source: string;
+        };
+        ListMembersBody: {
+            /** @description Newest first. */
+            members: components["schemas"]["ListMemberBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
         MemberBody: {
             /** Format: date-time */
             added_at: string;
@@ -895,16 +1122,76 @@ export interface components {
             /** Format: uuid */
             user_id: string;
         };
+        MemberIdentifierBody: {
+            /** @example email */
+            kind: string;
+            masked: boolean;
+            /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
+            value?: string | null;
+        };
+        MembershipChangeBody: {
+            /**
+             * @description `added` or `removed`.
+             * @example added
+             */
+            action: string;
+            /**
+             * Format: uuid
+             * @description The user who made the change; null when an API key, an import job or a flow did.
+             */
+            actor_user_id?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            list_id: string;
+            list_name: string;
+            /** Format: date-time */
+            occurred_at: string;
+            /** @description `ui`, `api`, `import`, `merge` or `flow`. */
+            source: string;
+            /**
+             * Format: uuid
+             * @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
+             */
+            trace_id: string;
+        };
+        MembershipHistoryBody: {
+            /** @description Newest first. */
+            changes: components["schemas"]["MembershipChangeBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
             local: boolean;
             /** @description True when sign-in through the identity provider is configured. */
             oidc: boolean;
         };
+        /** @description An input that named no person. */
+        NotFoundBody: {
+            /**
+             * @description The request field: `person_ids` or `identifiers`.
+             * @example identifiers
+             */
+            field: string;
+            /** @description Position in that field, from 0. */
+            index: number;
+            /** @example not_found */
+            reason: string;
+        };
         PersonIdentitiesBody: {
             identities: components["schemas"]["IdentityBody"][];
             /** Format: uuid */
             person_id: string;
+        };
+        PersonListBody: {
+            /** Format: date-time */
+            added_at: string;
+            /** Format: uuid */
+            list_id: string;
+            name: string;
+            /** @description `ui`, `api`, `import`, `merge` or `flow`. */
+            source: string;
         };
         /** @description An RFC 9457 problem document. */
         Problem: {
@@ -966,6 +1253,20 @@ export interface components {
              *     48 bits of an IPv6 address. A value that is not an address is removed.
              */
             truncate_ip?: string[];
+        };
+        RemoveMembersBody: {
+            /** @description The first 1000 inputs that named no person. */
+            not_found: components["schemas"]["NotFoundBody"][];
+            /** @description How many inputs named no person, however many `not_found` lists. */
+            not_found_count: number;
+            /** @description People who were not members. */
+            not_member: number;
+            /** @description People removed. */
+            removed: number;
+        };
+        RemoveMembersRequest: {
+            /** @description At most 1000. */
+            person_ids: string[];
         };
         /** @description How to close a conflict. */
         ResolveRequest: {
@@ -1058,6 +1359,18 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        UnmatchedRow: {
+            /**
+             * @description `not_found`, `malformed_row`, or the rule the identifier broke, such as `invalid_email`.
+             * @example not_found
+             */
+            reason: string;
+            /**
+             * @description The line of the file the row starts on, counting the header as line 1. A quoted value
+             *     that spans lines moves later rows down, as an editor shows them.
+             */
+            row: number;
+        };
         UpdateEventSchemaRequest: {
             description?: string | null;
             mode?: string | null;
@@ -1067,6 +1380,10 @@ export interface components {
              *     the deployment default.
              */
             retention_days?: number | null;
+        };
+        UpdateListRequest: {
+            description?: string | null;
+            name?: string | null;
         };
         UpdateTraitRequest: {
             archived?: boolean | null;
@@ -2706,6 +3023,623 @@ export interface operations {
             };
         };
     };
+    list_lists: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The lists */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateListRequest"];
+            };
+        };
+        responses: {
+            /** @description The new list */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A list with that name exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid name or description */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateListRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another list has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_list_members: {
+        parameters: {
+            query?: {
+                /** @description Members per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of members */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListMembersBody"];
+                };
+            };
+            /** @description limit is out of range, or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    add_list_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddMembersRequest"];
+            };
+        };
+        responses: {
+            /** @description What was added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddMembersBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The people changed at the same moment; try again */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description More than 1000 people, or a malformed identifier (the detail names its position and the rule) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    import_list_members: {
+        parameters: {
+            query?: {
+                /** @description Count only; change nothing */
+                dry_run?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description A header row `kind,value`, then one identifier per row */
+        requestBody: {
+            content: {
+                "text/csv": string;
+            };
+        };
+        responses: {
+            /** @description What the import did, or would do */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportBody"];
+                };
+            };
+            /** @description dry_run is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The people changed at the same moment; try again */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over 10 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not text/csv */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not UTF-8, a wrong header, an unclosed quote, or more than 100,000 rows */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    remove_list_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description List id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoveMembersRequest"];
+            };
+        };
+        responses: {
+            /** @description What was removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoveMembersBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The people changed at the same moment; try again */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description More than 1000 people */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_members: {
         parameters: {
             query?: never;
@@ -2861,6 +3795,124 @@ export interface operations {
                 };
             };
             /** @description No such workspace or member, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_person_lists: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The lists */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonListBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_person_list_history: {
+        parameters: {
+            query?: {
+                /** @description Changes per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of changes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembershipHistoryBody"];
+                };
+            };
+            /** @description limit is out of range, or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
             404: {
                 headers: {
                     [name: string]: unknown;

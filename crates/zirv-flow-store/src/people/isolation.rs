@@ -17,7 +17,10 @@ mod tests {
         list_conflicts, list_identities, list_identity_conflicts, list_trait_definitions,
         resolve_conflict, update_trait_definition,
     };
-    use crate::{begin, create_workspace};
+    use crate::{
+        ListSource, add_members, begin, commit, create_list, create_workspace, delete_list,
+        find_list, list_lists, lists_for, members, membership_history, remove_members, update_list,
+    };
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
@@ -298,5 +301,127 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(ids_one[0].id, ids_two[0].id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_list_read_and_write_stays_inside_its_workspace(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let (person_one, _) = seed(&pool, one).await;
+        let (person_two, _) = seed(&pool, two).await;
+        let list_one = create_list(&pool, one, "VIPs", "", None).await.unwrap();
+        let list_two = create_list(&pool, two, "VIPs", "", None).await.unwrap();
+        let trace = TraceContext::root(Cause::api("t"));
+        let mut tx = begin(&pool).await.unwrap();
+        add_members(
+            &mut tx,
+            one,
+            list_one.id,
+            &[person_one],
+            ListSource::Api,
+            None,
+            &trace,
+        )
+        .await
+        .unwrap();
+        add_members(
+            &mut tx,
+            two,
+            list_two.id,
+            &[person_two],
+            ListSource::Api,
+            None,
+            &trace,
+        )
+        .await
+        .unwrap();
+        // A person of the other workspace is missing, and a list of it does not exist.
+        let foreign_person = add_members(
+            &mut tx,
+            one,
+            list_one.id,
+            &[person_two],
+            ListSource::Api,
+            None,
+            &trace,
+        )
+        .await
+        .unwrap();
+        let foreign_list = add_members(
+            &mut tx,
+            one,
+            list_two.id,
+            &[person_one],
+            ListSource::Api,
+            None,
+            &trace,
+        )
+        .await;
+        let foreign_remove = remove_members(
+            &mut tx,
+            one,
+            list_two.id,
+            &[person_two],
+            ListSource::Api,
+            None,
+            &trace,
+        )
+        .await;
+        commit(tx).await.unwrap();
+
+        assert_eq!(foreign_person.missing, [0]);
+        assert!(foreign_list.is_err());
+        assert!(foreign_remove.is_err());
+        for (ws, own, person, foreign) in [
+            (one, &list_one, person_one, &list_two),
+            (two, &list_two, person_two, &list_one),
+        ] {
+            let lists = list_lists(&pool, ws).await.unwrap();
+            assert_eq!(
+                lists.iter().map(|list| list.id).collect::<Vec<_>>(),
+                [own.id]
+            );
+            assert!(find_list(&pool, ws, foreign.id).await.unwrap().is_none());
+            assert!(
+                update_list(&pool, ws, foreign.id, Some("x"), None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let (page, _) = members(&pool, ws, own.id, 10, None).await.unwrap();
+            assert_eq!(
+                page.iter().map(|m| m.person_id).collect::<Vec<_>>(),
+                [person]
+            );
+            assert!(
+                members(&pool, ws, foreign.id, 10, None)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+            assert_eq!(lists_for(&pool, ws, person).await.unwrap().len(), 1);
+            let (history, _) = membership_history(&pool, ws, person, 10, None)
+                .await
+                .unwrap();
+            assert_eq!(history.len(), 1);
+            let mut connection = pool.acquire().await.unwrap();
+            assert!(
+                delete_list(&mut connection, ws, foreign.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(lists_for(&pool, one, person_two).await.unwrap().is_empty());
+        assert_eq!(
+            find_list(&pool, one, list_one.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .member_count,
+            1
+        );
     }
 }
