@@ -642,8 +642,8 @@ mod tests {
         for (key, hours) in [("old", 25_i32), ("new", 1)] {
             sqlx::query(
                 "INSERT INTO contact_idempotency \
-                    (workspace_id, key, request_hash, status, contact_key, created_at) \
-                 VALUES ($1, $2, '\\x00'::bytea, 201, 'c-1', now() - make_interval(hours => $3))",
+                    (workspace_id, key, request_hash, status, created_at) \
+                 VALUES ($1, $2, '\\x00'::bytea, 201, now() - make_interval(hours => $3))",
             )
             .bind(ws.as_uuid())
             .bind(key)

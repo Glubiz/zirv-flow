@@ -11,21 +11,19 @@ CREATE TABLE contact_definitions (
     updated_by   uuid
 );
 
--- What an Idempotency-Key was used for. It holds no field values and no person id: a replay
--- answers with the contact as it is stored now. `contact_key` is the identifier value
--- `external:contact_key`, so a person's deletion clears the rows for the contact keys it held.
+-- What an Idempotency-Key was used for. It holds no field values, no person id and no contact
+-- key (which may be an email address): a replay takes the key from the request, whose hash
+-- covers the method, the path and the body, and answers with the contact as it is stored now.
 -- Rows expire after 24 hours, in the leader's upkeep.
 CREATE TABLE contact_idempotency (
     workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     key          text NOT NULL,
     request_hash bytea NOT NULL,
     status       smallint NOT NULL,
-    contact_key  text NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, key)
 );
 
-CREATE INDEX contact_idempotency_contact_idx ON contact_idempotency (workspace_id, contact_key);
 CREATE INDEX contact_idempotency_created_idx ON contact_idempotency (created_at);
 
 ALTER TABLE ingest_inbox DROP CONSTRAINT ingest_inbox_kind_check;

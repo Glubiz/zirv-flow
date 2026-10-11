@@ -61,19 +61,6 @@ pub async fn delete_person(
     }
 
     remove_from_lists(connection, workspace, &people).await?;
-    // The idempotency rows of the contact keys the group held; they go while the identities
-    // that name those keys are still there.
-    sqlx::query(
-        "DELETE FROM contact_idempotency WHERE workspace_id = $1 AND contact_key IN \
-            (SELECT value FROM identities \
-             WHERE workspace_id = $1 AND person_id = ANY($2) AND kind = $3)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&people)
-    .bind(zirv_flow_core::contacts::KEY_KIND)
-    .execute(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
     for statement in DELETIONS {
         sqlx::query(*statement)
             .bind(workspace.as_uuid())

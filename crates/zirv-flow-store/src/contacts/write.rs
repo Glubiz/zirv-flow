@@ -123,8 +123,8 @@ async fn begin_write(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let remembered: Option<(Vec<u8>, i16, String)> = sqlx::query_as(
-        "SELECT request_hash, status, contact_key FROM contact_idempotency \
+    let remembered: Option<(Vec<u8>, i16)> = sqlx::query_as(
+        "SELECT request_hash, status FROM contact_idempotency \
          WHERE workspace_id = $1 AND key = $2",
     )
     .bind(workspace.as_uuid())
@@ -132,7 +132,7 @@ async fn begin_write(
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let Some((hash, status, contact_key)) = remembered else {
+    let Some((hash, status)) = remembered else {
         return Ok(None);
     };
     if hash != idempotency.request_hash {
@@ -142,7 +142,7 @@ async fn begin_write(
     let contact = if status == 204 {
         None
     } else {
-        find_contact(connection, workspace, &contact_key).await?
+        find_contact(connection, workspace, key).await?
     };
     Ok(Some(Written {
         status,
@@ -155,21 +155,19 @@ async fn remember(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     idempotency: Option<&Idempotency<'_>>,
-    key: &str,
     status: u16,
 ) -> Result<(), StoreError> {
     let Some(idempotency) = idempotency else {
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO contact_idempotency (workspace_id, key, request_hash, status, contact_key) \
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO contact_idempotency (workspace_id, key, request_hash, status) \
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace.as_uuid())
     .bind(idempotency.key)
     .bind(idempotency.request_hash)
     .bind(i16::try_from(status).unwrap_or(200))
-    .bind(key)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -276,7 +274,7 @@ pub async fn write_contact(
             }
         }
     }
-    remember(&mut savepoint, workspace, idempotency, key, status).await?;
+    remember(&mut savepoint, workspace, idempotency, status).await?;
     let contact = find_contact(&mut savepoint, workspace, key).await?;
     savepoint.commit().await.map_err(StoreError::query)?;
     Ok(Written {
@@ -304,8 +302,7 @@ pub async fn delete_contact(
     if !remove_contribution_in(&mut savepoint, workspace, SOURCE, STREAM, key, trace).await? {
         return Err(WriteError::NotFound);
     }
-    // After the removal: deleting the person clears the idempotency rows of its contact keys.
-    remember(&mut savepoint, workspace, idempotency, key, 204).await?;
+    remember(&mut savepoint, workspace, idempotency, 204).await?;
     savepoint.commit().await.map_err(StoreError::query)?;
     Ok(Written {
         status: 204,

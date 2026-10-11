@@ -742,8 +742,8 @@ true`; the body is the contact as it is stored now, or `404` if it has since bee
 erased, and a delete replays `204`. The same key with a different request is a `422` with the
 code `idempotency_key_reused`. Keys are remembered for 24 hours and then forgotten by the
 scheduler leader. The table that remembers them (`contact_idempotency`) holds the key, a
-hash of the request, the status and the contact key, and no field value; deleting or erasing
-a person removes the rows of their contact keys. Without the header an identical repeat of a
+hash of the request and the status, and no field value, person id or contact key, so
+deleting or erasing a person has nothing to remove there. Without the header an identical repeat of a
 replace or patch still writes nothing, because a write that changes nothing is a no-op.
 
 **Bulk upsert is asynchronous.** `POST .../contacts/bulk` takes

@@ -615,11 +615,12 @@ savepoint of the caller's transaction, so the API commits the data and its audit
 together, and a registry rejection (a dropped trait) rolls the write back as a `422`. A
 write takes two advisory locks, the idempotency key and then the contact, so concurrent
 requests with either run in turn. `contact_idempotency (workspace_id, key, request_hash,
-status, contact_key, created_at)` holds no field value and no person id: a replay answers
-the stored status with the contact as it is now (`404` once it is gone, `204` for a delete),
+status, created_at)` holds no field value, no person id and no contact key (which may be an
+email address): a replay takes the key from its own request, whose hash covers the path and
+body, and answers the stored status with the contact as it is now (`404` once it is gone, `204` for a delete),
 a different request under the key is `422 idempotency_key_reused`, and the leader's
-hourly upkeep deletes rows older than 24 hours. `delete_person` deletes the rows of the
-contact keys the group held, so erasure leaves none. The bulk path appends inbox kind
+hourly upkeep deletes rows older than 24 hours. Because the table names no person,
+`delete_person` and erasure do not touch it. The bulk path appends inbox kind
 `contact` items (the migration extends the kind check) and the drain maps them to native
 records that replace the stored fields, tallying them as `contact` in
 `zirv_flow_ingest_applied_total`. The endpoints are in the README's Contacts section.

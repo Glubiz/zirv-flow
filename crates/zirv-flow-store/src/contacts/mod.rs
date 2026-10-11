@@ -809,40 +809,43 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn deleting_a_person_clears_the_idempotency_rows_of_its_contact_keys(pool: PgPool) {
+    async fn an_idempotency_row_never_holds_the_contact_key_so_a_deletion_leaves_nothing_to_clear(
+        pool: PgPool,
+    ) {
         let ws = defined(&pool, "one").await;
         let hash = [1_u8; 32];
-        let mut people = Vec::new();
-        for (key, email) in [("c-1", "a@example.com"), ("c-2", "b@example.com")] {
-            let idem = Idempotency {
-                key: &format!("req-{key}"),
-                request_hash: &hash,
-            };
-            let written = write(
-                &pool,
-                ws,
-                key,
-                ContactChange::Create(object(json!({"email": email}))),
-                Some(&idem),
-            )
-            .await
-            .unwrap();
-            people.push(written.contact.unwrap().person_id);
-        }
-        assert_eq!(count(&pool, "contact_idempotency").await, 2);
+        // A contact key may be an email address.
+        let key = "someone@example.com";
+        let create = Idempotency {
+            key: "req-create",
+            request_hash: &hash,
+        };
+        let delete = Idempotency {
+            key: "req-delete",
+            request_hash: &hash,
+        };
+        write(
+            &pool,
+            ws,
+            key,
+            ContactChange::Create(object(json!({"email": "a@example.com"}))),
+            Some(&create),
+        )
+        .await
+        .unwrap();
+        remove(&pool, ws, key, Some(&delete)).await.unwrap();
 
-        let mut tx = begin(&pool).await.unwrap();
-        delete_person(&mut tx, ws, people[0], DeleteReason::Requested, &trace())
-            .await
-            .unwrap();
-        commit(tx).await.unwrap();
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT to_jsonb(t)::text FROM contact_idempotency t")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
-        let left: Vec<String> = sqlx::query_scalar("SELECT contact_key FROM contact_idempotency")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(left, ["c-2"]);
-        assert!(read(&pool, ws, "c-1").await.is_none());
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| !row.contains(key)));
+        // A replay takes the key from its own request.
+        let replay = remove(&pool, ws, key, Some(&delete)).await.unwrap();
+        assert!(replay.replayed && replay.status == 204);
     }
 
     #[sqlx::test]
@@ -881,7 +884,6 @@ mod tests {
         assert_eq!(
             names,
             [
-                "contact_key",
                 "created_at",
                 "key",
                 "request_hash",
