@@ -4,7 +4,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -16,6 +16,7 @@ use super::store_error;
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::ingest::{read_json, unavailable};
 use crate::problem::{ApiError, ItemProblem, Problem};
 use crate::trace::request_trace;
 
@@ -62,10 +63,6 @@ fn problem(index: usize, field: &str, reason: &str) -> ItemProblem {
 
 fn invalid(errors: Vec<ItemProblem>) -> ApiError {
     ApiError::unprocessable("one or more contacts are invalid").with_errors(errors)
-}
-
-fn too_large() -> ApiError {
-    ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
 }
 
 /// Validates the items of a bulk request against `definition` and maps them to inbox items.
@@ -166,20 +163,8 @@ pub(crate) async fn bulk(
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
     let limits = state.ingest.limits();
-    let declared = request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > limits.max_request_bytes) {
-        return Err(too_large());
-    }
     let max_items = limits.max_batch_items;
-    let bytes = axum::body::to_bytes(request.into_body(), limits.max_request_bytes)
-        .await
-        .map_err(|_| too_large())?;
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?;
+    let body = read_json(request, limits.max_request_bytes).await?;
 
     let count = contacts_of(&body).map_err(invalid)?.len();
     if count == 0 || count > max_items {
@@ -209,12 +194,7 @@ pub(crate) async fn bulk(
 
     zirv_flow_store::append_inbox(&state.pool, workspace.id, sender, &request_trace(), &items)
         .await
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "ingestion is unavailable; nothing was stored, so retry",
-            )
-        })?;
+        .map_err(|_| unavailable())?;
     metrics::counter!("zirv_flow_ingest_items_total", "kind" => "contact")
         .increment(items.len() as u64);
     let mut tx = zirv_flow_store::begin(&state.pool)

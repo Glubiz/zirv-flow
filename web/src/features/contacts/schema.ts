@@ -2,7 +2,7 @@ import { client, unwrap, useResource, type components, type Resource } from "../
 import { useWorkspaceAccess } from "../members";
 
 export type Contact = components["schemas"]["ContactBody"];
-export type DefinitionBody = components["schemas"]["ContactDefinitionBody"];
+type DefinitionBody = components["schemas"]["ContactDefinitionBody"];
 export type DefinitionField = components["schemas"]["ContactFieldBody"];
 export type Trait = components["schemas"]["TraitBody"];
 
@@ -26,7 +26,7 @@ export interface ContactSchema {
   updatedAt: string | null;
 }
 
-export function toSchema(definition: DefinitionBody, traits: Trait[]): ContactSchema {
+function toSchema(definition: DefinitionBody, traits: Trait[]): ContactSchema {
   return {
     defined: definition.defined,
     registry: traits.filter((trait) => !trait.archived),
