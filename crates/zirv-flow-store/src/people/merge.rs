@@ -207,7 +207,9 @@ async fn close_conflicts_the_move_would_duplicate(
                          AND o.id <> c.id \
                          AND o.person_id = {person} AND o.other_person_id = {other} \
                          AND COALESCE(o.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid) \
-                           = COALESCE(c.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid)                          AND COALESCE(o.identity_id, '00000000-0000-0000-0000-000000000000'::uuid)                            = COALESCE(c.identity_id, '00000000-0000-0000-0000-000000000000'::uuid))",
+                           = COALESCE(c.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+                         AND COALESCE(o.identity_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+                           = COALESCE(c.identity_id, '00000000-0000-0000-0000-000000000000'::uuid))",
         person = if column == "person_id" { "$3" } else { "c.person_id" },
         other = if column == "other_person_id" { "$3" } else { "c.other_person_id" },
     )))

@@ -165,7 +165,8 @@ async fn drop_old_partitions(
     now: OffsetDateTime,
 ) -> Result<u64, StoreError> {
     let names: Vec<String> = sqlx::query_scalar(
-        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid          WHERE i.inhparent = 'events'::regclass",
+        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+         WHERE i.inhparent = 'events'::regclass",
     )
     .fetch_all(&mut *connection)
     .await
@@ -504,7 +505,8 @@ mod tests {
     async fn an_override_raised_after_the_cutoff_was_read_keeps_the_partition(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS events_y2025m12 PARTITION OF events              FOR VALUES FROM ('2025-12-01 00:00:00+00') TO ('2026-01-01 00:00:00+00')",
+            "CREATE TABLE IF NOT EXISTS events_y2025m12 PARTITION OF events \
+             FOR VALUES FROM ('2025-12-01 00:00:00+00') TO ('2026-01-01 00:00:00+00')",
         )
         .execute(&pool)
         .await

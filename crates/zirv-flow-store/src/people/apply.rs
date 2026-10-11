@@ -415,7 +415,8 @@ pub(crate) async fn record_resolution(
                  identity_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (workspace_id, person_id, other_person_id, \
-                          (COALESCE(source_record_id, '00000000-0000-0000-0000-000000000000'::uuid)),                           (COALESCE(identity_id, '00000000-0000-0000-0000-000000000000'::uuid))) \
+                          (COALESCE(source_record_id, '00000000-0000-0000-0000-000000000000'::uuid)), \
+                          (COALESCE(identity_id, '00000000-0000-0000-0000-000000000000'::uuid))) \
                 WHERE resolved_at IS NULL DO NOTHING \
              RETURNING id",
         )
