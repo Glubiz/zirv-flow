@@ -28,18 +28,11 @@ impl JobKind for PrivacyExport {
 }
 
 fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {
-    let bad = JobError::new("the payload needs a workspace_id and an export_id");
-    let workspace = payload
-        .get("workspace_id")
-        .and_then(Value::as_str)
-        .and_then(|text| text.parse::<WorkspaceId>().ok())
-        .ok_or(bad)?;
-    let export = payload
-        .get("export_id")
-        .and_then(Value::as_str)
-        .and_then(|text| Uuid::parse_str(text).ok())
-        .ok_or(bad)?;
-    Ok((workspace, export))
+    super::workspace_and_id(
+        payload,
+        "export_id",
+        "the payload needs a workspace_id and an export_id",
+    )
 }
 
 #[cfg(test)]

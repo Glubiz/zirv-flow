@@ -15,6 +15,7 @@ import {
 } from "../../ui";
 import { CONFIRM_PHRASE, erasureStatus } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
+import { ShowMore } from "./ShowMore";
 import { usePaged } from "./usePaged";
 
 const PAGE_SIZE = 50;
@@ -101,14 +102,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
             </div>
           )}
         </ResourceView>
-        {requests.resource.status === "ready" && requests.next !== null ? (
-          <div className="panel-footer">
-            {requests.moreError ? <InlineError {...describeError(requests.moreError)} /> : null}
-            <Button onClick={requests.loadMore} disabled={requests.loadingMore}>
-              {requests.loadingMore ? "Loading" : "Show more"}
-            </Button>
-          </div>
-        ) : null}
+        <ShowMore paged={requests} />
       </Panel>
       {pending ? (
         <ConfirmErasureDialog workspaceId={workspaceId} target={pending} onClose={() => setPending(null)} onRequested={requested} />

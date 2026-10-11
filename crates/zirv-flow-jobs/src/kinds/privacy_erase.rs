@@ -32,18 +32,11 @@ impl JobKind for PrivacyErase {
 }
 
 fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {
-    let bad = JobError::new("the payload needs a workspace_id and a request_id");
-    let workspace = payload
-        .get("workspace_id")
-        .and_then(Value::as_str)
-        .and_then(|text| text.parse::<WorkspaceId>().ok())
-        .ok_or(bad)?;
-    let request = payload
-        .get("request_id")
-        .and_then(Value::as_str)
-        .and_then(|text| Uuid::parse_str(text).ok())
-        .ok_or(bad)?;
-    Ok((workspace, request))
+    super::workspace_and_id(
+        payload,
+        "request_id",
+        "the payload needs a workspace_id and a request_id",
+    )
 }
 
 #[cfg(test)]

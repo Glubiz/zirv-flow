@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import {
-  Button,
   EmptyState,
   formatDateTime,
   formatDuration,
@@ -14,6 +13,7 @@ import {
 } from "../../ui";
 import { exportStatus, secondsLeft } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
+import { ShowMore } from "./ShowMore";
 import { usePaged } from "./usePaged";
 
 type Export = components["schemas"]["ExportBody"];
@@ -113,14 +113,7 @@ export function ExportSection({ workspaceId }: { workspaceId: string }) {
             </div>
           )}
         </ResourceView>
-        {exports.resource.status === "ready" && exports.next !== null ? (
-          <div className="panel-footer">
-            {exports.moreError ? <InlineError {...describeError(exports.moreError)} /> : null}
-            <Button onClick={exports.loadMore} disabled={exports.loadingMore}>
-              {exports.loadingMore ? "Loading" : "Show more"}
-            </Button>
-          </div>
-        ) : null}
+        <ShowMore paged={exports} />
       </Panel>
     </>
   );

@@ -1,6 +1,10 @@
 //! Every job kind this build ships: one module per kind and one line in [`ALL`].
 
-use crate::ErasedKind;
+use serde_json::Value;
+use uuid::Uuid;
+use zirv_flow_core::WorkspaceId;
+
+use crate::{ErasedKind, JobError};
 
 mod events_retention;
 mod ingest_drain;
@@ -19,3 +23,21 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &privacy_erase::PrivacyErase,
     &privacy_export::PrivacyExport,
 ];
+
+/// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text
+/// when either is missing or malformed.
+fn workspace_and_id(
+    payload: &Value,
+    id_key: &str,
+    expected: &'static str,
+) -> Result<(WorkspaceId, Uuid), JobError> {
+    let workspace = payload
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .and_then(|text| text.parse::<WorkspaceId>().ok());
+    let id = payload
+        .get(id_key)
+        .and_then(Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok());
+    workspace.zip(id).ok_or_else(|| JobError::new(expected))
+}
