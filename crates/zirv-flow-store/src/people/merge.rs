@@ -137,6 +137,7 @@ pub(super) async fn merge_people(
             "merged",
             None,
             vec![
+                ("person", survivor),
                 ("survivor", survivor),
                 ("merged", loser),
                 ("merge", merge_id),
@@ -296,7 +297,11 @@ pub async fn rewrite_merged_person(
             action: "person.merge.rewrite",
             outcome: "completed",
             reason: None,
-            subject_ids: vec![("survivor", survivor), ("merged", merged)],
+            subject_ids: vec![
+                ("person", survivor),
+                ("survivor", survivor),
+                ("merged", merged),
+            ],
             job,
         },
     )
@@ -812,6 +817,11 @@ mod tests {
             decisions
                 .iter()
                 .all(|d| d.action == "person.merge.rewrite" && d.outcome == "completed")
+        );
+        assert!(
+            decisions
+                .iter()
+                .all(|d| d.subject_ids["person"] == survivor.to_string())
         );
     }
 

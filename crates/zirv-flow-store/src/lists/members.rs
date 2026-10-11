@@ -592,7 +592,11 @@ pub(crate) async fn move_on_merge(
                 action: "list.membership",
                 outcome: "moved",
                 reason: Some(ListSource::Merge.as_str()),
-                subject_ids: vec![("survivor", survivor), ("merged", loser)],
+                subject_ids: vec![
+                    ("person", survivor),
+                    ("survivor", survivor),
+                    ("merged", loser),
+                ],
                 job: None,
             },
         )
@@ -917,6 +921,12 @@ mod tests {
             decisions
                 .iter()
                 .any(|d| d.action == "list.membership" && d.outcome == "moved")
+        );
+        assert!(
+            decisions
+                .iter()
+                .filter(|d| d.action == "list.membership")
+                .all(|d| d.subject_ids["person"] == p1.to_string())
         );
     }
 

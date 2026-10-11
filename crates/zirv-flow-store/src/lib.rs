@@ -69,13 +69,16 @@ pub use lists::{
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
-    ConflictResolution, DroppedTrait, IdentityConflict, NewTraitDefinition, Person, ProfileOutcome,
-    ProfileRecord, RECOMPUTE_BATCH, REWRITE_BATCH, REWRITE_JOB_KIND, ResolveError, StoredIdentity,
-    TraitDefinition, TraitDefinitionUpdate, apply_profile_batch, create_trait_definition,
-    current_person, find_conflict, find_people_by_identifiers, find_person,
-    find_person_by_identifier, find_trait_definition, find_trait_definition_for_update,
-    list_conflicts, list_identities, list_identity_conflicts, list_trait_definitions,
-    recompute_trait_batch, remove_contribution, resolve_conflict, rewrite_merged_person,
+    ConflictResolution, DroppedTrait, IdentityConflict, IdentityGroup, NewTraitDefinition, Person,
+    PersonSearch, Profile, ProfileMerge, ProfileOutcome, ProfileRecord, ProfileTrait,
+    RECOMPUTE_BATCH, REWRITE_BATCH, REWRITE_JOB_KIND, ResolveError, SearchError, SearchHit,
+    SearchPage, StoredIdentity, TimelineCursor, TimelineDecision, TimelineEntry, TimelineEvent,
+    TimelineFilter, TimelineKind, TimelinePage, TraitDefinition, TraitDefinitionUpdate, TraitOp,
+    apply_profile_batch, create_trait_definition, current_person, find_conflict,
+    find_people_by_identifiers, find_person, find_person_by_identifier, find_trait_definition,
+    find_trait_definition_for_update, list_conflicts, list_identities, list_identity_conflicts,
+    list_trait_definitions, load_profile, load_timeline, recompute_trait_batch,
+    remove_contribution, resolve_conflict, rewrite_merged_person, search_people,
     update_trait_definition,
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
@@ -114,6 +117,7 @@ enum StoreErrorKind {
     Query,
     Conflict,
     Retryable,
+    Timeout,
 }
 
 impl StoreError {
@@ -153,7 +157,13 @@ impl StoreError {
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "40P01" | "40001"));
-        let kind = if conflict {
+        let timeout = source
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code.as_ref() == "57014");
+        let kind = if timeout {
+            StoreErrorKind::Timeout
+        } else if conflict {
             StoreErrorKind::Conflict
         } else if retryable {
             StoreErrorKind::Retryable
@@ -179,6 +189,11 @@ impl StoreError {
     /// resolved within its retries.
     pub fn is_retryable(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Retryable)
+    }
+
+    /// Whether the query ran past its statement timeout and PostgreSQL cancelled it.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::Timeout)
     }
 
     /// Whether the write was refused because the value already exists.
@@ -239,6 +254,7 @@ impl fmt::Display for StoreError {
                 self.write_source(formatter)
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
+            StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::Retryable => {
                 formatter
                     .write_str("the transaction conflicted with another and can be retried")?;
