@@ -21,10 +21,10 @@ use zirv_flow_store::{ImportPhase, ImportReject, PgPool, find_import, list_impor
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::jobs_admin::parse_limit;
 use crate::problem::{ApiError, Problem};
 
 const DEFAULT_LIMIT: u32 = 100;
-const MAX_LIMIT: u32 = 1000;
 /// Rejects per page of the CSV download.
 const DOWNLOAD_PAGE: u32 = 1000;
 
@@ -91,13 +91,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         match key.as_ref() {
             "phase" => page.phase = Some(parse_phase(&value)?),
             "limit" => {
-                page.limit = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!("limit must be from 1 to {MAX_LIMIT}"))
-                    })?;
+                page.limit = parse_limit(&value)?;
             }
             "after" => {
                 page.after = Some(
@@ -125,7 +119,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Import id"),
         ("phase" = Option<String>, Query, description = "dry_run or run"),
-        ("limit" = Option<u32>, Query, description = "Rejects per page, 1 to 1000; default 100"),
+        ("limit" = Option<u32>, Query, description = "Rejects per page, 1 to 200; default 100"),
         ("after" = Option<i64>, Query, description = "The next_after of the previous page")
     ),
     responses(
@@ -377,7 +371,7 @@ mod tests {
         for bad in [
             "phase=never",
             "limit=0",
-            "limit=1001",
+            "limit=201",
             "limit=x",
             "after=-1",
             "after=x",

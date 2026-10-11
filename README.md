@@ -932,7 +932,7 @@ only what is still missing. Other failure codes: `list_not_found` (a mapped list
 deleted), `file_missing` (the file was already deleted) and `file_unreadable`.
 
 `GET .../imports/{id}/rejects?phase=&limit=&after=` pages through the rejects in row order
-with `row_number` and the codes. `GET .../imports/{id}/rejects.csv?phase=` downloads them as
+with `row_number` and the codes (`limit` 1 to 200). `GET .../imports/{id}/rejects.csv?phase=` downloads them as
 `row_number,column,reason`, one line per problem. For the owner, workspace admins and `admin`
 keys each row's own cells follow under the file's column names, in a file that may hold
 personal data; cells that start like a spreadsheet formula get a leading `'`. Everyone else
