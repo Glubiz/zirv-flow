@@ -37,6 +37,9 @@ CREATE UNLOGGED TABLE debugger_feed (
 -- The leader's upkeep deletes by age.
 CREATE INDEX debugger_feed_at_idx ON debugger_feed (at);
 
+-- `seq` is one identity for every workspace; a viewer settles it across all of them.
+CREATE INDEX debugger_feed_seq_idx ON debugger_feed (seq);
+
 -- Explorer queries carry the workspace and a time range, whatever else they filter.
 CREATE INDEX events_time_idx ON events (workspace_id, occurred_at DESC);
 

@@ -12,9 +12,12 @@
 //! viewer.
 //!
 //! The feed's `seq` is assigned when a row is inserted, not when its transaction commits, so
-//! rows can become visible out of order. A viewer therefore keeps a low watermark (every
-//! `seq` up to it is settled) and the set of rows it sent above it, and waits a few seconds
-//! for a missing number before giving up on it (its writer rolled back). A frame's `id` is
+//! rows can become visible out of order, and the identity is shared by every workspace. A
+//! viewer therefore keeps a low watermark (every `seq` up to it is settled) and the set of
+//! rows it sent above it. A number another workspace holds is settled; a number nobody holds
+//! is a hole, and the viewer waits a few seconds for it before giving up on it (its writer
+//! rolled back). A viewer without a position starts at the newest row older than that wait,
+//! so it also gets the rows of writers that were still open when it connected. A frame's `id` is
 //! the watermark after it, so resuming from it never skips a row; it may repeat rows above it.
 //!
 //! The feed holds redacted values only; `reveal` shows them as stored, never as received.
@@ -41,8 +44,8 @@ use uuid::Uuid;
 use zirv_flow_core::events::{mask_event, mask_sample};
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
-    FeedFilter, FeedItem, PgPool, debugger_feed_head, debugger_feed_seqs, listen_for_debugger,
-    read_debugger_feed, touch_debugger_watch,
+    FeedFilter, FeedItem, PgPool, debugger_feed_position, debugger_feed_seqs, debugger_feed_start,
+    listen_for_debugger, read_debugger_feed, touch_debugger_watch,
 };
 
 use crate::AppState;
@@ -77,6 +80,9 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// The most streams one workspace may have open in one process.
 pub(crate) const MAX_VIEWERS: usize = 20;
+
+/// The most streams one server process may have open, across every workspace.
+pub(crate) const MAX_VIEWERS_TOTAL: usize = 500;
 
 /// What a refused viewer is told to wait, in seconds.
 const RETRY_AFTER: u64 = 5;
@@ -145,7 +151,8 @@ impl DebuggerHub {
     }
 
     /// Joins the viewers of `workspace`, starting the shared tasks on the first call. `None`
-    /// when the workspace already has [`MAX_VIEWERS`] streams in this process.
+    /// when the workspace already has [`MAX_VIEWERS`] streams in this process, or the process
+    /// has [`MAX_VIEWERS_TOTAL`].
     pub(crate) fn subscribe(&self, workspace: WorkspaceId) -> Option<Subscription> {
         if !self.inner.started.swap(true, Ordering::SeqCst) {
             tokio::spawn(listen(Arc::downgrade(&self.inner)));
@@ -156,6 +163,9 @@ impl DebuggerHub {
             .slots
             .lock()
             .expect("the hub lock is never poisoned");
+        if slots.values().map(|slot| slot.viewers).sum::<usize>() >= MAX_VIEWERS_TOTAL {
+            return None;
+        }
         let slot = slots.entry(workspace).or_insert_with(|| Slot {
             viewers: 0,
             tick: watch::channel(0).0,
@@ -338,7 +348,15 @@ impl Cursor {
                     seq == next && now.duration_since(since) >= patience
                 });
             if give_up {
-                self.watermark = next;
+                // The numbers up to the next one anybody holds are the same age: all go.
+                let after = present
+                    .iter()
+                    .map(|(seq, _)| *seq)
+                    .chain(self.sent.iter().copied())
+                    .filter(|seq| *seq > next)
+                    .min()
+                    .unwrap_or(next + 1);
+                self.watermark = after - 1;
                 self.waiting = None;
                 continue;
             }
@@ -554,7 +572,7 @@ async fn pump(mut viewer: Viewer, start: i64, reset: bool) {
                 Ok(()) => skipped = 0,
                 Err(mpsc::error::TrySendError::Closed(_)) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    if let Ok(head) = debugger_feed_head(&viewer.pool, viewer.workspace).await {
+                    if let Ok(head) = debugger_feed_position(&viewer.pool).await {
                         skipped += u64::try_from(head - cursor.watermark).unwrap_or(0);
                         cursor = Cursor::new(cursor.watermark.max(head));
                     }
@@ -622,7 +640,7 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // Skip ahead rather than wait: a slow viewer must not hold anything.
                     *skipped += 1;
-                    if let Ok(head) = debugger_feed_head(pool, workspace).await {
+                    if let Ok(head) = debugger_feed_position(pool).await {
                         *skipped += u64::try_from(head - cursor.watermark).unwrap_or(0);
                         *cursor = Cursor::new(cursor.watermark.max(head));
                     }
@@ -638,8 +656,9 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
 }
 
 /// Watches the workspace's events as they are decided: one `item` frame per outcome
-/// (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live only, with no
-/// history. Each frame's `id` is a position that is safe to resume from: send it back as
+/// (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no
+/// history beyond the last few seconds before it connected (so a batch that was still
+/// committing is not missed). Each frame's `id` is a position that is safe to resume from: send it back as
 /// `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
 /// client already has (their `seq` identifies them). A position beyond the feed (the feed is
 /// unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
@@ -699,11 +718,13 @@ pub(crate) async fn stream(
     })?;
     // Watch first, so every event decided from now on is fed; then start at the head.
     touch_debugger_watch(&state.pool, workspace.id).await?;
-    let head = debugger_feed_head(&state.pool, workspace.id).await?;
+    let position = debugger_feed_position(&state.pool).await?;
+    // Without a position of its own, start where rows of writers still open are not yet lost.
+    let fresh = debugger_feed_start(&state.pool, PATIENCE).await?;
     let (start, reset) = match resume_from(&headers) {
-        Some(position) if position <= head => (position, false),
-        Some(_) => (head, true),
-        None => (head, false),
+        Some(resumed) if resumed <= position => (resumed, false),
+        Some(_) => (fresh, true),
+        None => (fresh, false),
     };
 
     let (frames, received) = mpsc::channel::<Event>(CHANNEL_FRAMES);
@@ -1007,5 +1028,63 @@ mod tests {
         assert!(before.is_err());
         assert!(after.is_ok());
         assert!(never.is_err());
+    }
+
+    #[test]
+    fn numbers_another_workspace_holds_are_settled_not_holes() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(0);
+        cursor.deliver(4);
+        // Seqs 1 to 3 and 5 belong to other workspaces; 4 is this viewer's, already sent.
+        let global = [(1, false), (2, false), (3, false), (4, true), (5, false)];
+
+        cursor.advance(&global, now, PATIENCE);
+
+        assert_eq!(cursor.watermark, 5);
+        assert!(
+            cursor.waiting.is_none(),
+            "no wait for other workspaces' numbers"
+        );
+    }
+
+    #[test]
+    fn giving_up_on_a_hole_skips_the_whole_run_of_missing_numbers() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(0);
+        cursor.deliver(9);
+        let global = [(9, true)];
+        cursor.advance(&global, now, PATIENCE);
+        let waiting = cursor.watermark;
+
+        cursor.advance(&global, now + PATIENCE, PATIENCE);
+
+        assert_eq!(waiting, 0);
+        assert_eq!(
+            cursor.watermark, 9,
+            "one wait covers numbers 1 to 8, not one wait each"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_process_wide_cap_counts_every_workspace_and_a_leaver_frees_a_place() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let hub = DebuggerHub::new(pool);
+        let mut held: Vec<Subscription> = Vec::new();
+        for _ in 0..MAX_VIEWERS_TOTAL / MAX_VIEWERS {
+            let workspace = WorkspaceId::new();
+            for _ in 0..MAX_VIEWERS {
+                held.push(hub.subscribe(workspace).unwrap());
+            }
+        }
+
+        let refused = hub.subscribe(WorkspaceId::new());
+        held.pop();
+        let after_leaving = hub.subscribe(WorkspaceId::new());
+
+        assert_eq!(held.len(), MAX_VIEWERS_TOTAL - 1);
+        assert!(refused.is_none());
+        assert!(after_leaving.is_some());
     }
 }

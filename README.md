@@ -528,7 +528,7 @@ store did with what was sent.
 is an `item` with the outcome (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`),
 the reasons, the properties and a trace link; filter by source, event name and outcome. The
 page can pause and resume, shows a notice when it could not keep up (`event: gap`) and
-reconnects from `Last-Event-ID`. It is live only: opening it shows nothing from before. A
+reconnects from `Last-Event-ID`. It is live: opening it shows nothing from before except the last few seconds. A
 workspace has at most 20 streams per server process (more get 429), and the page says when
 the server's notifier is down and updates are delayed.
 Ingestion writes the feed only while someone watches the workspace (a viewer renews a 30 s

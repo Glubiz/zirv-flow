@@ -1044,7 +1044,7 @@ As built (debugger, explorer):
   ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
   sample rule), and sends `item` frames through a bounded channel. A full channel makes the
   viewer skip to the head and send `event: gap` with the number skipped. `Last-Event-ID`
-  resumes as described; without it the stream starts at the head (live only). `reveal=true`
+  resumes as described; without it the stream starts at the newest row older than 10 s, so a batch still committing at that moment is not missed (live, plus those seconds). `reveal=true`
   shows stored values only to owners, admins and `admin` keys. Comments keep idle
   connections open every 15 s.
 - **Explorer.** `POST /events/explore/{count,breakdown,list,export}` (`read`). Every query

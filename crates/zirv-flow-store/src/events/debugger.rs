@@ -283,9 +283,12 @@ pub async fn read_debugger_feed<'e>(
         .collect())
 }
 
-/// The `seq` of every feed row of the workspace after `after`, oldest first, at most `limit`,
-/// with whether it matches `filter`. A viewer uses it to tell a row a filter hides from a
-/// number that no committed row holds (a writer still open, or rolled back).
+/// The `seq` of every feed row after `after`, of every workspace, oldest first, at most
+/// `limit`, with whether the row is the workspace's and matches `filter`.
+///
+/// `seq` is one identity shared by all workspaces, so a viewer can tell a number another
+/// workspace holds (settled, not its to send) from a hole (a writer still open, or rolled
+/// back). Only numbers and the match flag leave this query, never another workspace's row.
 pub async fn debugger_feed_seqs<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -295,10 +298,11 @@ pub async fn debugger_feed_seqs<'e>(
 ) -> Result<Vec<(i64, bool)>, StoreError> {
     sqlx::query_as(
         "SELECT f.seq, \
-                (($3::text IS NULL OR f.source = $3) \
+                (f.workspace_id = $1 \
+                 AND ($3::text IS NULL OR f.source = $3) \
                  AND ($4::text IS NULL OR f.name = $4) \
                  AND ($5::text IS NULL OR f.outcome = $5)) AS matched \
-         FROM debugger_feed f WHERE f.workspace_id = $1 AND f.seq > $2 \
+         FROM debugger_feed f WHERE f.seq > $2 \
          ORDER BY f.seq LIMIT $6",
     )
     .bind(workspace.as_uuid())
@@ -308,6 +312,36 @@ pub async fn debugger_feed_seqs<'e>(
     .bind(filter.outcome)
     .bind(limit)
     .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// The last `seq` the feed has handed out, of any workspace, or 0 when none was (a fresh or
+/// crashed feed). It does not fall when rows are pruned, so a position at or below it is
+/// real; one above it can only come from a feed that started over.
+pub async fn debugger_feed_position<'e>(executor: impl PgExecutor<'e>) -> Result<i64, StoreError> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(pg_sequence_last_value(\
+            pg_get_serial_sequence('debugger_feed', 'seq')::regclass), 0)",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Where a viewer without a position starts: the highest `seq` whose row is older than
+/// `settled`, so rows of writers that were still open a moment ago are still delivered. 0 when
+/// no row is that old.
+pub async fn debugger_feed_start<'e>(
+    executor: impl PgExecutor<'e>,
+    settled: std::time::Duration,
+) -> Result<i64, StoreError> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(max(seq), 0) FROM debugger_feed \
+         WHERE at < now() - make_interval(secs => $1)",
+    )
+    .bind(settled.as_secs_f64())
+    .fetch_one(executor)
     .await
     .map_err(StoreError::query)
 }
@@ -486,6 +520,44 @@ mod tests {
             [all[1].seq]
         );
         assert_eq!(seqs, [(all[1].seq, false), (all[2].seq, true)]);
+        // A number another workspace holds is listed too, as not the viewer's.
+        let other = workspace(&pool, "two").await;
+        feed(&pool, other, "theirs", "accepted").await;
+        let across = debugger_feed_seqs(&pool, ws, all[2].seq, FeedFilter::default(), 10)
+            .await
+            .unwrap();
+        let position = debugger_feed_position(&pool).await.unwrap();
+        assert_eq!(across, [(all[2].seq + 1, false)]);
+        assert_eq!(position, all[2].seq + 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_position_survives_pruning_and_the_start_is_the_newest_settled_row(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        assert_eq!(debugger_feed_position(&pool).await.unwrap(), 0);
+        feed(&pool, ws, "old", "accepted").await;
+        feed(&pool, ws, "new", "accepted").await;
+        sqlx::query("UPDATE debugger_feed SET at = now() - interval '1 minute' WHERE name = 'old'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let start = debugger_feed_start(&pool, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM debugger_feed")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let position = debugger_feed_position(&pool).await.unwrap();
+        let nothing_settled = debugger_feed_start(&pool, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        assert_eq!(start, 1, "only the old row is settled");
+        assert_eq!(position, 2, "pruning does not move the position back");
+        assert_eq!(nothing_settled, 0);
     }
 
     #[sqlx::test]

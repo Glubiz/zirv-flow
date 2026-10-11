@@ -14,8 +14,9 @@ pub(crate) use apply::{EventBatch, FailedItem, apply_event_record, reject_apply_
 pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 pub use debugger::{
     DEBUGGER_CHANNEL, DebuggerListener, FEED_RETENTION_MINUTES, FeedFilter, FeedItem,
-    WATCH_SECONDS, debugger_feed_head, debugger_feed_seqs, listen_for_debugger,
-    prune_debugger_feed, read_debugger_feed, touch_debugger_watch,
+    WATCH_SECONDS, debugger_feed_head, debugger_feed_position, debugger_feed_seqs,
+    debugger_feed_start, listen_for_debugger, prune_debugger_feed, read_debugger_feed,
+    touch_debugger_watch,
 };
 pub use explore::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, ExploreError, ExploreFilter, ExploreLimits,

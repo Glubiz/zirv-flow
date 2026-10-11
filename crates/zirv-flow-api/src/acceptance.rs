@@ -8847,4 +8847,108 @@ email,b@example.com,
             "the stream ends when the server shuts down"
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn another_workspaces_numbers_do_not_hold_a_viewers_position_back(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&mine, ""), Auth::Session(&owner), None).await;
+
+        // Two numbers go to another workspace, then one to this viewer's.
+        feed_row(&pool, &theirs, "not_yours").await;
+        feed_row(&pool, &theirs, "not_yours_either").await;
+        feed_row(&pool, &mine, "yours").await;
+        notify_feed(&pool, &mine).await;
+        let frames = viewer.take(1).await;
+
+        assert_eq!(frames[0].data["name"], "yours");
+        assert!(!frames[0].raw.contains("not_yours"));
+        // No wait for the numbers of the other workspace: the position is already past them.
+        assert_eq!(frames[0].id.as_deref(), Some("3"));
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(300))
+                .await
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_viewer_that_connects_between_two_commits_still_gets_the_late_one(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        // A takes seq 1 and stays open; B takes seq 2 and commits; then the viewer connects.
+        let mut writer_a = pool.begin().await.unwrap();
+        feed_row(&mut *writer_a, &ws, "from_a").await;
+        feed_row(&pool, &ws, "from_b").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        writer_a.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+
+        let frames = viewer.take(2).await;
+
+        let names: Vec<&str> = frames
+            .iter()
+            .map(|frame| frame.data["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"from_a"), "{names:?}");
+        assert!(names.contains(&"from_b"), "{names:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconnect_after_the_feed_was_pruned_is_not_a_reset(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut first =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "seen", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let frames = first.take(3).await;
+        let last = frames[2].id.clone().unwrap();
+        drop(first);
+        sqlx::query("DELETE FROM debugger_feed")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut again = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&last),
+        )
+        .await;
+
+        assert!(
+            again
+                .next(std::time::Duration::from_millis(500))
+                .await
+                .is_none(),
+            "no gap frame: the feed was pruned, not reset"
+        );
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record("a@example.com", "seen", None, 1, json!({}))],
+        )
+        .await;
+        let live = again.take(1).await;
+        assert_eq!(live[0].event, "item");
+    }
 }
