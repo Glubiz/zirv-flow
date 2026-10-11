@@ -321,7 +321,9 @@ mod tests {
 
     async fn insert_at(pool: &PgPool, ws: WorkspaceId, recorded_at: &str) {
         sqlx::query(
-            "INSERT INTO decision_records             (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id)          VALUES ($1, $2, $3, $4::timestamptz, 'step', 'done', 'api', 'x')",
+            "INSERT INTO decision_records \
+             (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id) \
+             VALUES ($1, $2, $3, $4::timestamptz, 'step', 'done', 'api', 'x')",
         )
         .bind(Uuid::new_v4())
         .bind(ws.as_uuid())

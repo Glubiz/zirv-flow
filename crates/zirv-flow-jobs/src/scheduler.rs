@@ -519,7 +519,8 @@ mod tests {
 
     async fn partitions(pool: &PgPool) -> Vec<String> {
         sqlx::query_scalar(
-            "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid              WHERE i.inhparent = 'decision_records'::regclass",
+            "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             WHERE i.inhparent = 'decision_records'::regclass",
         )
         .fetch_all(pool)
         .await
@@ -549,7 +550,9 @@ mod tests {
         );
 
         sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_locks              WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()",
+            "SELECT pg_terminate_backend(pid) FROM pg_locks \
+             WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid() \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
         )
         .execute(&pool)
         .await
