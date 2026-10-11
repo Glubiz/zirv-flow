@@ -8491,4 +8491,58 @@ email,b@example.com,
         assert_eq!(entries[0].summary["cause"], "definition_change");
         assert_eq!(entries[0].summary["emit_triggers"], false);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replaying_nothing_is_refused_or_answered_without_a_job_or_an_audit_row(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let uri = format!("/api/v1/workspaces/{ws}/ingest-rejects/replay");
+        let unknown = uuid::Uuid::now_v7();
+
+        let empty = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"ids": [], "cause": "manual", "dry_run": false})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let no_such_id = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"ids": [unknown], "cause": "manual", "dry_run": false})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let no_match = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"filter": {"name": "ghost"}, "cause": "manual", "dry_run": false})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
+        for answered in [&no_such_id, &no_match] {
+            assert_eq!(answered.status, StatusCode::OK, "{:?}", answered.body);
+            assert_eq!(answered.body["selected"], 0);
+            assert!(answered.body["trace_id"].is_null());
+        }
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.replay'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 0);
+        let audited = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(
+            audited
+                .iter()
+                .all(|row| row.action != "ingest_rejects.replayed")
+        );
+    }
 }

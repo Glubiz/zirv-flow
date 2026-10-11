@@ -4104,7 +4104,7 @@
         "tags": [
           "events"
         ],
-        "summary": "Replays rejected events after a schema or policy fix. With `dry_run` it validates each\nreject's stored, redacted payload against the current schema and policy and predicts the\noutcome, writing nothing. Without it, a job stores each event that now passes, once, with\nthe flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and\n`replay_event_id` on the reject and records an `event.replayed` decision with the cause.\nReplaying a reject again changes nothing. A reject that named no person cannot be\nreplayed (`still_rejected` with `no_person`).",
+        "summary": "Replays rejected events after a schema or policy fix. A request that covers no reject\n(ids that name none, or a filter that matches none) answers 200 with `selected: 0` and\nqueues nothing; an empty `ids` list is a 422. With `dry_run` it validates each\nreject's stored, redacted payload against the current schema and policy and predicts the\noutcome, writing nothing. Without it, a job stores each event that now passes, once, with\nthe flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and\n`replay_event_id` on the reject and records an `event.replayed` decision with the cause.\nReplaying a reject again changes nothing. A reject that named no person cannot be\nreplayed (`still_rejected` with `no_person`).",
         "operationId": "replay_ingest_rejects",
         "parameters": [
           {
@@ -4180,7 +4180,7 @@
             }
           },
           "422": {
-            "description": "Not exactly one of ids and filter, an unknown cause, or more than 10,000 rejects",
+            "description": "Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects",
             "content": {
               "application/problem+json": {
                 "schema": {

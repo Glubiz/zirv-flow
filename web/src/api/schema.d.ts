@@ -788,7 +788,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Replays rejected events after a schema or policy fix. With `dry_run` it validates each
+         * Replays rejected events after a schema or policy fix. A request that covers no reject
+         *     (ids that name none, or a filter that matches none) answers 200 with `selected: 0` and
+         *     queues nothing; an empty `ids` list is a 422. With `dry_run` it validates each
          *     reject's stored, redacted payload against the current schema and policy and predicts the
          *     outcome, writing nothing. Without it, a job stores each event that now passes, once, with
          *     the flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and
@@ -6080,7 +6082,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not exactly one of ids and filter, an unknown cause, or more than 10,000 rejects */
+            /** @description Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects */
             422: {
                 headers: {
                     [name: string]: unknown;

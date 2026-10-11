@@ -126,7 +126,9 @@ fn totals(predictions: &[PredictionBody]) -> TotalsBody {
     totals
 }
 
-/// Replays rejected events after a schema or policy fix. With `dry_run` it validates each
+/// Replays rejected events after a schema or policy fix. A request that covers no reject
+/// (ids that name none, or a filter that matches none) answers 200 with `selected: 0` and
+/// queues nothing; an empty `ids` list is a 422. With `dry_run` it validates each
 /// reject's stored, redacted payload against the current schema and policy and predicts the
 /// outcome, writing nothing. Without it, a job stores each event that now passes, once, with
 /// the flag `replayed` (and `no_triggers` unless `emit_triggers`), sets `replayed_at` and
@@ -146,7 +148,7 @@ fn totals(predictions: &[PredictionBody]) -> TotalsBody {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Not exactly one of ids and filter, an unknown cause, or more than 10,000 rejects", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "Not exactly one of ids and filter, an empty ids list, an unknown cause, or more than 10,000 rejects", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -170,6 +172,9 @@ pub(crate) async fn replay(
         }
     };
     let ids = match (&request.ids, &request.filter) {
+        (Some(ids), None) if ids.is_empty() => {
+            return Err(ApiError::unprocessable("ids: must hold at least one id"));
+        }
         (Some(ids), None) => {
             zirv_flow_store::select_rejects(&state.pool, workspace.id, ReplaySelection::Ids(ids))
                 .await?
@@ -198,6 +203,20 @@ pub(crate) async fn replay(
             "a replay covers at most {MAX_REPLAY} rejects"
         )));
     };
+
+    // Nothing to replay is an answer, not work: no preview, no job, no audit entry.
+    if ids.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(ReplayBody {
+                dry_run: request.dry_run,
+                selected: 0,
+                rejects: Vec::new(),
+                totals: TotalsBody::default(),
+                trace_id: None,
+            }),
+        ));
+    }
 
     if request.dry_run {
         let rejects: Vec<PredictionBody> =
