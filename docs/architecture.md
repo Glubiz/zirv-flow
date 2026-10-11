@@ -318,7 +318,7 @@ erDiagram
 | Event | Append-only `(name, schema_version, occurred_at, received_at, properties, source, event_id, message_id, trace_id, validation_state)`. Range-partitioned by month on `occurred_at`; ingest redaction runs before storage. A client `messageId` deduplicates retries for effectively-once storage. |
 | Ingest reject | Rejected customer event or sync record with reason, masked sample, source and trace. It is visible, retained separately and replayable after its schema or mapping is fixed. |
 | Decision log | Append-only, time-partitioned typed records for derived actions and their causes. It stores durable ids and reasons but no personal-data values; `trace_id` links the tree across jobs, events, messages and forwarding. |
-| Consent | State per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. |
+| Consent | Recorded consent: state per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. It is the input to the workspace consent policy (10.1), which decides effective consent. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
 | List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). |
 | Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
@@ -659,7 +659,7 @@ send time** (consent can change while a person waits):
 |---|------|------------|
 | 1 | Enrollment active, flow not paused | dropped |
 | 2 | Channel address present and valid (registry channel-address trait) | `skipped: no_address` |
-| 3 | Consent for channel and topic under the topic's policy (explicit opt-in, or allowed unless opted out) | `skipped: no_consent` |
+| 3 | Effective consent under the workspace consent policy (below); the default is the topic's policy (explicit opt-in, or allowed unless opted out) | `skipped: no_consent` |
 | 4 | Suppression check on the address hash | `skipped: suppressed` |
 | 5 | Frequency cap per person, channel, window; check-and-record under a per-person transaction advisory lock | `skipped: frequency_cap` or deferred (configurable) |
 | 6 | Quiet hours in the recipient's time zone | deferred to the next allowed time |
@@ -671,6 +671,28 @@ Each outcome updates `messages` (template version, destination, data
 freshness, gate results) and appends a person event, so the profile answers
 "why did this person not get the email". Zirv Flow enforces the consent policy
 the operator configures; it does not decide which legal regime applies.
+
+**Consent policies (M6).** What a person accepted is not always the whole answer.
+A company may also have to weigh its own data, for example a cooldown after a
+complaint, an account state such as self-excluded or closed, or a product the
+person no longer holds. Consent is also more than a channel: some regimes split
+it further, for example by product vertical. Zirv Flow therefore separates:
+
+- **Consent dimensions.** Each workspace defines the dimensions consent is
+  recorded on: the channel, plus its own dimensions such as topic, product
+  vertical or purpose. A consent record is keyed by one value per dimension. A
+  dimension can be left out, meaning "all values" (for example an unsubscribe
+  from every vertical on email). Topics (M2) are the first such dimension.
+- **Effective consent.** A workspace consent policy is built and versioned in
+  the UI. Its rules are conditions over the recorded consent, traits, events,
+  list membership and message history (cooldowns). They are expressed in the M4
+  segment condition AST, with no scripting, and published like a segment. The
+  send gate evaluates the policy for the message's channel and dimension values.
+  The gate result records which rule decided, so "why was this not sent" names
+  that rule, and a policy change appends a `definition_change` decision. The
+  default policy is the topic policy above.
+
+OQ-32 settles the dimension model and how the policy reuses the AST.
 
 ### 10.2 Email, tracking and feedback
 
@@ -1368,6 +1390,7 @@ they were ruled as their capabilities were added to the plan.
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
 | OQ-31 | Which Kafka client fits the static, multi-arch release build (a librdkafka binding or a pure-Rust client with consumer groups), and when do Avro and Protobuf values with a schema registry join JSON? | M3, before the Kafka source ships |
+| OQ-32 | Consent dimensions and policies: are dimensions a per-workspace catalog with typed values, or topics with categories? How does the policy reuse the M4 condition AST, and how does a recorded-consent read address dimension values? | M6, before the send pipeline ships |
 
 ### 21.1 Decided questions
 
