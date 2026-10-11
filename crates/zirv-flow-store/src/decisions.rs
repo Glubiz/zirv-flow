@@ -297,6 +297,114 @@ mod tests {
         assert_eq!(bound(date!(2027 - 01 - 01)), "2027-01-01 00:00:00+00");
     }
 
+    /// Nearest-rank percentile (0 to 100) of an ascending slice.
+    fn percentile_ms(sorted: &[f64], p: f64) -> f64 {
+        let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+        sorted[rank.clamp(1, sorted.len()) - 1]
+    }
+
+    /// Times the decision appends of one drain batch, the "added transaction time" of
+    /// architecture section 19. Run by hand with `ZIRV_FLOW_BENCH_DECISIONS=<batches>` (at least
+    /// 500 are run; `ZIRV_FLOW_BENCH_DRAIN_BATCH` sets the batch size, default 500, the shipped
+    /// `ingest.drain_batch_size`); without the variable it does nothing. It appends what a drain
+    /// writes, one `append_decision` per decision on the batch's transaction, and prints JSON
+    /// with the p50, p95 and p99 per batch in milliseconds, with and without the commit.
+    #[cfg(not(feature = "bench-no-decisions"))]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_DECISIONS to measure"]
+    async fn a_drain_batch_of_decisions_records_its_duration(pool: PgPool) {
+        use std::time::Instant;
+
+        let Some(batches) = std::env::var("ZIRV_FLOW_BENCH_DECISIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            eprintln!("ZIRV_FLOW_BENCH_DECISIONS is not set: skipping the timing run");
+            return;
+        };
+        let batches = batches.max(500);
+        let size = std::env::var("ZIRV_FLOW_BENCH_DRAIN_BATCH")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(500);
+        let ws = workspace(&pool, "bench").await;
+
+        // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
+        // `event.accepted`, a changed profile one `trait.change`; a new person adds a
+        // `person.created`.
+        type Decision = (&'static str, &'static str, &'static [&'static str]);
+        let shapes: [(&str, &[Decision]); 3] = [
+            (
+                "track",
+                &[("event.accepted", "valid", &["event", "person"])],
+            ),
+            (
+                "identify",
+                &[("trait.change", "changed", &["person", "source_record"])],
+            ),
+            (
+                "track_new_person",
+                &[
+                    ("person.created", "created", &["person", "source_record"]),
+                    ("event.accepted", "valid", &["event", "person"]),
+                ],
+            ),
+        ];
+        let mut report = Vec::new();
+        for (name, per_item) in shapes {
+            let mut inside = Vec::with_capacity(batches);
+            let mut committed = Vec::with_capacity(batches);
+            for _ in 0..batches {
+                let trace = TraceContext::root(Cause::api("bench"));
+                let started = Instant::now();
+                let mut tx = crate::begin(&pool).await.unwrap();
+                for _ in 0..size {
+                    for &(action, outcome, subjects) in per_item {
+                        append_decision(
+                            &mut *tx,
+                            &NewDecision {
+                                workspace_id: ws,
+                                trace: trace.clone(),
+                                action,
+                                outcome,
+                                reason: None,
+                                subject_ids: subjects
+                                    .iter()
+                                    .map(|name| (*name, Uuid::new_v4()))
+                                    .collect(),
+                                job: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                inside.push(started.elapsed().as_secs_f64() * 1000.0);
+                crate::commit(tx).await.unwrap();
+                committed.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let summary = |mut values: Vec<f64>| {
+                values.sort_by(f64::total_cmp);
+                serde_json::json!({
+                    "p50_ms": percentile_ms(&values, 50.0),
+                    "p95_ms": percentile_ms(&values, 95.0),
+                    "p99_ms": percentile_ms(&values, 99.0),
+                })
+            };
+            report.push(serde_json::json!({
+                "shape": name,
+                "decisions_per_batch": size * per_item.len(),
+                "batches": batches,
+                "inside_transaction": summary(inside),
+                "with_commit": summary(committed),
+            }));
+        }
+        println!(
+            "{}",
+            serde_json::json!({ "benchmark": "decision_append", "drain_batch_size": size, "shapes": report })
+        );
+    }
+
     #[test]
     fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
         assert_eq!(BENCH_NO_DECISIONS, cfg!(feature = "bench-no-decisions"));
