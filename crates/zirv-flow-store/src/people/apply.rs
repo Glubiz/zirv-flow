@@ -113,21 +113,51 @@ pub async fn remove_contribution(
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
     let mut tx = begin(pool).await?;
-    let row: Option<(Uuid, Uuid, Value, Value)> = sqlx::query_as(
-        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
-         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
-           AND deleted_at IS NULL \
-         RETURNING id, person_id, traits, identifiers",
-    )
-    .bind(workspace.as_uuid())
-    .bind(source)
-    .bind(stream)
-    .bind(record_key)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
+    // The person is locked before the record, the order a drain and a merge use. A merge can
+    // move the record to its survivor while this waits, so the record is looked up again.
+    let mut row: Option<(Uuid, Uuid, Value, Value)> = None;
+    for _ in 0..3 {
+        let owner: Option<Uuid> = sqlx::query_scalar(
+            "SELECT person_id FROM source_records \
+             WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+               AND deleted_at IS NULL",
+        )
+        .bind(workspace.as_uuid())
+        .bind(source)
+        .bind(stream)
+        .bind(record_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+            .bind(workspace.as_uuid())
+            .bind(owner)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::query)?;
+        row = sqlx::query_as(
+            "UPDATE source_records SET deleted_at = now(), updated_at = now() \
+             WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+               AND deleted_at IS NULL AND person_id = $5 \
+             RETURNING id, person_id, traits, identifiers",
+        )
+        .bind(workspace.as_uuid())
+        .bind(source)
+        .bind(stream)
+        .bind(record_key)
+        .bind(owner)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+        if row.is_some() {
+            break;
+        }
+    }
     let Some((record_id, person_id, traits, identifiers)) = row else {
-        return Ok(false);
+        return Err(StoreError::retryable_race());
     };
     let keys: Vec<String> = traits
         .as_object()
@@ -2205,5 +2235,52 @@ mod tests {
         for person in [two, with_event, with_consent] {
             assert!(find_person(&pool, ws, person).await.unwrap().is_some());
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removal_waits_for_the_person_before_it_touches_the_source_record(pool: PgPool) {
+        use crate::privacy::testing::profile;
+
+        let ws = workspace(&pool, "one").await;
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[profile(
+                "crm",
+                "1",
+                &[("email", "a@example.com")],
+                json!({"n": 1}),
+            )],
+        )
+        .await
+        .unwrap();
+        let person = person_of(&outcomes[0]);
+        // A drain or a merge holds the person first.
+        let mut holder = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(person)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let removal = tokio::spawn({
+            let pool = pool.clone();
+            async move { remove_contribution(&pool, ws, "crm", "contacts", "1", &trace()).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // The removal is waiting on the person; it holds no lock on the record yet.
+        let mut probe = begin(&pool).await.unwrap();
+        let record = sqlx::query("SELECT id FROM source_records FOR UPDATE NOWAIT")
+            .execute(&mut *probe)
+            .await;
+        drop(probe);
+        commit(holder).await.unwrap();
+
+        assert!(
+            record.is_ok(),
+            "the removal locked the record before the person"
+        );
+        assert!(removal.await.unwrap().unwrap());
     }
 }
