@@ -1,0 +1,1076 @@
+//! The durable job queue and recurring schedules (architecture section 14).
+//!
+//! Every write a worker makes to a claimed job is fenced on its lease token, so a worker
+//! whose lease expired can change nothing.
+
+use std::time::Duration;
+
+use serde_json::Value;
+use sqlx::postgres::PgListener;
+use sqlx::prelude::FromRow;
+use sqlx::{PgConnection, PgExecutor};
+use time::OffsetDateTime;
+use uuid::Uuid;
+use zirv_flow_core::WorkspaceId;
+
+use crate::{PgPool, StoreError};
+
+/// The channel enqueue notifies; the payload is the job kind.
+pub const NOTIFY_CHANNEL: &str = "zirv_flow_jobs";
+/// Attempts a job gets unless it says otherwise.
+pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
+/// The longest `last_error` kept, in bytes.
+const MAX_ERROR_BYTES: usize = 2048;
+/// The advisory-lock key of the scheduler leader.
+const LEADER_LOCK_KEY: i64 = 0x7a69_7276_6a6f_6273;
+/// Serialises claims while a per-workspace cap is on, so the cap cannot be overshot.
+const CLAIM_LOCK_KEY: i64 = 0x7a69_7276_636c_6d73;
+
+/// A job to enqueue.
+#[derive(Clone, Debug)]
+pub struct NewJob {
+    pub workspace_id: Option<WorkspaceId>,
+    pub kind: String,
+    pub payload: Value,
+    /// Lower numbers are claimed first.
+    pub priority: i16,
+    /// When the job becomes runnable; the database's `now()` when absent.
+    pub run_at: Option<OffsetDateTime>,
+    pub max_attempts: i32,
+    /// At most one ready or running job holds a key; a second enqueue is a no-op.
+    pub unique_key: Option<String>,
+}
+
+impl NewJob {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            workspace_id: None,
+            kind: kind.into(),
+            payload: Value::Object(serde_json::Map::new()),
+            priority: 0,
+            run_at: None,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            unique_key: None,
+        }
+    }
+}
+
+/// A job as stored.
+#[derive(Clone, Debug, FromRow)]
+pub struct Job {
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub kind: String,
+    pub payload: Value,
+    pub priority: i16,
+    pub run_at: OffsetDateTime,
+    pub state: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub lease_token: Option<Uuid>,
+    pub lease_expires_at: Option<OffsetDateTime>,
+    pub locked_by: Option<String>,
+    pub unique_key: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: OffsetDateTime,
+}
+
+/// A job a worker has claimed. `attempts` already counts this attempt.
+#[derive(Clone, Debug, FromRow)]
+pub struct ClaimedJob {
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub kind: String,
+    pub payload: Value,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub lease_token: Uuid,
+    pub unique_key: Option<String>,
+}
+
+/// What a fenced failure did to the job.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailOutcome {
+    /// Back to `ready`, to run again after the backoff.
+    Retried,
+    /// Out of attempts.
+    Dead,
+}
+
+/// What a reaper pass did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Reaped {
+    pub requeued: u64,
+    pub dead: u64,
+}
+
+/// How many jobs are in each state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueueCounts {
+    pub ready: i64,
+    pub running: i64,
+    pub dead: i64,
+}
+
+/// A recurring schedule.
+#[derive(Clone, Debug, FromRow)]
+pub struct Schedule {
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub kind: String,
+    pub cron: String,
+    pub timezone: String,
+    pub next_run_at: OffsetDateTime,
+    pub payload: Value,
+    pub enabled: bool,
+}
+
+/// Enqueues a job; returns whether a row was inserted (false when its unique key is held).
+///
+/// Pass the caller's transaction so the job commits with the change that caused it. The
+/// wake-up notification is sent in that transaction, so it is delivered on commit.
+pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<bool, StoreError> {
+    let notified = sqlx::query(
+        "WITH inserted AS ( \
+             INSERT INTO jobs \
+                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key) \
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8) \
+             ON CONFLICT DO NOTHING \
+             RETURNING kind) \
+         SELECT pg_notify($9, kind) FROM inserted",
+    )
+    .bind(Uuid::new_v4())
+    .bind(job.workspace_id.map(|id| id.as_uuid()))
+    .bind(&job.kind)
+    .bind(&job.payload)
+    .bind(job.priority)
+    .bind(job.run_at)
+    .bind(job.max_attempts)
+    .bind(job.unique_key.as_deref())
+    .bind(NOTIFY_CHANNEL)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(notified.is_some())
+}
+
+/// Claims the next runnable job of one of `kinds`, or none.
+///
+/// A short transaction of its own, committed before the handler runs. With
+/// `max_running_per_workspace`, a workspace that already has that many running jobs is
+/// skipped, and claims are serialised so the cap holds under concurrent workers.
+pub async fn claim_job(
+    pool: &PgPool,
+    worker: &str,
+    kinds: &[&str],
+    lease: Duration,
+    max_running_per_workspace: Option<u32>,
+) -> Result<Option<ClaimedJob>, StoreError> {
+    let cap = max_running_per_workspace.map(i64::from);
+    // Without a cap one statement is enough. With one, claims queue up on a transaction
+    // lock so the count each claim sees includes the claims before it.
+    let mut tx = None;
+    if cap.is_some() {
+        let mut started = pool.begin().await.map_err(StoreError::query)?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *started)
+            .await
+            .map_err(StoreError::query)?;
+        tx = Some(started);
+    }
+    let query = sqlx::query_as(
+        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
+            lease_token = gen_random_uuid(), \
+            lease_expires_at = now() + make_interval(secs => $2) \
+            WHERE id = (SELECT j.id FROM jobs j \
+            WHERE j.state = 'ready' AND j.run_at <= now() AND j.kind = ANY($3) \
+            AND ($4::bigint IS NULL OR j.workspace_id IS NULL \
+            OR (SELECT count(*) FROM jobs r \
+            WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4) \
+            ORDER BY j.priority, j.run_at \
+            LIMIT 1 \
+            FOR UPDATE SKIP LOCKED) \
+            RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, unique_key",
+    )
+    .bind(worker)
+    .bind(lease.as_secs_f64())
+    .bind(kinds)
+    .bind(cap);
+    let claimed = match tx {
+        Some(mut tx) => {
+            let claimed = query
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::query)?;
+            tx.commit().await.map_err(StoreError::query)?;
+            claimed
+        }
+        None => query
+            .fetch_optional(pool)
+            .await
+            .map_err(StoreError::query)?,
+    };
+    Ok(claimed)
+}
+
+/// Locks the job row in the handler's transaction, to confirm the lease is still held.
+///
+/// False means the row is gone or carries another token: the lease was lost and the
+/// transaction must be abandoned. The lock is a key-share lock, which still lets the
+/// heartbeat extend the lease while the handler runs; completion is then fenced by
+/// [`complete_job`] in the same transaction.
+pub async fn lock_lease(
+    connection: &mut PgConnection,
+    id: Uuid,
+    lease_token: Uuid,
+) -> Result<bool, StoreError> {
+    let row = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2 FOR KEY SHARE")
+        .bind(id)
+        .bind(lease_token)
+        .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(row.is_some())
+}
+
+/// Deletes a finished job. False means the lease was lost, and the caller must roll back
+/// the transaction it ran the handler in.
+pub async fn complete_job<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    lease_token: Uuid,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query("DELETE FROM jobs WHERE id = $1 AND lease_token = $2")
+        .bind(id)
+        .bind(lease_token)
+        .execute(executor)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Records a failed attempt: back to `ready` after `retry_in`, or `dead` when the attempts
+/// are used up. `None` means the lease was lost and nothing changed.
+///
+/// `error` is truncated to 2 KB and must never contain payload values.
+pub async fn fail_job<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    lease_token: Uuid,
+    retry_in: Duration,
+    error: &str,
+) -> Result<Option<FailOutcome>, StoreError> {
+    let state: Option<String> = sqlx::query_scalar(
+        "UPDATE jobs SET \
+                state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
+                run_at = CASE WHEN attempts >= max_attempts THEN run_at \
+                              ELSE now() + make_interval(secs => $3) END, \
+                last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
+         WHERE id = $1 AND lease_token = $2 \
+         RETURNING state",
+    )
+    .bind(id)
+    .bind(lease_token)
+    .bind(retry_in.as_secs_f64())
+    .bind(truncate_error(error))
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(state.map(|state| {
+        if state == "dead" {
+            FailOutcome::Dead
+        } else {
+            FailOutcome::Retried
+        }
+    }))
+}
+
+/// Extends the lease of a running job. False means the lease was lost.
+pub async fn heartbeat_job<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    lease_token: Uuid,
+    lease: Duration,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE jobs SET lease_expires_at = now() + make_interval(secs => $3) \
+         WHERE id = $1 AND lease_token = $2",
+    )
+    .bind(id)
+    .bind(lease_token)
+    .bind(lease.as_secs_f64())
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Moves running jobs whose lease expired back to `ready`, to run now, or to `dead` when
+/// their attempts are used up (the attempt was counted at claim time).
+pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
+    let states: Vec<String> = sqlx::query_scalar(
+        "UPDATE jobs SET \
+                state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
+                run_at = now(), last_error = 'lease expired', \
+                lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
+         WHERE state = 'running' AND lease_expires_at < now() \
+         RETURNING state",
+    )
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    let dead = states.iter().filter(|state| *state == "dead").count() as u64;
+    Ok(Reaped {
+        requeued: states.len() as u64 - dead,
+        dead,
+    })
+}
+
+pub async fn find_job<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+) -> Result<Option<Job>, StoreError> {
+    sqlx::query_as(
+        "SELECT id, workspace_id, kind, payload, priority, run_at, state, attempts, \
+                max_attempts, lease_token, lease_expires_at, locked_by, unique_key, \
+                last_error, created_at \
+         FROM jobs WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+pub async fn queue_counts<'e>(executor: impl PgExecutor<'e>) -> Result<QueueCounts, StoreError> {
+    let (ready, running, dead): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state = 'ready'), \
+                count(*) FILTER (WHERE state = 'running'), \
+                count(*) FILTER (WHERE state = 'dead') \
+         FROM jobs",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(QueueCounts {
+        ready,
+        running,
+        dead,
+    })
+}
+
+/// The database's clock; due times are compared against it, never the host's.
+pub async fn database_now<'e>(executor: impl PgExecutor<'e>) -> Result<OffsetDateTime, StoreError> {
+    sqlx::query_scalar("SELECT now()")
+        .fetch_one(executor)
+        .await
+        .map_err(StoreError::query)
+}
+
+/// A schedule to create.
+#[derive(Clone, Debug)]
+pub struct NewSchedule {
+    pub workspace_id: Option<WorkspaceId>,
+    pub kind: String,
+    pub cron: String,
+    pub timezone: String,
+    pub next_run_at: OffsetDateTime,
+    pub payload: Value,
+}
+
+pub async fn create_schedule<'e>(
+    executor: impl PgExecutor<'e>,
+    schedule: &NewSchedule,
+) -> Result<Uuid, StoreError> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO schedules (id, workspace_id, kind, cron, timezone, next_run_at, payload) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(id)
+    .bind(schedule.workspace_id.map(|id| id.as_uuid()))
+    .bind(&schedule.kind)
+    .bind(&schedule.cron)
+    .bind(&schedule.timezone)
+    .bind(schedule.next_run_at)
+    .bind(&schedule.payload)
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(id)
+}
+
+/// Enabled schedules whose next slot is at or before `now`, oldest first.
+pub async fn due_schedules<'e>(
+    executor: impl PgExecutor<'e>,
+    now: OffsetDateTime,
+    limit: i64,
+) -> Result<Vec<Schedule>, StoreError> {
+    sqlx::query_as(
+        "SELECT id, workspace_id, kind, cron, timezone, next_run_at, payload, enabled \
+         FROM schedules WHERE enabled AND next_run_at <= $1 \
+         ORDER BY next_run_at LIMIT $2",
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Compare-and-set: moves a schedule from the slot the caller read to `to`. False means
+/// another scheduler already advanced it, so the caller must not enqueue that slot.
+///
+/// Call it in the same transaction as the enqueue; the advanced `next_run_at` is the
+/// durable record that the slot fired, and survives the job completing and being deleted.
+pub async fn advance_schedule<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    from: OffsetDateTime,
+    to: OffsetDateTime,
+) -> Result<bool, StoreError> {
+    let done =
+        sqlx::query("UPDATE schedules SET next_run_at = $3 WHERE id = $1 AND next_run_at = $2")
+            .bind(id)
+            .bind(from)
+            .bind(to)
+            .execute(executor)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Stops a schedule from firing, for one that can no longer be evaluated.
+pub async fn disable_schedule<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE schedules SET enabled = false WHERE id = $1")
+        .bind(id)
+        .execute(executor)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// A dedicated connection listening for new jobs.
+pub struct JobListener {
+    inner: PgListener,
+}
+
+/// Starts listening on [`NOTIFY_CHANNEL`] with a connection of its own.
+pub async fn listen_for_jobs(pool: &PgPool) -> Result<JobListener, StoreError> {
+    let mut inner = PgListener::connect_with(pool)
+        .await
+        .map_err(StoreError::query)?;
+    inner
+        .listen(NOTIFY_CHANNEL)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(JobListener { inner })
+}
+
+impl JobListener {
+    /// Waits for a notification. `Ok(false)` means the connection was lost; it reconnects
+    /// on the next call, and notifications sent meanwhile are lost, so callers fall back
+    /// to polling.
+    pub async fn wait(&mut self) -> Result<bool, StoreError> {
+        self.inner
+            .try_recv()
+            .await
+            .map(|notification| notification.is_some())
+            .map_err(StoreError::query)
+    }
+}
+
+/// The scheduler leader's hold on the advisory lock. The lock lives as long as this
+/// connection does.
+pub struct Leadership {
+    connection: PgConnection,
+}
+
+/// Tries to become the scheduler leader. The lock is taken on a connection detached from
+/// the pool, so it is never returned to the pool still holding the lock.
+pub async fn try_lead(pool: &PgPool) -> Result<Option<Leadership>, StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?.detach();
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(LEADER_LOCK_KEY)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(acquired.then_some(Leadership { connection }))
+}
+
+impl Leadership {
+    /// Whether the lock connection is still alive. A dead connection has lost the lock.
+    pub async fn is_held(&mut self) -> bool {
+        sqlx::query("SELECT 1")
+            .execute(&mut self.connection)
+            .await
+            .is_ok()
+    }
+
+    /// Gives the lock up now rather than when the connection is dropped.
+    pub async fn release(mut self) {
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(LEADER_LOCK_KEY)
+            .execute(&mut self.connection)
+            .await;
+    }
+}
+
+/// Keeps `error` within [`MAX_ERROR_BYTES`], cutting on a character boundary.
+fn truncate_error(error: &str) -> &str {
+    if error.len() <= MAX_ERROR_BYTES {
+        return error;
+    }
+    let mut end = MAX_ERROR_BYTES;
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    &error[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::PgPool;
+    use zirv_flow_core::{Slug, WorkspaceName};
+
+    use super::*;
+    use crate::create_workspace;
+
+    const LEASE: Duration = Duration::from_secs(30);
+
+    fn job(kind: &str) -> NewJob {
+        NewJob::new(kind)
+    }
+
+    async fn claim(pool: &PgPool, kinds: &[&str]) -> Option<ClaimedJob> {
+        claim_job(pool, "test-worker", kinds, LEASE, None)
+            .await
+            .unwrap()
+    }
+
+    async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let name = WorkspaceName::parse(slug).unwrap();
+        let slug = Slug::parse(slug).unwrap();
+        create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    async fn only_job(pool: &PgPool) -> Job {
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM jobs")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        find_job(pool, id).await.unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_long_error_is_cut_to_two_kilobytes_on_a_character_boundary() {
+        let long = "é".repeat(2000);
+
+        let kept = truncate_error(&long);
+
+        assert!(kept.len() <= MAX_ERROR_BYTES);
+        assert!(kept.len() >= MAX_ERROR_BYTES - 1);
+        assert_eq!(truncate_error("short"), "short");
+    }
+
+    #[test]
+    fn a_new_job_defaults_to_an_empty_payload_and_five_attempts() {
+        let job = NewJob::new("maintenance.noop");
+
+        assert_eq!(job.payload, json!({}));
+        assert_eq!(job.max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(job.priority, 0);
+        assert!(job.unique_key.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_enqueued_job_can_be_claimed_once(pool: PgPool) {
+        assert!(enqueue(&pool, &job("a.kind")).await.unwrap());
+
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+
+        assert_eq!(claimed.kind, "a.kind");
+        assert_eq!(claimed.attempts, 1);
+        assert!(claim(&pool, &["a.kind"]).await.is_none());
+        let stored = only_job(&pool).await;
+        assert_eq!(stored.state, "running");
+        assert_eq!(stored.lease_token, Some(claimed.lease_token));
+        assert_eq!(stored.locked_by.as_deref(), Some("test-worker"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_job_with_a_held_unique_key_is_not_enqueued(pool: PgPool) {
+        let mut keyed = job("a.kind");
+        keyed.unique_key = Some("once".into());
+
+        assert!(enqueue(&pool, &keyed).await.unwrap());
+        assert!(!enqueue(&pool, &keyed).await.unwrap());
+        // Still held while running.
+        claim(&pool, &["a.kind"]).await.unwrap();
+        assert!(!enqueue(&pool, &keyed).await.unwrap());
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_unique_key_is_free_again_once_the_job_is_gone_or_dead(pool: PgPool) {
+        let mut keyed = job("a.kind");
+        keyed.unique_key = Some("once".into());
+        keyed.max_attempts = 1;
+        enqueue(&pool, &keyed).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+        fail_job(
+            &pool,
+            claimed.id,
+            claimed.lease_token,
+            Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+
+        assert!(enqueue(&pool, &keyed).await.unwrap());
+        let second = claim(&pool, &["a.kind"]).await.unwrap();
+        assert!(
+            complete_job(&pool, second.id, second.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(enqueue(&pool, &keyed).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn claims_follow_priority_then_age_and_skip_other_kinds_and_future_jobs(pool: PgPool) {
+        let mut low = job("a.kind");
+        low.priority = 5;
+        low.payload = json!({"n": "low"});
+        let mut high = job("a.kind");
+        high.priority = -1;
+        high.payload = json!({"n": "high"});
+        let mut other = job("b.kind");
+        other.priority = -10;
+        let mut later = job("a.kind");
+        later.priority = -10;
+        later.run_at = Some(OffsetDateTime::now_utc() + time::Duration::hours(1));
+        for new in [&low, &high, &other, &later] {
+            enqueue(&pool, new).await.unwrap();
+        }
+
+        let first = claim(&pool, &["a.kind"]).await.unwrap();
+        let second = claim(&pool, &["a.kind"]).await.unwrap();
+
+        assert_eq!(first.payload, json!({"n": "high"}));
+        assert_eq!(second.payload, json!({"n": "low"}));
+        assert!(claim(&pool, &["a.kind"]).await.is_none());
+        assert!(claim(&pool, &["b.kind"]).await.is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_per_workspace_cap_keeps_a_busy_workspace_from_starving_the_rest(pool: PgPool) {
+        let busy = workspace(&pool, "busy").await;
+        let quiet = workspace(&pool, "quiet").await;
+        for _ in 0..3 {
+            let mut new = job("a.kind");
+            new.workspace_id = Some(busy);
+            new.priority = 0;
+            enqueue(&pool, &new).await.unwrap();
+        }
+        let mut other = job("a.kind");
+        other.workspace_id = Some(quiet);
+        other.priority = 1;
+        enqueue(&pool, &other).await.unwrap();
+        let claim_capped = || claim_job(&pool, "w", &["a.kind"], LEASE, Some(2));
+
+        let first = claim_capped().await.unwrap().unwrap();
+        let second = claim_capped().await.unwrap().unwrap();
+        // The busy workspace is at its cap, so the next claim passes it over.
+        let third = claim_capped().await.unwrap().unwrap();
+        let fourth = claim_capped().await.unwrap();
+
+        assert_eq!(first.workspace_id, Some(busy.as_uuid()));
+        assert_eq!(second.workspace_id, Some(busy.as_uuid()));
+        assert_eq!(third.workspace_id, Some(quiet.as_uuid()));
+        assert!(fourth.is_none());
+        // Finishing a busy job frees a slot.
+        complete_job(&pool, first.id, first.lease_token)
+            .await
+            .unwrap();
+        let fifth = claim_capped().await.unwrap().unwrap();
+        assert_eq!(fifth.workspace_id, Some(busy.as_uuid()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_cap_does_not_apply_to_instance_level_jobs(pool: PgPool) {
+        for _ in 0..3 {
+            enqueue(&pool, &job("a.kind")).await.unwrap();
+        }
+
+        for _ in 0..3 {
+            let claimed = claim_job(&pool, "w", &["a.kind"], LEASE, Some(1))
+                .await
+                .unwrap();
+            assert!(claimed.is_some());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn completing_deletes_the_job_and_a_stale_token_changes_nothing(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+
+        let stale = Uuid::new_v4();
+        assert!(!complete_job(&pool, claimed.id, stale).await.unwrap());
+        assert!(
+            fail_job(&pool, claimed.id, stale, Duration::ZERO, "boom")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !heartbeat_job(&pool, claimed.id, stale, LEASE)
+                .await
+                .unwrap()
+        );
+        assert_eq!(only_job(&pool).await.state, "running");
+
+        assert!(
+            complete_job(&pool, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(find_job(&pool, claimed.id).await.unwrap().is_none());
+        assert!(
+            !complete_job(&pool, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_retries_after_the_backoff_with_the_error_kept(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+
+        let outcome = fail_job(
+            &pool,
+            claimed.id,
+            claimed.lease_token,
+            Duration::from_secs(3600),
+            "it broke",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, Some(FailOutcome::Retried));
+        let stored = only_job(&pool).await;
+        assert_eq!(stored.state, "ready");
+        assert_eq!(stored.last_error.as_deref(), Some("it broke"));
+        assert!(stored.lease_token.is_none() && stored.locked_by.is_none());
+        assert!(stored.run_at > OffsetDateTime::now_utc() + time::Duration::minutes(59));
+        assert!(claim(&pool, &["a.kind"]).await.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_is_dead_once_its_attempts_are_used_up(pool: PgPool) {
+        let mut new = job("a.kind");
+        new.max_attempts = 2;
+        enqueue(&pool, &new).await.unwrap();
+
+        let first = claim(&pool, &["a.kind"]).await.unwrap();
+        let retried = fail_job(&pool, first.id, first.lease_token, Duration::ZERO, "one")
+            .await
+            .unwrap();
+        let second = claim(&pool, &["a.kind"]).await.unwrap();
+        let dead = fail_job(&pool, second.id, second.lease_token, Duration::ZERO, "two")
+            .await
+            .unwrap();
+
+        assert_eq!(retried, Some(FailOutcome::Retried));
+        assert_eq!(second.attempts, 2);
+        assert_eq!(dead, Some(FailOutcome::Dead));
+        let stored = only_job(&pool).await;
+        assert_eq!(stored.state, "dead");
+        assert_eq!(stored.last_error.as_deref(), Some("two"));
+        assert!(claim(&pool, &["a.kind"]).await.is_none());
+        assert_eq!(
+            queue_counts(&pool).await.unwrap(),
+            QueueCounts {
+                ready: 0,
+                running: 0,
+                dead: 1
+            }
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_requeues_an_expired_lease_and_fences_the_old_token(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim_job(&pool, "w", &["a.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        // A live lease is left alone.
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+        claim(&pool, &["b.kind"]).await.unwrap();
+        wait_until_expired(&pool, claimed.id).await;
+
+        let reaped = reap_expired(&pool).await.unwrap();
+
+        assert_eq!(
+            reaped,
+            Reaped {
+                requeued: 1,
+                dead: 0
+            }
+        );
+        let again = claim(&pool, &["a.kind"]).await.unwrap();
+        assert_eq!(again.id, claimed.id);
+        assert_eq!(again.attempts, 2);
+        assert_ne!(again.lease_token, claimed.lease_token);
+        assert!(
+            !complete_job(&pool, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !lock_lease(
+                &mut pool.acquire().await.unwrap(),
+                claimed.id,
+                claimed.lease_token
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_kills_an_expired_job_that_is_out_of_attempts(pool: PgPool) {
+        let mut new = job("a.kind");
+        new.max_attempts = 1;
+        enqueue(&pool, &new).await.unwrap();
+        let claimed = claim_job(&pool, "w", &["a.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_until_expired(&pool, claimed.id).await;
+
+        let reaped = reap_expired(&pool).await.unwrap();
+
+        assert_eq!(
+            reaped,
+            Reaped {
+                requeued: 0,
+                dead: 1
+            }
+        );
+        assert_eq!(only_job(&pool).await.state, "dead");
+    }
+
+    /// Waits for the lease to pass, by the database's clock.
+    async fn wait_until_expired(pool: &PgPool, id: Uuid) {
+        loop {
+            let expired: bool =
+                sqlx::query_scalar("SELECT lease_expires_at < now() FROM jobs WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            if expired {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_heartbeat_extends_the_lease(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim_job(&pool, "w", &["a.kind"], Duration::from_secs(5), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = only_job(&pool).await.lease_expires_at.unwrap();
+
+        assert!(
+            heartbeat_job(
+                &pool,
+                claimed.id,
+                claimed.lease_token,
+                Duration::from_secs(600)
+            )
+            .await
+            .unwrap()
+        );
+
+        assert!(
+            only_job(&pool).await.lease_expires_at.unwrap() > before + time::Duration::minutes(5)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_lease_lock_still_lets_a_heartbeat_through(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+
+        assert!(
+            lock_lease(&mut tx, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        // A different connection extends the lease without waiting for the transaction.
+        assert!(
+            heartbeat_job(&pool, claimed.id, claimed.lease_token, LEASE)
+                .await
+                .unwrap()
+        );
+        assert!(
+            complete_job(&mut *tx, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+
+        assert!(find_job(&pool, claimed.id).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rolled_back_completion_leaves_the_job_running(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        complete_job(&mut *tx, claimed.id, claimed.lease_token)
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(only_job(&pool).await.state, "running");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_enqueued_in_a_rolled_back_transaction_never_exists(pool: PgPool) {
+        let mut tx = pool.begin().await.unwrap();
+        enqueue(&mut *tx, &job("a.kind")).await.unwrap();
+        drop(tx);
+
+        assert_eq!(queue_counts(&pool).await.unwrap(), QueueCounts::default());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_committed_enqueue_wakes_a_listener(pool: PgPool) {
+        let mut listener = listen_for_jobs(&pool).await.unwrap();
+
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+
+        assert!(listener.wait().await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_schedule_advances_only_from_the_slot_the_caller_read(pool: PgPool) {
+        let slot =
+            OffsetDateTime::now_utc().replace_nanosecond(0).unwrap() - time::Duration::hours(2);
+        let id = create_schedule(
+            &pool,
+            &NewSchedule {
+                workspace_id: None,
+                kind: "a.kind".into(),
+                cron: "0 * * * *".into(),
+                timezone: "UTC".into(),
+                next_run_at: slot,
+                payload: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        let now = database_now(&pool).await.unwrap();
+        let next = slot + time::Duration::hours(1);
+
+        let due = due_schedules(&pool, now, 10).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].next_run_at, slot);
+        assert!(advance_schedule(&pool, id, slot, next).await.unwrap());
+        // A second scheduler holding the old slot loses the race.
+        assert!(!advance_schedule(&pool, id, slot, next).await.unwrap());
+
+        let due = due_schedules(&pool, now, 10).await.unwrap();
+        assert_eq!(due[0].next_run_at, next);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_disabled_or_future_schedule_is_not_due(pool: PgPool) {
+        let now = database_now(&pool).await.unwrap();
+        let make = |next_run_at| NewSchedule {
+            workspace_id: None,
+            kind: "a.kind".into(),
+            cron: "0 * * * *".into(),
+            timezone: "UTC".into(),
+            next_run_at,
+            payload: json!({}),
+        };
+        let disabled = create_schedule(&pool, &make(now - time::Duration::hours(1)))
+            .await
+            .unwrap();
+        create_schedule(&pool, &make(now + time::Duration::hours(1)))
+            .await
+            .unwrap();
+        disable_schedule(&pool, disabled).await.unwrap();
+
+        assert!(due_schedules(&pool, now, 10).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_one_connection_leads_at_a_time(pool: PgPool) {
+        let first = try_lead(&pool).await.unwrap();
+        let mut leader = first.expect("the first caller leads");
+
+        assert!(try_lead(&pool).await.unwrap().is_none());
+        assert!(leader.is_held().await);
+
+        leader.release().await;
+        assert!(try_lead(&pool).await.unwrap().is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn dropping_the_leaders_connection_hands_over_leadership(pool: PgPool) {
+        let leader = try_lead(&pool).await.unwrap().unwrap();
+
+        drop(leader);
+
+        // The server notices the closed connection on its own schedule.
+        loop {
+            if try_lead(&pool).await.unwrap().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}

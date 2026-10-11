@@ -3,6 +3,7 @@
 mod accounts;
 mod api_keys;
 mod audit;
+mod jobs;
 mod migrations;
 mod pool;
 mod sessions;
@@ -20,8 +21,14 @@ pub use api_keys::{
     touch_api_key,
 };
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
+pub use jobs::{
+    ClaimedJob, DEFAULT_MAX_ATTEMPTS, FailOutcome, Job, JobListener, Leadership, NOTIFY_CHANNEL,
+    NewJob, NewSchedule, QueueCounts, Reaped, Schedule, advance_schedule, claim_job, complete_job,
+    create_schedule, database_now, disable_schedule, due_schedules, enqueue, fail_job, find_job,
+    heartbeat_job, listen_for_jobs, lock_lease, queue_counts, reap_expired, try_lead,
+};
 pub use migrations::{SchemaState, migrate, schema_state};
-pub use pool::{PgPool, Tx, begin, commit, connect};
+pub use pool::{PgPool, Tx, begin, commit, connect, sized_like};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,

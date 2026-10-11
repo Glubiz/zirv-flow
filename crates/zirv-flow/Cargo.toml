@@ -23,4 +23,6 @@ zirv-flow-jobs.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 sqlx.workspace = true
+time.workspace = true

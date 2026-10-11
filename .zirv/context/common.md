@@ -19,7 +19,7 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 
 ## Module map
 
-- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root. `zirv-flow-core` is pure domain code (ids, roles, scopes, hashing); `zirv-flow-store` owns the PostgreSQL pool, embedded migrations (`migrations/NNNN_name.sql`) and one repository module per feature (`accounts`, `workspaces`, `sessions`, `api_keys`, `audit`); `zirv-flow-api` owns the axum router, the `auth` extractor and CSRF check, the shared `admin` operations (HTTP and the `admin` CLI share them; they audit), problem+json errors and the committed `openapi.json`, regenerated with `ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi`; `zirv-flow-jobs` is a shell. Edges: `docs/architecture.md` 5.1; order: `docs/roadmap.md`.
+- The virtual Cargo workspace lives under `crates/`. `zirv-flow` is the binary composition root. `zirv-flow-core` is pure domain code (ids, roles, scopes, hashing); `zirv-flow-store` owns the PostgreSQL pool, embedded migrations (`migrations/NNNN_name.sql`) and one repository module per feature (`accounts`, `workspaces`, `sessions`, `api_keys`, `audit`); `zirv-flow-api` owns the axum router, the `auth` extractor and CSRF check, the shared `admin` operations (HTTP and the `admin` CLI share them; they audit), problem+json errors and the committed `openapi.json`, regenerated with `ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi`; `zirv-flow-jobs` runs the worker pool, scheduler leader and job-kind registry. Edges: `docs/architecture.md` 5.1; order: `docs/roadmap.md`.
 
 ## Conventions
 
