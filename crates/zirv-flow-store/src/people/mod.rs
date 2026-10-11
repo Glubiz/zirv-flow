@@ -14,6 +14,7 @@ mod erasure;
 #[cfg(test)]
 mod isolation;
 
+pub(crate) use apply::apply_profile_record;
 pub use apply::{
     DroppedTrait, ProfileOutcome, ProfileRecord, apply_profile_batch, remove_contribution,
 };

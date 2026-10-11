@@ -7,6 +7,7 @@ mod consent;
 mod decisions;
 mod events;
 mod identities;
+mod ingest;
 mod jobs;
 mod lists;
 mod migrations;
@@ -48,6 +49,10 @@ pub use events::{
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
     take_oidc_login,
+};
+pub use ingest::{
+    DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, append_inbox, drain_batch,
+    drain_batch_singly, enqueue_drain, inbox_heads,
 };
 pub use jobs::{
     ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
@@ -162,6 +167,11 @@ impl StoreError {
     /// whole unit of work can be run again.
     pub(crate) fn retryable_race() -> Self {
         Self::new(StoreErrorKind::Retryable)
+    }
+
+    /// An inbox row that cannot be mapped to a record: retrying the batch cannot help.
+    pub(crate) fn poison() -> Self {
+        Self::new(StoreErrorKind::Query)
     }
 
     /// Whether running the whole transaction again can succeed: PostgreSQL reported a

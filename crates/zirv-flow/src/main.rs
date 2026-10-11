@@ -352,6 +352,10 @@ async fn run_roles_reporting(
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
         worker_config.event_retention = config.events_retention();
+        worker_config.redaction_key = master_key
+            .as_deref()
+            .map(|key| Arc::new(key.hmac_key(zirv_flow_store::HmacPurpose::Redaction)));
+        worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
             zirv_flow_jobs::Registry::built_in(),
@@ -564,7 +568,8 @@ fn http_state(
     let mut state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
         .with_local_sign_in(config.auth_local_enabled())
-        .with_event_retention(config.events_retention());
+        .with_event_retention(config.events_retention())
+        .with_ingest_limits(config.ingest_limits());
     if let Some(key) = master_key {
         state = state.with_master_key(key);
     }

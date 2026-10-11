@@ -64,6 +64,9 @@ pub(crate) enum Need {
     Write,
     /// Manage members and keys: a workspace admin, the owner, or an `admin` key.
     Admin,
+    /// Send events and profile updates: an API key with the `ingest` scope, and nobody
+    /// else.
+    Ingest,
 }
 
 impl Principal {
@@ -100,6 +103,18 @@ impl Principal {
             Ok(session)
         } else {
             Err(ApiError::forbidden("only the instance owner can do this"))
+        }
+    }
+
+    /// The API key of an ingestion request. A session is refused: ingestion is for keys
+    /// only, which also keeps it free of CSRF. A key without the `ingest` scope is refused.
+    pub(crate) fn require_ingest_key(&self) -> Result<&KeyPrincipal, ApiError> {
+        match self {
+            Self::Key(key) if scopes_allow(&key.key.scopes, Need::Ingest) => Ok(key),
+            Self::Key(_) => Err(ApiError::forbidden("the API key lacks the required scope")),
+            Self::Session(_) => Err(ApiError::forbidden(
+                "ingestion needs an API key with the ingest scope",
+            )),
         }
     }
 }
@@ -190,6 +205,7 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
         Need::ReadMembers => scopes.contains(&Scope::Read) || scopes.contains(&Scope::Admin),
         Need::Write => scopes.contains(&Scope::Write),
         Need::Admin => scopes.contains(&Scope::Admin),
+        Need::Ingest => scopes.contains(&Scope::Ingest),
     }
 }
 
@@ -197,6 +213,7 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
 pub(crate) fn role_allows(role: Role, need: Need) -> bool {
     match need {
         Need::Read | Need::ReadMembers | Need::Write => true,
+        Need::Ingest => false,
         Need::Admin => role == Role::Admin,
     }
 }
@@ -343,6 +360,10 @@ mod tests {
             &[Scope::Read, Scope::Admin, Scope::Ingest],
             Need::Write
         ));
+        assert!(scopes_allow(&[Scope::Ingest], Need::Ingest));
+        for other in [Scope::Read, Scope::Write, Scope::Admin] {
+            assert!(!scopes_allow(&[other], Need::Ingest));
+        }
     }
 
     #[test]
@@ -374,6 +395,7 @@ mod tests {
         assert!(role_allows(Role::Member, Need::Write));
         assert!(!role_allows(Role::Member, Need::Admin));
         assert!(role_allows(Role::Admin, Need::Admin));
+        assert!(!role_allows(Role::Admin, Need::Ingest));
     }
 
     #[test]
@@ -409,5 +431,35 @@ mod tests {
 
         assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
         assert!(path_id::<WorkspaceId>(&WorkspaceId::new().to_string()).is_ok());
+    }
+
+    #[test]
+    fn only_a_key_with_the_ingest_scope_passes_the_ingest_guard() {
+        let key = |scopes: Vec<Scope>| {
+            Principal::Key(KeyPrincipal {
+                key: ApiKey {
+                    id: zirv_flow_core::ApiKeyId::new(),
+                    workspace_id: WorkspaceId::new(),
+                    name: "ci".into(),
+                    scopes,
+                    created_by: None,
+                    created_at: OffsetDateTime::now_utc(),
+                    last_used_at: None,
+                    revoked_at: None,
+                },
+            })
+        };
+
+        assert!(key(vec![Scope::Ingest]).require_ingest_key().is_ok());
+        assert!(
+            key(vec![Scope::Read, Scope::Write, Scope::Admin])
+                .require_ingest_key()
+                .is_err()
+        );
+        assert!(
+            Principal::Session(session(true))
+                .require_ingest_key()
+                .is_err()
+        );
     }
 }

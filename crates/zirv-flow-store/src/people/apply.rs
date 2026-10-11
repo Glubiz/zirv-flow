@@ -74,11 +74,21 @@ pub async fn apply_profile_batch(
     records: &[ProfileRecord],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
+    let outcomes = apply_profile_records(&mut tx, workspace, records).await?;
+    commit(tx).await?;
+    Ok(outcomes)
+}
+
+/// [`apply_profile_batch`] inside the caller's transaction, which the caller commits.
+pub(crate) async fn apply_profile_records(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    records: &[ProfileRecord],
+) -> Result<Vec<ProfileOutcome>, StoreError> {
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
-        outcomes.push(apply_record(&mut tx, workspace, record).await?);
+        outcomes.push(apply_profile_record(connection, workspace, record).await?);
     }
-    commit(tx).await?;
     Ok(outcomes)
 }
 
@@ -131,7 +141,7 @@ pub async fn remove_contribution(
     Ok(true)
 }
 
-async fn apply_record(
+pub(crate) async fn apply_profile_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,

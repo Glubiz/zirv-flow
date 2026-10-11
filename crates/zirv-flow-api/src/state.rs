@@ -6,6 +6,7 @@ use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::ingest::{IngestLimits, IngestState};
 use crate::oidc;
 
 pub(crate) type SchemaCheck = Arc<
@@ -25,6 +26,8 @@ pub struct AppState {
     pub(crate) oidc: Option<OidcState>,
     /// The bounds a per-name event retention override must respect.
     pub(crate) event_retention: EventRetention,
+    /// The ingestion limits and the per-key rate-limit buckets.
+    pub(crate) ingest: IngestState,
     /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
@@ -54,6 +57,7 @@ impl AppState {
             local_sign_in: true,
             oidc: None,
             event_retention: EventRetention::default(),
+            ingest: IngestState::new(IngestLimits::default()),
             setup_token: Arc::default(),
             identifier_key: None,
         }
@@ -82,6 +86,12 @@ impl AppState {
     /// suppression endpoints answer 503.
     pub fn with_master_key(mut self, key: &MasterKey) -> Self {
         self.identifier_key = Some(Arc::new(key.hmac_key(HmacPurpose::Identifier)));
+        self
+    }
+
+    /// The ingestion limits: body size, batch size and the per-key rate, per process.
+    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+        self.ingest = IngestState::new(limits);
         self
     }
 

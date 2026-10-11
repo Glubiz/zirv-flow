@@ -555,4 +555,49 @@ mod tests {
         let (listed, _) = list_suppressions(&pool, one, 10, None, None).await.unwrap();
         assert_eq!(listed.len(), 1);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn draining_the_inbox_touches_only_its_own_workspaces_rows(pool: PgPool) {
+        use zirv_flow_core::{HmacPurpose, MasterKey};
+
+        use crate::{IngestItem, IngestPayload, append_inbox, drain_batch, inbox_heads};
+
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let item = IngestItem {
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            timestamp: None,
+            message_id: Some("m-1".into()),
+            payload: IngestPayload::Track {
+                event: "seen".into(),
+                properties: serde_json::Map::new(),
+            },
+        };
+        for ws in [one, two] {
+            append_inbox(
+                &pool,
+                ws,
+                Uuid::now_v7(),
+                &trace,
+                std::slice::from_ref(&item),
+            )
+            .await
+            .unwrap();
+        }
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+
+        let outcome = drain_batch(&pool, one, &key, 100).await.unwrap();
+
+        assert_eq!(outcome.rows, 1);
+        let heads = inbox_heads(&pool).await.unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].workspace_id, two);
+        let events: Vec<Uuid> = sqlx::query_scalar("SELECT workspace_id FROM events")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, [one.as_uuid()]);
+    }
 }

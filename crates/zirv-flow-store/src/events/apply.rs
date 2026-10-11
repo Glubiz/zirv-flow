@@ -76,24 +76,35 @@ pub async fn apply_event_batch(
     records: &[EventRecord],
 ) -> Result<Vec<EventOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
-    let mut batch = Batch::default();
+    let outcomes = apply_event_records(&mut tx, workspace, key, records).await?;
+    commit(tx).await?;
+    Ok(outcomes)
+}
+
+/// [`apply_event_batch`] inside the caller's transaction, which the caller commits.
+pub(crate) async fn apply_event_records(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    records: &[EventRecord],
+) -> Result<Vec<EventOutcome>, StoreError> {
+    let mut batch = EventBatch::default();
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
-        outcomes.push(apply_event(&mut tx, workspace, key, &mut batch, record).await?);
+        outcomes.push(apply_event_record(connection, workspace, key, &mut batch, record).await?);
     }
-    commit(tx).await?;
     Ok(outcomes)
 }
 
 /// What one batch loads once.
 #[derive(Default)]
-struct Batch {
+pub(crate) struct EventBatch {
     policy: Option<EventPolicy>,
     schemas: HashMap<String, Option<PublishedSchema>>,
     drafted: HashSet<String>,
 }
 
-impl Batch {
+impl EventBatch {
     async fn policy(
         &mut self,
         connection: &mut PgConnection,
@@ -130,11 +141,11 @@ struct Refusal<'a> {
     person_id: Option<Uuid>,
 }
 
-async fn apply_event(
+pub(crate) async fn apply_event_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &HmacKey,
-    batch: &mut Batch,
+    batch: &mut EventBatch,
     record: &EventRecord,
 ) -> Result<EventOutcome, StoreError> {
     let identifiers = match checked_input(record) {
@@ -352,7 +363,7 @@ async fn refuse(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &HmacKey,
-    batch: &mut Batch,
+    batch: &mut EventBatch,
     record: &EventRecord,
     refusal: &Refusal<'_>,
 ) -> Result<EventOutcome, StoreError> {
@@ -432,6 +443,84 @@ async fn refuse(
     })
 }
 
+/// A drained inbox row that could not be applied, as the reject keeps it.
+pub(crate) struct FailedItem<'a> {
+    /// `event` or `record`.
+    pub(crate) kind: &'static str,
+    pub(crate) source: &'a str,
+    pub(crate) name: Option<&'a str>,
+    /// The event's properties or the record's traits.
+    pub(crate) values: &'a Map<String, Value>,
+    pub(crate) timestamp: Option<OffsetDateTime>,
+    pub(crate) received_at: OffsetDateTime,
+    pub(crate) message_id: Option<&'a str>,
+    pub(crate) trace: &'a TraceContext,
+}
+
+/// Stores an `apply_failed` reject for an item that cannot be applied, with the masked
+/// sample and the redacted payload, and a decision. An item whose message already has an
+/// open reject writes nothing more.
+pub(crate) async fn reject_apply_failed(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    item: &FailedItem<'_>,
+) -> Result<(), StoreError> {
+    let policy = get_event_policy(&mut *connection, workspace).await?;
+    let mut redacted = item.values.clone();
+    redact(&mut redacted, &policy.redaction, workspace, key);
+    let sample = mask_sample(&redacted, None);
+    let payload = json!({
+        "properties": redacted,
+        "timestamp": item.timestamp.and_then(|at| at.format(&Rfc3339).ok()),
+    });
+    let sample = json!({ "properties": sample.properties, "masked": sample.masked });
+    let name = item.name.filter(|name| validate_event_name(name).is_ok());
+    let reject_id = Uuid::now_v7();
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO ingest_rejects \
+            (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, payload, \
+             message_id, trace_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'apply_failed', '[]'::jsonb, $7, $8, $9, $10) \
+         ON CONFLICT (workspace_id, message_id) \
+            WHERE message_id IS NOT NULL AND replayed_at IS NULL DO NOTHING \
+         RETURNING id",
+    )
+    .bind(reject_id)
+    .bind(workspace.as_uuid())
+    .bind(item.received_at)
+    .bind(item.source)
+    .bind(item.kind)
+    .bind(name)
+    .bind(Json(&sample))
+    .bind(Json(&payload))
+    .bind(item.message_id)
+    .bind(item.trace.trace_id.as_uuid())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if inserted.is_none() {
+        return Ok(());
+    }
+    let action = if item.kind == "event" {
+        "event.rejected"
+    } else {
+        "record.rejected"
+    };
+    append_decision(
+        connection,
+        &NewDecision {
+            workspace_id: workspace,
+            trace: item.trace.clone(),
+            action,
+            outcome: "rejected",
+            reason: Some("apply_failed"),
+            subject_ids: vec![("reject", reject_id)],
+            job: None,
+        },
+    )
+    .await
+}
 async fn decide(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
