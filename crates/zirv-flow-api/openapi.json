@@ -1144,6 +1144,308 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/identity-conflicts": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Identity conflicts, newest first: those still open (the default) or already resolved.",
+        "operationId": "list_identity_conflicts",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`open` (default) or `resolved`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Conflicts per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of conflicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "status or limit is out of range, or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key with neither the read nor the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/identity-conflicts/{id}": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "One conflict and the identities of its two people. Values are shown to the owner,\nworkspace admins and `admin` keys, and masked for everyone else.",
+        "operationId": "get_identity_conflict",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conflict id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The conflict with both people's identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key with neither the read nor the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or conflict, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve": {
+      "post": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Closes an open conflict: keep the two people separate, or move the shared identifier to\none of them. There is no unmerge. Audited as `identity_conflict.kept_separate` or\n`identity_conflict.identifier_moved`, and recorded as an `identity.conflict.resolved`\ndecision.",
+        "operationId": "resolve_identity_conflict",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conflict id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The closed conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or conflict, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already resolved, or the move would break an identity rule",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "to_person_id is not one of the conflict's two people",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/members": {
       "get": {
         "tags": [
@@ -1880,6 +2182,102 @@
           }
         }
       },
+      "ConflictBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "person_id",
+          "other_person_id",
+          "reason",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The identifier kind the two people share, such as `email`.",
+            "example": "email"
+          },
+          "other_person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The other person that owns the shared identifier."
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The person the record attached to."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the people were not merged: `unique_kind`, `max_per_person`, or `merge_deferred`\non conflicts recorded before merges existed.",
+            "example": "unique_kind"
+          },
+          "resolution": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`merged`, `kept_separate` or `identifier_moved`; null while open."
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ConflictDetailBody": {
+        "type": "object",
+        "required": [
+          "conflict",
+          "people"
+        ],
+        "properties": {
+          "conflict": {
+            "$ref": "#/components/schemas/ConflictBody"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonIdentitiesBody"
+            },
+            "description": "The conflict's person first, then the other person; one entry when they have since\nbeen merged into one."
+          }
+        }
+      },
+      "ConflictsBody": {
+        "type": "object",
+        "required": [
+          "conflicts"
+        ],
+        "properties": {
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConflictBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
       "CreateApiKeyRequest": {
         "type": "object",
         "required": [
@@ -2097,6 +2495,34 @@
           }
         }
       },
+      "IdentityBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "masked",
+          "shared"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "email"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "shared": {
+            "type": "boolean",
+            "description": "The identifier the conflict is about."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see values."
+          }
+        }
+      },
       "JobBody": {
         "type": "object",
         "description": "A job without its payload.",
@@ -2240,6 +2666,25 @@
           }
         }
       },
+      "PersonIdentitiesBody": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "identities"
+        ],
+        "properties": {
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityBody"
+            }
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "description": "An RFC 9457 problem document.",
@@ -2281,6 +2726,46 @@
             "example": "about:blank"
           }
         }
+      },
+      "ResolveRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The two people are different people; the identifier stays where it is.",
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "keep_separate"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The shared identifier belongs to `to_person_id`, one of the conflict's two people.",
+            "required": [
+              "to_person_id",
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "move_identifier"
+                ]
+              },
+              "to_person_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "description": "How to close a conflict."
       },
       "RoleBody": {
         "type": "object",

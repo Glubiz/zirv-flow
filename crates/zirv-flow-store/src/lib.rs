@@ -45,9 +45,9 @@ pub use people::{
     ProfileRecord, RECOMPUTE_BATCH, REWRITE_BATCH, REWRITE_JOB_KIND, ResolveError, StoredIdentity,
     TraitDefinition, TraitDefinitionUpdate, apply_profile_batch, create_trait_definition,
     current_person, find_conflict, find_person, find_person_by_identifier, find_trait_definition,
-    list_conflicts, list_identities, list_identity_conflicts, list_trait_definitions,
-    recompute_trait_batch, remove_contribution, resolve_conflict, rewrite_merged_person,
-    update_trait_definition,
+    find_trait_definition_for_update, list_conflicts, list_identities, list_identity_conflicts,
+    list_trait_definitions, recompute_trait_batch, remove_contribution, resolve_conflict,
+    rewrite_merged_person, update_trait_definition,
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use sessions::{

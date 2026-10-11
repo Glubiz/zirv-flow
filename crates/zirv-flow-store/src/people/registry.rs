@@ -138,6 +138,26 @@ pub async fn find_trait_definition<'e>(
     row.map(DefinitionRow::into_definition).transpose()
 }
 
+/// Reads a definition and locks its row until the caller's transaction ends, so a second
+/// update of the same key waits and then compares against what this one wrote.
+pub async fn find_trait_definition_for_update<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    key: &str,
+) -> Result<Option<TraitDefinition>, StoreError> {
+    let row: Option<DefinitionRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        definition_columns!(),
+        " FROM trait_definitions WHERE workspace_id = $1 AND key = $2 FOR UPDATE"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(key)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    row.map(DefinitionRow::into_definition).transpose()
+}
+
 /// Creates a definition. A key that exists, archived or not, is a conflict.
 pub async fn create_trait_definition<'e>(
     executor: impl PgExecutor<'e>,
@@ -338,5 +358,60 @@ mod tests {
 
         assert!(update.precedence.is_none() && update.archived.is_none());
         assert!(update.source_order.is_none() && update.description.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_locking_read_makes_a_second_one_wait_and_then_see_the_first_ones_write(
+        pool: PgPool,
+    ) {
+        use std::time::Duration;
+
+        let ws = workspace(&pool, "one").await;
+        create_trait_definition(&pool, ws, &new_definition("plan"))
+            .await
+            .unwrap();
+        let mut first = crate::begin(&pool).await.unwrap();
+        let before = find_trait_definition_for_update(&mut *first, ws, "plan")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.precedence, Precedence::Latest);
+
+        let second = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let seen = find_trait_definition_for_update(&mut *tx, ws, "plan")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                crate::commit(tx).await.unwrap();
+                seen
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!second.is_finished(), "the second read did not wait");
+        update_trait_definition(
+            &mut *first,
+            ws,
+            "plan",
+            &TraitDefinitionUpdate {
+                precedence: Some(Precedence::First),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::commit(first).await.unwrap();
+
+        let seen = second.await.unwrap();
+        assert_eq!(seen.precedence, Precedence::First);
+        assert!(
+            find_trait_definition_for_update(&pool, ws, "nope")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

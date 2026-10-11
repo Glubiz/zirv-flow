@@ -28,5 +28,6 @@ pub use profiles::{
 pub use recompute::{RECOMPUTE_BATCH, recompute_trait_batch};
 pub use registry::{
     NewTraitDefinition, TraitDefinition, TraitDefinitionUpdate, create_trait_definition,
-    find_trait_definition, list_trait_definitions, update_trait_definition,
+    find_trait_definition, find_trait_definition_for_update, list_trait_definitions,
+    update_trait_definition,
 };
