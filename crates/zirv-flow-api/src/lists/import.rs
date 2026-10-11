@@ -13,7 +13,7 @@ use uuid::Uuid;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::{ListSource, MAX_PEOPLE_PER_CALL};
 
-use super::membership_error;
+use super::{capped, membership_error};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
@@ -42,7 +42,10 @@ pub(crate) struct ImportBody {
     added: usize,
     /// Matched rows whose person was a member already or appears earlier in the file.
     already_member: usize,
+    /// The first 1000 rows that were skipped, in file order.
     unmatched: Vec<UnmatchedRow>,
+    /// How many rows were skipped, however many `unmatched` lists.
+    unmatched_count: usize,
 }
 
 /// Why a file was refused as a whole.
@@ -278,11 +281,13 @@ pub(crate) async fn import(
     } else {
         zirv_flow_store::commit(tx).await?;
     }
+    let (unmatched, unmatched_count) = capped(unmatched);
     Ok(Json(ImportBody {
         matched: people.len(),
         added,
         already_member: people.len() - added,
         unmatched,
+        unmatched_count,
     }))
 }
 

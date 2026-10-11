@@ -2266,6 +2266,923 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/lists": {
+      "get": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "The workspace's lists with their member counts, ordered by name.",
+        "operationId": "list_lists",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ListBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Creates an empty list. Audited as `list.created`.",
+        "operationId": "create_list",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A list with that name exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid name or description",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/lists/{id}": {
+      "get": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "One list.",
+        "operationId": "get_list",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Deletes a list together with its members and their history. Audited as `list.deleted`.",
+        "operationId": "delete_list",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Renames a list or changes its description. Audited as `list.updated`.",
+        "operationId": "update_list",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another list has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/lists/{id}/members": {
+      "get": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "A page of the members, newest first, with each one's strongest identifier. Values are shown\nto the owner, workspace admins and `admin` keys, and masked for everyone else.",
+        "operationId": "list_list_members",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Members per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMembersBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Adds people by id or by identifier. Adding a member again changes nothing. Identifiers\nthat no person owns come back in `not_found` and never create a person. Membership changes\ngo to the people's history and the decision log, not the audit log.",
+        "operationId": "add_list_members",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMembersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What was added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddMembersBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The people changed at the same moment; try again",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "More than 1000 people, or a malformed identifier (the detail names its position and the rule)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/lists/{id}/members/import": {
+      "post": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Adds the people a CSV of `kind,value` rows names. With `dry_run=true` nothing is kept and\nthe answer says what a real import would do. Rows no person owns, and rows that are\nmalformed, come back as row numbers with a reason code; values are never echoed. At most\n10 MiB and 100,000 rows. Membership changes go to the people's history and the decision\nlog, not the audit log.",
+        "operationId": "import_list_members",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "Count only; change nothing",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "A header row `kind,value`, then one identifier per row",
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the import did, or would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "dry_run is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The people changed at the same moment; try again",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 10 MiB",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not text/csv",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not UTF-8, a wrong header, an unclosed quote, or more than 100,000 rows",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/lists/{id}/members/remove": {
+      "post": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Removes people by id. Removing someone who is not a member changes nothing.",
+        "operationId": "remove_list_members",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "List id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveMembersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What was removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveMembersBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The people changed at the same moment; try again",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "More than 1000 people",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/members": {
       "get": {
         "tags": [
@@ -2494,6 +3411,201 @@
           },
           "404": {
             "description": "No such workspace or member, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/people/{id}/lists": {
+      "get": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "The lists a person is in, ordered by name. A person merged into another is read as the\nperson they were merged into.",
+        "operationId": "list_person_lists",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonListBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/people/{id}/lists/history": {
+      "get": {
+        "tags": [
+          "lists"
+        ],
+        "summary": "Every time a person was added to or removed from a list, newest first. Merges keep the\nhistory of both people under the survivor.",
+        "operationId": "list_person_list_history",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Changes per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipHistoryBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2931,6 +4043,59 @@
   },
   "components": {
     "schemas": {
+      "AddMembersBody": {
+        "type": "object",
+        "required": [
+          "added",
+          "already_member",
+          "not_found",
+          "not_found_count"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "description": "People newly added.",
+            "minimum": 0
+          },
+          "already_member": {
+            "type": "integer",
+            "description": "People who were members already, duplicates in the request included.",
+            "minimum": 0
+          },
+          "not_found": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotFoundBody"
+            },
+            "description": "The first 1000 inputs that named no person."
+          },
+          "not_found_count": {
+            "type": "integer",
+            "description": "How many inputs named no person, however many `not_found` lists.",
+            "minimum": 0
+          }
+        }
+      },
+      "AddMembersRequest": {
+        "type": "object",
+        "properties": {
+          "identifiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentifierInput"
+            },
+            "description": "People by identifier; one that no person owns is reported, never created."
+          },
+          "person_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "People by id. Together with `identifiers`, at most 1000."
+          }
+        }
+      },
       "ApiKeyBody": {
         "type": "object",
         "required": [
@@ -3149,6 +4314,23 @@
               "$ref": "#/components/schemas/PropertyBody"
             },
             "description": "The first draft."
+          }
+        }
+      },
+      "CreateListRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "At most 500 characters."
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 128 characters after trimming; unique in the workspace, ignoring case.",
+            "example": "Newsletter"
           }
         }
       },
@@ -3460,6 +4642,24 @@
           }
         }
       },
+      "IdentifierInput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+            "example": "email"
+          },
+          "value": {
+            "type": "string",
+            "example": "ada@example.com"
+          }
+        }
+      },
       "IdentityBody": {
         "type": "object",
         "required": [
@@ -3485,6 +4685,45 @@
               "null"
             ],
             "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see values."
+          }
+        }
+      },
+      "ImportBody": {
+        "type": "object",
+        "required": [
+          "matched",
+          "added",
+          "already_member",
+          "unmatched",
+          "unmatched_count"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "description": "People newly added; on a dry run, the people that would be.",
+            "minimum": 0
+          },
+          "already_member": {
+            "type": "integer",
+            "description": "Matched rows whose person was a member already or appears earlier in the file.",
+            "minimum": 0
+          },
+          "matched": {
+            "type": "integer",
+            "description": "Rows that named an existing person.",
+            "minimum": 0
+          },
+          "unmatched": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnmatchedRow"
+            },
+            "description": "The first 1000 rows that were skipped, in file order."
+          },
+          "unmatched_count": {
+            "type": "integer",
+            "description": "How many rows were skipped, however many `unmatched` lists.",
+            "minimum": 0
           }
         }
       },
@@ -3684,6 +4923,107 @@
           }
         }
       },
+      "ListBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "member_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many people are in the list."
+          },
+          "name": {
+            "type": "string",
+            "example": "Newsletter"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ListMemberBody": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "added_at",
+          "source"
+        ],
+        "properties": {
+          "added_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "identifier": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MemberIdentifierBody",
+                "description": "The strongest identifier the person holds; null for a person with none."
+              }
+            ]
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "type": "string",
+            "description": "`ui`, `api`, `import`, `merge` or `flow`.",
+            "example": "ui"
+          }
+        }
+      },
+      "ListMembersBody": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListMemberBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
       "MemberBody": {
         "type": "object",
         "required": [
@@ -3711,6 +5051,102 @@
           }
         }
       },
+      "MemberIdentifierBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "masked"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "email"
+          },
+          "masked": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when `masked`: only workspace admins, the owner and `admin` keys see values."
+          }
+        }
+      },
+      "MembershipChangeBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "list_id",
+          "list_name",
+          "action",
+          "source",
+          "occurred_at",
+          "trace_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`added` or `removed`.",
+            "example": "added"
+          },
+          "actor_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who made the change; null when an API key, an import job or a flow did."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "list_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "list_name": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string",
+            "description": "`ui`, `api`, `import`, `merge` or `flow`."
+          },
+          "trace_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`."
+          }
+        }
+      },
+      "MembershipHistoryBody": {
+        "type": "object",
+        "required": [
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MembershipChangeBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
       "MethodsBody": {
         "type": "object",
         "required": [
@@ -3725,6 +5161,31 @@
           "oidc": {
             "type": "boolean",
             "description": "True when sign-in through the identity provider is configured."
+          }
+        }
+      },
+      "NotFoundBody": {
+        "type": "object",
+        "description": "An input that named no person.",
+        "required": [
+          "field",
+          "index",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The request field: `person_ids` or `identifiers`.",
+            "example": "identifiers"
+          },
+          "index": {
+            "type": "integer",
+            "description": "Position in that field, from 0.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "example": "not_found"
           }
         }
       },
@@ -3744,6 +5205,32 @@
           "person_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "PersonListBody": {
+        "type": "object",
+        "required": [
+          "list_id",
+          "name",
+          "added_at",
+          "source"
+        ],
+        "properties": {
+          "added_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "list_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "`ui`, `api`, `import`, `merge` or `flow`."
           }
         }
       },
@@ -3871,6 +5358,55 @@
               "type": "string"
             },
             "description": "IP addresses with the host part zeroed: the last IPv4 octet, or all but the first\n48 bits of an IPv6 address. A value that is not an address is removed."
+          }
+        }
+      },
+      "RemoveMembersBody": {
+        "type": "object",
+        "required": [
+          "removed",
+          "not_member",
+          "not_found",
+          "not_found_count"
+        ],
+        "properties": {
+          "not_found": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotFoundBody"
+            },
+            "description": "The first 1000 inputs that named no person."
+          },
+          "not_found_count": {
+            "type": "integer",
+            "description": "How many inputs named no person, however many `not_found` lists.",
+            "minimum": 0
+          },
+          "not_member": {
+            "type": "integer",
+            "description": "People who were not members.",
+            "minimum": 0
+          },
+          "removed": {
+            "type": "integer",
+            "description": "People removed.",
+            "minimum": 0
+          }
+        }
+      },
+      "RemoveMembersRequest": {
+        "type": "object",
+        "required": [
+          "person_ids"
+        ],
+        "properties": {
+          "person_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "At most 1000."
           }
         }
       },
@@ -4152,6 +5688,25 @@
           }
         }
       },
+      "UnmatchedRow": {
+        "type": "object",
+        "required": [
+          "row",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "`not_found`, `malformed_row`, or the rule the identifier broke, such as `invalid_email`.",
+            "example": "not_found"
+          },
+          "row": {
+            "type": "integer",
+            "description": "The row in the file, counting the header as row 1.",
+            "minimum": 0
+          }
+        }
+      },
       "UpdateEventSchemaRequest": {
         "type": "object",
         "properties": {
@@ -4174,6 +5729,23 @@
             ],
             "format": "int32",
             "description": "Days events of this name are kept, within the operator's bounds; `null` goes back to\nthe deployment default."
+          }
+        }
+      },
+      "UpdateListRequest": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

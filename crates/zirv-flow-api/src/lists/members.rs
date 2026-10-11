@@ -10,7 +10,7 @@ use uuid::Uuid;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::{ListMember, MAX_PEOPLE_PER_CALL};
 
-use super::{invalid, membership_error, source_of};
+use super::{capped, invalid, membership_error, source_of};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
@@ -105,7 +105,10 @@ pub(crate) struct AddMembersBody {
     added: usize,
     /// People who were members already, duplicates in the request included.
     already_member: usize,
+    /// The first 1000 inputs that named no person.
     not_found: Vec<NotFoundBody>,
+    /// How many inputs named no person, however many `not_found` lists.
+    not_found_count: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -114,7 +117,10 @@ pub(crate) struct RemoveMembersBody {
     removed: usize,
     /// People who were not members.
     not_member: usize,
+    /// The first 1000 inputs that named no person.
     not_found: Vec<NotFoundBody>,
+    /// How many inputs named no person, however many `not_found` lists.
+    not_found_count: usize,
 }
 
 fn not_found(field: &'static str, index: usize) -> NotFoundBody {
@@ -255,10 +261,12 @@ pub(crate) async fn add(
         .map(|&position| not_found("person_ids", position))
         .collect();
     not_found_list.extend(unknown);
+    let (not_found, not_found_count) = capped(not_found_list);
     Ok(Json(AddMembersBody {
         added: outcome.changed,
         already_member: outcome.unchanged,
-        not_found: not_found_list,
+        not_found,
+        not_found_count,
     }))
 }
 
@@ -304,14 +312,17 @@ pub(crate) async fn remove(
     .await
     .map_err(|error| ApiError::from(membership_error(error)))?;
     zirv_flow_store::commit(tx).await?;
+    let missing = outcome
+        .missing
+        .iter()
+        .map(|&position| not_found("person_ids", position))
+        .collect();
+    let (not_found, not_found_count) = capped(missing);
     Ok(Json(RemoveMembersBody {
         removed: outcome.changed,
         not_member: outcome.unchanged,
-        not_found: outcome
-            .missing
-            .iter()
-            .map(|&position| not_found("person_ids", position))
-            .collect(),
+        not_found,
+        not_found_count,
     }))
 }
 

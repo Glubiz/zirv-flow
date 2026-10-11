@@ -251,6 +251,7 @@ describe("a list", () => {
         { row: 5, reason: "not_found" },
         { row: 6, reason: "invalid_email" },
       ],
+      unmatched_count: 2,
     };
     const bodies: string[] = [];
     const queries: string[] = [];
@@ -302,8 +303,10 @@ describe("a list", () => {
   });
 
   it("cuts a long list of skipped rows short", async () => {
-    const unmatched = Array.from({ length: 25 }, (_, index) => ({ row: index + 2, reason: "not_found" }));
-    asAdmin({ [IMPORT_ROUTE]: () => json({ matched: 0, added: 0, already_member: 0, unmatched }) });
+    const unmatched = Array.from({ length: 1000 }, (_, index) => ({ row: index + 2, reason: "not_found" }));
+    asAdmin({
+      [IMPORT_ROUTE]: () => json({ matched: 0, added: 0, already_member: 0, unmatched, unmatched_count: 1025 }),
+    });
     const user = userEvent.setup();
     mount();
 
@@ -312,8 +315,9 @@ describe("a list", () => {
     await user.upload(dialog.getByLabelText("CSV file"), new File(["kind,value\n"], "x.csv", { type: "text/csv" }));
     await user.click(dialog.getByRole("button", { name: "Check file" }));
 
-    expect(await dialog.findByText("and 5 more.")).toBeInTheDocument();
+    expect(await dialog.findByText("and 1005 more.")).toBeInTheDocument();
     expect(dialog.getAllByText(/^Row \d+:/)).toHaveLength(20);
+    expect(dialog.getByText("1025 rows will be skipped:")).toBeInTheDocument();
     expect(dialog.getByRole("button", { name: "Add 0 people" })).toBeDisabled();
   });
 });

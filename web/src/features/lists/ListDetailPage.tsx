@@ -218,7 +218,7 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
           onImported={(result) => {
             setImporting(false);
             setNotice(
-              `Added ${plural(result.added, "person", "people")}. ${result.already_member} already in the list, ${result.unmatched.length} skipped.`,
+              `Added ${plural(result.added, "person", "people")}. ${result.already_member} already in the list, ${result.unmatched_count} skipped.`,
             );
             refresh();
           }}

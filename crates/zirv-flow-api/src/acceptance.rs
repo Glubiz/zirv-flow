@@ -3599,6 +3599,7 @@ mod tests {
         assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
         assert_eq!(first.body["added"], 2);
         assert_eq!(first.body["already_member"], 0);
+        assert_eq!(first.body["not_found_count"], 2);
         assert_eq!(
             first.body["not_found"],
             json!([
@@ -3662,6 +3663,7 @@ mod tests {
         assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
         assert_eq!(removed.body["removed"], 1);
         assert_eq!(removed.body["not_member"], 1);
+        assert_eq!(removed.body["not_found_count"], 1);
         assert_eq!(
             removed.body["not_found"],
             json!([{"field": "person_ids", "index": 2, "reason": "not_found"}])
@@ -3918,6 +3920,7 @@ mod tests {
         assert_eq!(preview.body["added"], 2);
         assert_eq!(preview.body["already_member"], 2);
         assert_eq!(preview.body["unmatched"], expected_unmatched);
+        assert_eq!(preview.body["unmatched_count"], 4);
         assert_eq!(count_after_preview, 1);
         assert_eq!(committed.body, preview.body);
         assert_eq!(count_after_commit, 3);
@@ -3998,6 +4001,7 @@ mod tests {
         assert_eq!(empty.status, StatusCode::OK);
         assert_eq!(empty.body["matched"], 0);
         assert_eq!(empty.body["unmatched"], json!([]));
+        assert_eq!(empty.body["unmatched_count"], 0);
     }
 
     #[sqlx::test]
@@ -4118,5 +4122,40 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(membership_audit, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_long_unmatched_list_is_cut_at_a_thousand_with_the_total(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let mut csv = String::from("kind,value\n");
+        for n in 0..1200 {
+            csv.push_str(&format!("email,nobody{n}@example.com\n"));
+        }
+
+        let reply = call_raw(
+            &router,
+            &format!("{}/{list}/members/import", lists_uri(&ws)),
+            Some("text/csv"),
+            csv.into_bytes(),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{:?}",
+            reply.body.get("detail")
+        );
+        assert_eq!(reply.body["matched"], 0);
+        assert_eq!(reply.body["unmatched_count"], 1200);
+        let rows = reply.body["unmatched"].as_array().unwrap();
+        assert_eq!(rows.len(), 1000);
+        assert_eq!(rows[0]["row"], 2);
+        assert_eq!(rows[999]["row"], 1001);
     }
 }

@@ -116,10 +116,10 @@ export function ImportDialog({ workspaceId, listId, onClose, onImported }: Impor
               {plural(preview.already_member, "row", "rows")} would change nothing because the person is already in the list
               or appears earlier in the file.
             </p>
-            {preview.unmatched.length > 0 ? (
+            {preview.unmatched_count > 0 ? (
               <>
                 <p className="strong">
-                  {plural(preview.unmatched.length, "row", "rows")} will be skipped:
+                  {plural(preview.unmatched_count, "row", "rows")} will be skipped:
                 </p>
                 <ul className="list-plain">
                   {preview.unmatched.slice(0, SHOWN_ROWS).map((row) => (
@@ -128,8 +128,8 @@ export function ImportDialog({ workspaceId, listId, onClose, onImported }: Impor
                     </li>
                   ))}
                 </ul>
-                {preview.unmatched.length > SHOWN_ROWS ? (
-                  <p className="faint">and {preview.unmatched.length - SHOWN_ROWS} more.</p>
+                {preview.unmatched_count > SHOWN_ROWS ? (
+                  <p className="faint">and {preview.unmatched_count - SHOWN_ROWS} more.</p>
                 ) : null}
               </>
             ) : null}
