@@ -20,6 +20,18 @@ function titleFor(pathname: string): string {
   return TITLES[key] ?? "zirv flow";
 }
 
+function WorkspaceItem({ base, segment, children }: { base: string | null; segment: string; children: string }) {
+  if (base === null) {
+    return (
+      <span className="nav-disabled" aria-disabled="true" title="Pick a workspace first">
+        {children}
+        <span className="visually-hidden"> (pick a workspace first)</span>
+      </span>
+    );
+  }
+  return <NavLink to={`${base}/${segment}`}>{children}</NavLink>;
+}
+
 export function Shell() {
   const user = useSignedInUser();
   const current = useCurrentWorkspace();
@@ -49,15 +61,9 @@ export function Shell() {
             <NavLink to="/w" end>
               Workspaces
             </NavLink>
-            <NavLink to={base ? `${base}/members` : "/w"} end={!base}>
-              Members
-            </NavLink>
-            <NavLink to={base ? `${base}/api-keys` : "/w"} end={!base}>
-              API keys
-            </NavLink>
-            <NavLink to={base ? `${base}/traces` : "/w"} end={!base}>
-              Traces
-            </NavLink>
+            <WorkspaceItem base={base} segment="members">Members</WorkspaceItem>
+            <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
+            <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}
             <NavLink to="/health">Health</NavLink>
           </nav>

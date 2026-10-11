@@ -98,7 +98,7 @@ function KeyList({ workspaceId }: { workspaceId: string }) {
                       <td className="mono">{shortId(key.id)}</td>
                       <td className="mono">{key.scopes.join(", ")}</td>
                       <td>{formatDateTime(key.created_at)}</td>
-                      <td>{key.last_used_at ? formatDateTime(key.last_used_at) : "Never"}</td>
+                      <td>{key.last_used_at ? formatDateTime(key.last_used_at) : "—"}</td>
                       <td>{key.revoked_at ? <Pill tone="error">Revoked</Pill> : <Pill>Active</Pill>}</td>
                       <td className="num">
                         {key.revoked_at ? null : (

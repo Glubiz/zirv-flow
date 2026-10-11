@@ -61,8 +61,8 @@ function TraceResult({ workspaceId, traceId }: { workspaceId: string; traceId: s
                       <td className="mono">
                         {record.cause.kind} {record.cause.id}
                       </td>
-                      <td className="mono">{record.job_id ?? "none"}</td>
-                      <td className="mono">{record.attempt ?? "none"}</td>
+                      <td className="mono">{record.job_id ?? "—"}</td>
+                      <td className="mono">{record.attempt ?? "—"}</td>
                       <td>{record.reason ?? ""}</td>
                       <td className="mono">
                         {Object.entries(record.subject_ids)

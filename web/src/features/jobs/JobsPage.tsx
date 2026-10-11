@@ -110,7 +110,7 @@ function JobsAdmin() {
         </div>
         <div className="panel stat">
           <span className="stat-label">Longest wait</span>
-          <span className="stat-value">{depth.status === "ready" ? (longest === null ? "None" : formatDuration(longest)) : "–"}</span>
+          <span className="stat-value">{depth.status === "ready" ? formatDuration(longest) : "—"}</span>
         </div>
       </section>
       <div className="split">

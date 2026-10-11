@@ -912,3 +912,9 @@ select {
 main:focus {
   outline: none;
 }
+
+.nav-disabled {
+  padding: 12px 14px;
+  color: var(--ink-3);
+  cursor: not-allowed;
+}

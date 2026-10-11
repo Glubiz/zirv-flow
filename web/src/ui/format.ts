@@ -9,7 +9,7 @@ export function formatDateTime(value: string): string {
 }
 
 export function formatDuration(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined) return "none waiting";
+  if (seconds === null || seconds === undefined) return "—";
   if (seconds < 1) return "under 1 s";
   if (seconds < 60) return `${Math.round(seconds)} s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)} min`;

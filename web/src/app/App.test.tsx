@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -89,5 +89,26 @@ describe("navigation", () => {
       expect(nav).toHaveTextContent("Health");
     });
     expect(nav).not.toHaveTextContent("Jobs");
+  });
+});
+
+describe("navigation without a workspace", () => {
+  it("marks exactly one item as current and renders the workspace items as plain text", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces": () => json([]),
+    });
+    renderApp("/w");
+
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    await waitFor(() => {
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(3);
+    });
+    expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
+    expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
+    for (const name of ["Members", "API keys", "Traces"]) {
+      expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
+    }
+    expect(nav).toHaveTextContent("pick a workspace first");
   });
 });
