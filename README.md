@@ -407,9 +407,28 @@ reason; the rest of the record still applies.
 **Identifier kinds.** A person is recognised by `email` (trimmed, lowercased), `phone`
 (international format only: spaces, dashes, dots and brackets are removed, a leading `00`
 becomes `+`, then 8 to 15 digits), `anonymous_id`, or `external:<namespace>` for ids from
-another system. When a record's identifiers match different people, it attaches to the owner
-of the strongest kind (external, then email, phone, anonymous id) and a conflict is recorded
-for later review; people are not merged yet.
+another system.
+
+**Merges.** When a record's identifiers match several people, they are merged into the
+oldest one: it keeps every identifier and source record and the others point at it. Merging
+is refused when the combined identifiers would break a rule. The rules are the same for every
+workspace for now (they are not configurable yet): a person holds one value of each
+`external:<namespace>` kind, up to 10 emails, up to 10 phone numbers and up to 100
+anonymous ids. A refused merge attaches the record to the owner of the strongest kind and
+records an **identity conflict** for each other person. Every merge keeps a provenance row
+(the identities and source records that moved) and a decision record, and there is no
+unmerge. A background job (`person.merge.rewrite`) then re-points what the merge did not
+move; reading a merged person follows it to the person it was merged into.
+
+**Conflict review.** Admins work through conflicts under **Conflicts** in the web UI, which
+shows the two people side by side with the shared identifier marked and offers two outcomes:
+keep the people separate, or move the identifier to one of them (refused when it would break
+a rule for that person). Members can read conflicts but see identifier values masked and
+cannot resolve them. The API is `GET /api/v1/workspaces/{ws}/identity-conflicts` (filter with
+`status=open|resolved`, page with `before`), `GET .../identity-conflicts/{id}` and
+`POST .../identity-conflicts/{id}/resolve` with `{"outcome": "keep_separate"}` or
+`{"outcome": "move_identifier", "to_person_id": "..."}`. Each resolution is audited and
+recorded as a decision.
 
 **Precedence.** When several sources supply the same field for one person, the field's
 policy picks the value, and the person shows which source it came from:

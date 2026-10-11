@@ -159,9 +159,15 @@ async fn apply_record(
         workspace,
         &identifiers,
         existing.as_ref().map(|row| row.person_id),
+        &record.trace,
     )
     .await?;
     let person_id = resolution.person_id;
+    // A merge in the resolution moved the record's old person into this one.
+    let previous = existing
+        .as_ref()
+        .map(|row| row.person_id)
+        .filter(|previous| !resolution.merged.contains(previous));
     let (record_id, ledger_keys) = upsert_ledger_row(
         connection,
         workspace,
@@ -188,14 +194,43 @@ async fn apply_record(
         )
         .await?;
     }
+    if let Some(previous) = resolution.split_from {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "identity.split",
+            "new_person",
+            Some("unique_kind"),
+            vec![
+                ("person", person_id),
+                ("previous_person", previous),
+                ("source_record", record_id),
+            ],
+        )
+        .await?;
+    }
+    if resolution.skipped > 0 {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "identity.limit",
+            "skipped",
+            Some("max_per_person"),
+            vec![("person", person_id), ("source_record", record_id)],
+        )
+        .await?;
+    }
     for conflict in &resolution.conflicts {
         let inserted = sqlx::query(
             "INSERT INTO identity_conflicts \
-                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
-             SELECT $1, $2, $3, $4, $5, $6, 'merge_deferred' \
+                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason, \
+                 identity_id) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8 \
              WHERE NOT EXISTS (SELECT 1 FROM identity_conflicts \
                                WHERE workspace_id = $2 AND person_id = $3 AND other_person_id = $4 \
-                                 AND source_record_id = $6 AND reason = 'merge_deferred' \
+                                 AND source_record_id = $6 AND reason = $7 \
                                  AND resolved_at IS NULL)",
         )
         .bind(Uuid::now_v7())
@@ -204,6 +239,8 @@ async fn apply_record(
         .bind(conflict.other_person_id)
         .bind(&conflict.kind)
         .bind(record_id)
+        .bind(conflict.reason)
+        .bind(conflict.identity_id)
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
@@ -214,7 +251,7 @@ async fn apply_record(
                 &record.trace,
                 "identity.conflict",
                 "recorded",
-                Some("merge_deferred"),
+                Some(conflict.reason),
                 vec![
                     ("person", person_id),
                     ("other_person", conflict.other_person_id),
@@ -226,10 +263,11 @@ async fn apply_record(
 
     // A record that moved to another person takes its traits away from the previous one.
     if let Some(row) = &existing
-        && row.person_id != person_id
-        && recompute(connection, workspace, row.person_id, &row.trait_keys()).await?
+        && let Some(previous) = previous
+        && previous != person_id
+        && recompute(connection, workspace, previous, &row.trait_keys()).await?
     {
-        mark_dirty(connection, workspace, row.person_id).await?;
+        mark_dirty(connection, workspace, previous).await?;
         record_decision(
             connection,
             workspace,
@@ -237,7 +275,7 @@ async fn apply_record(
             "trait.change",
             "changed",
             None,
-            vec![("person", row.person_id), ("source_record", record_id)],
+            vec![("person", previous), ("source_record", record_id)],
         )
         .await?;
     }
@@ -622,21 +660,38 @@ pub(super) async fn recompute(
 }
 
 /// Whether two stored values are the same for change detection: numbers compare by numeric
-/// value (5 and 5.0 are equal; two integers compare exactly as integers), everything else
-/// exactly. Storage always keeps the number as sent.
+/// value (5 and 5.0 are equal; two integers compare exactly as integers, and an integer
+/// equals a float only when the float is that exact integer), everything else exactly. Storage always keeps the number as sent.
 fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
-            if let (Some(i), Some(j)) = (x.as_i64(), y.as_i64()) {
+            if let (Some(i), Some(j)) = (exact_integer(x), exact_integer(y)) {
                 i == j
-            } else if let (Some(i), Some(j)) = (x.as_u64(), y.as_u64()) {
-                i == j
+            } else if let (Some(integer), Some(float)) = (exact_integer(x), y.as_f64()) {
+                float_is_integer(float, integer)
+            } else if let (Some(float), Some(integer)) = (x.as_f64(), exact_integer(y)) {
+                float_is_integer(float, integer)
             } else {
                 x.as_f64() == y.as_f64()
             }
         }
         _ => a == b,
     }
+}
+
+/// The value of a JSON number that is stored as an integer.
+fn exact_integer(number: &serde_json::Number) -> Option<i128> {
+    number
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| number.as_u64().map(i128::from))
+}
+
+/// Whether `float` is integral, in range, and exactly `integer`. A plain `f64` comparison
+/// would round a large integer to the nearest float.
+fn float_is_integer(float: f64, integer: i128) -> bool {
+    // 2^127 is the first float outside i128, so every float below it converts exactly.
+    float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == integer
 }
 
 pub(super) async fn mark_dirty(
@@ -1202,26 +1257,31 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn identifiers_of_two_people_record_a_deferred_merge_conflict(pool: PgPool) {
+    async fn a_merge_the_rules_forbid_attaches_to_the_strongest_identifier_and_records_a_conflict(
+        pool: PgPool,
+    ) {
         let ws = workspace(&pool, "one").await;
-        let a = record(
+        let mut first = record(
             "crm",
             "1",
             "a@example.com",
             json!({}),
             datetime!(2026-01-01 00:00 UTC),
         );
-        let mut b = record(
+        first.identifiers.push(("external:crm".into(), "1".into()));
+        let mut second = record(
             "crm",
             "2",
             "b@example.com",
             json!({}),
             datetime!(2026-01-01 00:00 UTC),
         );
-        b.identifiers = vec![("phone".into(), "+4512345678".into())];
-        let outcomes = apply_profile_batch(&pool, ws, &[a, b]).await.unwrap();
-        let (email_person, phone_person) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
-        assert_ne!(email_person, phone_person);
+        second.identifiers = vec![("external:crm".into(), "2".into())];
+        let outcomes = apply_profile_batch(&pool, ws, &[first, second])
+            .await
+            .unwrap();
+        let (email_person, external_person) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert_ne!(email_person, external_person);
         let mut both = record(
             "web",
             "7",
@@ -1229,33 +1289,272 @@ mod tests {
             json!({}),
             datetime!(2026-01-02 00:00 UTC),
         );
-        both.identifiers
-            .push(("phone".into(), "+4512345678".into()));
-        both.identifiers
-            .push(("anonymous_id".into(), "anon-1".into()));
+        both.identifiers = vec![
+            ("email".into(), "a@example.com".into()),
+            ("external:crm".into(), "2".into()),
+            ("anonymous_id".into(), "anon-1".into()),
+        ];
 
         let outcomes = apply_profile_batch(&pool, ws, &[both.clone()])
             .await
             .unwrap();
 
-        assert_eq!(person_of(&outcomes[0]), email_person);
-        let conflicts = list_identity_conflicts(&pool, ws, email_person)
+        assert_eq!(person_of(&outcomes[0]), external_person);
+        let conflicts = list_identity_conflicts(&pool, ws, external_person)
             .await
             .unwrap();
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].other_person_id, phone_person);
-        assert_eq!(conflicts[0].reason, "merge_deferred");
+        assert_eq!(conflicts[0].other_person_id, email_person);
+        assert_eq!(conflicts[0].reason, "unique_kind");
+        assert_eq!(conflicts[0].kind, "email");
         assert!(conflicts[0].resolved_at.is_none());
-        let identities = list_identities(&pool, ws, email_person).await.unwrap();
+        let shared: Uuid = sqlx::query_scalar(
+            "SELECT id FROM identities WHERE kind = 'email' AND value = 'a@example.com'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(conflicts[0].identity_id, Some(shared));
+        let identities = list_identities(&pool, ws, external_person).await.unwrap();
         let kinds: Vec<&str> = identities.iter().map(|i| i.kind.as_str()).collect();
-        assert_eq!(kinds, ["anonymous_id", "email"]);
+        assert_eq!(kinds, ["anonymous_id", "external:crm"]);
+        let merges: i64 = sqlx::query_scalar("SELECT count(*) FROM person_merges")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(merges, 0);
         let (decisions, _) = list_trace(&pool, ws, both.trace.trace_id, 10)
             .await
             .unwrap();
+        assert!(decisions.iter().any(|d| d.action == "identity.conflict"
+            && d.outcome == "recorded"
+            && d.reason.as_deref() == Some("unique_kind")));
+    }
+
+    fn with_identifiers(mut record: ProfileRecord, identifiers: &[(&str, &str)]) -> ProfileRecord {
+        record.identifiers = identifiers
+            .iter()
+            .map(|(kind, value)| ((*kind).into(), (*value).into()))
+            .collect();
+        record
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_value_of_a_unique_kind_makes_the_record_a_different_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("email", "a@example.com"), ("external:crm", "1")],
+        );
+        let owner = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let second = with_identifiers(
+            record("web", "2", "a@example.com", json!({"plan": "pro"}), at),
+            &[("email", "a@example.com"), ("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, std::slice::from_ref(&second))
+            .await
+            .unwrap();
+
+        let newcomer = person_of(&outcomes[0]);
+        assert_ne!(newcomer, owner);
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { created: true, .. }
+        ));
+        let kinds = |identities: Vec<crate::StoredIdentity>| {
+            identities.into_iter().map(|i| i.kind).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(list_identities(&pool, ws, owner).await.unwrap()),
+            ["email", "external:crm"]
+        );
+        assert_eq!(
+            kinds(list_identities(&pool, ws, newcomer).await.unwrap()),
+            ["external:crm"]
+        );
+        assert_eq!(
+            trait_of(&pool, ws, newcomer, "plan").await,
+            Some(json!("pro"))
+        );
+        assert_eq!(trait_of(&pool, ws, owner, "plan").await, None);
+        let conflicts = list_identity_conflicts(&pool, ws, newcomer).await.unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].other_person_id, owner);
+        assert_eq!(conflicts[0].reason, "unique_kind");
+        assert_eq!(conflicts[0].kind, "email");
+        let email_identity: Uuid =
+            sqlx::query_scalar("SELECT id FROM identities WHERE kind = 'email'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(conflicts[0].identity_id, Some(email_identity));
+        let (decisions, _) = list_trace(&pool, ws, second.trace.trace_id, 10)
+            .await
+            .unwrap();
+        assert!(decisions.iter().any(|d| d.action == "identity.conflict"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn identifiers_beyond_the_maximum_of_a_kind_are_skipped_and_the_rest_applies(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let emails: Vec<(String, String)> = (0..10)
+            .map(|n| ("email".to_owned(), format!("e{n}@example.com")))
+            .collect();
+        let mut full = record("crm", "1", "e0@example.com", json!({}), at);
+        full.identifiers = emails;
+        let person = person_of(&apply_profile_batch(&pool, ws, &[full]).await.unwrap()[0]);
+        let mut more = record("web", "2", "e0@example.com", json!({"plan": "pro"}), at);
+        more.identifiers = vec![
+            ("email".into(), "e0@example.com".into()),
+            ("email".into(), "extra@example.com".into()),
+            ("phone".into(), "+4512345678".into()),
+        ];
+
+        let outcomes = apply_profile_batch(&pool, ws, &[more.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        let identities = list_identities(&pool, ws, person).await.unwrap();
+        assert_eq!(identities.len(), 11);
+        assert!(identities.iter().any(|i| i.kind == "phone"));
+        assert!(identities.iter().all(|i| i.value != "extra@example.com"));
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        let (decisions, _) = list_trace(&pool, ws, more.trace.trace_id, 10)
+            .await
+            .unwrap();
+        let skipped = decisions
+            .iter()
+            .find(|d| d.action == "identity.limit")
+            .expect("an identity.limit decision");
+        assert_eq!(skipped.outcome, "skipped");
+        assert_eq!(skipped.reason.as_deref(), Some("max_per_person"));
+        assert_eq!(skipped.subject_ids["person"], person.to_string());
+        assert!(skipped.subject_ids["source_record"].is_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_allowed_new_identifier_still_attaches_to_the_one_matching_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let person = person_of(
+            &apply_profile_batch(
+                &pool,
+                ws,
+                &[record("crm", "1", "a@example.com", json!({}), at)],
+            )
+            .await
+            .unwrap()[0],
+        );
+        let both = with_identifiers(
+            record("web", "2", "a@example.com", json!({}), at),
+            &[("email", "a@example.com"), ("email", "b@example.com")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[both]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert_eq!(list_identities(&pool, ws, person).await.unwrap().len(), 2);
         assert!(
-            decisions
-                .iter()
-                .any(|d| d.action == "identity.conflict" && d.outcome == "recorded")
+            list_identity_conflicts(&pool, ws, person)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_already_over_a_rule_keeps_receiving_its_records(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({"plan": "free"}), at),
+            &[("external:crm", "1")],
+        );
+        let person = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        sqlx::query(
+            "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+             VALUES ($1, $2, $3, 'external:crm', '2')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let again = with_identifiers(
+            record("crm", "1", "a@example.com", json!({"plan": "pro"}), at),
+            &[("external:crm", "1"), ("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let conflicts: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_conflicts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((people, conflicts), (1, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_split_with_no_matching_owner_is_recorded(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("external:crm", "1")],
+        );
+        let previous = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let moved = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, std::slice::from_ref(&moved))
+            .await
+            .unwrap();
+
+        let person = person_of(&outcomes[0]);
+        assert_ne!(person, previous);
+        let (decisions, _) = list_trace(&pool, ws, moved.trace.trace_id, 10)
+            .await
+            .unwrap();
+        let split = decisions
+            .iter()
+            .find(|d| d.action == "identity.split")
+            .expect("an identity.split decision");
+        assert_eq!(split.outcome, "new_person");
+        assert_eq!(split.reason.as_deref(), Some("unique_kind"));
+        assert_eq!(split.subject_ids["person"], person.to_string());
+        assert_eq!(split.subject_ids["previous_person"], previous.to_string());
+        assert!(split.subject_ids["source_record"].is_string());
+        assert!(
+            list_identity_conflicts(&pool, ws, person)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -1488,6 +1787,22 @@ mod tests {
             &json!(9_007_199_254_740_992_i64)
         ));
         assert!(same_value(&json!(u64::MAX), &json!(u64::MAX)));
+    }
+
+    #[test]
+    fn a_mixed_integer_and_float_pair_is_equal_only_when_the_float_is_that_exact_integer() {
+        let big = 9_007_199_254_740_993_i64;
+        assert!(!same_value(&json!(big), &json!(9_007_199_254_740_992.0)));
+        assert!(!same_value(&json!(9_007_199_254_740_992.0), &json!(big)));
+        assert!(same_value(
+            &json!(9_007_199_254_740_992_i64),
+            &json!(9_007_199_254_740_992.0)
+        ));
+        assert!(same_value(&json!(-3.0), &json!(-3)));
+        assert!(!same_value(&json!(3), &json!(3.5)));
+        assert!(!same_value(&json!(u64::MAX), &json!(1.8446744073709552e19)));
+        assert!(!same_value(&json!(i64::MIN), &json!(1.0e300)));
+        assert!(same_value(&json!(2.5), &json!(2.5)));
         assert!(!same_value(&json!(5), &json!("5")));
     }
 

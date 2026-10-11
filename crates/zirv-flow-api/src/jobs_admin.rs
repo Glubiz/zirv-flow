@@ -18,8 +18,8 @@ use crate::problem::{ApiError, Problem};
 use crate::traces::CauseBody;
 use crate::{AppState, admin};
 
-const DEFAULT_LIMIT: u32 = 50;
-const MAX_LIMIT: u32 = 200;
+pub(crate) const DEFAULT_LIMIT: u32 = 50;
+pub(crate) const MAX_LIMIT: u32 = 200;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct DepthBody {
@@ -255,13 +255,14 @@ fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiError> {
     Ok((limit, before))
 }
 
-/// Opaque to callers: base64url of the microseconds since the epoch and the job id.
-fn encode_cursor((dead_at, id): DeadCursor) -> String {
+/// Opaque to callers: base64url of the microseconds since the epoch and the row id. Shared by
+/// every keyset-paged list.
+pub(crate) fn encode_cursor((dead_at, id): DeadCursor) -> String {
     let micros = dead_at.unix_timestamp_nanos() / 1000;
     URL_SAFE_NO_PAD.encode(format!("{micros}:{id}"))
 }
 
-fn decode_cursor(cursor: &str) -> Option<DeadCursor> {
+pub(crate) fn decode_cursor(cursor: &str) -> Option<DeadCursor> {
     let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
     let text = String::from_utf8(bytes).ok()?;
     let (micros, id) = text.split_once(':')?;

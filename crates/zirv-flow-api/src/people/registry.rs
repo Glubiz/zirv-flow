@@ -8,7 +8,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use zirv_flow_core::people::{Precedence, TraitType, validate_key};
-use zirv_flow_core::{Cause, TraceContext, ValidationError, WorkspaceId};
+use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{NewJob, NewTraitDefinition, PgPool, TraitDefinition, TraitDefinitionUpdate};
 
 use crate::AppState;
@@ -239,7 +239,8 @@ pub(crate) async fn update_trait(
     }
 
     let mut tx = zirv_flow_store::begin(pool).await?;
-    let before = zirv_flow_store::find_trait_definition(&mut *tx, workspace, key)
+    // Locked until commit: an overlapping update waits, then compares against this one.
+    let before = zirv_flow_store::find_trait_definition_for_update(&mut *tx, workspace, key)
         .await?
         .ok_or(AdminError::NotFound("trait"))?;
     let definition = zirv_flow_store::update_trait_definition(&mut *tx, workspace, key, &update)
@@ -261,10 +262,7 @@ pub(crate) async fn update_trait(
         || before.source_order != definition.source_order
         || before.archived != definition.archived
     {
-        let trace = crate::trace::current().unwrap_or_else(|| {
-            TraceContext::root(Cause::api(crate::request_id::current().unwrap_or_default()))
-        });
-        let mut job = NewJob::new("traits.recompute", trace);
+        let mut job = NewJob::new("traits.recompute", super::request_trace());
         job.workspace_id = Some(workspace);
         job.payload = json!({ "workspace_id": workspace, "key": definition.key });
         zirv_flow_store::enqueue(&mut *tx, &job).await?;

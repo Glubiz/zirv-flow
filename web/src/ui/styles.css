@@ -918,3 +918,97 @@ main:focus {
   color: var(--ink-3);
   cursor: not-allowed;
 }
+
+.dialog-wide {
+  max-width: 760px;
+}
+
+.dialog-actions-wrap {
+  justify-content: flex-start;
+}
+
+.compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.compare-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+
+.compare-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.identity-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-input);
+  background: var(--ground);
+}
+
+.identity-shared {
+  border-color: var(--attention-dot);
+}
+
+.identity-kind {
+  flex: 0 0 100%;
+  font-size: 13.5px;
+  color: var(--ink-3);
+}
+
+.identity-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  padding: 12px 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-control);
+  background: var(--paper);
+}
+
+.panel-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 640px) {
+  .compare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dialog {
+    padding: 20px;
+  }
+}

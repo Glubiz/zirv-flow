@@ -2335,4 +2335,487 @@ mod tests {
                 .unwrap();
         assert_eq!(queued, 0);
     }
+
+    fn conflicts_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/identity-conflicts")
+    }
+
+    fn profile(key: &str, identifiers: &[(&str, &str)]) -> zirv_flow_store::ProfileRecord {
+        zirv_flow_store::ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: key.into(),
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect(),
+            traits: serde_json::Map::new(),
+            observed_at: time::macros::datetime!(2026-01-01 00:00 UTC),
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+        }
+    }
+
+    /// P1 holds `{external:crm 1, email x}` and P2 `{external:crm 2}`; a record with
+    /// `{external:crm 2, email x}` records a `unique_kind` conflict. Returns the person the
+    /// record attached to (P2), the other person (P1) and the conflict id.
+    async fn seed_conflict(pool: &PgPool, ws: &str) -> (String, String, String) {
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            pool,
+            workspace,
+            &[
+                profile("1", &[("external:crm", "1"), ("email", "x@example.com")]),
+                profile("2", &[("external:crm", "2")]),
+                profile("3", &[("external:crm", "2"), ("email", "x@example.com")]),
+            ],
+        )
+        .await
+        .unwrap();
+        let person = |outcome: &zirv_flow_store::ProfileOutcome| match outcome {
+            zirv_flow_store::ProfileOutcome::Applied { person_id, .. } => person_id.to_string(),
+            other => panic!("not applied: {other:?}"),
+        };
+        let (first, second) = (person(&outcomes[0]), person(&outcomes[1]));
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM identity_conflicts WHERE workspace_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(workspace.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (second, first, id.to_string())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn conflicts_are_listed_by_status_and_shown_with_both_peoples_identities(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+
+        let open = call(
+            &router,
+            "GET",
+            &conflicts_uri(&ws),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let resolved = call(
+            &router,
+            "GET",
+            &format!("{}?status=resolved", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad = call(
+            &router,
+            "GET",
+            &format!("{}?status=all", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let detail = call(
+            &router,
+            "GET",
+            &format!("{}/{id}", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(open.status, StatusCode::OK, "{:?}", open.body);
+        let listed = &open.body["conflicts"][0];
+        assert_eq!(listed["id"], id);
+        assert_eq!(listed["kind"], "email");
+        assert_eq!(listed["reason"], "unique_kind");
+        assert_eq!(listed["person_id"], holder);
+        assert_eq!(listed["other_person_id"], other);
+        assert!(listed["resolved_at"].is_null() && listed["resolution"].is_null());
+        assert!(open.body["next_before"].is_null());
+        assert_eq!(resolved.body["conflicts"], json!([]));
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert_eq!(detail.status, StatusCode::OK, "{:?}", detail.body);
+        let people = detail.body["people"].as_array().unwrap();
+        assert_eq!(people[0]["person_id"], holder);
+        assert_eq!(people[1]["person_id"], other);
+        assert_eq!(
+            people[0]["identities"],
+            json!([{"kind": "external:crm", "value": "2", "masked": false, "shared": false}])
+        );
+        assert_eq!(
+            people[1]["identities"],
+            json!([
+                {"kind": "email", "value": "x@example.com", "masked": false, "shared": true},
+                {"kind": "external:crm", "value": "1", "masked": false, "shared": false}
+            ])
+        );
+        let missing = call(
+            &router,
+            "GET",
+            &format!("{}/{}", conflicts_uri(&ws), uuid::Uuid::now_v7()),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_pages_by_cursor(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, _, id) = seed_conflict(&pool, &ws).await;
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO identity_conflicts \
+                    (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
+                 SELECT $1, workspace_id, person_id, other_person_id, kind, source_record_id, \
+                        reason FROM identity_conflicts WHERE id = $2",
+            )
+            .bind(uuid::Uuid::now_v7())
+            .bind(uuid::Uuid::parse_str(&id).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let first = call(
+            &router,
+            "GET",
+            &format!("{}?limit=2", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let second = call(
+            &router,
+            "GET",
+            &format!("{}?limit=2&before={cursor}", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(first.body["conflicts"].as_array().unwrap().len(), 2);
+        assert_eq!(second.body["conflicts"].as_array().unwrap().len(), 1);
+        assert!(second.body["next_before"].is_null());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn members_and_read_keys_see_masked_values_and_admin_keys_see_them(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, _, id) = seed_conflict(&pool, &ws).await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let uri = format!("{}/{id}", conflicts_uri(&ws));
+
+        let as_member = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        let as_read_key = call(&router, "GET", &uri, None, Auth::Key(&read_key)).await;
+        let as_admin_key = call(&router, "GET", &uri, None, Auth::Key(&admin_key)).await;
+
+        for masked in [&as_member, &as_read_key] {
+            assert_eq!(masked.status, StatusCode::OK);
+            let text = masked.body.to_string();
+            assert!(!text.contains("x@example.com") && !text.contains("\"value\":\""));
+            for person in masked.body["people"].as_array().unwrap() {
+                for identity in person["identities"].as_array().unwrap() {
+                    assert!(identity["value"].is_null());
+                    assert_eq!(identity["masked"], true);
+                }
+            }
+        }
+        assert_eq!(as_admin_key.status, StatusCode::OK);
+        assert_eq!(
+            as_admin_key.body["people"][1]["identities"][0]["value"],
+            "x@example.com"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn keeping_two_people_separate_closes_the_conflict_audits_and_records_a_decision(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+        let uri = format!("{}/{id}/resolve", conflicts_uri(&ws));
+
+        let closed = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "keep_separate"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let again = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "keep_separate"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let resolved = call(
+            &router,
+            "GET",
+            &format!("{}?status=resolved", conflicts_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(closed.status, StatusCode::OK, "{:?}", closed.body);
+        assert_eq!(closed.body["resolution"], "kept_separate");
+        assert!(closed.body["resolved_at"].is_string());
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(resolved.body["conflicts"].as_array().unwrap().len(), 1);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let entry = audit
+            .iter()
+            .find(|row| row.action == "identity_conflict.kept_separate")
+            .expect("an audit entry");
+        assert_eq!(entry.object_kind.as_deref(), Some("identity_conflict"));
+        assert_eq!(entry.object_id.map(|id| id.to_string()), Some(id.clone()));
+        assert_eq!(
+            entry.summary,
+            json!({"person_id": holder, "other_person_id": other})
+        );
+        let decision: (String, String) = sqlx::query_as(
+            "SELECT action, outcome FROM decision_records WHERE action = 'identity.conflict.resolved'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            decision,
+            ("identity.conflict.resolved".into(), "kept_separate".into())
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn moving_the_identifier_gives_it_to_the_chosen_person_and_audits_ids_only(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+        let uri = format!("{}/{id}/resolve", conflicts_uri(&ws));
+
+        let moved = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "move_identifier", "to_person_id": holder})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+        assert_eq!(moved.body["resolution"], "identifier_moved");
+        let owner_of_email: String =
+            sqlx::query_scalar("SELECT person_id::text FROM identities WHERE kind = 'email'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_of_email, holder);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let entry = audit
+            .iter()
+            .find(|row| row.action == "identity_conflict.identifier_moved")
+            .expect("an audit entry");
+        assert_eq!(
+            entry.summary,
+            json!({"person_id": holder, "other_person_id": other, "to_person_id": holder})
+        );
+        assert!(!entry.summary.to_string().contains("x@example.com"));
+        let decision: String = sqlx::query_scalar(
+            "SELECT outcome FROM decision_records WHERE action = 'identity.conflict.resolved'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decision, "identifier_moved");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_move_that_breaks_a_rule_is_409_a_stranger_is_422_and_nothing_changes(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let mut fill = profile("fill", &[("external:crm", "2")]);
+        fill.identifiers
+            .extend((0..10).map(|n| ("email".to_owned(), format!("e{n}@example.com"))));
+        zirv_flow_store::apply_profile_batch(&pool, workspace_id, &[fill])
+            .await
+            .unwrap();
+        let uri = format!("{}/{id}/resolve", conflicts_uri(&ws));
+
+        let over = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "move_identifier", "to_person_id": holder})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let stranger = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "move_identifier", "to_person_id": uuid::Uuid::now_v7()})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let already = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "move_identifier", "to_person_id": other})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let malformed = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"outcome": "move_identifier"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "POST",
+            &format!("{}/{}/resolve", conflicts_uri(&ws), uuid::Uuid::now_v7()),
+            Some(json!({"outcome": "keep_separate"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(over.status, StatusCode::CONFLICT, "{:?}", over.body);
+        assert_eq!(stranger.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(already.status, StatusCode::CONFLICT);
+        assert_eq!(malformed.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM identity_conflicts WHERE resolved_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(open, 1);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        assert!(
+            audit
+                .iter()
+                .all(|row| !row.action.starts_with("identity_conflict."))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_admins_resolve_and_another_workspace_sees_nothing(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Alpha").await;
+        let theirs = workspace(&router, &owner, "Beta").await;
+        let (_, _, id) = seed_conflict(&pool, &mine).await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &mine, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
+        let (_, theirs_key) = make_key(&router, &owner, &theirs, &["admin"]).await;
+        let uri = format!("{}/{id}/resolve", conflicts_uri(&mine));
+        let body = || Some(json!({"outcome": "keep_separate"}));
+
+        let as_member = call(&router, "POST", &uri, body(), Auth::Session(&member)).await;
+        let as_read_key = call(&router, "POST", &uri, body(), Auth::Key(&read_key)).await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &uri,
+            body(),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let anonymous = call(&router, "POST", &uri, body(), Auth::Anonymous).await;
+        let foreign_key = call(&router, "POST", &uri, body(), Auth::Key(&theirs_key)).await;
+        let foreign_workspace = call(
+            &router,
+            "GET",
+            &format!("{}/{id}", conflicts_uri(&theirs)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_list = call(
+            &router,
+            "GET",
+            &conflicts_uri(&theirs),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(as_read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(foreign_key.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_workspace.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_list.body["conflicts"], json!([]));
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM identity_conflicts WHERE resolved_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(open, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_move_after_a_person_was_merged_away_is_409_conflict_changed(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(uuid::Uuid::parse_str(&holder).unwrap())
+            .bind(uuid::Uuid::parse_str(&other).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/{id}/resolve", conflicts_uri(&ws)),
+            Some(json!({"outcome": "move_identifier", "to_person_id": other})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert!(
+            reply.body["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("conflict_changed")
+        );
+    }
 }

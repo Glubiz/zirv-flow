@@ -101,6 +101,18 @@ fn routes() -> Router<AppState> {
             patch(people::update),
         )
         .route(
+            "/api/v1/workspaces/{ws}/identity-conflicts",
+            get(people::conflicts::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/identity-conflicts/{id}",
+            get(people::conflicts::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve",
+            axum::routing::post(people::conflicts::resolve),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/traces/{trace_id}",
             get(traces::get),
         )
