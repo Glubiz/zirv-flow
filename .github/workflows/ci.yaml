@@ -322,3 +322,43 @@ jobs:
       # The scan proves itself on every run too.
       - name: Advisory scan self-test
         run: bash scripts/security-scan.sh --self-test
+
+  # Proves the clean-checkout promise of the README quickstart: the image
+  # builds, the compose stack comes up healthy and /readyz answers 200.
+  # linux/amd64 only; CD builds and pushes the multi-arch image.
+  container-smoke-test:
+    name: Container Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
+
+      # Loads the image under the name docker-compose.yml expects, so the
+      # `up` below uses it instead of building a second time.
+      - name: Build Image
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/glubiz/zirv-flow:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start The Compose Stack
+        run: docker compose up -d --no-build --wait --wait-timeout 120
+
+      - name: Check Readiness
+        run: curl -fsS http://localhost:8080/readyz
+
+      - name: Print Logs On Failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear Down
+        if: always()
+        run: docker compose down -v

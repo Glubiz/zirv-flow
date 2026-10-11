@@ -25,6 +25,8 @@ pub(crate) enum Command {
     Scheduler,
     /// Apply database migrations.
     Migrate,
+    /// Probe this instance's /readyz and exit 0 when it is ready (for container health checks).
+    Healthcheck,
     /// Administer accounts: create the owner or reset a password.
     #[command(subcommand)]
     Admin(AdminCommand),
@@ -41,6 +43,7 @@ impl Command {
             Self::Worker => "worker",
             Self::Scheduler => "scheduler",
             Self::Migrate => "migrate",
+            Self::Healthcheck => "healthcheck",
             Self::Admin(_) => "admin",
             Self::Config(_) => "config",
         }
@@ -130,6 +133,7 @@ mod tests {
             "worker",
             "scheduler",
             "migrate",
+            "healthcheck",
             "admin",
             "config",
         ] {

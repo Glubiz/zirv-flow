@@ -24,6 +24,45 @@ durable job queue and scheduler are implemented, but nothing is ready to use yet
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
 
+## Quickstart with Docker Compose
+
+`docker-compose.yml` runs `zirv-flow all` and PostgreSQL 16 with a named data
+volume and health checks. From a clean checkout:
+
+```sh
+docker compose up -d --build --wait
+curl -fsS localhost:8080/readyz
+```
+
+Create the first owner. The password is read from one line of standard input,
+so it never appears on a command line:
+
+```sh
+docker compose exec -T zirv-flow zirv-flow admin create-owner --email you@example.com
+```
+
+Run it from an interactive terminal and type the password, or pipe it in from a
+file or a secret store. The compose file's database credentials are local-use
+defaults (`POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` override them);
+change them before exposing the stack anywhere else. The stack serves plain
+HTTP on port 8080 and applies migrations on start. Session cookies are `Secure`,
+which browsers accept over plain HTTP only on `localhost`; to sign in from
+another host, put TLS in front or set `ZIRV_FLOW_SERVER__COOKIE_SECURE=false`
+for development. Stop it with `docker compose down`, add `-v` to delete the
+database volume as well.
+
+The image is published to GHCR on each release as
+`ghcr.io/glubiz/zirv-flow:<version>` and `:latest` for linux/amd64 and
+linux/arm64. It is a static binary on a distroless base that runs as a non-root
+user, with `zirv-flow all` as its default command and `0.0.0.0:8080` as its bind
+address; supply `ZIRV_FLOW_DATABASE__URL` at run time.
+
+The image declares a health check, `zirv-flow healthcheck`, which requests
+`/readyz` on `server.bind` and exits 0 only on a 200. A container that runs only
+the `worker` or `scheduler` role has no HTTP listener yet, so give it
+`healthcheck: { disable: true }` in compose (or `--no-healthcheck` with
+`docker run`), or it will be reported unhealthy.
+
 ## Configuration
 
 Pass an optional TOML file with `zirv-flow --config <path>`, or set

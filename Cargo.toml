@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.11.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -31,7 +31,7 @@ sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "migrate", "macros", "runtime-tokio", "tls-rustls-ring-native-roots", "uuid", "time", "json"] }
 subtle = "2.6.1"
 time = { version = "0.3.55", features = ["formatting", "macros", "serde-well-known"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "net", "signal", "sync", "time"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tower = { version = "0.5.3", features = ["util"] }
