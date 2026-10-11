@@ -1077,6 +1077,96 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/traces/{trace_id}": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "summary": "What was decided and done under one trace, in the workspace. A trace with no records in\nthis workspace is 404, whether or not it exists elsewhere.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trace_id",
+            "in": "path",
+            "description": "Trace id: 32 lowercase hex characters, from the x-trace-id response header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trace's records, at most 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The trace id is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, no access to it, or no records for the trace in it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1185,6 +1275,24 @@
           }
         }
       },
+      "CauseBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "What caused the work: a request id for `api`, otherwise a record id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`.",
+            "example": "api"
+          }
+        }
+      },
       "CreateApiKeyRequest": {
         "type": "object",
         "required": [
@@ -1266,6 +1374,62 @@
           }
         ]
       },
+      "DecisionBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "recorded_at",
+          "action",
+          "outcome",
+          "cause",
+          "subject_ids"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "example": "job.attempt"
+          },
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "cause": {
+            "$ref": "#/components/schemas/CauseBody"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string",
+            "example": "failed"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "subject_ids": {
+            "type": "object",
+            "description": "Durable domain ids by name; never personal data."
+          }
+        }
+      },
       "MemberBody": {
         "type": "object",
         "required": [
@@ -1320,6 +1484,13 @@
           },
           "title": {
             "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `x-trace-id` of the failed request; look it up with\n`GET /api/v1/workspaces/{ws}/traces/{trace_id}`."
           },
           "type": {
             "type": "string",
@@ -1398,6 +1569,31 @@
           "status": {
             "type": "string",
             "example": "ok"
+          }
+        }
+      },
+      "TraceBody": {
+        "type": "object",
+        "required": [
+          "trace_id",
+          "records",
+          "truncated"
+        ],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DecisionBody"
+            },
+            "description": "Oldest first."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace id: 32 lowercase hex characters."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the trace has more records than this response carries."
           }
         }
       },

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod healthcheck;
+mod log;
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -11,8 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use tokio::net::TcpListener;
+use tracing::{error, info, warn};
 use zirv_flow_store::{PgPool, SchemaState};
 
 use crate::cli::{AdminCommand, Cli, Command, ConfigCommand};
@@ -20,6 +22,11 @@ use crate::config::Config;
 
 /// Seconds; makes the exporter render request durations as histograms rather than summaries.
 const HTTP_DURATION_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
+
+/// Seconds; for job durations and claim lag, which run far longer than a request.
+const JOB_BUCKETS: [f64; 13] = [
+    0.005, 0.025, 0.1, 0.5, 1.0, 2.5, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0,
+];
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -90,11 +97,15 @@ async fn run(
     }
 
     if let Some(roles) = Roles::of(&command) {
+        log::install(&config);
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
-            Err(message) => return database_error(stderr, message),
+            Err(message) => {
+                error!(error = %message, "could not open the database");
+                return 1;
+            }
         };
-        return run_roles(roles, &config, pool, stderr, shutdown_signal()).await;
+        return run_roles(roles, &config, pool, shutdown_signal()).await;
     }
 
     let _ = writeln!(
@@ -139,12 +150,11 @@ async fn run_roles(
     roles: Roles,
     config: &Config,
     pool: PgPool,
-    stderr: &mut impl Write,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
     // A bad server configuration stops the process before any role starts.
     let state = if roles.serve {
-        match http_state(config, pool.clone(), stderr) {
+        match http_state(config, pool.clone()) {
             Ok(state) => Some(state),
             Err(code) => return code,
         }
@@ -177,10 +187,10 @@ async fn run_roles(
             worker_config,
         );
         background.spawn(worker.run(stopped.clone()));
-        let _ = writeln!(
-            stderr,
-            "worker: running up to {} jobs at once",
-            config.worker_concurrency()
+        info!(
+            role = "worker",
+            concurrency = config.worker_concurrency(),
+            "worker started"
         );
     }
     if roles.scheduler {
@@ -189,12 +199,12 @@ async fn run_roles(
             zirv_flow_jobs::SchedulerConfig::default(),
         );
         background.spawn(scheduler.run(stopped.clone()));
-        let _ = writeln!(stderr, "scheduler: standing for leadership");
+        info!(role = "scheduler", "scheduler standing for leadership");
     }
 
     let code = if let Some(state) = state {
         let mut draining = stopped.clone();
-        let code = serve_http(state, config.server_bind(), stderr, &deadline, async move {
+        let code = serve_http(state, config.server_bind(), &deadline, async move {
             let _ = draining.wait_for(|stopped| *stopped).await;
         })
         .await;
@@ -208,22 +218,21 @@ async fn run_roles(
         0
     };
 
-    drain(background, deadline.start(), stderr).await;
+    drain(background, deadline.start()).await;
     code
 }
 
 /// The API state for the `serve` role: the metrics recorder, cookie and sign-in settings.
 /// On failure it reports the problem and returns the exit code.
-fn http_state(
-    config: &Config,
-    pool: PgPool,
-    stderr: &mut impl Write,
-) -> Result<zirv_flow_api::AppState, u8> {
+fn http_state(config: &Config, pool: PgPool) -> Result<zirv_flow_api::AppState, u8> {
     let handle = PrometheusBuilder::new()
         .set_buckets(&HTTP_DURATION_BUCKETS)
+        .and_then(|builder| {
+            builder.set_buckets_for_metric(Matcher::Prefix("zirv_flow_job_".into()), &JOB_BUCKETS)
+        })
         .and_then(|builder| builder.install_recorder())
         .map_err(|error| {
-            let _ = writeln!(stderr, "error: metrics: {error}");
+            error!(%error, "could not install the metrics recorder");
             1
         })?;
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || handle.render());
@@ -234,7 +243,7 @@ fn http_state(
         Some((settings, auto_create_users)) => state
             .with_oidc(settings, auto_create_users)
             .map_err(|error| {
-                let _ = writeln!(stderr, "error: auth.oidc: {error}");
+                error!(%error, "auth.oidc is not usable");
                 2
             }),
         None => Ok(state),
@@ -255,24 +264,19 @@ impl ShutdownDeadline {
 }
 
 /// Waits for the background roles to finish, until `deadline`.
-async fn drain(
-    mut background: tokio::task::JoinSet<()>,
-    deadline: tokio::time::Instant,
-    stderr: &mut impl Write,
-) {
+async fn drain(mut background: tokio::task::JoinSet<()>, deadline: tokio::time::Instant) {
     let drained = async { while background.join_next().await.is_some() {} };
     tokio::select! {
         result = tokio::time::timeout_at(deadline, drained) => {
             if result.is_err() {
-                let _ = writeln!(
-                    stderr,
-                    "warning: jobs still running after {}s; leaving them to lease expiry",
+                warn!(
+                    "jobs still running after {}s; leaving them to lease expiry",
                     SHUTDOWN_GRACE.as_secs()
                 );
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            let _ = writeln!(stderr, "warning: interrupted while draining jobs");
+            warn!("interrupted while draining jobs");
         }
     }
 }
@@ -281,19 +285,18 @@ async fn drain(
 async fn serve_http(
     state: zirv_flow_api::AppState,
     addr: SocketAddr,
-    stderr: &mut impl Write,
     deadline: &ShutdownDeadline,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
     let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            let _ = writeln!(stderr, "error: server: could not bind {addr}: {error}");
+            error!(address = %addr, %error, "could not bind the server address");
             return 1;
         }
     };
     let bound = listener.local_addr().unwrap_or(addr);
-    let _ = writeln!(stderr, "listening on {bound}");
+    info!(address = %bound, "listening on {bound}");
 
     let (drain, draining) = tokio::sync::watch::channel(false);
     let server = zirv_flow_api::serve(listener, state, async move {
@@ -312,12 +315,12 @@ async fn serve_http(
                 result = tokio::time::timeout_at(deadline.start(), &mut server) => match result {
                     Ok(result) => result,
                     Err(_) => {
-                        let _ = writeln!(stderr, "error: server: requests still running after {}s; exiting", SHUTDOWN_GRACE.as_secs());
+                        error!("requests still running after {}s; exiting", SHUTDOWN_GRACE.as_secs());
                         return 1;
                     }
                 },
                 _ = tokio::signal::ctrl_c() => {
-                    let _ = writeln!(stderr, "error: server: interrupted while draining requests");
+                    error!("interrupted while draining requests");
                     return 1;
                 }
             }
@@ -326,7 +329,7 @@ async fn serve_http(
     match result {
         Ok(()) => 0,
         Err(error) => {
-            let _ = writeln!(stderr, "error: server: {error}");
+            error!(%error, "the server failed");
             1
         }
     }
@@ -568,6 +571,44 @@ mod tests {
         let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
 
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+    }
+
+    #[tokio::test]
+    async fn config_check_shows_the_log_section_with_its_overrides() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Config(ConfigCommand::Check)),
+        };
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_LOG__FILTER".into(), "warn".into()));
+        env.push(("ZIRV_FLOW_LOG__FORMAT".into(), "text".into()));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut stderr).await;
+        let output = String::from_utf8(stdout).unwrap();
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(
+            output.contains("[log]\nfilter = \"warn\"\nformat = \"text\""),
+            "{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_log_filter_exits_with_code_two() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Serve),
+        };
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_LOG__FILTER".into(), "zirv=notalevel".into()));
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
+
+        assert_eq!(code, 2);
+        assert!(String::from_utf8(stderr).unwrap().contains("log.filter"));
     }
 
     #[tokio::test]
@@ -823,47 +864,90 @@ mod tests {
         zirv_flow_api::AppState::new(lazy_pool(), Arc::new(String::new))
     }
 
+    /// Routes the process's logs into the returned capture until the guard drops.
+    fn capture_logs() -> (log::Captured, tracing::subscriber::DefaultGuard) {
+        let captured = log::Captured::default();
+        let dispatch = log::dispatch("info", config::LogFormat::Json, captured.clone());
+        (captured, tracing::dispatcher::set_default(&dispatch))
+    }
+
     #[tokio::test]
-    async fn a_bind_failure_is_reported_with_exit_code_one() {
+    async fn a_bind_failure_is_logged_as_an_error_with_exit_code_one() {
+        let (logs, _guard) = capture_logs();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap();
-        let mut stderr = Vec::new();
 
         let code = serve_http(
             state(),
             addr,
-            &mut stderr,
             &ShutdownDeadline::default(),
             std::future::ready(()),
         )
         .await;
 
         assert_eq!(code, 1);
-        let message = String::from_utf8(stderr).unwrap();
-        assert!(
-            message.starts_with(&format!("error: server: could not bind {addr}: ")),
-            "{message}"
+        let lines = logs.json_lines();
+        assert_eq!(lines.len(), 1, "{}", logs.text());
+        assert_eq!(lines[0]["level"], "ERROR");
+        assert_eq!(
+            lines[0]["fields"]["message"],
+            "could not bind the server address"
         );
+        assert_eq!(lines[0]["fields"]["address"], addr.to_string());
     }
 
     #[tokio::test]
     async fn the_server_binds_and_exits_cleanly_on_shutdown() {
-        let mut stderr = Vec::new();
+        let (logs, _guard) = capture_logs();
 
         let code = serve_http(
             state(),
             "127.0.0.1:0".parse().unwrap(),
-            &mut stderr,
             &ShutdownDeadline::default(),
             std::future::ready(()),
         )
         .await;
 
         assert_eq!(code, 0);
+        let lines = logs.json_lines();
+        assert_eq!(lines[0]["level"], "INFO");
         assert!(
-            String::from_utf8(stderr)
+            lines[0]["fields"]["address"]
+                .as_str()
                 .unwrap()
-                .contains("listening on 127.0.0.1:")
+                .starts_with("127.0.0.1:")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_started_worker_and_scheduler_each_log_one_json_startup_line() {
+        let (logs, _guard) = capture_logs();
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let roles = Roles {
+            serve: false,
+            worker: true,
+            scheduler: true,
+        };
+
+        let code = run_roles(roles, &config, lazy_pool(), std::future::ready(())).await;
+
+        assert_eq!(code, 0);
+        let lines = logs.json_lines();
+        let started = |message: &str| {
+            lines
+                .iter()
+                .find(|line| line["fields"]["message"] == message)
+                .unwrap_or_else(|| panic!("no {message:?} line in {}", logs.text()))
+                .clone()
+        };
+        let worker = started("worker started");
+        assert_eq!(worker["level"], "INFO");
+        assert_eq!(worker["fields"]["role"], "worker");
+        assert_eq!(worker["fields"]["concurrency"], 4);
+        assert!(worker["timestamp"].is_string());
+        assert_eq!(
+            started("scheduler standing for leadership")["fields"]["role"],
+            "scheduler"
         );
     }
 
@@ -873,22 +957,24 @@ mod tests {
         // The shutdown began; the server used up most of the grace before this point.
         let ends = deadline.start();
         assert_eq!(deadline.start(), ends, "the deadline starts only once");
+        let (logs, _guard) = capture_logs();
         let mut background = tokio::task::JoinSet::new();
         background.spawn(std::future::pending());
-        let mut stderr = Vec::new();
 
         let soon = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            drain(background, soon, &mut stderr),
-        )
-        .await
-        .expect("the drain ends at its deadline, not a fresh grace period");
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain(background, soon))
+            .await
+            .expect("the drain ends at its deadline, not a fresh grace period");
 
-        let message = String::from_utf8(stderr).unwrap();
+        let lines = logs.json_lines();
+        assert_eq!(lines[0]["level"], "WARN");
         assert!(
-            message.contains("jobs still running after 30s"),
-            "{message}"
+            lines[0]["fields"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("jobs still running after 30s"),
+            "{}",
+            logs.text()
         );
     }
 
@@ -908,9 +994,14 @@ mod tests {
     async fn the_worker_and_scheduler_roles_do_their_work_and_drain_on_shutdown(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
-        zirv_flow_store::enqueue(&pool, &zirv_flow_store::NewJob::new("maintenance.noop"))
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, trace_id, cause_kind, cause_id) \
+             VALUES (gen_random_uuid(), 'maintenance.noop', gen_random_uuid(), 'manual', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (logs, _guard) = capture_logs();
         // A schedule that is due, so the scheduler has a slot to fire.
         zirv_flow_store::create_schedule(
             &pool,
@@ -935,12 +1026,10 @@ mod tests {
         let run = tokio::spawn({
             let pool = pool.clone();
             async move {
-                let mut stderr = Vec::new();
-                let code = run_roles(roles, &config, pool, &mut stderr, async move {
+                run_roles(roles, &config, pool, async move {
                     let _ = shut_down.await;
                 })
-                .await;
-                (code, String::from_utf8(stderr).unwrap())
+                .await
             }
         });
 
@@ -965,13 +1054,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         shutdown.send(()).unwrap();
-        let (code, stderr) = run.await.unwrap();
+        let code = run.await.unwrap();
 
-        assert_eq!(code, 0, "{stderr}");
-        assert!(stderr.contains("worker: running up to 4 jobs"), "{stderr}");
-        assert!(
-            stderr.contains("scheduler: standing for leadership"),
-            "{stderr}"
-        );
+        assert_eq!(code, 0, "{}", logs.text());
     }
 }

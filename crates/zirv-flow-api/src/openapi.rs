@@ -7,6 +7,7 @@ use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::problem::Problem;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
+use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
 use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
@@ -40,6 +41,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         keys::list,
         keys::create,
         keys::revoke,
+        traces::get,
     ),
     components(schemas(
         Problem,
@@ -57,6 +59,9 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         ApiKeyBody,
         CreatedApiKeyBody,
         CreateApiKeyRequest,
+        TraceBody,
+        DecisionBody,
+        CauseBody,
     )),
     modifiers(&SecuritySchemes)
 )]

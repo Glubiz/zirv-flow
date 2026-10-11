@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::request_id;
+use crate::{request_id, trace};
 
 /// An RFC 9457 problem document.
 #[derive(Debug, Serialize, ToSchema)]
@@ -17,6 +17,9 @@ pub struct Problem {
     pub detail: String,
     /// The `x-request-id` of the failed request.
     pub request_id: Option<String>,
+    /// The `x-trace-id` of the failed request; look it up with
+    /// `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
+    pub trace_id: Option<String>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -52,6 +55,10 @@ impl ApiError {
 
     pub(crate) fn forbidden(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, detail)
+    }
+
+    pub(crate) fn bad_request(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, detail)
     }
 
     /// Also the answer for a resource the caller may not know exists.
@@ -103,6 +110,7 @@ impl IntoResponse for ApiError {
             status: self.status.as_u16(),
             detail: self.detail,
             request_id: request_id::current(),
+            trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         (
@@ -168,6 +176,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_problem_inside_a_traced_request_carries_the_trace_id() {
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("req"));
+        let expected = trace.trace_id.to_string();
+
+        let response =
+            trace::with_trace(trace, async { ApiError::not_found().into_response() }).await;
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["trace_id"], expected.as_str());
+    }
+
+    #[tokio::test]
     async fn an_api_error_renders_as_a_problem_document() {
         let response = ApiError::new(StatusCode::NOT_FOUND, "no such resource").into_response();
 
@@ -187,7 +210,8 @@ mod tests {
                 "title": "Not Found",
                 "status": 404,
                 "detail": "no such resource",
-                "request_id": null
+                "request_id": null,
+                "trace_id": null
             })
         );
     }

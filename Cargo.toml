@@ -34,6 +34,7 @@ time = { version = "0.3.55", features = ["formatting", "macros", "serde-well-kno
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "net", "signal", "sync", "time"] }
 toml = "1.1.8"
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "registry", "fmt", "json", "env-filter"] }
 tower = { version = "0.5.3", features = ["util"] }
 utoipa = { version = "5.5.0", features = ["uuid"] }
 url = "2.5.8"

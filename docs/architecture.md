@@ -794,6 +794,40 @@ Decision records are append-only and time-partitioned by record time. Their
 retention and volume policy is OQ-28; erasure removes records scoped to the
 person while preserving aggregate operational metrics.
 
+As built (M1 skeleton):
+
+- **Trace id and cause.** `TraceId` is a v4 UUID shown as 32 lowercase hex
+  characters (the W3C trace-id shape, so OTLP can carry it later). `Cause` is one
+  of the six kinds above plus an id, built only through typed constructors. The
+  HTTP layer mints a fresh trace per request with cause `api(<request id>)` and
+  ignores any incoming trace header, so a client cannot graft its requests onto
+  another trace. The scheduler mints one per fired slot with cause
+  `schedule(<schedule id>)`.
+- **Jobs.** `jobs.trace_id`, `cause_kind` and `cause_id` are required; handlers read
+  the trace from `JobContext::trace()` and pass it to follow-up jobs they enqueue.
+- **`decision_records`.** Columns: `id`, `workspace_id`, `trace_id`, `recorded_at`,
+  `action`, `outcome`, `reason`, `cause_kind`, `cause_id`, `subject_ids` (name to
+  uuid, durable ids only), `job_id` and `attempt`. The table is partitioned by
+  month on `recorded_at` with primary key `(recorded_at, id)`, an index on
+  `(workspace_id, trace_id, recorded_at)` and a DEFAULT partition, so an insert
+  never fails for a missing month. The scheduler leader creates this month's and
+  next month's partitions on taking leadership and at most hourly; if the DEFAULT
+  partition already holds rows for a month, that month's partition cannot be
+  created, a warning is logged, and the rows stay readable. The store API takes
+  static strings and ids only, and offers no update or delete.
+- **`job.attempt` records.** For workspace jobs, a failed attempt appends
+  `job.attempt` with outcome `failed` (a retry follows) or `exhausted` (dead) and
+  the fixed failure reason, in the same statement as the fenced update. The lease
+  reaper appends `lease_expired`, or `exhausted` when the expiry kills the job.
+  Successful completion appends nothing; domain handlers record their own
+  decisions through `JobContext::record_decision`, in their own transaction.
+- **`GET /api/v1/workspaces/{ws}/traces/{trace_id}`** needs a workspace member or an
+  API key with `read` scope. It returns `{trace_id, records, truncated}`, oldest
+  first and at most 1000 records, each with `id`, `recorded_at`, `action`,
+  `outcome`, `reason`, `cause {kind, id}`, `subject_ids`, `job_id` and `attempt`.
+  A malformed id is 400 and a trace with no records in the workspace is 404,
+  never saying whether it exists elsewhere.
+
 ### 12.5 Event forwarding
 
 M6 adds event-forwarding destinations after core tracking and causality are in
@@ -1064,10 +1098,10 @@ and assistant transcript retention is OQ-26.
 
 | Area | Design |
 |------|--------|
-| Logs and traces | Structured JSON through `tracing`; spans per request and job carry request id, trace id, job id, kind, workspace and attempt. OTLP export is optional. Operational spans link to, but never replace, the customer-event, audit or decision stores in section 12. |
-| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status; queue depth by kind/state, claim lag (`now - run_at`), handler duration, retries, dead jobs; ingestion rate, inbox age, validation outcomes, duplicates and late events; debugger delivery latency and clients; explorer duration/timeouts/exports; decision-log append duration; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; forwarding lag/retries/dead letters; template render duration and failures; assistant calls/tokens/estimated cost/latency/outcomes/budget denials; DB pool, jobs-table dead tuples |
+| Logs and traces | Structured JSON through `tracing` on standard error for the long-running commands (`serve`, `worker`, `scheduler`, `all`); one-shot commands print plain text. An `http.request` span carries `request_id`, `trace_id`, `method` and the matched `route`; a `job` span carries `job_id`, `kind`, `workspace_id`, `attempt`, `trace_id`, `cause_kind` and `cause_id`. JSON lines include the current span's fields. The response header `x-trace-id` and the `trace_id` of problem bodies name the trace; `traceparent` ingest and OTLP export are follow-ups (#22). Operational spans link to, but never replace, the customer-event, audit or decision stores in section 12. |
+| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status (`zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds`); queue depth `zirv_flow_jobs{kind,state}` for `ready`, `running` and `dead`, claim lag `zirv_flow_job_claim_lag_seconds{kind}` (`now - run_at`), handler duration `zirv_flow_job_duration_seconds{kind}`, attempts `zirv_flow_jobs_total{kind,outcome}`; ingestion rate, inbox age, validation outcomes, duplicates and late events; debugger delivery latency and clients; explorer duration/timeouts/exports; decision-log append duration; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; forwarding lag/retries/dead letters; template render duration and failures; assistant calls/tokens/estimated cost/latency/outcomes/budget denials; DB pool `zirv_flow_db_pool_connections{pool,state}` and `zirv_flow_db_pool_max_connections{pool}`, jobs-table dead tuples. `/metrics` is served only by processes that run `serve` (so not by a worker-only or scheduler-only process, #21); the leader exports the queue gauges, so they appear where `serve` and the leader run together |
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
-| Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `secrets` (`master_key_file`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
+| Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `log` (`filter`, an EnvFilter directive, default `info`; `format`, `json` or `text`, default `json`), `secrets` (`master_key_file`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
 | Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); release binaries from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. PostgreSQL 16 or newer is required. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
