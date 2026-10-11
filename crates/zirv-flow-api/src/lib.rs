@@ -122,6 +122,18 @@ fn routes() -> Router<AppState> {
             axum::routing::post(people::conflicts::resolve),
         )
         .route(
+            "/api/v1/workspaces/{ws}/people/search",
+            post(people::search::search),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}",
+            get(people::profile::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/timeline",
+            get(people::timeline::get),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/event-schemas",
             get(events::schemas::list).post(events::schemas::create),
         )

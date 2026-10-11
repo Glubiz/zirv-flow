@@ -92,6 +92,48 @@ describe("navigation", () => {
   });
 });
 
+describe("people routes", () => {
+  const routes = {
+    "GET /api/v1/session": () => json(session(OWNER)),
+    "GET /api/v1/workspaces": () => json([WORKSPACE]),
+    "GET /api/v1/workspaces/ws1/members": () => json([]),
+    "GET /api/v1/workspaces/ws1/identity-conflicts": () => json({ conflicts: [], next_before: null }),
+  };
+
+  it("serves the search page as People, current in the menu", async () => {
+    mockApi(routes);
+    renderApp("/w/ws1/people");
+
+    expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
+    expect(await screen.findByText("Search to find people")).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Conflicts" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("keeps Conflicts current, and People not, on the conflicts page", async () => {
+    mockApi(routes);
+    renderApp("/w/ws1/people/conflicts");
+
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    await waitFor(() => {
+      expect(within(nav).getByRole("link", { name: "Conflicts" })).toHaveAttribute("aria-current", "page");
+    });
+    expect(within(nav).getByRole("link", { name: "People" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("reaches a profile at a person's address", async () => {
+    mockApi({
+      ...routes,
+      "GET /api/v1/workspaces/ws1/people/p1": () => problem(404, "Not Found", "no such resource"),
+    });
+    renderApp("/w/ws1/people/p1");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("no such resource");
+    expect(screen.getByRole("link", { name: "All people" })).toHaveAttribute("href", "/w/ws1/people");
+  });
+});
+
 describe("event routes", () => {
   it("serves the schema list, the rejects and the settings, with Events current in the menu", async () => {
     mockApi({
@@ -165,11 +207,11 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(9);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(10);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Lists", "Conflicts", "Events", "Topics", "Suppressions", "API keys", "Traces"]) {
+    for (const name of ["Members", "Fields", "Lists", "People", "Conflicts", "Events", "Topics", "Suppressions", "API keys", "Traces"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");

@@ -9,7 +9,7 @@ const TITLES: Record<string, string> = {
   w: "Workspaces",
   members: "Members",
   traits: "Fields",
-  people: "Identity conflicts",
+  people: "People",
   events: "Events",
   lists: "Lists",
   topics: "Topics",
@@ -22,11 +22,24 @@ const TITLES: Record<string, string> = {
 
 function titleFor(pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
+  if (parts[2] === "people" && parts[3] === "conflicts") return "Identity conflicts";
   const key = parts[0] === "w" && parts.length > 2 ? (parts[2] ?? "w") : (parts[0] ?? "w");
   return TITLES[key] ?? "zirv flow";
 }
 
-function WorkspaceItem({ base, segment, children }: { base: string | null; segment: string; children: string }) {
+function WorkspaceItem({
+  base,
+  segment,
+  children,
+  except,
+}: {
+  base: string | null;
+  segment: string;
+  children: string;
+  /** A path below this item that belongs to another item. */
+  except?: string;
+}) {
+  const location = useLocation();
   if (base === null) {
     return (
       <span className="nav-disabled" aria-disabled="true" title="Pick a workspace first">
@@ -35,7 +48,11 @@ function WorkspaceItem({ base, segment, children }: { base: string | null; segme
       </span>
     );
   }
-  return <NavLink to={`${base}/${segment}`}>{children}</NavLink>;
+  const to = `${base}/${segment}`;
+  if (except !== undefined && location.pathname.startsWith(`${base}/${except}`)) {
+    return <Link to={to}>{children}</Link>;
+  }
+  return <NavLink to={to}>{children}</NavLink>;
 }
 
 export function Shell() {
@@ -70,6 +87,7 @@ export function Shell() {
             <WorkspaceItem base={base} segment="members">Members</WorkspaceItem>
             <WorkspaceItem base={base} segment="traits">Fields</WorkspaceItem>
             <WorkspaceItem base={base} segment="lists">Lists</WorkspaceItem>
+            <WorkspaceItem base={base} segment="people" except="people/conflicts">People</WorkspaceItem>
             <WorkspaceItem base={base} segment="people/conflicts">Conflicts</WorkspaceItem>
             <WorkspaceItem base={base} segment="events">Events</WorkspaceItem>
             <WorkspaceItem base={base} segment="topics">Topics</WorkspaceItem>

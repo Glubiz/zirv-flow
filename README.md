@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, and the governed event store's schemas, rejects and retention, and ingestion over HTTP with a durable inbox, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, and ingestion over HTTP with a durable inbox, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -726,6 +726,50 @@ inbox holds the raw item only until it is applied. Metrics: a `serve` process ex
 a `worker` process exports `zirv_flow_ingest_applied_total{kind,outcome}` (`valid`, `flagged`,
 `unplanned`, `rejected`, `duplicate`, `apply_failed`) and `zirv_flow_ingest_late_total`; the
 scheduler leader exports `zirv_flow_ingest_inbox_age_seconds`, the age of the oldest row.
+
+## People
+
+Open **People** in the web UI to find a person and see everything the system knows and did
+about them. Any member can look; an API key needs the `read` scope.
+
+**Search.** Search by an identifier, matched exactly after the usual clean-up (an email is
+trimmed and lowercased, a phone number put in international form), or by the value of one
+field. A person that was merged into another is found as the person they were merged into.
+The conditions on a field depend on its type: `eq` and `exists` for any type (on a
+`string_list`, `eq` means the list holds the value), `prefix` for text, and `gt`, `gte`, `lt`
+and `lte` for numbers, timestamps and dates. The API is `POST /api/v1/workspaces/{ws}/people/search`
+with exactly one of `{"identifier": {"kind": "email", "value": "..."}}` and
+`{"trait": {"key": "plan", "op": "prefix", "value": "pro"}}`, plus `limit` (1 to 200,
+default 50) and `after` (the `next_after` of the previous page). It is a POST so the values
+stay out of URLs and access logs. Results are `{id, display, updated_at}`, paged by person
+id, where `display` is the person's strongest identifier. Searches run under a 5 second
+limit; one that takes longer is answered `503` with the problem code `search_timeout`, so
+narrow it rather than retry it unchanged. A caller who may not see values (see Masking) can search a PII-flagged field only with `eq` and `exists`; `prefix` and the range conditions on it are refused with `403` and the code `pii_trait_not_searchable`. Equality on a field uses an index; the other
+conditions scan the workspace's people until the indexing question (OQ-1) is decided.
+
+**Profile.** `GET /api/v1/workspaces/{ws}/people/{id}` returns the identities grouped by the
+source whose live records list them (those no record lists, such as one first seen on an
+event, come under `observed`), each field with its type, source and the time that source
+observed it, the person's consent and lists (the same as their own endpoints), and the people
+merged into this one. An id that was merged into another returns the survivor with
+`merged_from` set to the id you asked for. The web UI shows the same on the profile page,
+where a member can also record a consent choice for the person.
+
+**Timeline.** `GET .../people/{id}/timeline?limit&before&kinds&all_decisions` returns the
+person's events and the decisions the system made about them, newest first, as entries with
+`"type": "event"` or `"type": "decision"`, paged with an opaque `before` cursor. Decisions
+cover trait changes, merges, consent changes, list membership and identity conflicts. The
+people merged into this one are included. `kinds` is `event`, `decision` or both separated by
+a comma. The `event.accepted` decision repeats the event entry, so it is left out unless you
+pass `all_decisions=true`. Every entry has a `trace_id` that opens in **Traces**
+(`GET .../traces/{trace_id}`), where the decisions hold ids and reason codes only.
+
+**Masking.** Identifier values, PII-flagged field values and the PII properties of events
+are shown to the owner, workspace admins and `admin` keys. Members and `read` keys see
+`masked: true` and no value (the web UI says "Hidden"). An event with no published schema
+cannot say which of its properties are personal, so all of its values are hidden from them.
+Search is not masked on the way in: a caller who may search can find a person by a value
+they already know.
 
 ## Web UI
 

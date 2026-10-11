@@ -8,6 +8,7 @@ import {
   ErrorState,
   formatDateTime,
   InlineError,
+  kindLabel,
   PageHeader,
   Panel,
   ResourceView,
@@ -15,7 +16,6 @@ import {
   shortId,
   TextField,
 } from "../../ui";
-import { kindLabel } from "../people";
 import { plural, sourceLabel, useListAccess } from "./access";
 import { ImportDialog } from "./ImportDialog";
 import { useListMembers, type ListMember } from "./useListMembers";

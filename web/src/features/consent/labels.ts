@@ -47,3 +47,13 @@ const ROW_PROBLEMS: Record<string, string> = {
 export function rowProblemLabel(code: string): string {
   return ROW_PROBLEMS[code] ?? code;
 }
+
+export const STATUSES: { value: string; label: string }[] = [
+  { value: "subscribed", label: "Subscribed" },
+  { value: "unsubscribed", label: "Unsubscribed" },
+  { value: "pending_confirmation", label: "Pending confirmation" },
+];
+
+export function statusLabel(value: string): string {
+  return STATUSES.find((status) => status.value === value)?.label ?? value;
+}

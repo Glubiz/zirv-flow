@@ -634,6 +634,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/people/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finds people by an identifier, matched exactly after normalization and following merges to
+         *     the surviving person, or by one trait with an operator that fits its type. Results are
+         *     paged by person id; identifier values are shown to the owner, workspace admins and
+         *     `admin` keys and masked for everyone else. A search that runs past its time limit is
+         *     answered 503 with the code `search_timeout`.
+         */
+        post: operations["search_people"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Everything the system holds about one person: identities grouped by the sources that list
+         *     them, traits with the source and time of each value, consent, lists and the people merged
+         *     into this one. A person that was merged into another is read as the survivor, with
+         *     `merged_from` set. Identifier values and PII-flagged trait values are shown to the owner,
+         *     workspace admins and `admin` keys, and masked for everyone else.
+         */
+        get: operations["get_person"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/people/{id}/consent": {
         parameters: {
             query?: never;
@@ -709,6 +755,31 @@ export interface paths {
          *     history of both people under the survivor.
          */
         get: operations["list_person_list_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A person's timeline, newest first: their events, and the decisions the system made about
+         *     them (trait changes, merges, consent changes, list membership, identity conflicts). Each
+         *     entry has a `trace_id` that opens the decisions behind it. A person that was merged into
+         *     another reads as the survivor, with the merged people's entries included. Event properties
+         *     the schema flags as PII are masked for callers who may not see values.
+         * @description `event.accepted` decisions duplicate the event entry and are left out unless
+         *     `all_decisions=true`.
+         */
+        get: operations["get_person_timeline"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1246,9 +1317,72 @@ export interface components {
             /** @description Durable domain ids by name; never personal data. */
             subject_ids: Record<string, never>;
         };
+        DecisionEntryBody: {
+            /**
+             * @description What was decided, such as `trait.change`, `person.merge`, `consent.change`,
+             *     `list.membership` or `identity.conflict`.
+             * @example trait.change
+             */
+            action: string;
+            /**
+             * Format: date-time
+             * @description When the decision was recorded.
+             */
+            at: string;
+            /** @description `event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`. */
+            cause_kind: string;
+            /** Format: uuid */
+            id: string;
+            /** @example changed */
+            outcome: string;
+            /** @description A reason code; never personal data. */
+            reason?: string | null;
+            /** @description Durable domain ids by name; never personal data. */
+            subject_ids: Record<string, never>;
+            /** @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`. */
+            trace_id: string;
+        };
         DepthBody: {
             /** @description Sorted by kind. */
             kinds: components["schemas"]["KindDepthBody"][];
+        };
+        /**
+         * @description An identifier shown for a person. The value is null when `masked`: only workspace admins,
+         *     the owner and `admin` keys see identifier values.
+         */
+        DisplayBody: {
+            /** @example email */
+            kind: string;
+            masked: boolean;
+            value?: string | null;
+        };
+        EventEntryBody: {
+            /**
+             * Format: date-time
+             * @description When the event occurred.
+             */
+            at: string;
+            /** @description Timing flags such as `late` or `future`. */
+            flags: string[];
+            /** Format: uuid */
+            id: string;
+            /** @description The names of the properties whose values were replaced by null. */
+            masked: string[];
+            /** @example order_completed */
+            name: string;
+            /**
+             * @description The stored properties. The values of properties the published schema flags as PII are
+             *     null for callers who may not see values; so is every value of an event without a
+             *     published schema.
+             */
+            properties: Record<string, never>;
+            /** @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`. */
+            trace_id: string;
+            /**
+             * @description `valid`, `flagged` or `unplanned`.
+             * @example valid
+             */
+            validation_state: string;
         };
         EventPolicyBody: {
             /**
@@ -1343,6 +1477,15 @@ export interface components {
             /** @example ada@example.com */
             value: string;
         };
+        /** @description An identifier to find: the value is normalized for the kind, then matched exactly. */
+        IdentifierQuery: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
+             * @example email
+             */
+            kind: string;
+            value: string;
+        };
         IdentifierRequest: {
             /**
              * @description `email` or `phone`.
@@ -1383,6 +1526,14 @@ export interface components {
             shared: boolean;
             /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
             value?: string | null;
+        };
+        IdentityGroupBody: {
+            identities: components["schemas"]["ProfileIdentityBody"][];
+            /**
+             * @description The source whose live records list these identities.
+             * @example crm
+             */
+            source: string;
         };
         ImportBody: {
             /** @description People newly added; on a dry run, the people that would be. */
@@ -1586,6 +1737,12 @@ export interface components {
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
         };
+        MergeBody: {
+            /** Format: date-time */
+            merged_at: string;
+            /** Format: uuid */
+            merged_person_id: string;
+        };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
             local: boolean;
@@ -1604,6 +1761,16 @@ export interface components {
             /** @example not_found */
             reason: string;
         };
+        PersonHitBody: {
+            display?: null | components["schemas"]["DisplayBody"];
+            /**
+             * Format: uuid
+             * @description The surviving person: a merged person is never listed.
+             */
+            id: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         PersonIdentitiesBody: {
             identities: components["schemas"]["IdentityBody"][];
             /** Format: uuid */
@@ -1620,6 +1787,11 @@ export interface components {
         };
         /** @description An RFC 9457 problem document. */
         Problem: {
+            /**
+             * @description A stable machine-readable code for a failure a client acts on, such as
+             *     `search_timeout`; absent for the rest.
+             */
+            code?: string | null;
             detail: string;
             /** @description The invalid fields of an ingestion request: field names and reason codes, never values. */
             errors?: components["schemas"]["ItemProblem"][] | null;
@@ -1638,6 +1810,62 @@ export interface components {
              * @example about:blank
              */
             type: string;
+        };
+        ProfileBody: {
+            /** @description The channel-wide state first, then topics by key. */
+            consent: components["schemas"]["ConsentStateBody"][];
+            /** Format: date-time */
+            created_at: string;
+            display?: null | components["schemas"]["DisplayBody"];
+            /**
+             * Format: uuid
+             * @description The surviving person.
+             */
+            id: string;
+            /** @description By source name. */
+            identity_groups: components["schemas"]["IdentityGroupBody"][];
+            /** @description By name. */
+            lists: components["schemas"]["PersonListBody"][];
+            /**
+             * Format: uuid
+             * @description The id that was asked for, when it was merged into `id`; null otherwise.
+             */
+            merged_from?: string | null;
+            /** @description The people merged into this one, oldest first. */
+            merges: components["schemas"]["MergeBody"][];
+            /** @description Identities no live source record lists, such as one first seen on an event. */
+            observed: components["schemas"]["ProfileIdentityBody"][];
+            /** @description By key. */
+            traits: components["schemas"]["ProfileTraitBody"][];
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ProfileIdentityBody: {
+            /** @example email */
+            kind: string;
+            masked: boolean;
+            /** @description Null when `masked`: only workspace admins, the owner and `admin` keys see values. */
+            value?: string | null;
+        };
+        ProfileTraitBody: {
+            /** @example plan */
+            key: string;
+            masked: boolean;
+            /** Format: date-time */
+            observed_at?: string | null;
+            pii: boolean;
+            /** @description The source that supplied the value. */
+            source?: string | null;
+            /**
+             * @description `string`, `number`, `boolean`, `timestamp`, `date` or `string_list`; null for a key the
+             *     registry does not know.
+             */
+            trait_type?: string | null;
+            /**
+             * @description Null when `masked`: PII-flagged traits are shown only to workspace admins, the owner
+             *     and `admin` keys.
+             */
+            value?: unknown;
         };
         /** @description One property of a schema. */
         PropertyBody: {
@@ -1723,6 +1951,33 @@ export interface components {
             published_by?: string | null;
             /** Format: int32 */
             version: number;
+        };
+        SearchBody: {
+            /**
+             * Format: uuid
+             * @description Pass as `after` for the next page; null when there is none.
+             */
+            next_after?: string | null;
+            /** @description By person id. */
+            people: components["schemas"]["PersonHitBody"][];
+        };
+        /**
+         * @description Exactly one of `identifier` and `trait`. It is a POST so the values stay out of URLs and
+         *     access logs.
+         */
+        SearchRequest: {
+            /**
+             * Format: uuid
+             * @description The `next_after` of the previous page.
+             */
+            after?: string | null;
+            identifier?: null | components["schemas"]["IdentifierQuery"];
+            /**
+             * Format: int32
+             * @description People per page, 1 to 200; default 50.
+             */
+            limit?: number | null;
+            trait?: null | components["schemas"]["TraitQuery"];
         };
         SessionBody: {
             /** @description Send this as `x-csrf-token` on every POST, PUT, PATCH and DELETE made with the cookie. */
@@ -1813,6 +2068,19 @@ export interface components {
             /** @description Newest first. */
             suppressions: components["schemas"]["SuppressionBody"][];
         };
+        TimelineBody: {
+            /** @description Newest first. */
+            entries: components["schemas"]["TimelineEntryBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
+        TimelineEntryBody: (components["schemas"]["EventEntryBody"] & {
+            /** @enum {string} */
+            type: "event";
+        }) | (components["schemas"]["DecisionEntryBody"] & {
+            /** @enum {string} */
+            type: "decision";
+        });
         TopicBody: {
             archived: boolean;
             /** Format: date-time */
@@ -1894,6 +2162,19 @@ export interface components {
             type: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description A trait to compare. The operators that apply depend on the trait's registry type: `eq`
+         *     and `exists` for any type (a `string_list` matches when it holds the value), `prefix` for
+         *     strings, and `gt`, `gte`, `lt` and `lte` for numbers, timestamps and dates.
+         */
+        TraitQuery: {
+            /** @example plan */
+            key: string;
+            /** @example eq */
+            op: string;
+            /** @description Required for every operator but `exists`; it must fit the trait's type. */
+            value?: unknown;
         };
         UnmatchedRow: {
             /**
@@ -4587,6 +4868,139 @@ export interface operations {
             };
         };
     };
+    search_people: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchRequest"];
+            };
+        };
+        responses: {
+            /** @description A page of people */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, a missing CSRF token, or a prefix or range search on a PII-flagged trait by a caller who may not see values (`code` is `pii_trait_not_searchable`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not exactly one of identifier and trait, an invalid identifier, an unknown trait or operator, an operator that does not fit the trait's type, or a value that does not fit it */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The search ran past its time limit (`code` is `search_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_person: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_person_consent: {
         parameters: {
             query?: never;
@@ -4879,6 +5293,85 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_person_timeline: {
+        parameters: {
+            query?: {
+                /** @description Entries per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description `event`, `decision` or both separated by a comma; default both */
+                kinds?: string;
+                /** @description Include the `event.accepted` decisions; default false */
+                all_decisions?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineBody"];
+                };
+            };
+            /** @description limit is out of range, or before, kinds or all_decisions is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

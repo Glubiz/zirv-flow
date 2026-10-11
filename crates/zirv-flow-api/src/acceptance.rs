@@ -5388,4 +5388,520 @@ email,b@example.com,
         assert_eq!(next.body["suppressions"].as_array().unwrap().len(), 1);
         assert_eq!(next.body["next_before"], serde_json::Value::Null);
     }
+
+    fn people_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/people{rest}")
+    }
+
+    /// Seeds, in `ws`, an identified person (email, a PII `city` trait and a plain `plan`
+    /// trait) with an event, and an anonymous person merged into it. Returns the survivor and
+    /// the merged person.
+    async fn seed_profile(pool: &PgPool, ws: &str) -> (String, String) {
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        zirv_flow_store::create_trait_definition(
+            pool,
+            workspace,
+            &zirv_flow_store::NewTraitDefinition {
+                key: "city".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let apply = |identifiers: &'static [(&'static str, &'static str)],
+                     key: &'static str,
+                     traits: Value| {
+            let mut record = profile(key, identifiers);
+            record.traits = traits.as_object().cloned().unwrap();
+            async move {
+                match zirv_flow_store::apply_profile_batch(pool, workspace, &[record])
+                    .await
+                    .unwrap()
+                    .remove(0)
+                {
+                    zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
+                    | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => person_id,
+                    other => panic!("not applied: {other:?}"),
+                }
+            }
+        };
+        let survivor = apply(
+            &[("email", "ada@example.com")],
+            "1",
+            json!({"city": "Aarhus", "plan": "pro"}),
+        )
+        .await;
+        let merged = apply(&[("anonymous_id", "anon-1")], "2", json!({})).await;
+        let event = zirv_flow_store::EventRecord {
+            source: "web".into(),
+            identifiers: vec![("email".into(), "ada@example.com".into())],
+            name: "page_view".into(),
+            properties: json!({"coupon": "SECRET-COUPON"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            timestamp: None,
+            received_at: time::OffsetDateTime::now_utc(),
+            message_id: None,
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+        };
+        let key =
+            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        zirv_flow_store::apply_event_batch(pool, workspace, &key, &[event])
+            .await
+            .unwrap();
+        let both = apply(
+            &[("email", "ada@example.com"), ("anonymous_id", "anon-1")],
+            "3",
+            json!({}),
+        )
+        .await;
+        assert_eq!(both, survivor);
+        (survivor.to_string(), merged.to_string())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_profile_follows_a_merged_id_and_masks_values_for_members_and_read_keys(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
+        let (survivor, merged) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, &format!("/{merged}"));
+
+        let as_owner = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        let as_member = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        let as_read_key = call(&router, "GET", &uri, None, Auth::Key(&read_key)).await;
+        let as_admin_key = call(&router, "GET", &uri, None, Auth::Key(&admin_key)).await;
+
+        assert_eq!(as_owner.status, StatusCode::OK, "{:?}", as_owner.body);
+        assert_eq!(as_owner.body["id"], survivor.as_str());
+        assert_eq!(as_owner.body["merged_from"], merged.as_str());
+        assert_eq!(as_owner.body["display"]["kind"], "email");
+        assert_eq!(as_owner.body["display"]["value"], "ada@example.com");
+        let city = &as_owner.body["traits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "city")
+            .unwrap();
+        assert_eq!(city["value"], "Aarhus");
+        assert_eq!(city["source"], "crm");
+        assert_eq!(city["trait_type"], "string");
+        assert_eq!(
+            as_owner.body["merges"][0]["merged_person_id"],
+            merged.as_str()
+        );
+        assert!(as_owner.body["consent"].is_array() && as_owner.body["lists"].is_array());
+        assert_eq!(as_admin_key.body["display"]["value"], "ada@example.com");
+        for masked in [&as_member, &as_read_key] {
+            assert_eq!(masked.status, StatusCode::OK);
+            let text = masked.body.to_string();
+            assert!(!text.contains("ada@example.com"), "{text}");
+            assert!(!text.contains("Aarhus"), "{text}");
+            assert_eq!(masked.body["display"]["masked"], true);
+            assert_eq!(masked.body["display"]["kind"], "email");
+            let city = masked.body["traits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["key"] == "city")
+                .unwrap();
+            assert_eq!(city["masked"], true);
+            assert!(city["value"].is_null());
+            let plan = masked.body["traits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["key"] == "plan")
+                .unwrap();
+            assert_eq!(plan["value"], "pro");
+        }
+        let direct = call(
+            &router,
+            "GET",
+            &people_uri(&ws, &format!("/{survivor}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert!(direct.body["merged_from"].is_null());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_of_another_workspace_is_a_404_for_the_profile_and_the_timeline(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let a = workspace(&router, &owner, "Alpha").await;
+        let b = workspace(&router, &owner, "Beta").await;
+        let (person, _) = seed_profile(&pool, &a).await;
+
+        for rest in [format!("/{person}"), format!("/{person}/timeline")] {
+            let foreign = call(
+                &router,
+                "GET",
+                &people_uri(&b, &rest),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            let unknown = call(
+                &router,
+                "GET",
+                &people_uri(
+                    &a,
+                    &rest.replace(&person, &uuid::Uuid::now_v7().to_string()),
+                ),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            let malformed = call(
+                &router,
+                "GET",
+                &people_uri(&a, &rest.replace(&person, "nope")),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{rest}");
+            assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{rest}");
+            assert_eq!(malformed.status, StatusCode::NOT_FOUND, "{rest}");
+        }
+        let anonymous = call(
+            &router,
+            "GET",
+            &people_uri(&a, &format!("/{person}")),
+            None,
+            Auth::Anonymous,
+        )
+        .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn search_finds_by_identifier_and_trait_and_masks_the_display_for_members(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (survivor, _) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, "/search");
+        let by_identifier = json!({"identifier": {"kind": "anonymous_id", "value": "anon-1"}});
+        let by_trait = json!({"trait": {"key": "plan", "op": "prefix", "value": "pr"}});
+
+        let found = call(
+            &router,
+            "POST",
+            &uri,
+            Some(by_identifier.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let traits = call(
+            &router,
+            "POST",
+            &uri,
+            Some(by_trait.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let masked_member = call(
+            &router,
+            "POST",
+            &uri,
+            Some(by_identifier.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let masked_key = call(&router, "POST", &uri, Some(by_trait), Auth::Key(&read_key)).await;
+
+        assert_eq!(found.status, StatusCode::OK, "{:?}", found.body);
+        assert_eq!(found.body["people"][0]["id"], survivor.as_str());
+        assert_eq!(
+            found.body["people"][0]["display"]["value"],
+            "ada@example.com"
+        );
+        assert!(found.body["next_after"].is_null());
+        assert_eq!(traits.body["people"][0]["id"], survivor.as_str());
+        for masked in [&masked_member, &masked_key] {
+            assert_eq!(masked.status, StatusCode::OK, "{:?}", masked.body);
+            assert_eq!(masked.body["people"][0]["id"], survivor.as_str());
+            assert_eq!(masked.body["people"][0]["display"]["masked"], true);
+            assert!(!masked.body.to_string().contains("ada@example.com"));
+        }
+        let none = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": "nobody@example.com"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(none.status, StatusCode::OK);
+        assert_eq!(none.body["people"], json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn search_refuses_a_bad_request_per_field_without_echoing_the_value(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, "/search");
+
+        for body in [
+            json!({}),
+            json!({"identifier": {"kind": "email", "value": "a@example.com"}, "trait": {"key": "plan", "op": "exists"}}),
+            json!({"identifier": {"kind": "fax", "value": "secret-value"}}),
+            json!({"identifier": {"kind": "email", "value": "secret-value"}}),
+            json!({"trait": {"key": "nope", "op": "exists"}}),
+            json!({"trait": {"key": "plan", "op": "like", "value": "secret-value"}}),
+            json!({"trait": {"key": "plan", "op": "gt", "value": "secret-value"}}),
+            json!({"trait": {"key": "plan", "op": "eq"}}),
+            json!({"trait": {"key": "plan", "op": "eq", "value": 5}}),
+            json!({"identifier": {"kind": "email", "value": "a@example.com"}, "limit": 0}),
+        ] {
+            let reply = call(
+                &router,
+                "POST",
+                &uri,
+                Some(body.clone()),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{body}: {:?}",
+                reply.body
+            );
+            assert!(!reply.body.to_string().contains("secret-value"));
+        }
+        let no_csrf = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"identifier": {"kind": "email", "value": "a@example.com"}})),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_timeline_interleaves_entries_links_traces_and_masks_event_values(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (survivor, merged) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, &format!("/{merged}/timeline"));
+
+        let as_owner = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        let as_member = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+
+        assert_eq!(as_owner.status, StatusCode::OK, "{:?}", as_owner.body);
+        let entries = as_owner.body["entries"].as_array().unwrap();
+        let kinds: Vec<&str> = entries
+            .iter()
+            .map(|e| e["type"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"event") && kinds.contains(&"decision"));
+        let actions: Vec<&str> = entries
+            .iter()
+            .filter(|e| e["type"] == "decision")
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert!(actions.contains(&"person.merge") && actions.contains(&"trait.change"));
+        assert!(!actions.contains(&"event.accepted"));
+        let times: Vec<&str> = entries.iter().map(|e| e["at"].as_str().unwrap()).collect();
+        assert!(times.windows(2).all(|pair| pair[0] >= pair[1]), "{times:?}");
+        let merge = entries
+            .iter()
+            .find(|e| e["action"] == "person.merge")
+            .unwrap();
+        assert_eq!(merge["subject_ids"]["person"], survivor.as_str());
+        let event = entries.iter().find(|e| e["type"] == "event").unwrap();
+        assert_eq!(event["name"], "page_view");
+        assert_eq!(event["properties"]["coupon"], "SECRET-COUPON");
+        for entry in entries {
+            let trace = entry["trace_id"].as_str().unwrap();
+            let opened = call(
+                &router,
+                "GET",
+                &format!("/api/v1/workspaces/{ws}/traces/{trace}"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(opened.status, StatusCode::OK, "{trace}: {:?}", opened.body);
+            assert!(!opened.body.to_string().contains("SECRET-COUPON"));
+        }
+        let hidden_event = as_member.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "event")
+            .unwrap();
+        assert!(hidden_event["properties"]["coupon"].is_null());
+        assert_eq!(hidden_event["masked"], json!(["coupon"]));
+        assert!(!as_member.body.to_string().contains("SECRET-COUPON"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_timeline_pages_by_cursor_filters_by_kind_and_refuses_bad_queries(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (survivor, _) = seed_profile(&pool, &ws).await;
+        let timeline = |query: &str| people_uri(&ws, &format!("/{survivor}/timeline{query}"));
+        let all = call(
+            &router,
+            "GET",
+            &timeline("?limit=200"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let total = all.body["entries"].as_array().unwrap().len();
+        assert!(total >= 4 && all.body["next_before"].is_null());
+
+        let mut seen = Vec::new();
+        let mut query = "?limit=2".to_owned();
+        loop {
+            let page = call(
+                &router,
+                "GET",
+                &timeline(&query),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(page.status, StatusCode::OK, "{:?}", page.body);
+            let entries = page.body["entries"].as_array().unwrap();
+            assert!(entries.len() <= 2);
+            seen.extend(entries.iter().map(|e| e["id"].as_str().unwrap().to_owned()));
+            match page.body["next_before"].as_str() {
+                Some(next) => query = format!("?limit=2&before={next}"),
+                None => break,
+            }
+        }
+        let expected: Vec<String> = all.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(seen, expected);
+        let events = call(
+            &router,
+            "GET",
+            &timeline("?kinds=event"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert!(
+            events.body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["type"] == "event")
+        );
+        let decisions = call(
+            &router,
+            "GET",
+            &timeline("?kinds=decision&all_decisions=true"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let actions: Vec<&str> = decisions.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert!(actions.contains(&"event.accepted"));
+        for bad in [
+            "?limit=0",
+            "?limit=201",
+            "?before=%21",
+            "?kinds=flow",
+            "?all_decisions=maybe",
+        ] {
+            let reply = call(&router, "GET", &timeline(bad), None, Auth::Session(&owner)).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pii_trait_cannot_be_searched_by_prefix_or_range_without_access_to_values(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (survivor, _) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, "/search");
+        let prefix = json!({"trait": {"key": "city", "op": "prefix", "value": "Aa"}});
+        let eq = json!({"trait": {"key": "city", "op": "eq", "value": "Aarhus"}});
+
+        let as_owner = call(
+            &router,
+            "POST",
+            &uri,
+            Some(prefix.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let as_member = call(
+            &router,
+            "POST",
+            &uri,
+            Some(prefix.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let as_key = call(&router, "POST", &uri, Some(prefix), Auth::Key(&read_key)).await;
+        let member_eq = call(&router, "POST", &uri, Some(eq), Auth::Session(&member)).await;
+
+        assert_eq!(as_owner.status, StatusCode::OK, "{:?}", as_owner.body);
+        assert_eq!(as_owner.body["people"][0]["id"], survivor.as_str());
+        for refused in [&as_member, &as_key] {
+            assert_eq!(refused.status, StatusCode::FORBIDDEN, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "pii_trait_not_searchable");
+            assert_eq!(
+                refused.headers[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+        }
+        assert_eq!(member_eq.status, StatusCode::OK);
+        assert_eq!(member_eq.body["people"][0]["id"], survivor.as_str());
+    }
 }

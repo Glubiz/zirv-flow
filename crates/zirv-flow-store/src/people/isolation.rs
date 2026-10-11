@@ -600,4 +600,57 @@ mod tests {
             .unwrap();
         assert_eq!(events, [one.as_uuid()]);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn search_profile_and_timeline_reads_stay_inside_their_workspace(pool: PgPool) {
+        use crate::people::{
+            PersonSearch, TimelineFilter, TraitOp, load_profile, load_timeline, search_people,
+        };
+
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let (person_one, _) = seed(&pool, one).await;
+        let (person_two, _) = seed(&pool, two).await;
+        let email = PersonSearch::Identifier {
+            kind: "email".into(),
+            value: "a@example.com".into(),
+        };
+        let plan = PersonSearch::Trait {
+            key: "plan".into(),
+            op: TraitOp::Exists,
+            value: None,
+        };
+
+        for (ws, own, foreign) in [(one, person_one, person_two), (two, person_two, person_one)] {
+            let found = search_people(&pool, ws, &email, 10, None, true)
+                .await
+                .unwrap();
+            assert_eq!(found.hits.len(), 1);
+            assert_eq!(found.hits[0].id, own);
+            let by_trait = search_people(&pool, ws, &plan, 50, None, true)
+                .await
+                .unwrap();
+            assert!(by_trait.hits.iter().all(|hit| hit.id != foreign));
+            assert!(load_profile(&pool, ws, foreign).await.unwrap().is_none());
+            assert!(load_profile(&pool, ws, own).await.unwrap().is_some());
+            let filter = TimelineFilter::default();
+            assert!(
+                load_timeline(&pool, ws, foreign, filter, 10, None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let timeline = load_timeline(&pool, ws, own, filter, 100, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!timeline.entries.is_empty());
+            for entry in timeline.entries {
+                if let crate::people::TimelineEntry::Decision(decision) = entry {
+                    assert_eq!(decision.subject_ids["person"], own.to_string());
+                }
+            }
+        }
+    }
 }
