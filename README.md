@@ -941,8 +941,8 @@ who may read gets the codes alone. Each download is audited.
 **Retention and personal data.** The cells of rejected rows are the one place the file's
 values are kept beyond the people they created: they are admin-only and deleted 30 days after
 they were written. The scheduler leader deletes the uploaded file 7 days after an import ends
-(succeeded, failed or cancelled; cancel an import you will not run so its file goes too) and the
-rejects after 30 days. The import itself, its mapping and its counters are kept. The import
+(succeeded, failed or cancelled) and the rejects after 30 days. An import that is uploaded, mapped or dry-run and untouched for 7 days is cancelled as `abandoned` and loses its file at once, and an upload that never finished (a crash mid-body) is deleted after a day.
+The import itself, its mapping and its counters are kept. The import
 tables hold no person id, so an erasure does not reach the cells in a reject; they age out. The
 audit log records `import.created`, `import.run_started`, `import.cancelled` and
 `import.rejects_downloaded` with ids and counts only. No log line, metric label, decision or

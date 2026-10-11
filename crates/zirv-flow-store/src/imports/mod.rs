@@ -23,7 +23,8 @@ pub use rejects::{
     ImportPhase, ImportReject, RejectReason, RejectedRow, StoredReason, list_import_rejects,
 };
 pub use retention::{
-    CHUNK_RETENTION_DAYS, ImportRetention, REJECT_RETENTION_DAYS, delete_expired_import_data,
+    ABANDONED_AFTER_DAYS, CHUNK_RETENTION_DAYS, ImportRetention, REJECT_RETENTION_DAYS,
+    UPLOAD_ABANDONED_AFTER_DAYS, delete_expired_import_data,
 };
 pub use upload::{CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, read_import_chunk};
 
@@ -770,7 +771,8 @@ mod tests {
             report,
             ImportRetention {
                 chunks: 1,
-                rejects: 1
+                rejects: 1,
+                ..ImportRetention::default()
             }
         );
         let left: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT import_id FROM import_chunks")
@@ -783,6 +785,93 @@ mod tests {
         assert_eq!(count(&pool, "imports").await, 4, "the status is kept");
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_nobody_touched_for_a_week_is_cancelled_as_abandoned_and_loses_its_file(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let stale_uploaded = upload(&pool, ws, b"email\n", 0).await;
+        let stale_mapped = mapped(&pool, ws, b"email\n", 0).await;
+        let fresh = mapped(&pool, ws, b"email\n", 0).await;
+        let busy = running(&pool, ws, 0).await;
+        sqlx::query("UPDATE imports SET updated_at = now() - interval '8 days' WHERE id = ANY($1)")
+            .bind(vec![stale_uploaded.id, stale_mapped.id, busy.id])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = delete_expired_import_data(&pool).await.unwrap();
+
+        assert_eq!((report.abandoned, report.chunks), (2, 2));
+        for id in [stale_uploaded.id, stale_mapped.id] {
+            let import = find_import(&pool, ws, id).await.unwrap().unwrap();
+            assert_eq!(import.status, ImportStatus::Cancelled);
+            assert_eq!(import.error_code.as_deref(), Some("abandoned"));
+            assert!(import.finished_at.is_some());
+            assert!(read_import_chunk(&pool, id, 0).await.unwrap().is_none());
+        }
+        let kept = find_import(&pool, ws, fresh.id).await.unwrap().unwrap();
+        assert_eq!(kept.status, ImportStatus::Mapped);
+        assert!(
+            read_import_chunk(&pool, fresh.id, 0)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let running_still = find_import(&pool, ws, busy.id).await.unwrap().unwrap();
+        assert_eq!(running_still.status, ImportStatus::Running);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_untouched_for_a_day_is_deleted_with_its_chunks(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let trace = trace();
+        let mut crashed = ImportUpload::begin(&pool, ws, &start(&trace))
+            .await
+            .unwrap();
+        crashed.write(&vec![b'a'; CHUNK_BYTES]).await.unwrap();
+        let mut current = ImportUpload::begin(&pool, ws, &start(&trace))
+            .await
+            .unwrap();
+        current.write(&vec![b'b'; CHUNK_BYTES]).await.unwrap();
+        sqlx::query("UPDATE imports SET created_at = now() - interval '2 days' WHERE id = $1")
+            .bind(crashed.id())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = delete_expired_import_data(&pool).await.unwrap();
+
+        assert_eq!(report.uploads, 1);
+        assert!(
+            find_import(&pool, ws, crashed.id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_import(&pool, ws, current.id())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(count(&pool, "import_chunks").await, 1);
+        // The upload in progress is not disturbed: it still finishes.
+        let header = vec!["email".to_owned()];
+        let (finished, tx) = current
+            .finish(&UploadScan {
+                delimiter: ',',
+                header: &header,
+                rows_total: 0,
+            })
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        assert_eq!(finished.status, ImportStatus::Uploaded);
+        drop(crashed);
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_import_read_and_change_stays_inside_its_workspace(pool: PgPool) {
