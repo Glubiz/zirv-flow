@@ -144,6 +144,10 @@ async fn may_see_values(state: &AppState, principal: &Principal, workspace: Work
         .is_ok()
 }
 
+/// The detail of the 409 for a conflict whose people were merged since the caller looked. The
+/// code is the text before the colon.
+pub(crate) const CHANGED: &str = "conflict_changed: the people of this conflict changed, reload it";
+
 fn block_message(reason: BlockReason) -> &'static str {
     match reason {
         BlockReason::UniqueKind => {
@@ -194,6 +198,7 @@ pub(crate) async fn resolve_identity_conflict(
         ResolveError::NoIdentifier => {
             AdminError::Conflict("the conflict does not name an identifier to move")
         }
+        ResolveError::Changed => AdminError::Conflict(CHANGED),
         ResolveError::AlreadyThere => {
             AdminError::Conflict("the identifier already belongs to that person")
         }
@@ -339,7 +344,7 @@ pub(crate) async fn get(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or conflict, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Already resolved, or the move would break an identity rule", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Already resolved, the move would break an identity rule, or the people changed since the conflict was loaded (detail starts with `conflict_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "to_person_id is not one of the conflict's two people", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -416,6 +421,11 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<ResolveRequest>(bad).is_err());
         }
+    }
+
+    #[test]
+    fn the_changed_detail_starts_with_its_code() {
+        assert!(CHANGED.starts_with("conflict_changed:"));
     }
 
     #[test]

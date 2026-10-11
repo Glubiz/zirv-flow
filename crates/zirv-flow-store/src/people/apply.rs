@@ -194,6 +194,22 @@ async fn apply_record(
         )
         .await?;
     }
+    if let Some(previous) = resolution.split_from {
+        record_decision(
+            connection,
+            workspace,
+            &record.trace,
+            "identity.split",
+            "new_person",
+            Some("unique_kind"),
+            vec![
+                ("person", person_id),
+                ("previous_person", previous),
+                ("source_record", record_id),
+            ],
+        )
+        .await?;
+    }
     if resolution.skipped > 0 {
         record_decision(
             connection,
@@ -1450,6 +1466,90 @@ mod tests {
 
         assert_eq!(person_of(&outcomes[0]), person);
         assert_eq!(list_identities(&pool, ws, person).await.unwrap().len(), 2);
+        assert!(
+            list_identity_conflicts(&pool, ws, person)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_already_over_a_rule_keeps_receiving_its_records(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({"plan": "free"}), at),
+            &[("external:crm", "1")],
+        );
+        let person = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        sqlx::query(
+            "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+             VALUES ($1, $2, $3, 'external:crm', '2')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let again = with_identifiers(
+            record("crm", "1", "a@example.com", json!({"plan": "pro"}), at),
+            &[("external:crm", "1"), ("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        assert_eq!(person_of(&outcomes[0]), person);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let conflicts: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_conflicts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((people, conflicts), (1, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_split_with_no_matching_owner_is_recorded(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("external:crm", "1")],
+        );
+        let previous = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let moved = with_identifiers(
+            record("crm", "1", "a@example.com", json!({}), at),
+            &[("external:crm", "2")],
+        );
+
+        let outcomes = apply_profile_batch(&pool, ws, std::slice::from_ref(&moved))
+            .await
+            .unwrap();
+
+        let person = person_of(&outcomes[0]);
+        assert_ne!(person, previous);
+        let (decisions, _) = list_trace(&pool, ws, moved.trace.trace_id, 10)
+            .await
+            .unwrap();
+        let split = decisions
+            .iter()
+            .find(|d| d.action == "identity.split")
+            .expect("an identity.split decision");
+        assert_eq!(split.outcome, "new_person");
+        assert_eq!(split.reason.as_deref(), Some("unique_kind"));
+        assert_eq!(split.subject_ids["person"], person.to_string());
+        assert_eq!(split.subject_ids["previous_person"], previous.to_string());
+        assert!(split.subject_ids["source_record"].is_string());
         assert!(
             list_identity_conflicts(&pool, ws, person)
                 .await

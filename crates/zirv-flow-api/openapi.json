@@ -1416,7 +1416,7 @@
             }
           },
           "409": {
-            "description": "Already resolved, or the move would break an identity rule",
+            "description": "Already resolved, the move would break an identity rule, or the people changed since the conflict was loaded (detail starts with `conflict_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -29,6 +29,9 @@ pub enum ResolveError {
     AlreadyResolved,
     /// The target is neither of the two people.
     NotAParty,
+    /// One of the people, or the target the caller named, was merged away since the caller
+    /// looked: the caller should reload.
+    Changed,
     /// The conflict predates merges and does not name its identifier.
     NoIdentifier,
     /// The identifier already belongs to the target.
@@ -174,14 +177,22 @@ async fn move_identifier(
     let mut to_lock = parties.clone();
     to_lock.sort();
     to_lock.dedup();
-    sqlx::query(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
+    to_lock.push(to_person_id);
+    to_lock.sort();
+    to_lock.dedup();
+    let locked: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT merged_into FROM people \
+         WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(&to_lock)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    // Merged away after the caller looked, or between reading the parties and locking them.
+    if locked.iter().any(Option::is_some) {
+        return Err(ResolveError::Changed);
+    }
 
     let identity: Option<(Uuid, String, String)> = sqlx::query_as(
         "SELECT person_id, kind, value FROM identities \
@@ -468,5 +479,47 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 5);
         assert!(ids.windows(2).all(|pair| pair[0] > pair[1]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_move_to_a_person_merged_away_since_is_refused_and_moves_nothing(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (one, _two, conflict) = blocked(&pool, ws).await;
+        // `one` holds the shared email; a merge elsewhere folds it into a newcomer.
+        let survivor = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(survivor)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(one)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let stale = resolve(
+            &pool,
+            ws,
+            conflict.id,
+            ConflictResolution::MoveIdentifier { to_person_id: one },
+        )
+        .await;
+
+        assert!(matches!(stale, Err(ResolveError::Changed)));
+        let owner: Uuid =
+            sqlx::query_scalar("SELECT person_id FROM identities WHERE kind = 'email'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(owner, one);
+        let still = find_conflict(&pool, ws, conflict.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(still.resolved_at.is_none());
     }
 }

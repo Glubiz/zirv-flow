@@ -8,10 +8,12 @@
 //! Every person a resolution touches is locked with `FOR UPDATE` in id order, so concurrent
 //! resolutions and merges cannot deadlock on each other.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed};
+use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed, rule_for};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::merge::merge_people;
@@ -40,6 +42,8 @@ pub(crate) struct Resolution {
     pub merged: Vec<Uuid>,
     /// Identifiers left off the person because it holds the most of their kind it may.
     pub skipped: usize,
+    /// The person the record would have attached to, when it became a new person instead.
+    pub split_from: Option<Uuid>,
 }
 
 struct Owned {
@@ -108,6 +112,7 @@ pub(crate) async fn resolve_person(
             .map(|(_, identifier)| identifier)
             .collect();
         let mut skipped = 0;
+        let mut split_from = None;
         if merge.is_none() && !created {
             // What the record would add must fit the person it attaches to.
             let held = load_identities(connection, workspace, &[person_id]).await?;
@@ -119,6 +124,7 @@ pub(crate) async fn resolve_person(
                 Fit::OtherPerson => {
                     // The record is not this person: it starts its own, and what it shares
                     // stays with its owners.
+                    split_from = Some(person_id);
                     person_id = create_person(connection, workspace).await?;
                     created = true;
                     blocked = Some(BlockReason::UniqueKind.as_str());
@@ -154,6 +160,7 @@ pub(crate) async fn resolve_person(
             conflicts,
             merged,
             skipped,
+            split_from,
         });
     }
 }
@@ -245,24 +252,29 @@ enum Fit<'a> {
     OtherPerson,
 }
 
-/// Which of `missing` a person holding `held` may take on.
+/// Which of `missing` a person holding `held` may take on. Only what is added is judged:
+/// what the person already holds is never questioned, even if it breaks a rule.
 fn fit<'a>(held: &[Identifier], missing: &[&'a Identifier]) -> Fit<'a> {
-    let mut union: Vec<&Identifier> = held.iter().collect();
-    union.extend(missing.iter().copied());
-    match merge_allowed(union.iter().copied()) {
-        Ok(()) => return Fit::Keep(missing.to_vec()),
-        Err(BlockReason::UniqueKind) => return Fit::OtherPerson,
-        Err(BlockReason::MaxPerPerson) => {}
+    let mut values: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for identity in held {
+        values
+            .entry(identity.kind().as_text())
+            .or_default()
+            .insert(identity.value());
     }
-    let mut taken: Vec<&Identifier> = held.iter().collect();
     let mut keep = Vec::new();
     for candidate in missing {
-        taken.push(candidate);
-        if merge_allowed(taken.iter().copied()).is_ok() {
-            keep.push(*candidate);
-        } else {
-            taken.pop();
+        let kind = candidate.kind().as_text();
+        let rule = rule_for(candidate.kind());
+        let current = values.entry(kind.clone()).or_default();
+        if rule.unique_per_person && current.iter().any(|value| *value != candidate.value()) {
+            return Fit::OtherPerson;
         }
+        if current.len() >= rule.max_per_person {
+            continue;
+        }
+        current.insert(candidate.value());
+        keep.push(*candidate);
     }
     Fit::Keep(keep)
 }
@@ -425,6 +437,17 @@ mod tests {
         let phone = identifier("phone", "+4512345678");
 
         assert!(matches!(fit(&held, &[&second_crm]), Fit::OtherPerson));
+        let doubled = [
+            identifier("external:crm", "1"),
+            identifier("external:crm", "2"),
+        ];
+        assert!(matches!(fit(&doubled, &[]), Fit::Keep(keep) if keep.is_empty()));
+        assert!(matches!(fit(&doubled, &[&second_email]), Fit::Keep(keep) if keep.len() == 1));
+        let other_crm = identifier("external:crm", "3");
+        assert!(matches!(
+            fit(&[], &[&second_crm, &other_crm]),
+            Fit::OtherPerson
+        ));
         assert!(matches!(fit(&held, &[&second_email]), Fit::Keep(keep) if keep.len() == 1));
         assert!(matches!(fit(&full, &[&extra, &phone]), Fit::Keep(keep) if keep == [&phone]));
     }

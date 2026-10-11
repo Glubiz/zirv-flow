@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, formatDateTime, InlineError, Pill, ResourceView, shortId } from "../../ui";
 import { kindLabel, reasonExplanation, resolutionLabel } from "./identityKinds";
 import type { Conflict } from "./useConflicts";
@@ -50,7 +50,11 @@ export function ConflictDialog({ workspaceId, conflict, canManage, onClose, onRe
       );
       onResolved(message);
     } catch (error) {
-      setFailure(describeError(error));
+      setFailure(
+        error instanceof ApiError && error.status === 409 && error.detail.startsWith("conflict_changed")
+          ? { title: "This conflict changed; reload", detail: "The people were merged since you opened it.", traceId: error.traceId }
+          : describeError(error),
+      );
       setBusy(false);
     }
   }

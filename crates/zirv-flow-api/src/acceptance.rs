@@ -2786,4 +2786,36 @@ mod tests {
                 .unwrap();
         assert_eq!(open, 1);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_move_after_a_person_was_merged_away_is_409_conflict_changed(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (holder, other, id) = seed_conflict(&pool, &ws).await;
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(uuid::Uuid::parse_str(&holder).unwrap())
+            .bind(uuid::Uuid::parse_str(&other).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/{id}/resolve", conflicts_uri(&ws)),
+            Some(json!({"outcome": "move_identifier", "to_person_id": other})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert!(
+            reply.body["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("conflict_changed")
+        );
+    }
 }

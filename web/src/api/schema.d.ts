@@ -1867,7 +1867,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Already resolved, or the move would break an identity rule */
+            /** @description Already resolved, the move would break an identity rule, or the people changed since the conflict was loaded (detail starts with `conflict_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;

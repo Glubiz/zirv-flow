@@ -285,6 +285,21 @@ describe("identity conflicts", () => {
     expect(confirm.getByRole("button", { name: "Move email address" })).toBeEnabled();
   });
 
+  it("tells the user to reload when the people changed under the conflict", async () => {
+    mountAsAdmin({
+      [RESOLVE_ROUTE]: () => problem(409, "Conflict", "conflict_changed: the people of this conflict changed, reload it"),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /^Review Email address conflict/ }));
+    await user.click(await screen.findByRole("button", { name: "Move identifier to person A" }));
+    const confirm = within(screen.getByRole("dialog", { name: "Move the email address to person A?" }));
+    await user.click(confirm.getByRole("button", { name: "Move email address" }));
+
+    expect(await confirm.findByText("This conflict changed; reload")).toBeInTheDocument();
+  });
+
   it("shows a loading state and an error with a retry while the people load", async () => {
     mountAsAdmin({ [DETAIL_ROUTE]: () => problem(500, "Internal Server Error", "internal error") });
     const user = userEvent.setup();
