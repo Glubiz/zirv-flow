@@ -92,13 +92,13 @@ fn edit(
     path: &str,
     change: &mut dyn FnMut(Value) -> Option<Value>,
 ) {
+    // A key with dots in it is a path of one segment, and the same text is also a nested path:
+    // both copies are edited.
     if path.contains('.')
         && let Some(value) = properties.remove(path)
+        && let Some(replacement) = change(value)
     {
-        if let Some(replacement) = change(value) {
-            properties.insert(path.to_owned(), replacement);
-        }
-        return;
+        properties.insert(path.to_owned(), replacement);
     }
     let segments: Vec<&str> = path.split('.').collect();
     edit_in(properties, &segments, change);
@@ -120,15 +120,24 @@ fn edit_in(
         }
         [first, rest @ ..] => match object.get_mut(*first) {
             Some(Value::Object(inner)) => edit_in(inner, rest, change),
-            Some(Value::Array(items)) => {
-                for item in items {
-                    if let Value::Object(inner) = item {
-                        edit_in(inner, rest, change);
-                    }
-                }
-            }
+            Some(Value::Array(items)) => edit_items(items, rest, change),
             _ => {}
         },
+    }
+}
+
+/// Applies the rest of a path to every object in a list, however deeply lists are nested.
+fn edit_items(
+    items: &mut [Value],
+    segments: &[&str],
+    change: &mut dyn FnMut(Value) -> Option<Value>,
+) {
+    for item in items {
+        match item {
+            Value::Object(inner) => edit_in(inner, segments, change),
+            Value::Array(nested) => edit_items(nested, segments, change),
+            _ => {}
+        }
     }
 }
 
@@ -231,6 +240,45 @@ mod tests {
         assert_eq!(
             Value::Object(properties),
             json!({"context.ip": "203.0.113.0", "a": {"b": 1}})
+        );
+    }
+
+    #[test]
+    fn a_flat_key_and_a_nested_copy_at_the_same_path_are_both_redacted() {
+        let mut properties = map(json!({
+            "context.ip": "203.0.113.9",
+            "context": {"ip": "198.51.100.7"}
+        }));
+
+        redact(
+            &mut properties,
+            &rules(&[], &[], &["context.ip"]),
+            WorkspaceId::new(),
+            &key(),
+        );
+
+        assert_eq!(
+            Value::Object(properties),
+            json!({"context.ip": "203.0.113.0", "context": {"ip": "198.51.100.0"}})
+        );
+    }
+
+    #[test]
+    fn a_path_walks_arrays_of_arrays() {
+        let mut properties = map(json!({
+            "rows": [[{"ip": "203.0.113.9", "keep": 1}], [[{"ip": "198.51.100.7"}]], "loose"]
+        }));
+
+        redact(
+            &mut properties,
+            &rules(&[], &[], &["rows.ip"]),
+            WorkspaceId::new(),
+            &key(),
+        );
+
+        assert_eq!(
+            Value::Object(properties),
+            json!({"rows": [[{"ip": "203.0.113.0", "keep": 1}], [[{"ip": "198.51.100.0"}]], "loose"]})
         );
     }
 

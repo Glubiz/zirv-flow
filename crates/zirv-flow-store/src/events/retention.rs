@@ -4,7 +4,6 @@
 
 use sqlx::PgConnection;
 use time::{Date, Duration, Month, OffsetDateTime};
-use uuid::Uuid;
 
 use super::partitions::PARTITION_PREFIX;
 use crate::StoreError;
@@ -36,6 +35,16 @@ impl Default for EventRetention {
     }
 }
 
+/// Deletes events past the retention of their own name, read from the schema row by every
+/// statement, so a batch always uses the override as it is now.
+const OVERRIDDEN_DELETE: &str = "DELETE FROM events e USING ( \
+    SELECT x.occurred_at, x.id FROM events x \
+    JOIN event_schemas s ON s.workspace_id = x.workspace_id AND s.name = x.name \
+    WHERE s.retention_days IS NOT NULL \
+      AND x.occurred_at < $1::timestamptz - make_interval(days => s.retention_days) \
+    LIMIT $2) d \
+ WHERE e.occurred_at = d.occurred_at AND e.id = d.id";
+
 /// What one run removed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RetentionReport {
@@ -55,30 +64,10 @@ pub async fn apply_event_retention(
     let default_days = i32::try_from(settings.default_days).unwrap_or(i32::MAX);
     let mut report = RetentionReport::default();
 
-    let overridden: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT workspace_id, name, retention_days FROM event_schemas \
-         WHERE retention_days IS NOT NULL",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    for (workspace, name, days) in overridden {
-        report.events_deleted += delete_in_batches(
-            connection,
-            "DELETE FROM events e USING ( \
-                SELECT occurred_at, id FROM events \
-                WHERE workspace_id = $1 AND name = $2 AND occurred_at < $3 LIMIT $4) d \
-             WHERE e.occurred_at = d.occurred_at AND e.id = d.id",
-            |query| {
-                query
-                    .bind(workspace)
-                    .bind(name.clone())
-                    .bind(now - Duration::days(i64::from(days)))
-                    .bind(RETENTION_BATCH)
-            },
-        )
-        .await?;
-    }
+    report.events_deleted += delete_in_batches(connection, OVERRIDDEN_DELETE, |query| {
+        query.bind(now).bind(RETENTION_BATCH)
+    })
+    .await?;
 
     let default_cutoff = now - Duration::days(i64::from(settings.default_days));
     report.events_deleted += delete_in_batches(
@@ -196,6 +185,7 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
+    use uuid::Uuid;
     use zirv_flow_core::events::EventMode;
     use zirv_flow_core::{
         Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceId, WorkspaceName,
@@ -380,6 +370,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ages, [5, 790]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_batch_reads_the_override_as_it_is_when_the_batch_runs(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        for index in 0..3 {
+            store(&pool, ws, "tuned", 50, Some(&format!("m-{index}"))).await;
+        }
+        let set = |days: Option<i32>| {
+            let pool = pool.clone();
+            async move {
+                let update = EventSchemaUpdate {
+                    retention_days: Some(days),
+                    ..Default::default()
+                };
+                update_event_schema(&pool, ws, "tuned", &update).await
+            }
+        };
+        let batch = |size: i64| {
+            sqlx::query(OVERRIDDEN_DELETE)
+                .bind(NOW)
+                .bind(size)
+                .execute(&pool)
+        };
+        set(Some(30)).await.unwrap();
+
+        let first = batch(1).await.unwrap().rows_affected();
+        set(Some(90)).await.unwrap();
+        let after_raise = batch(5000).await.unwrap().rows_affected();
+        set(Some(30)).await.unwrap();
+        let after_lowering = batch(5000).await.unwrap().rows_affected();
+
+        assert_eq!((first, after_raise, after_lowering), (1, 0, 2));
+        assert_eq!(remaining(&pool, "tuned").await, 0);
     }
 
     #[sqlx::test]
