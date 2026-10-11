@@ -525,6 +525,16 @@ react as configured and destination syncs remove the person downstream (10.2).
 Deletion removes one source's contribution; **erasure** (16.3) removes the
 person and every derived row.
 
+As built (M2): `remove_contribution` tombstones the record, recomputes the traits, deletes the
+identities no other live record of the person lists (and the conflicts about them), marks the
+person dirty, appends `contribution.removed` and then applies `workspaces.orphan_policy`
+(`keep` or `delete`; orphan means no live record, no event and no explicit consent).
+`store::privacy::delete_person` is the one function that owns the list of person-scoped tables;
+it deletes the person and the people merged into them, and every milestone that adds a table
+extends it. It is exposed as `DELETE /people/{id}`, as a step of erasure and as the orphan
+policy's action, and it adds no suppression. Event-linked removal waits for record-linked
+events (M3).
+
 ### 7.5 Freshness and connector concerns
 
 | Object | Freshness | Shown as |
@@ -1315,6 +1325,20 @@ per-name workspace overrides (drop monthly partitions; batched deletes where
 an override is shorter), messages 13 months, ingest and sync rejects 30 days,
 job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28
 and assistant transcript retention is OQ-26.
+
+As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
+status, requester, trace); it is the one table the erasure scan skips on purpose.
+`POST /privacy/erasures` records the request and enqueues `privacy.erase` in one transaction;
+the job then runs in one transaction: it deletes the pending `ingest_inbox` rows whose
+identifiers match the person's identity values (locked `FOR UPDATE`, so a drain either applied
+them before or never sees them), upserts `erased` suppressions from the ledger hashes, calls
+`delete_person`, completes the ledger row and audits `privacy.erased` with the request id.
+`admin replay-erasures` re-applies completed entries after a restore (suppressions, restored
+people, and pending inbox rows by hash with the master key). Exports are `privacy_exports`:
+`privacy.export` builds the gzip JSON `zirv-flow.person-export/v1`, the download is
+admin-only, audited and answers 410 after 24 hours, and the leader's hourly upkeep drops expired
+content. A request whose job went dead reads as `failed`. Destination `erase` calls, message and
+enrollment tables and backup-copy handling of the ledger (OQ-13) are not built yet.
 
 ## 17. Observability and operations
 
