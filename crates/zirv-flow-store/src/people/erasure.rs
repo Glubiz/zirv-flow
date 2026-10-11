@@ -7,13 +7,18 @@ use uuid::Uuid;
 
 /// `(table.column, row count)` for every place that holds `person`, sorted by name. It scans
 /// each column named `person_id` or ending in `_person_id`, `people.id`,
-/// `people.merged_into`, and the subjects of `decision_records`. Places with no row are left
+/// `people.merged_into`, and the subjects of `decision_records`. A partition is counted
+/// through its parent table. Places with no row are left
 /// out, so an empty result means the person is gone.
 pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<(String, i64)> {
     let mut places: Vec<(String, String)> = sqlx::query_as(
         "SELECT table_name::text, column_name::text FROM information_schema.columns \
          WHERE table_schema = current_schema() AND data_type = 'uuid' \
            AND (column_name = 'person_id' OR column_name LIKE '%\\_person\\_id') \
+           AND NOT EXISTS (SELECT 1 FROM pg_class c \
+                           JOIN pg_namespace n ON n.oid = c.relnamespace \
+                           WHERE n.nspname = table_schema::text \
+                             AND c.relname = table_name::text AND c.relispartition) \
          ORDER BY 1, 2",
     )
     .fetch_all(pool)
@@ -156,5 +161,65 @@ mod tests {
                 .all(|(place, _)| place != "people.merged_into")
         );
         assert!(for_survivor.contains(&("people.merged_into".to_owned(), 1)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_scan_finds_the_rows_the_event_store_wrote(pool: PgPool) {
+        use crate::{
+            EventOutcome, EventPolicy, EventRecord, HmacPurpose, MasterKey, apply_event_batch,
+            set_event_policy,
+        };
+        use zirv_flow_core::events::UnplannedPolicy;
+
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let record = |event: &str, message_id: &str| EventRecord {
+            source: "web".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            name: event.into(),
+            properties: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: datetime!(2026-01-01 00:00 UTC),
+            message_id: Some(message_id.into()),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let accepted = apply_event_batch(&pool, ws, &key, &[record("seen", "m-1")])
+            .await
+            .unwrap();
+        let EventOutcome::Accepted { person_id, .. } = accepted[0] else {
+            panic!("not accepted");
+        };
+        set_event_policy(
+            &pool,
+            ws,
+            &EventPolicy {
+                unplanned: UnplannedPolicy::Reject,
+                ..EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+        apply_event_batch(&pool, ws, &key, &[record("unknown", "m-2")])
+            .await
+            .unwrap();
+
+        let found = rows_referencing_person(&pool, person_id).await;
+
+        let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "decision_records.subject_ids",
+                "event_dedupe.person_id",
+                "events.person_id",
+                "identities.person_id",
+                "ingest_rejects.person_id",
+                "people.id",
+                "person_changes.person_id",
+            ]
+        );
     }
 }

@@ -17,10 +17,14 @@ pub const REWRITE_JOB_KIND: &str = "person.merge.rewrite";
 pub const REWRITE_BATCH: i64 = 1000;
 
 /// Person-scoped columns that name a merged person and are re-pointed in batches rather than
-/// in the merge transaction. The events table joins this list with its `person_id` column.
-const REWRITE_TARGETS: &[(&str, &str)] = &[
-    ("identity_conflicts", "person_id"),
-    ("identity_conflicts", "other_person_id"),
+/// in the merge transaction, with the columns that identify a row within its workspace. The
+/// event table is partitioned, so its rows are found by `(occurred_at, id)`.
+const REWRITE_TARGETS: &[(&str, &str, &[&str])] = &[
+    ("identity_conflicts", "person_id", &["id"]),
+    ("identity_conflicts", "other_person_id", &["id"]),
+    ("events", "person_id", &["occurred_at", "id"]),
+    ("event_dedupe", "person_id", &["message_id"]),
+    ("ingest_rejects", "person_id", &["id"]),
 ];
 
 /// The person that currently stands for `person`: the survivor when it was merged, else
@@ -179,6 +183,37 @@ pub(super) async fn merge_people(
     Ok(())
 }
 
+/// Closes the open conflicts naming `merged` in `column` whose re-pointed copy would match an
+/// open conflict that already exists: one open conflict per person pair and source record.
+async fn close_conflicts_the_move_would_duplicate(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    column: &str,
+    merged: Uuid,
+    survivor: Uuid,
+) -> Result<(), StoreError> {
+    // The column is one of the constants above, never input.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE identity_conflicts c SET resolved_at = now(), resolution = 'merged' \
+         WHERE c.workspace_id = $1 AND c.resolved_at IS NULL AND c.{column} = $2 \
+           AND EXISTS (SELECT 1 FROM identity_conflicts o \
+                       WHERE o.workspace_id = c.workspace_id AND o.resolved_at IS NULL \
+                         AND o.id <> c.id \
+                         AND o.person_id = {person} AND o.other_person_id = {other} \
+                         AND COALESCE(o.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+                           = COALESCE(c.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid))",
+        person = if column == "person_id" { "$3" } else { "c.person_id" },
+        other = if column == "other_person_id" { "$3" } else { "c.other_person_id" },
+    )))
+    .bind(workspace.as_uuid())
+    .bind(merged)
+    .bind(survivor)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Re-points what still names `merged` to the person it was merged into, in batches of
 /// [`REWRITE_BATCH`] rows per statement, on `connection`. Returns how many rows moved; a
 /// second run moves none. Conflicts that end up between the survivor and itself are closed
@@ -202,12 +237,25 @@ pub async fn rewrite_merged_person(
         return Ok(0);
     };
     let mut total = 0;
-    for (table, column) in REWRITE_TARGETS {
+    for (table, column, key) in REWRITE_TARGETS {
+        if *table == "identity_conflicts" {
+            close_conflicts_the_move_would_duplicate(
+                connection, workspace, column, merged, survivor,
+            )
+            .await?;
+        }
+        let columns = key.join(", ");
+        let same_row: String = key
+            .iter()
+            .map(|name| format!(" AND x.{name} = d.{name}"))
+            .collect();
         loop {
             // Names come from the constant above, never from input.
             let moved = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE {table} SET {column} = $3 WHERE workspace_id = $1 AND id IN \
-                    (SELECT id FROM {table} WHERE workspace_id = $1 AND {column} = $2 LIMIT $4)"
+                "UPDATE {table} x SET {column} = $3 FROM \
+                    (SELECT workspace_id, {columns} FROM {table} \
+                     WHERE workspace_id = $1 AND {column} = $2 LIMIT $4) d \
+                 WHERE x.workspace_id = d.workspace_id{same_row}"
             )))
             .bind(workspace.as_uuid())
             .bind(merged)
@@ -682,7 +730,7 @@ mod tests {
             record("crm", "2", &[("email", "l@example.com")], json!({})),
         )
         .await;
-        let third = apply_one(
+        apply_one(
             &pool,
             ws,
             record("crm", "3", &[("email", "t@example.com")], json!({})),
@@ -698,15 +746,19 @@ mod tests {
             ("person_id", "other_person_id"),
             ("other_person_id", "person_id"),
         ] {
+            // One open conflict per person pair and source record, so each row names its own
+            // other person.
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "INSERT INTO identity_conflicts \
+                "WITH others AS (INSERT INTO people (id, workspace_id) \
+                                 SELECT gen_random_uuid(), $1 FROM generate_series(1, 2500) \
+                                 RETURNING id) \
+                 INSERT INTO identity_conflicts \
                     (id, workspace_id, {column}, {other}, kind, source_record_id, reason) \
-                 SELECT gen_random_uuid(), $1, $2, $3, 'email', $4, 'unique_kind' \
-                 FROM generate_series(1, 2500)"
+                 SELECT gen_random_uuid(), $1, $2, others.id, 'email', $3, 'unique_kind' \
+                 FROM others"
             )))
             .bind(ws.as_uuid())
             .bind(loser)
-            .bind(third)
             .bind(source_record)
             .execute(&pool)
             .await
@@ -756,6 +808,193 @@ mod tests {
                 .iter()
                 .all(|d| d.action == "person.merge.rewrite" && d.outcome == "completed")
         );
+    }
+
+    async fn event_of(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        email: &str,
+        name: &str,
+        message_id: &str,
+    ) -> crate::EventOutcome {
+        let key =
+            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        let event = crate::EventRecord {
+            source: "web".into(),
+            identifiers: vec![("email".into(), email.into())],
+            name: name.into(),
+            properties: json!({}).as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: time::macros::datetime!(2026-01-01 00:00 UTC),
+            message_id: Some(message_id.into()),
+            trace: TraceContext::root(Cause::api("event")),
+        };
+        crate::apply_event_batch(pool, ws, &key, &[event])
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rewrite_re_points_events_dedupe_and_rejects_and_a_second_run_moves_nothing(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:crm", "1")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("crm", "2", &[("email", "l@example.com")], json!({})),
+        )
+        .await;
+        for index in 0..3 {
+            let outcome = event_of(&pool, ws, "l@example.com", "seen", &format!("m-{index}")).await;
+            assert!(
+                matches!(outcome, crate::EventOutcome::Accepted { person_id, .. } if person_id == loser)
+            );
+        }
+        crate::set_event_policy(
+            &pool,
+            ws,
+            &crate::EventPolicy {
+                unplanned: zirv_flow_core::events::UnplannedPolicy::Reject,
+                ..crate::EventPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+        let rejected = event_of(&pool, ws, "l@example.com", "unknown", "m-reject").await;
+        assert!(matches!(rejected, crate::EventOutcome::Rejected { .. }));
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "web",
+                "3",
+                &[("external:crm", "1"), ("email", "l@example.com")],
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(merged_into(&pool, loser).await, Some(survivor));
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let first = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        let second = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        assert_eq!((first, second), (7, 0));
+        for table in ["events", "event_dedupe", "ingest_rejects"] {
+            let on = |person: Uuid| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                        "SELECT count(*) FROM {table} WHERE person_id = $1"
+                    )))
+                    .bind(person)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                }
+            };
+            assert_eq!(on(loser).await, 0, "{table}");
+            assert!(on(survivor).await >= 1, "{table}");
+        }
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE person_id = $1")
+            .bind(survivor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_conflict_the_move_would_duplicate_is_closed_instead_of_failing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:crm", "1")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("crm", "2", &[("email", "l@example.com")], json!({})),
+        )
+        .await;
+        let other = apply_one(
+            &pool,
+            ws,
+            record("crm", "3", &[("email", "o@example.com")], json!({})),
+        )
+        .await;
+        for (person, against) in [
+            (loser, other),
+            (survivor, other),
+            (other, loser),
+            (other, survivor),
+        ] {
+            sqlx::query(
+                "INSERT INTO identity_conflicts \
+                    (id, workspace_id, person_id, other_person_id, kind, reason) \
+                 VALUES (gen_random_uuid(), $1, $2, $3, 'email', 'unique_kind')",
+            )
+            .bind(ws.as_uuid())
+            .bind(person)
+            .bind(against)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "web",
+                "4",
+                &[("external:crm", "1"), ("email", "l@example.com")],
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(merged_into(&pool, loser).await, Some(survivor));
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM identity_conflicts WHERE resolved_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let closed: Vec<String> = sqlx::query_scalar(
+            "SELECT resolution FROM identity_conflicts WHERE resolved_at IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open, 2,
+            "one per direction between the survivor and the other person"
+        );
+        assert_eq!(closed, ["merged", "merged"]);
     }
 
     #[sqlx::test]

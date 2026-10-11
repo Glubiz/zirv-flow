@@ -17,6 +17,7 @@ mod isolation;
 pub use apply::{
     DroppedTrait, ProfileOutcome, ProfileRecord, apply_profile_batch, remove_contribution,
 };
+pub(crate) use apply::{mark_changed, normalize_identifiers, record_resolution};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };
@@ -31,3 +32,4 @@ pub use registry::{
     find_trait_definition, find_trait_definition_for_update, list_trait_definitions,
     update_trait_definition,
 };
+pub(crate) use resolve::{find_known_person, resolve_person};

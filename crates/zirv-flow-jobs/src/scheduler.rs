@@ -12,7 +12,7 @@ use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, disable_schedule, due_schedules, enqueue, ensure_decision_partitions,
-    queue_depths, reap_expired, try_lead,
+    ensure_event_partitions, queue_depths, reap_expired, try_lead,
 };
 
 use crate::metrics::QueueGauges;
@@ -20,7 +20,8 @@ use crate::metrics::QueueGauges;
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
 
-/// The longest between checks that the decision log has partitions for this and next month.
+/// The longest between checks that the decision log and the event store have partitions for
+/// this and next month.
 const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// How often the scheduler works.
@@ -66,7 +67,7 @@ pub struct Scheduler {
     config: SchedulerConfig,
     leadership: Option<Leadership>,
     gauges: Mutex<QueueGauges>,
-    /// When the decision-log partitions were last checked; none until this instance leads.
+    /// When the partitions were last checked; none until this instance leads.
     partitions_checked: Option<Instant>,
 }
 
@@ -128,7 +129,8 @@ impl Scheduler {
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
-    /// Makes sure the decision log has partitions for this and next month: on gaining
+    /// Makes sure the decision log and the event store have partitions for this and next
+    /// month: on gaining
     /// leadership, then at most hourly. A failure is logged and retried at the next check.
     async fn keep_partitions(&mut self, now: OffsetDateTime) {
         let due = self
@@ -140,6 +142,9 @@ impl Scheduler {
         self.partitions_checked = Some(Instant::now());
         if let Err(error) = ensure_decision_partitions(&self.pool, now.date()).await {
             warn!("could not create the decision-log partitions: {error}");
+        }
+        if let Err(error) = ensure_event_partitions(&self.pool, now.date()).await {
+            warn!("could not create the event partitions: {error}");
         }
     }
 
@@ -295,6 +300,11 @@ mod tests {
 
     async fn migrated(pool: &PgPool) {
         zirv_flow_store::migrate(pool).await.unwrap();
+        // The tests walk the clock far ahead and count the slots they created themselves.
+        sqlx::query("DELETE FROM schedules WHERE kind = 'events.retention'")
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE fired (slot_key text PRIMARY KEY)")
             .execute(pool)
             .await
@@ -515,13 +525,22 @@ mod tests {
                 "{name} missing after the tick: {after:?}"
             );
         }
+        let events = partitions_of(&pool, "events").await;
+        for name in names.map(|name| name.replace("decision_records", "events")) {
+            assert!(events.contains(&name), "{name} missing: {events:?}");
+        }
     }
 
     async fn partitions(pool: &PgPool) -> Vec<String> {
+        partitions_of(pool, "decision_records").await
+    }
+
+    async fn partitions_of(pool: &PgPool, parent: &str) -> Vec<String> {
         sqlx::query_scalar(
             "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-             WHERE i.inhparent = 'decision_records'::regclass",
+             WHERE i.inhparent = $1::regclass",
         )
+        .bind(parent)
         .fetch_all(pool)
         .await
         .unwrap()

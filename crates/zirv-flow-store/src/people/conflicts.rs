@@ -451,14 +451,26 @@ mod tests {
         let ws = workspace(&pool).await;
         let (_, _, first) = blocked(&pool, ws).await;
         for _ in 0..4 {
+            // Another open conflict about the same identifier, from another person.
+            let extra = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id) \
+                 SELECT $1, workspace_id FROM identity_conflicts WHERE id = $2",
+            )
+            .bind(extra)
+            .bind(first.id)
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::query(
                 "INSERT INTO identity_conflicts \
                     (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
-                 SELECT $1, workspace_id, person_id, other_person_id, kind, source_record_id, \
+                 SELECT $1, workspace_id, $3, other_person_id, kind, source_record_id, \
                         reason FROM identity_conflicts WHERE id = $2",
             )
             .bind(Uuid::now_v7())
             .bind(first.id)
+            .bind(extra)
             .execute(&pool)
             .await
             .unwrap();

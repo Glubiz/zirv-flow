@@ -9,8 +9,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
-    ClaimedJob, FailOutcome, PgPool, begin, claim_job, complete_job, fail_job, heartbeat_job,
-    listen_for_jobs, lock_lease, observe_pool, sized_like,
+    ClaimedJob, EventRetention, FailOutcome, PgPool, begin, claim_job, complete_job, fail_job,
+    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
 use crate::context::JobContext;
@@ -38,6 +38,8 @@ pub struct WorkerConfig {
     pub backoff_base: Duration,
     /// The longest retry delay.
     pub backoff_cap: Duration,
+    /// What the `events.retention` job keeps and for how long.
+    pub event_retention: EventRetention,
 }
 
 impl WorkerConfig {
@@ -49,6 +51,7 @@ impl WorkerConfig {
             max_running_per_workspace: None,
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(3600),
+            event_retention: EventRetention::default(),
         }
     }
 }
@@ -315,7 +318,8 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         lost,
     )));
     let result = {
-        let mut ctx = JobContext::new(&mut tx, &job);
+        let mut ctx =
+            JobContext::new(&mut tx, &job).with_event_retention(shared.config.event_retention);
         let handler = kind.run(&mut ctx, job.payload.clone());
         tokio::select! {
             result = handler => Some(result),
@@ -517,6 +521,7 @@ mod tests {
             max_running_per_workspace: None,
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(5),
+            event_retention: EventRetention::default(),
         }
     }
 

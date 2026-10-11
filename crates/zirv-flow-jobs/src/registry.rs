@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_registry_ships_the_noop_merge_rewrite_and_recompute_kinds() {
+    fn the_built_in_registry_ships_the_noop_merge_rewrite_recompute_and_retention_kinds() {
         let registry = Registry::built_in();
 
         assert_eq!(
@@ -109,7 +109,8 @@ mod tests {
             vec![
                 "maintenance.noop",
                 "person.merge.rewrite",
-                "traits.recompute"
+                "traits.recompute",
+                "events.retention"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -137,6 +138,7 @@ mod tests {
                 "maintenance.noop",
                 "person.merge.rewrite",
                 "traits.recompute",
+                "events.retention",
                 "test.first",
                 "test.second"
             ]

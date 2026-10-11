@@ -92,6 +92,69 @@ describe("navigation", () => {
   });
 });
 
+describe("event routes", () => {
+  it("serves the schema list, the rejects and the settings, with Events current in the menu", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json([]),
+      "GET /api/v1/workspaces/ws1/event-schemas": () => json([]),
+      "GET /api/v1/workspaces/ws1/ingest-rejects": () => json({ rejects: [], next_before: null }),
+      "GET /api/v1/workspaces/ws1/event-policy": () =>
+        json({
+          unplanned: "draft",
+          future_skew_seconds: 300,
+          lateness_seconds: 86400,
+          redaction: { drop: [], hash: [], truncate_ip: [] },
+        }),
+    });
+    const user = userEvent.setup();
+    renderApp("/w/ws1/events");
+
+    expect(await screen.findByRole("heading", { name: "Events" })).toBeInTheDocument();
+    expect(await screen.findByText("No event schemas yet")).toBeInTheDocument();
+    const main = screen.getByRole("navigation", { name: "Main" });
+    expect(within(main).getByRole("link", { name: "Events" })).toHaveAttribute("aria-current", "page");
+
+    await user.click(screen.getByRole("link", { name: "Rejects" }));
+    expect(await screen.findByRole("heading", { name: "Rejects" })).toBeInTheDocument();
+    expect(await screen.findByText("No rejects")).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Event settings" })).toBeInTheDocument();
+    expect(within(main).getByRole("link", { name: "Events" })).toHaveAttribute("aria-current", "page");
+  });
+});
+
+describe("event schema routes", () => {
+  it("reaches a schema named like a static page", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json([]),
+      "GET /api/v1/workspaces/ws1/event-schemas/rejects": () =>
+        json({
+          schema: {
+            name: "rejects",
+            mode: "warn",
+            description: "",
+            current_version: null,
+            has_draft: false,
+            inferred: false,
+            retention_days: null,
+            created_at: "2026-10-01T09:00:00Z",
+            updated_at: "2026-10-01T09:00:00Z",
+          },
+          draft: null,
+          versions: [],
+        }),
+    });
+    renderApp("/w/ws1/events/schemas/rejects");
+
+    expect(await screen.findByRole("heading", { name: "rejects" })).toBeInTheDocument();
+    expect(await screen.findByText(/Nothing is published/)).toBeInTheDocument();
+  });
+});
+
 describe("navigation without a workspace", () => {
   it("marks exactly one item as current and renders the workspace items as plain text", async () => {
     mockApi({
@@ -102,11 +165,11 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(5);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(6);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Conflicts", "API keys", "Traces"]) {
+    for (const name of ["Members", "Fields", "Conflicts", "Events", "API keys", "Traces"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");

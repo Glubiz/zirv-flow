@@ -229,7 +229,7 @@ pub(crate) async fn retry(
     Ok(Json(JobBody::from(job)))
 }
 
-fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiError> {
+pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiError> {
     let mut limit = DEFAULT_LIMIT;
     let mut before = None;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {

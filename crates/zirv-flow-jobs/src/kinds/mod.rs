@@ -2,6 +2,7 @@
 
 use crate::ErasedKind;
 
+mod events_retention;
 mod noop;
 mod person_merge_rewrite;
 mod traits_recompute;
@@ -10,4 +11,5 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
     &person_merge_rewrite::PersonMergeRewrite,
     &traits_recompute::TraitsRecompute,
+    &events_retention::EventsRetention,
 ];
