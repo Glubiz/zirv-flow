@@ -4,6 +4,8 @@ export interface ProblemDetails {
   status: number;
   traceId: string | null;
   requestId: string | null;
+  /** A stable code for failures a client acts on, such as `search_timeout`. */
+  code?: string | null;
 }
 
 export class ApiError extends Error {
@@ -12,6 +14,7 @@ export class ApiError extends Error {
   readonly detail: string;
   readonly traceId: string | null;
   readonly requestId: string | null;
+  readonly code: string | null;
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -21,6 +24,7 @@ export class ApiError extends Error {
     this.detail = problem.detail;
     this.traceId = problem.traceId;
     this.requestId = problem.requestId;
+    this.code = problem.code ?? null;
   }
 }
 
@@ -40,6 +44,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       status: typeof body["status"] === "number" ? body["status"] : response.status,
       traceId: text(body["trace_id"]),
       requestId: text(body["request_id"]),
+      code: text(body["code"]),
     });
   }
   return new ApiError({

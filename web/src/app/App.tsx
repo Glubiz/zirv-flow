@@ -7,7 +7,7 @@ import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
 import { MembersPage } from "../features/members";
 import { SuppressionsPage, TopicsPage } from "../features/consent";
-import { ConflictsPage, TraitsPage } from "../features/people";
+import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
@@ -113,7 +113,9 @@ export function AppRoutes() {
           <Route path="w/:ws/traits" element={<TraitsPage />} />
           <Route path="w/:ws/lists" element={<ListsPage />} />
           <Route path="w/:ws/lists/:listId" element={<ListDetailPage />} />
+          <Route path="w/:ws/people" element={<PeoplePage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
+          <Route path="w/:ws/people/:id" element={<ProfilePage />} />
           <Route path="w/:ws/events" element={<EventsPage />} />
           <Route path="w/:ws/events/rejects" element={<RejectsPage />} />
           <Route path="w/:ws/events/settings" element={<EventSettingsPage />} />
