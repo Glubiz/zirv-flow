@@ -6,6 +6,7 @@ mod email;
 mod ids;
 pub mod password;
 mod role;
+pub mod schedule;
 mod scope;
 pub mod token;
 mod validation;

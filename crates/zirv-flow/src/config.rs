@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 13] = [
+const CONFIG_KEYS: [&str; 15] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -27,6 +27,8 @@ const CONFIG_KEYS: [&str; 13] = [
     "database.max_connections",
     "database.migrate_on_start",
     "worker.concurrency",
+    "worker.lease_seconds",
+    "worker.max_running_per_workspace",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -123,6 +125,10 @@ struct DatabaseConfig {
 #[serde(deny_unknown_fields)]
 struct WorkerConfig {
     concurrency: u32,
+    lease_seconds: u32,
+    /// Unset means unlimited.
+    #[serde(default)]
+    max_running_per_workspace: Option<u32>,
 }
 
 struct SecretUrl(Url);
@@ -241,7 +247,8 @@ impl Config {
             .merge(Serialized::default("auth.local.enabled", true))
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
-            .merge(Serialized::default("worker.concurrency", 4_u32));
+            .merge(Serialized::default("worker.concurrency", 4_u32))
+            .merge(Serialized::default("worker.lease_seconds", 30_u32));
         if let Some(path) = path {
             figment = figment.merge(Toml::string(&read_file(path)?));
         }
@@ -277,7 +284,15 @@ impl Config {
         for (key, value) in [
             ("database.max_connections", config.database.max_connections),
             ("worker.concurrency", config.worker.concurrency),
-        ] {
+            ("worker.lease_seconds", config.worker.lease_seconds),
+        ]
+        .into_iter()
+        .chain(
+            config
+                .worker
+                .max_running_per_workspace
+                .map(|cap| ("worker.max_running_per_workspace", cap)),
+        ) {
             if value == 0 {
                 return Err(ConfigError::new(
                     key,
@@ -382,6 +397,21 @@ impl Config {
 
     pub(crate) fn database_migrate_on_start(&self) -> bool {
         self.database.migrate_on_start
+    }
+
+    /// Jobs a worker process runs at once.
+    pub(crate) fn worker_concurrency(&self) -> u32 {
+        self.worker.concurrency
+    }
+
+    /// How long a claimed job's lease lasts without a heartbeat.
+    pub(crate) fn worker_lease_seconds(&self) -> u32 {
+        self.worker.lease_seconds
+    }
+
+    /// The most jobs of one workspace that run at once; none means unlimited.
+    pub(crate) fn worker_max_running_per_workspace(&self) -> Option<u32> {
+        self.worker.max_running_per_workspace
     }
 }
 
@@ -642,6 +672,42 @@ cookie_secure = false
 
         assert!(error.contains("worker.concurrency"));
         assert!(error.contains("must be at least 1"));
+    }
+
+    #[test]
+    fn the_worker_defaults_are_a_thirty_second_lease_and_no_workspace_cap() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(config.worker_concurrency(), 4);
+        assert_eq!(config.worker_lease_seconds(), 30);
+        assert_eq!(config.worker_max_running_per_workspace(), None);
+        assert!(!toml::to_string(&config).unwrap().contains("max_running"));
+    }
+
+    #[test]
+    fn the_lease_and_the_workspace_cap_can_be_set_and_must_be_at_least_one() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_WORKER__LEASE_SECONDS".into(), "90".into()));
+        env.push((
+            "ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE".into(),
+            "2".into(),
+        ));
+        let config = Config::load(None, env).unwrap();
+
+        assert_eq!(config.worker_lease_seconds(), 90);
+        assert_eq!(config.worker_max_running_per_workspace(), Some(2));
+        for key in [
+            "ZIRV_FLOW_WORKER__LEASE_SECONDS",
+            "ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE",
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), "0".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains("must be at least 1"), "{error}");
+            assert!(error.contains(key), "{error}");
+        }
     }
 
     #[test]

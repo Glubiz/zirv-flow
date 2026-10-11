@@ -912,14 +912,45 @@ RETURNING id, kind, payload, attempts, lease_token;
 DELETE FROM jobs WHERE id = $id AND lease_token = $token;
 ```
 
+**Completion.** The runtime opens the handler's transaction and first takes a
+key-share lock on the job row, `SELECT 1 FROM jobs WHERE id = $1 AND
+lease_token = $2 FOR KEY SHARE`; no row means the lease was lost and the
+transaction is abandoned. A key-share lock, not `FOR UPDATE`, because the
+heartbeat's `UPDATE` runs on another connection while the handler works and must
+not wait for the handler to finish. The handler writes and enqueues through that
+transaction. When it returns, the runtime runs the fenced `DELETE FROM jobs
+WHERE id = $1 AND lease_token = $2` in the same transaction and commits only if
+a row was deleted; otherwise the lease was lost meanwhile and the whole
+transaction, handler writes included, rolls back. Of two workers that ran the
+same job, exactly one deletes it, so a job never completes twice. Failure, retry,
+heartbeat and dead are fenced on the token the same way. `last_error` is cut to
+2 KB and never holds payload values; handlers return a typed error with a fixed
+message.
+
+**Scheduler slots.** A slot is enqueued only by `UPDATE schedules SET
+next_run_at = $next WHERE id = $id AND next_run_at = $slot`, a compare-and-set
+in the same transaction as the enqueue, with unique key `schedule:<id>:<slot>`.
+Advancing `next_run_at` is the durable record that a slot fired, so a failover
+or a two-leader overlap fires no slot twice, even after the first slot's job
+completed and was deleted. A schedule far behind enqueues only its latest due
+slot and logs how many it skipped. A DST gap runs a fixed wall-clock time at the
+first instant after the gap, and an overlap runs it once.
+
+**Fairness (OQ-8, decided).** One shared queue with a per-workspace running cap:
+the claim query skips a workspace that already has `worker.max_running_per_workspace`
+jobs running (default unlimited; instance-level jobs are never capped). While a
+cap is set, claims take a transaction-level advisory lock so concurrent workers
+cannot overshoot it. Weighted claiming is rejected for v1: it is more complex
+and nothing yet shows the cap is not enough. M8 validates the cap under load.
+
 | Concern | Design |
 |---------|--------|
-| Execution | Outside any claim transaction. The handler's writes and the jobs it enqueues commit in its own transaction, which also checks the lease token. Long handlers heartbeat. |
+| Execution | Outside any claim transaction. The handler's writes and the jobs it enqueues commit in its own transaction, which also checks the lease token (see Completion below). Long handlers heartbeat every third of the lease (default 30 s, `worker.lease_seconds`); a heartbeat that finds the lease gone cancels the handler and discards its transaction. |
 | Retries | `run_at = now() + min(base * 2^attempts, cap) * jitter`; after `max_attempts` the job is `dead`, visible and retryable on the Jobs admin page. |
 | Idempotency | Database effects are idempotent by construction (upserts, unique keys, `state_version`). External effects carry stable keys: effectively-once where the destination honours them; where it cannot (SMTP), a crash between provider acceptance and recording can duplicate a send. Documented, not hidden. |
 | Scheduler | Leader enqueues due schedules with unique key `(schedule_id, slot)`, reaps expired leases, pre-creates event partitions and watches the default partition, enforces retention, marks stale sources, triggers scheduled segment refreshes. |
 | Hygiene | Completed jobs are deleted at once (history only for failures/dead); aggressive autovacuum on `jobs`; applied inbox rows deleted; dead-tuple counts exported as metrics. |
-| Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is OQ-8. |
+| Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is a per-workspace running cap (OQ-8, below). |
 
 ## 15. API and UI
 
@@ -1174,7 +1205,6 @@ they were ruled as their capabilities were added to the plan.
 | OQ-5 | Is the bounded transform set enough, or is a small expression language needed for mapping? | M3 |
 | OQ-6 | Do membership changes from a definition edit trigger flows? (Proposed: no.) | M4 |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
-| OQ-8 | Cross-workspace fairness in the shared queue: per-workspace concurrency limits or weighted claiming? | M1 design, M8 validation |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
 | OQ-11 | Scope and timing of a dedicated transactional messaging API | M6 |
@@ -1199,6 +1229,9 @@ they were ruled as their capabilities were added to the plan.
 
 ### 21.1 Decided questions
 
+- **OQ-8:** A per-workspace running cap in the claim query
+  (`worker.max_running_per_workspace`, default unlimited); weighted claiming is
+  rejected for v1. M8 validates it under load (section 14).
 - **OQ-15:** PostgreSQL 16 is the minimum supported version. CI covers
   PostgreSQL 16 and 18. Reassess the minimum before v1.0 against the versions
   supported at that release date.

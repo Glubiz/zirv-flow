@@ -17,9 +17,9 @@ from that data, and run automation flows for everyone or for a segment.
 ## Status
 
 Pre-alpha. The project is at the architecture and roadmap stage; configuration,
-database bootstrap, the HTTP server skeleton and local accounts with workspaces,
-sessions and API keys, and OIDC sign-in (Keycloak is the reference provider) are
-implemented, but nothing is ready to use yet.
+database bootstrap, the HTTP server skeleton, local accounts with workspaces,
+sessions and API keys, OIDC sign-in (Keycloak is the reference provider), and the
+durable job queue and scheduler are implemented, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -46,6 +46,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
 | `worker.concurrency` | u32 | 4 | at least 1 |
+| `worker.lease_seconds` | u32 | 30 | at least 1 |
+| `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
 
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password and the OIDC client secret redacted.
@@ -67,9 +69,8 @@ applied migration, or a schema newer than the running binary.
 
 ## HTTP server
 
-`zirv-flow serve` (and `all`, until the worker and scheduler roles exist) runs
-the startup database check, binds `server.bind` and serves until Ctrl-C or
-SIGTERM, draining in-flight requests.
+`zirv-flow serve` (and `all`) runs the startup database check, binds
+`server.bind` and serves until Ctrl-C or SIGTERM, draining in-flight requests.
 
 | Endpoint | Behaviour |
 |----------|-----------|
@@ -89,6 +90,39 @@ annotation, regenerate it with:
 ```sh
 ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi
 ```
+
+## Background jobs
+
+Background work runs through a durable job queue in PostgreSQL. Three roles
+use it:
+
+| Command | What it does |
+|---------|--------------|
+| `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time. Run as many as you like. |
+| `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue and exports queue gauges. |
+| `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
+
+A running job holds a lease of `worker.lease_seconds`, which its worker extends
+every third of that while the handler runs. A worker that dies leaves its job to
+the scheduler, which makes it runnable again once the lease has expired; a job
+that fails is retried with exponential backoff and jitter, and is kept as
+`dead` after its last attempt. A job's database writes commit together with its
+completion, so a job never completes twice. Work that reaches outside the
+database must be idempotent: a crash can run a job again. A workspace is limited
+to `worker.max_running_per_workspace` running jobs when that is set, so one busy
+workspace cannot take every worker.
+
+The worker runs on pools of its own, so HTTP traffic and running jobs cannot
+starve a heartbeat: it opens up to `2 * worker.concurrency + 1` connections (one
+pool for claims and job transactions, one for heartbeats), in addition to
+`database.max_connections`. The `LISTEN` connection and the scheduler's leader
+lock each take one connection from `database.max_connections`, as does all HTTP
+and admin work, so keep it above a few.
+
+On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
+running jobs; any still running are left to lease expiry. `/metrics` carries
+`zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
+`zirv_flow_jobs_ready` and `zirv_flow_jobs_running`.
 
 ## Accounts, workspaces and authentication
 

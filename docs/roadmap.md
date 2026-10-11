@@ -273,7 +273,8 @@ systems, and feed delivery and engagement back as events.
 
 **Scope.**
 - **Destinations.** `Destination` trait on the M3 connector runtime, with capability flags (idempotency, batching, rate limits, erase).
-- **Email.** SMTP destination; email-provider HTTP API destinations (built in or manifest); sender identities; a guide to DKIM and domain setup at the relay or provider.
+- **Email.** SMTP destination; email-provider HTTP API destinations (built in or manifest); sender identities (from name, from and reply-to addresses) bound to verified sending domains.
+- **Sender authentication.** Sending domains with verification: Zirv Flow generates the DKIM key and the SPF, DKIM and DMARC records to publish, checks them in DNS and shows their status; SMTP mail from a verified domain is DKIM-signed (key stored under the M3 secrets encryption); provider destinations show the provider's domain status where its API exposes it. Sends from an unverified domain are blocked. A guide covers DNS setup at common hosts.
 - **Templates (code mode).** The pure `zirv-flow-templates` renderer with MiniJinja HTML and text parts: sandbox, versions, preview with a real or sample person through the send renderer, test sends, required unsubscribe link for the marketing category. M7 builds the block builder on it.
 - **Send pipeline.** Consent under the topic policy, suppression, frequency caps, quiet hours, render, rate limit, deliver; a `messages` log with skip reasons.
 - **Tracking.** Open pixel, click redirect with recorded-link allowlist, unsubscribe page, RFC 8058 one-click, topic preference center.
@@ -291,6 +292,7 @@ block builder (M7).
 
 **Exit criteria.**
 - [ ] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
+- [ ] A sending domain stays unverified until its SPF, DKIM and DMARC records resolve (fixture resolver); SMTP mail from a verified domain carries a DKIM signature that verifies against the published key, and a send from an unverified domain is refused.
 - [ ] A hard-bounce webhook adds a suppression; later sends are skipped with `suppressed`.
 - [ ] Concurrent sends from two flows to one person never exceed the frequency cap (concurrency test).
 - [ ] Quiet hours defer a send to the next allowed local time, including across a DST change (injected clock test).
@@ -313,7 +315,7 @@ that sends (architecture section 11, ADR-006).
 - **Content model.** Versioned JSON document with explicit `schema` numbers; email and webhook content types; SMS, push and in-app types reserved in the schema; document migrations as pure functions with golden tests.
 - **Renderer.** Block documents in `zirv-flow-templates`: theme tokens, snippet resolution, MiniJinja per text field, MJML via `mrml`, generated text part, post-render tracking and unsubscribe binding, deterministic output. Code mode stays; blocks-to-code conversion is one-way.
 - **Block editor UI.** Email block set v1 (sections with 1 to 3 columns, heading, sanitized rich text, image, button, divider, spacer, raw HTML, snippet), reordering, per-block settings, inline validation.
-- **Brand theme and snippets.** Theme editor (colours, fonts, logo, default footer); versioned snippets with where-used.
+- **Themes and snippets.** Several themes per workspace (colours, fonts, logo, link and button styles, default footer), one of them the default; each template picks a theme or follows the default. Theme editor with preview; versioned snippets with where-used.
 - **Assets.** Image upload into Postgres with sniffed type, raster allowlist (no SVG), size and quota limits (OQ-21); content-addressed public serving from `/a/`; asset library.
 - **Personalization.** Merge-tag picker fed by the field registry and event catalog; per-block visibility conditions on the segment AST, evaluated through the `ConditionEvaluator`.
 - **Assistant.** Draft email copy, subject-line variants, block layouts and translations through the typed template tool; template validation and bounded repair precede a rendered diff at desktop and mobile widths and explicit acceptance into a draft.
@@ -331,6 +333,7 @@ pages and forms; blocks beyond the v1 set.
 - [ ] A browser end-to-end test builds the reference newsletter layout without code and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
 - [ ] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected.
 - [ ] After a snippet update is published, later sends use it, and the message log records the template, snippet and theme versions each message used.
+- [ ] One template rendered under two themes differs only in theme tokens; changing the workspace default theme changes only templates that follow the default.
 - [ ] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
 - [ ] A raw HTML block containing a script runs no script in the app preview, and an SVG or type-mismatched upload is rejected (tests).
 - [ ] The fake provider drafts copy, subject variants, a layout and a translation; invalid merge fields are repaired or returned as errors, the render diff is reviewable, and acceptance changes only the template draft.
