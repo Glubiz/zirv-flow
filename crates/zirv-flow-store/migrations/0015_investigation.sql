@@ -39,3 +39,14 @@ CREATE INDEX debugger_feed_at_idx ON debugger_feed (at);
 
 -- Explorer queries carry the workspace and a time range, whatever else they filter.
 CREATE INDEX events_time_idx ON events (workspace_id, occurred_at DESC);
+
+-- A timestamp filter of the explorer reads a stored property that a flagged event may hold in
+-- the wrong shape: an unparsable value compares as absent instead of failing the query.
+CREATE FUNCTION zf_try_timestamptz(value text) RETURNS timestamptz
+LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN value::timestamptz;
+EXCEPTION WHEN others THEN
+    RETURN NULL;
+END
+$$;

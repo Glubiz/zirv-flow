@@ -9,8 +9,8 @@
 use std::fmt;
 
 use serde_json::Value;
-use sqlx::PgPool;
 use sqlx::prelude::FromRow;
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -179,6 +179,36 @@ struct DecisionRow {
     trace_id: Uuid,
 }
 
+/// The people that read as `person`: the survivor it was merged into (or itself) and everyone
+/// merged into that survivor. `None` when the workspace has no such person. Errors are
+/// bounded-read errors, so a timeout is reported as one.
+pub(crate) async fn person_group(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+) -> Result<Option<Vec<Uuid>>, StoreError> {
+    let current: Option<Uuid> = sqlx::query_scalar(
+        "SELECT COALESCE(merged_into, id) FROM people WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::bounded)?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    let people = sqlx::query_scalar(
+        "WITH RECURSIVE group_ AS (              SELECT id FROM people WHERE workspace_id = $1 AND id = $2              UNION              SELECT p.id FROM people p JOIN group_ g ON p.merged_into = g.id              WHERE p.workspace_id = $1)          SELECT id FROM group_",
+    )
+    .bind(workspace.as_uuid())
+    .bind(current)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::bounded)?;
+    Ok(Some(people))
+}
+
 /// The timeline of `person` and the people merged into it, or `None` when the workspace has
 /// no such person. A merged person reads as its survivor.
 pub async fn load_timeline(
@@ -191,30 +221,9 @@ pub async fn load_timeline(
 ) -> Result<Option<TimelinePage>, StoreError> {
     let limit = i64::from(limit.max(1));
     let mut tx = begin_bounded(pool).await?;
-    let current: Option<Uuid> = sqlx::query_scalar(
-        "SELECT COALESCE(merged_into, id) FROM people WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StoreError::bounded)?;
-    let Some(current) = current else {
+    let Some(people) = person_group(&mut tx, workspace, person).await? else {
         return Ok(None);
     };
-    let people: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE group_ AS ( \
-             SELECT id FROM people WHERE workspace_id = $1 AND id = $2 \
-             UNION \
-             SELECT p.id FROM people p JOIN group_ g ON p.merged_into = g.id \
-             WHERE p.workspace_id = $1) \
-         SELECT id FROM group_",
-    )
-    .bind(workspace.as_uuid())
-    .bind(current)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(StoreError::bounded)?;
     let texts: Vec<String> = people.iter().map(Uuid::to_string).collect();
     let (at, rank, id) = match before {
         Some(cursor) => (Some(cursor.at), cursor.kind.rank(), Some(cursor.id)),

@@ -3,6 +3,7 @@
 
 mod apply;
 mod debugger;
+mod explore;
 mod partitions;
 mod rejects;
 mod retention;
@@ -13,6 +14,11 @@ pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 pub use debugger::{
     DEBUGGER_CHANNEL, FEED_RETENTION_MINUTES, FeedFilter, FeedItem, WATCH_SECONDS,
     debugger_feed_head, prune_debugger_feed, read_debugger_feed, touch_debugger_watch,
+};
+pub use explore::{
+    BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, ExploreError, ExploreFilter, ExploreLimits,
+    ExploreRow, ExploreScope, FilterOp, MAX_FILTERS, MAX_RANGE_DAYS, RowCursor, RowsPage,
+    explore_breakdown, explore_count, explore_rows, explore_total,
 };
 pub use partitions::ensure_event_partitions;
 pub use rejects::{IngestReject, RejectCursor, RejectFilter, list_ingest_rejects};
