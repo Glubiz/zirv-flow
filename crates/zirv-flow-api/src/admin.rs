@@ -152,7 +152,25 @@ pub async fn create_owner(
     email: &str,
     password: &str,
 ) -> Result<User, AdminError> {
-    create_account(pool, context, email, password, true).await
+    create_account(pool, context, email, password, true, None).await
+}
+
+/// Creates the instance owner for the first-run setup endpoint; the audit entry says so.
+pub async fn create_first_owner(
+    pool: &PgPool,
+    context: &Context,
+    email: &str,
+    password: &str,
+) -> Result<User, AdminError> {
+    create_account(
+        pool,
+        context,
+        email,
+        password,
+        true,
+        Some("first-run setup"),
+    )
+    .await
 }
 
 /// Creates an ordinary user.
@@ -162,7 +180,7 @@ pub async fn create_user(
     email: &str,
     password: &str,
 ) -> Result<User, AdminError> {
-    create_account(pool, context, email, password, false).await
+    create_account(pool, context, email, password, false, None).await
 }
 
 async fn create_account(
@@ -171,6 +189,7 @@ async fn create_account(
     email: &str,
     plain: &str,
     is_owner: bool,
+    via: Option<&'static str>,
 ) -> Result<User, AdminError> {
     let email = Email::parse(email)?;
     password::validate(plain)?;
@@ -199,7 +218,10 @@ async fn create_account(
         None,
         "user.created",
         Some(("user", user.id.as_uuid())),
-        json!({ "owner": is_owner }),
+        match via {
+            Some(via) => json!({ "owner": is_owner, "via": via }),
+            None => json!({ "owner": is_owner }),
+        },
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -477,6 +499,29 @@ mod tests {
             owner.password_hash.as_deref().unwrap()
         ));
         assert!(matches!(second, AdminError::Conflict(_)), "{second}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_first_owner_is_audited_as_first_run_setup_and_only_once(pool: PgPool) {
+        migrated(&pool).await;
+
+        let owner = create_first_owner(&pool, &Context::anonymous(), "o@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let second =
+            create_first_owner(&pool, &Context::anonymous(), "p@example.com", PASSWORD).await;
+
+        assert!(owner.is_owner);
+        assert!(matches!(second, Err(AdminError::Conflict(_))));
+        let entry = &zirv_flow_store::list_audit(&pool, 10).await.unwrap()[0];
+        assert_eq!(entry.action, "user.created");
+        assert_eq!(entry.actor_kind, "anonymous");
+        assert_eq!(entry.object_id, Some(owner.id.as_uuid()));
+        assert_eq!(
+            entry.summary,
+            json!({ "owner": true, "via": "first-run setup" })
+        );
     }
 
     #[sqlx::test]

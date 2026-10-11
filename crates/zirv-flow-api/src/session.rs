@@ -118,8 +118,13 @@ pub(crate) async fn sign_in(
         return Err(invalid());
     }
     let new = start(&state, user.id, "password").await?;
+    Ok(started(&state, &user, new))
+}
 
-    Ok((
+/// The response that hands a freshly started session to the browser: the cookie, and the
+/// user with the CSRF token in the body. Sign-in and first-run setup answer alike.
+pub(crate) fn started(state: &AppState, user: &User, new: NewSession) -> Response {
+    (
         [
             (
                 header::SET_COOKIE,
@@ -131,11 +136,11 @@ pub(crate) async fn sign_in(
             ),
         ],
         Json(SessionBody {
-            user: UserBody::from(&user),
+            user: UserBody::from(user),
             csrf_token: new.csrf,
         }),
     )
-        .into_response())
+        .into_response()
 }
 
 /// A freshly started session: the cookie value and the CSRF token that goes with it.
@@ -285,6 +290,39 @@ mod tests {
         assert!(json.contains("a@example.com"));
         assert!(!json.contains("argon2"));
         assert!(!json.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn a_started_session_sets_the_cookie_and_shows_the_user_and_csrf_token() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let state = AppState::new(pool, std::sync::Arc::new(String::new));
+        let user = User {
+            id: UserId::new(),
+            email: "a@example.com".into(),
+            password_hash: None,
+            is_owner: true,
+            failed_sign_ins: 0,
+            locked_until: None,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        let new = NewSession {
+            token: "cookie-value".into(),
+            csrf: "csrf-value".into(),
+        };
+
+        let response = started(&state, &user, new);
+
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.starts_with("zf_session=cookie-value"), "{cookie}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["csrf_token"], "csrf-value");
+        assert_eq!(json["user"]["email"], "a@example.com");
     }
 
     #[test]

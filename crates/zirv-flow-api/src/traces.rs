@@ -54,6 +54,12 @@ pub(crate) struct DecisionBody {
     attempt: Option<i32>,
 }
 
+impl CauseBody {
+    pub(crate) fn new(kind: String, id: String) -> Self {
+        Self { kind, id }
+    }
+}
+
 impl From<Decision> for DecisionBody {
     fn from(decision: Decision) -> Self {
         Self {
