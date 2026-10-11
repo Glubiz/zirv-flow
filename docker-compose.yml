@@ -16,6 +16,15 @@ services:
       timeout: 5s
       retries: 10
 
+  # Creates the master key on first start and keeps it on later ones.
+  zirv-flow-key:
+    build: .
+    image: ghcr.io/glubiz/zirv-flow:latest
+    command: ["admin", "generate-master-key", "--out", "/var/lib/zirv-flow/secrets/master.key", "--if-missing"]
+    restart: "no"
+    volumes:
+      - zirv-flow-secrets:/var/lib/zirv-flow/secrets
+
   zirv-flow:
     build: .
     image: ghcr.io/glubiz/zirv-flow:latest
@@ -24,7 +33,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      zirv-flow-key:
+        condition: service_completed_successfully
+    volumes:
+      - zirv-flow-secrets:/var/lib/zirv-flow/secrets:ro
     environment:
+      ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
       ZIRV_FLOW_DATABASE__URL: postgres://${POSTGRES_USER:-zirv}:${POSTGRES_PASSWORD:-zirv-quickstart}@postgres:5432/${POSTGRES_DB:-zirv_flow}
       ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "true"
     ports:
@@ -32,3 +46,4 @@ services:
 
 volumes:
   postgres-data:
+  zirv-flow-secrets:

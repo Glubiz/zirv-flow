@@ -5,9 +5,11 @@ mod log;
 mod otlp;
 
 use std::ffi::OsString;
+use std::fs;
 use std::future::Future;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +21,7 @@ use tracing::{error, info, warn};
 use zirv_flow_store::{PgPool, SchemaState};
 
 use crate::cli::{AdminCommand, Cli, Command, ConfigCommand};
-use crate::config::Config;
+use crate::config::{Config, MasterKeySource};
 
 /// Seconds; makes the exporter render request durations as histograms rather than summaries.
 const HTTP_DURATION_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
@@ -51,6 +53,12 @@ async fn run(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> u8 {
+    let command = cli.command.unwrap_or(Command::All);
+    // Writing a key needs no configuration, so it works before any exists.
+    if let Command::Admin(AdminCommand::GenerateMasterKey { out, if_missing }) = &command {
+        return generate_master_key(out, *if_missing, stdout, stderr);
+    }
+
     let config = match Config::load(cli.config.as_deref(), env) {
         Ok(config) => config,
         Err(error) => {
@@ -59,7 +67,6 @@ async fn run(
         }
     };
 
-    let command = cli.command.unwrap_or(Command::All);
     if matches!(command, Command::Config(ConfigCommand::Check)) {
         match toml::to_string_pretty(&config) {
             Ok(output) => {
@@ -98,7 +105,22 @@ async fn run(
     }
 
     if let Some(roles) = Roles::of(&command) {
+        // The key is checked before the database is opened or anything is bound or claimed.
+        let master_key = if roles.serve || roles.worker {
+            match load_master_key(&config) {
+                Ok(key) => Some(key),
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: {message}");
+                    return 2;
+                }
+            }
+        } else {
+            None
+        };
         let export = log::install(&config);
+        if let Some(key) = &master_key {
+            info!(key_id = %key.key_id(), "master key loaded");
+        }
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
             Err(message) => {
@@ -118,6 +140,81 @@ async fn run(
         command.name()
     );
     1
+}
+
+/// Reads the operator master key from the configured file or inline value. The error is the
+/// message to report; it names the source but never the key.
+fn load_master_key(config: &Config) -> Result<zirv_flow_store::MasterKey, String> {
+    match config.master_key_source() {
+        MasterKeySource::Unset => Err("the master key is required for serve and worker: set \
+             secrets.master_key_file or ZIRV_FLOW_SECRETS__MASTER_KEY; create one with \
+             zirv-flow admin generate-master-key --out <path>"
+            .into()),
+        MasterKeySource::Inline(text) => zirv_flow_store::MasterKey::parse(text)
+            .map_err(|error| format!("secrets.master_key: {error}")),
+        MasterKeySource::File(path) => {
+            let text = fs::read_to_string(path)
+                .map_err(|_| format!("secrets.master_key_file {}: not readable", path.display()))?;
+            zirv_flow_store::MasterKey::parse(&text)
+                .map_err(|error| format!("secrets.master_key_file {}: {error}", path.display()))
+        }
+    }
+}
+
+/// Creates `out` holding a new master key, never overwriting a file. With `if_missing`, an
+/// existing file that holds a valid key is kept. Prints the key id, never the key.
+fn generate_master_key(
+    out: &Path,
+    if_missing: bool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let mut fail = |message: String| {
+        let _ = writeln!(stderr, "error: admin: {message}");
+        1
+    };
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty())
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return fail(format!("could not create {}: {error}", parent.display()));
+    }
+    let key = zirv_flow_store::MasterKey::generate();
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(out) {
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "{}", key.to_base64()) {
+                drop(file);
+                let _ = fs::remove_file(out);
+                return fail(format!("could not write {}: {error}", out.display()));
+            }
+            let _ = writeln!(stdout, "master key written: {}", key.key_id());
+            0
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !if_missing {
+                return fail(format!(
+                    "{} already exists; it is never overwritten",
+                    out.display()
+                ));
+            }
+            let existing = fs::read_to_string(out)
+                .map_err(|_| "not readable".to_owned())
+                .and_then(|text| {
+                    zirv_flow_store::MasterKey::parse(&text).map_err(|error| error.to_string())
+                });
+            match existing {
+                Ok(existing) => {
+                    let _ = writeln!(stdout, "master key exists: {}", existing.key_id());
+                    0
+                }
+                Err(reason) => fail(format!("{}: {reason}", out.display())),
+            }
+        }
+        Err(error) => fail(format!("could not create {}: {error}", out.display())),
+    }
 }
 
 /// Flushes the trace exporter, if there is one, before the process exits.
@@ -627,6 +724,9 @@ async fn run_admin(
                 .await
                 .map(|()| "password reset; the user's sessions were ended")
         }
+        AdminCommand::GenerateMasterKey { .. } => {
+            unreachable!("generate-master-key is handled before the database is opened")
+        }
     };
     match result {
         Ok(message) => {
@@ -903,6 +1003,237 @@ endpoint = \"http://collector:4318/\""
         );
     }
 
+    /// A fresh directory under the system temp directory, removed on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("zirv-flow-key-{}-{id}", std::process::id())))
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn generate(out: &Path, if_missing: bool) -> (u8, String, String) {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = generate_master_key(out, if_missing, &mut stdout, &mut stderr);
+        (
+            code,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_test_key_is_a_valid_master_key() {
+        assert!(zirv_flow_store::MasterKey::parse(TEST_MASTER_KEY).is_ok());
+    }
+
+    #[test]
+    fn generate_master_key_creates_the_file_and_prints_only_the_key_id() {
+        let dir = TempDir::new();
+        let out = dir.0.join("nested").join("master.key");
+
+        let (code, stdout, stderr) = generate(&out, false);
+
+        assert_eq!(code, 0, "{stderr}");
+        let contents = fs::read_to_string(&out).unwrap();
+        assert!(contents.ends_with('\n'));
+        let key = zirv_flow_store::MasterKey::parse(&contents).unwrap();
+        assert_eq!(stdout, format!("master key written: {}\n", key.key_id()));
+        assert!(!stdout.contains(contents.trim()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn generate_master_key_refuses_to_overwrite_without_if_missing() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        generate(&out, false);
+        let before = fs::read_to_string(&out).unwrap();
+
+        let (code, stdout, stderr) = generate(&out, false);
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("already exists"), "{stderr}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), before);
+    }
+
+    #[test]
+    fn if_missing_keeps_a_valid_key_and_rejects_an_invalid_file() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        let (_, written, _) = generate(&out, true);
+        let id = written.trim().strip_prefix("master key written: ").unwrap();
+        let before = fs::read_to_string(&out).unwrap();
+
+        let (code, stdout, _) = generate(&out, true);
+
+        assert_eq!(code, 0);
+        assert_eq!(stdout, format!("master key exists: {id}\n"));
+        assert_eq!(fs::read_to_string(&out).unwrap(), before);
+
+        fs::write(&out, "hunter2 is not a key\n").unwrap();
+        let (code, stdout, stderr) = generate(&out, true);
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("not a base64 32-byte key"), "{stderr}");
+        assert!(!stderr.contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn generate_master_key_runs_without_any_configuration() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Admin(AdminCommand::GenerateMasterKey {
+                out: out.clone(),
+                if_missing: false,
+            })),
+        };
+        let mut stdout = Vec::new();
+
+        let code = run(cli, [], &mut io::empty(), &mut stdout, &mut Vec::new()).await;
+
+        assert_eq!(code, 0);
+        assert!(out.exists());
+    }
+
+    async fn start_without_database(command: Command, key: Option<(&str, &str)>) -> (u8, String) {
+        let cli = Cli {
+            config: None,
+            command: Some(command),
+        };
+        let mut env = database_env("postgres://postgres@127.0.0.1:1/zirv_flow");
+        env.extend(key.map(|(name, value)| (name.into(), value.into())));
+        let (logs, _guard) = capture_logs();
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut io::sink(), &mut stderr).await;
+
+        (
+            code,
+            format!("{}{}", logs.text(), String::from_utf8(stderr).unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn serve_worker_and_all_refuse_to_start_without_a_master_key() {
+        for command in [Command::Serve, Command::Worker, Command::All] {
+            let (code, output) = start_without_database(command, None).await;
+
+            assert_eq!(code, 2, "{output}");
+            assert!(
+                output.contains(
+                    "the master key is required for serve and worker: set secrets.master_key_file or ZIRV_FLOW_SECRETS__MASTER_KEY; create one with zirv-flow admin generate-master-key --out <path>"
+                ),
+                "{output}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_needs_no_master_key() {
+        let (code, output) = start_without_database(Command::Scheduler, None).await;
+
+        // It got past the key check and failed on the unreachable database instead.
+        assert_eq!(code, 1, "{output}");
+        assert!(!output.contains("master key"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_master_key_is_refused_without_echoing_it() {
+        let (code, output) = start_without_database(
+            Command::Serve,
+            Some(("ZIRV_FLOW_SECRETS__MASTER_KEY", "hunter2-not-a-key")),
+        )
+        .await;
+
+        assert_eq!(code, 2, "{output}");
+        assert!(output.contains("secrets.master_key: not a base64 32-byte key"));
+        assert!(!output.contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_master_key_file_is_refused_with_its_path() {
+        let missing = TempDir::new().0.join("absent.key");
+        let (code, output) = start_without_database(
+            Command::Worker,
+            Some((
+                "ZIRV_FLOW_SECRETS__MASTER_KEY_FILE",
+                missing.to_str().unwrap(),
+            )),
+        )
+        .await;
+
+        assert_eq!(code, 2, "{output}");
+        assert!(
+            output.contains(&format!(
+                "secrets.master_key_file {}: not readable",
+                missing.display()
+            )),
+            "{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_master_key_is_logged_by_id_only_and_the_start_goes_on() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        generate(&out, false);
+        let text = fs::read_to_string(&out).unwrap();
+        let id = zirv_flow_store::MasterKey::parse(&text).unwrap().key_id();
+
+        let (code, output) = start_without_database(
+            Command::Serve,
+            Some(("ZIRV_FLOW_SECRETS__MASTER_KEY_FILE", out.to_str().unwrap())),
+        )
+        .await;
+
+        // Past the key check; the database is unreachable.
+        assert_eq!(code, 1, "{output}");
+        assert!(output.contains("master key loaded"), "{output}");
+        assert!(output.contains(&id), "{output}");
+        assert!(!output.contains(text.trim()), "{output}");
+    }
+
+    #[tokio::test]
+    async fn config_check_redacts_the_inline_master_key() {
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Config(ConfigCommand::Check)),
+        };
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__MASTER_KEY".into(),
+            TEST_MASTER_KEY.into(),
+        ));
+        let mut stdout = Vec::new();
+        let code = run(cli, env, &mut io::empty(), &mut stdout, &mut Vec::new()).await;
+        let output = String::from_utf8(stdout).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(!output.contains(TEST_MASTER_KEY), "{output}");
+        assert!(output.contains("master_key = \"<redacted>\""), "{output}");
+    }
+
     #[tokio::test]
     async fn admin_commands_fail_without_a_password_before_touching_the_database() {
         let cli = Cli {
@@ -1107,6 +1438,9 @@ endpoint = \"http://collector:4318/\""
         );
     }
 
+    /// 32 bytes of 0x07, as base64.
+    const TEST_MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
     fn lazy_pool() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
@@ -1182,6 +1516,10 @@ endpoint = \"http://collector:4318/\""
 
     async fn serve_against(pool: &PgPool, migrate_on_start: bool) -> (u8, String) {
         let mut env = database_env(&test_database_url(pool));
+        env.push((
+            "ZIRV_FLOW_SECRETS__MASTER_KEY".into(),
+            TEST_MASTER_KEY.into(),
+        ));
         env.push((
             "ZIRV_FLOW_DATABASE__MIGRATE_ON_START".into(),
             migrate_on_start.to_string().into(),

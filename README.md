@@ -28,7 +28,9 @@ a request into its jobs and a per-workspace decision log are implemented, but no
 ## Quickstart with Docker Compose
 
 `docker-compose.yml` runs `zirv-flow all` and PostgreSQL 16 with a named data
-volume and health checks. From a clean checkout:
+volume and health checks. A one-shot `zirv-flow-key` service creates the master
+key on first start in the `zirv-flow-secrets` volume and keeps it on later
+starts; `docker compose down -v` deletes it with the database. From a clean checkout:
 
 ```sh
 docker compose up -d --build --wait
@@ -84,6 +86,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `auth.oidc.client_secret` | string, secret | required with `auth.oidc` | not empty; redacted as `***` |
 | `auth.oidc.scopes` | list of strings | `["openid", "email", "profile"]` | `openid` is always requested |
 | `auth.oidc.auto_create_users` | bool | false | none |
+| `secrets.master_key_file` | path | none | file holding the base64 master key; set at most one of the two `secrets` keys; required by `serve`, `worker` and `all` |
+| `secrets.master_key` | string, secret | none | the base64 master key itself (`ZIRV_FLOW_SECRETS__MASTER_KEY`); 32 bytes; redacted as `<redacted>` |
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
@@ -94,8 +98,29 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
 
+### Master key
+
+`serve`, `worker` and `all` need the operator master key and refuse to start
+without it (`scheduler`, `migrate`, `config check` and the other `admin`
+commands do not). It is 32 random bytes as base64; per-purpose HMAC keys for
+identifier and redaction hashes are derived from it with HKDF-SHA256. Create it
+once and point `secrets.master_key_file` at it:
+
+```sh
+zirv-flow admin generate-master-key --out /etc/zirv-flow/master.key
+```
+
+The command writes the file readable only by its owner (mode 0600 on Unix),
+refuses to overwrite an existing file, prints the key id (the first 8 bytes of
+its SHA-256 as hex, also logged at start as `master key loaded`) and never
+prints the key. `--if-missing` keeps an existing valid key and succeeds.
+Keep the key and back it up separately from your database backups (a dump and
+the key together defeat the point of having a key). Losing or replacing it
+breaks suppression matching against hashes already stored; rotation will be
+an explicit migration, not a config change.
+
 Run `zirv-flow config check` to validate the effective configuration and print
-it as TOML with the database password and the OIDC client secret redacted.
+it as TOML with the database password, the OIDC client secret and the master key redacted.
 Supply the client secret as `ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET` rather than in
 a file.
 
