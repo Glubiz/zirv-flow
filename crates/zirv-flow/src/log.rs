@@ -15,18 +15,9 @@ use crate::otlp::{Otlp, ZirvTracer};
 /// no-op, which only tests make. Returns the trace exporter when `[log.otlp]` is set; the
 /// caller flushes it on the way out.
 pub(crate) fn install(config: &Config) -> Option<Otlp> {
-    let otlp = match Otlp::build(config.log_otlp_endpoint()) {
-        Ok(otlp) => otlp,
-        Err(error) => {
-            let dispatch = dispatch(
-                config.log_filter(),
-                config.log_format(),
-                io::stderr as fn() -> io::Stderr,
-            );
-            let _ = tracing::dispatcher::set_global_default(dispatch);
-            warn!("trace export is off: {error}");
-            return None;
-        }
+    let (otlp, unavailable) = match Otlp::build(config.log_otlp_endpoint()) {
+        Ok(otlp) => (otlp, None),
+        Err(error) => (None, Some(error)),
     };
     let dispatch = dispatch_with(
         config.log_filter(),
@@ -35,11 +26,15 @@ pub(crate) fn install(config: &Config) -> Option<Otlp> {
         otlp.as_ref().map(Otlp::layer),
     );
     let _ = tracing::dispatcher::set_global_default(dispatch);
+    if let Some(error) = unavailable {
+        warn!("trace export is off: {error}");
+    }
     otlp
 }
 
 /// A subscriber for `filter` and `format` that writes to `writer`. The filter was checked
 /// when the configuration loaded; an unusable one falls back to `info`.
+#[cfg(test)]
 pub(crate) fn dispatch<W>(filter: &str, format: LogFormat, writer: W) -> Dispatch
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
