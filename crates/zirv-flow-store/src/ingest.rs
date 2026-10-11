@@ -690,6 +690,35 @@ mod tests {
     }
 
     #[test]
+    fn a_contact_row_maps_to_a_native_record_keyed_by_its_contact_key() {
+        let item = IngestItem {
+            identifiers: pairs(&[("external:contact_key", "c-1"), ("email", "a@example.com")]),
+            timestamp: None,
+            message_id: None,
+            payload: IngestPayload::Contact {
+                traits: object(json!({"plan": "pro"})),
+            },
+        };
+        let stored = stored_json(&item);
+
+        let Some(Mapped::Contact(record)) = map_row(&row("contact", stored)) else {
+            panic!("not a contact");
+        };
+
+        assert_eq!(
+            (record.source.as_str(), record.stream.as_str()),
+            ("native", "contacts")
+        );
+        assert_eq!(record.record_key, "c-1");
+        assert_eq!(record.identifiers.len(), 2);
+        assert_eq!(record.traits["plan"], "pro");
+        assert_eq!(item.payload.kind(), "contact");
+        // Without its key the row cannot be placed: it is poison.
+        let keyless = json!({"identifiers": [["email", "a@example.com"]], "traits": {}});
+        assert!(map_row(&row("contact", keyless)).is_none());
+    }
+
+    #[test]
     fn a_track_row_maps_to_an_event_record_with_its_message_id() {
         let item = json!({
             "identifiers": [["anonymous_id", "a1"]],

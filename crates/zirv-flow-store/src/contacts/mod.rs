@@ -8,7 +8,7 @@ mod write;
 
 pub use definition::{
     ContactDefinition, DefinitionError, DefinitionProblem, find_contact_definition,
-    put_contact_definition,
+    put_contact_definition, typed_definition,
 };
 pub use records::{
     Contact, ContactPage, ContactSearch, ContactSearchError, find_contact, list_contacts,
@@ -804,12 +804,7 @@ mod tests {
         );
         assert_eq!(numeric[0].reason, "identifier_needs_string");
         assert!(matches!(malformed, DefinitionError::Invalid(_)));
-        assert!(
-            find_contact_definition(&mut connection, ws)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(find_contact_definition(&pool, ws).await.unwrap().is_none());
     }
 
     #[sqlx::test]

@@ -636,6 +636,34 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leaders_upkeep_forgets_contact_idempotency_keys_older_than_a_day(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        for (key, hours) in [("old", 25_i32), ("new", 1)] {
+            sqlx::query(
+                "INSERT INTO contact_idempotency \
+                    (workspace_id, key, request_hash, status, contact_key, created_at) \
+                 VALUES ($1, $2, '\\x00'::bytea, 201, 'c-1', now() - make_interval(hours => $3))",
+            )
+            .bind(ws.as_uuid())
+            .bind(key)
+            .bind(hours)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        scheduler(&pool).tick().await.unwrap();
+
+        let left: Vec<String> = sqlx::query_scalar("SELECT key FROM contact_idempotency")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, ["new"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_creates_the_decision_log_partitions_for_this_month(pool: PgPool) {
         migrated(&pool).await;
         let now = database_now(&pool).await.unwrap();

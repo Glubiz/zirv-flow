@@ -69,6 +69,24 @@ impl IngestState {
         ));
         Self { limits, limiter }
     }
+
+    pub(crate) fn limits(&self) -> &IngestLimits {
+        &self.limits
+    }
+
+    /// Charges `items` against the bucket of `id` (an API key id, or a user id for a session):
+    /// a 429 with `Retry-After` when they do not fit.
+    pub(crate) fn charge(&self, id: uuid::Uuid, items: usize) -> Result<(), ApiError> {
+        self.limiter
+            .take(id, items, Instant::now())
+            .map_err(|seconds| {
+                ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "the API key is over its rate limit",
+                )
+                .with_retry_after(seconds)
+            })
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -352,17 +370,7 @@ async fn accept(
         Endpoint::Batch => batch_items(&body, limits.max_batch_items).map_err(invalid)?,
         Endpoint::Identify | Endpoint::Track => std::slice::from_ref(&body),
     };
-    state
-        .ingest
-        .limiter
-        .take(key.key.id.as_uuid(), values.len(), Instant::now())
-        .map_err(|seconds| {
-            ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "the API key is over its rate limit",
-            )
-            .with_retry_after(seconds)
-        })?;
+    state.ingest.charge(key.key.id.as_uuid(), values.len())?;
     let items = parse_items(values, endpoint.kind()).map_err(invalid)?;
 
     let accepted = Accepted {

@@ -2,7 +2,7 @@
 //! contacts have, which are required and which are identifiers.
 
 use serde_json::Value;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::contacts::{ContactField, TypedField, validate_definition};
@@ -52,15 +52,15 @@ fn corrupt(what: &'static str) -> StoreError {
 }
 
 /// The workspace's definition, or none while it has not saved one.
-pub async fn find_contact_definition(
-    connection: &mut PgConnection,
+pub async fn find_contact_definition<'e>(
+    executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
 ) -> Result<Option<ContactDefinition>, StoreError> {
     let row: Option<(Value, OffsetDateTime, Option<Uuid>)> = sqlx::query_as(
         "SELECT fields, updated_at, updated_by FROM contact_definitions WHERE workspace_id = $1",
     )
     .bind(workspace.as_uuid())
-    .fetch_optional(connection)
+    .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
     row.map(|(fields, updated_at, updated_by)| {
@@ -131,7 +131,7 @@ pub async fn put_contact_definition(
 /// The definition with the registry type of each field, for validating a write. A field whose
 /// registry key was archived is left out, so a write cannot set it; none while the workspace
 /// has no definition.
-pub(crate) async fn typed_definition(
+pub async fn typed_definition(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<Option<Vec<TypedField>>, StoreError> {

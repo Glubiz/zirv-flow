@@ -43,15 +43,22 @@ pub struct TypedField {
     pub trait_type: TraitType,
 }
 
-/// A contact key: 1 to 256 characters without control characters.
+/// The path segments of the contacts API that are not contact keys.
+const RESERVED_KEYS: [&str; 2] = ["search", "bulk"];
+
+/// A contact key: 1 to 256 characters without control characters, and not `search` or `bulk`,
+/// which name endpoints.
 pub fn validate_contact_key(key: &str) -> Result<(), ValidationError> {
     let length = key.chars().count();
-    if (1..=MAX_KEY_CHARS).contains(&length) && !key.chars().any(char::is_control) {
+    if (1..=MAX_KEY_CHARS).contains(&length)
+        && !key.chars().any(char::is_control)
+        && !RESERVED_KEYS.contains(&key)
+    {
         Ok(())
     } else {
         Err(ValidationError::new(
             "key",
-            "must be 1 to 256 characters without control characters",
+            "must be 1 to 256 characters without control characters, and not search or bulk",
         ))
     }
 }
