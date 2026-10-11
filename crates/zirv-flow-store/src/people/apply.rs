@@ -845,7 +845,9 @@ mod tests {
                 .unwrap();
         assert_eq!(dirty, 1);
         let (decisions, _) = list_trace(&pool, ws, rec.trace.trace_id, 10).await.unwrap();
-        let actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
+        // Records of one transaction share a time, so their order is not defined.
+        let mut actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
+        actions.sort_unstable();
         assert_eq!(actions, ["person.created", "trait.change"]);
         let text =
             serde_json::to_string(&decisions.iter().map(|d| &d.subject_ids).collect::<Vec<_>>())
