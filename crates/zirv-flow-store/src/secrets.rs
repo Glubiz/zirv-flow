@@ -12,6 +12,54 @@ use crate::StoreError;
 /// The name of the deployment key every HMAC key derives from.
 pub const HMAC_ROOT: &str = "hmac_root";
 
+/// Why no HMAC root exists to rotate under or to write secrets against. Startup and rotation
+/// both refuse with this text.
+pub const NO_HMAC_ROOT: &str = "no HMAC root exists yet; start once with only the master key that produced the existing hashes before rotating";
+
+/// Whether a secret write may proceed, per the HMAC root's wrapping key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WriterCheck {
+    /// The root's key is one the writer holds.
+    Allowed,
+    /// There is no root row.
+    NoRoot,
+    /// The root is wrapped by a key the writer does not hold: the writer is stale.
+    Outdated { root_key_id: String },
+}
+
+/// Locks the HMAC root row `FOR SHARE` for the rest of the transaction and checks that its
+/// wrapping key is one of `allowed_key_ids`. A rotation holds the row `FOR UPDATE`, so a write
+/// waits for it and then sees the new key id, and a rotation waits for writes in flight and
+/// then re-wraps what they stored. Call it in the transaction that inserts or replaces.
+pub async fn check_writer(
+    connection: &mut PgConnection,
+    allowed_key_ids: &[String],
+) -> Result<WriterCheck, StoreError> {
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT key_id FROM deployment_keys WHERE name = $1 FOR SHARE")
+            .bind(HMAC_ROOT)
+            .fetch_optional(connection)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(match root {
+        None => WriterCheck::NoRoot,
+        Some(id) if allowed_key_ids.contains(&id) => WriterCheck::Allowed,
+        Some(root_key_id) => WriterCheck::Outdated { root_key_id },
+    })
+}
+
+/// Locks the HMAC root row `FOR UPDATE` and returns its wrapping key id; `None` when absent.
+/// Rotation takes this before it scans any row.
+pub async fn lock_root_for_rotation(
+    connection: &mut PgConnection,
+) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar("SELECT key_id FROM deployment_keys WHERE name = $1 FOR UPDATE")
+        .bind(HMAC_ROOT)
+        .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)
+}
+
 /// A workspace secret as stored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSecret {
@@ -561,6 +609,42 @@ mod tests {
         assert_eq!(hmac_root(&pool).await.unwrap().unwrap().key_id, new_id);
     }
 
+    /// Every (table, encoding) whose rows, read as text, hold the marker in UTF-8 or in hex.
+    async fn scan_for_marker(pool: &PgPool, marker: &str, hex: &str) -> Vec<(String, String)> {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut hits = Vec::new();
+        let mut dumped = 0;
+        for encoding in ["hex", "escape"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SET bytea_output = '{encoding}'"
+            )))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            for table in &tables {
+                let text: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT string_agg(t::text, E'\\n') FROM \"{table}\" t"
+                )))
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+                let text = text.unwrap_or_default();
+                dumped += text.len();
+                if text.contains(marker) || text.contains(hex) {
+                    hits.push((table.clone(), encoding.to_owned()));
+                }
+            }
+        }
+        assert!(dumped > 0);
+        hits
+    }
+
     /// The test of the dump: with a stored credential, no row of any table, read as text in any
     /// bytea encoding, holds the plaintext in UTF-8 or in hex.
     #[sqlx::test]
@@ -583,6 +667,30 @@ mod tests {
         insert_hmac_root_if_absent(&pool, &root).await.unwrap();
         let hex: String = marker.bytes().map(|byte| format!("{byte:02x}")).collect();
 
+        // Positive control: a throwaway table that holds the marker in plain text must be
+        // flagged by the very same scan, so a clean result means something.
+        sqlx::query("CREATE TABLE scan_control (note text)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scan_control (note) VALUES ($1)")
+            .bind(&marker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hits = scan_for_marker(&pool, &marker, &hex).await;
+        assert_eq!(
+            hits.iter()
+                .map(|(table, _)| table.as_str())
+                .collect::<Vec<_>>(),
+            ["scan_control", "scan_control"],
+            "the scan must detect a plaintext marker (once per encoding)"
+        );
+        sqlx::query("DROP TABLE scan_control")
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()",
         )
@@ -590,34 +698,7 @@ mod tests {
         .await
         .unwrap();
         assert!(tables.iter().any(|table| table == "encrypted_secrets"));
-        let mut connection = pool.acquire().await.unwrap();
-        let mut dumped = 0;
-        for encoding in ["hex", "escape"] {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SET bytea_output = '{encoding}'"
-            )))
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-            for table in &tables {
-                let text: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT string_agg(t::text, E'\\n') FROM \"{table}\" t"
-                )))
-                .fetch_one(&mut *connection)
-                .await
-                .unwrap();
-                let text = text.unwrap_or_default();
-                dumped += text.len();
-                assert!(
-                    !text.contains(&marker),
-                    "{table} holds the plaintext ({encoding})"
-                );
-                assert!(
-                    !text.contains(&hex),
-                    "{table} holds the plaintext in hex ({encoding})"
-                );
-            }
-        }
-        assert!(dumped > 0);
+        let hits = scan_for_marker(&pool, &marker, &hex).await;
+        assert!(hits.is_empty(), "plaintext found in {hits:?}");
     }
 }

@@ -72,11 +72,7 @@ pub(crate) async fn load_hmac_root(pool: &PgPool, keyring: &Keyring) -> Result<H
         .map_err(|error| error.to_string())?;
     if stored.is_none() {
         if keyring.has_previous() {
-            return Err(
-                "no HMAC root exists yet; start once with only the master key that \
-                 produced the existing hashes before rotating"
-                    .to_owned(),
-            );
+            return Err(secrets::NO_HMAC_ROOT.to_owned());
         }
         let root = HmacRoot::bootstrap_from(keyring.current());
         let sealed = seal_secret(keyring, root.to_secret_bytes().expose(), &aad);

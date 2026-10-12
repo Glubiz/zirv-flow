@@ -506,6 +506,11 @@ pub async fn rotate_master_key(
 ) -> Result<RotationReport, AdminError> {
     let key_id = keyring.current().key_id();
     let mut tx = zirv_flow_store::begin(pool).await?;
+    // The root first: it refuses a deployment with no root before anything changes, and it
+    // makes secret writes in flight finish (or wait) so the scan below sees every row.
+    if secrets::lock_root_for_rotation(&mut tx).await?.is_none() {
+        return Err(AdminError::Conflict(secrets::NO_HMAC_ROOT));
+    }
     let rows = secrets::rows_not_wrapped_by(&mut tx, &key_id).await?;
     let mut from_key_ids = std::collections::BTreeSet::new();
     for row in &rows {
@@ -535,6 +540,23 @@ pub async fn rotate_master_key(
     Ok(report)
 }
 
+/// Refuses a secret write by a process whose keyring does not hold the key that wraps the
+/// HMAC root: after a rotation such a process would store a row no later keyring opens. A
+/// missing root also refuses, because serve and worker create it at start and the write
+/// cannot be ordered against a rotation without it. Holds the root `FOR SHARE` until the
+/// transaction ends.
+async fn check_writer(tx: &mut PgConnection, keyring: &Keyring) -> Result<(), AdminError> {
+    match secrets::check_writer(tx, &keyring.key_ids()).await? {
+        secrets::WriterCheck::Allowed => Ok(()),
+        secrets::WriterCheck::NoRoot => Err(AdminError::Conflict(
+            "no HMAC root exists yet; start the server or worker once before storing secrets",
+        )),
+        secrets::WriterCheck::Outdated { .. } => Err(AdminError::Conflict(
+            "this process's master key is outdated; restart it with the current master key",
+        )),
+    }
+}
+
 /// Seals `plaintext` and stores it as a secret of the workspace. Audited as `secret.created`
 /// with the purpose and the wrapping key id, never the value.
 pub async fn create_secret(
@@ -552,6 +574,7 @@ pub async fn create_secret(
         &secret_aad(workspace, id, purpose),
     );
     let mut tx = zirv_flow_store::begin(pool).await?;
+    check_writer(&mut tx, keyring).await?;
     secrets::insert(&mut *tx, workspace, purpose, id, &sealed).await?;
     audit(
         &mut tx,
@@ -576,6 +599,7 @@ pub async fn replace_secret(
     plaintext: &SecretBytes,
 ) -> Result<(), AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
+    check_writer(&mut tx, keyring).await?;
     let stored = secrets::get(&mut *tx, workspace, id)
         .await?
         .ok_or(AdminError::NotFound("secret"))?;
@@ -674,6 +698,35 @@ mod tests {
 
     async fn migrated(pool: &PgPool) {
         zirv_flow_store::migrate(pool).await.unwrap();
+    }
+
+    /// Stores the HMAC root the way startup does, wrapped by the keyring's current key.
+    async fn seed_root(pool: &PgPool, keys: &Keyring) {
+        let bytes = HmacRoot::bootstrap_from(keys.current()).to_secret_bytes();
+        let root = seal(
+            keys,
+            bytes.expose(),
+            &deployment_key_aad(secrets::HMAC_ROOT),
+        );
+        secrets::insert_hmac_root_if_absent(pool, &root)
+            .await
+            .unwrap();
+    }
+
+    async fn write_with(
+        pool: &PgPool,
+        keys: &Keyring,
+        ws: WorkspaceId,
+    ) -> Result<SecretId, AdminError> {
+        create_secret(
+            pool,
+            &Context::system(),
+            keys,
+            ws,
+            SecretPurpose::OAuthToken,
+            &SecretBytes::new(b"token".to_vec()),
+        )
+        .await
     }
 
     #[sqlx::test]
@@ -890,6 +943,7 @@ mod tests {
             .await
             .unwrap();
         let keys = keyring(&MasterKey::generate(), None);
+        seed_root(&pool, &keys).await;
 
         let id = create_secret(
             &pool,
@@ -954,6 +1008,7 @@ mod tests {
         let old = MasterKey::generate();
         let new = MasterKey::generate();
         let before = keyring(&old, None);
+        seed_root(&pool, &before).await;
         let id = create_secret(
             &pool,
             &context,
@@ -965,14 +1020,6 @@ mod tests {
         .await
         .unwrap();
         let root_bytes = HmacRoot::bootstrap_from(&old).to_secret_bytes();
-        let root = seal(
-            &before,
-            root_bytes.expose(),
-            &deployment_key_aad(secrets::HMAC_ROOT),
-        );
-        secrets::insert_hmac_root_if_absent(&pool, &root)
-            .await
-            .unwrap();
         let ciphertext = secrets::get(&pool, ws.id, id)
             .await
             .unwrap()
@@ -1024,6 +1071,7 @@ mod tests {
             MasterKey::generate(),
             MasterKey::generate(),
         );
+        seed_root(&pool, &keyring(&a, None)).await;
         let known = create_secret(
             &pool,
             &context,
@@ -1034,16 +1082,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let stray = create_secret(
-            &pool,
-            &context,
+        // A row wrapped by B, stored directly: a writer on B is refused by the writer check.
+        let stray = SecretId::new();
+        let sealed = seal(
             &keyring(&b, None),
-            ws.id,
-            SecretPurpose::AiProviderKey,
-            &SecretBytes::new(b"two".to_vec()),
-        )
-        .await
-        .unwrap();
+            b"two",
+            &secret_aad(ws.id, stray, SecretPurpose::AiProviderKey),
+        );
+        secrets::insert(&pool, ws.id, SecretPurpose::AiProviderKey, stray, &sealed)
+            .await
+            .unwrap();
 
         let error = rotate_master_key(&pool, &context, &keyring(&c, Some(&a)))
             .await
@@ -1056,5 +1104,158 @@ mod tests {
         }
         let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
         assert!(!actions(&entries).contains(&"secrets.master_key_rotated"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotation_without_an_hmac_root_fails_and_changes_and_audits_nothing(pool: PgPool) {
+        migrated(&pool).await;
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        // A row under A exists, but no root does (as in an upgraded deployment).
+        let id = SecretId::new();
+        let sealed = seal(
+            &keyring(&a, None),
+            b"x",
+            &secret_aad(ws.id, id, SecretPurpose::OAuthToken),
+        );
+        secrets::insert(&pool, ws.id, SecretPurpose::OAuthToken, id, &sealed)
+            .await
+            .unwrap();
+
+        let error = rotate_master_key(&pool, &Context::system(), &keyring(&b, Some(&a)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), secrets::NO_HMAC_ROOT);
+        let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+        assert_eq!(stored.sealed.key_id, a.key_id());
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(!actions(&entries).contains(&"secrets.master_key_rotated"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_with_an_outdated_key_is_refused_after_rotation_and_stores_nothing(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        seed_root(&pool, &keyring(&a, None)).await;
+        rotate_master_key(&pool, &Context::system(), &keyring(&b, Some(&a)))
+            .await
+            .unwrap();
+
+        let error = write_with(&pool, &keyring(&a, None), ws.id)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("outdated"), "{error}");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(!actions(&entries).contains(&"secret.created"));
+        // A restarted process on the new key writes.
+        write_with(&pool, &keyring(&b, None), ws.id).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn writes_in_the_rotation_window_succeed_and_are_wrapped_by_the_writers_key(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        seed_root(&pool, &keyring(&a, None)).await;
+
+        // Root on A: a B-current/A-previous writer and a stale A-only writer both write.
+        let by_b = write_with(&pool, &keyring(&b, Some(&a)), ws.id)
+            .await
+            .unwrap();
+        let by_a = write_with(&pool, &keyring(&a, None), ws.id).await.unwrap();
+
+        let stored = secrets::get(&pool, ws.id, by_b).await.unwrap().unwrap();
+        assert_eq!(stored.sealed.key_id, b.key_id());
+        let report = rotate_master_key(&pool, &Context::system(), &keyring(&b, Some(&a)))
+            .await
+            .unwrap();
+        assert_eq!(report.rows, 2, "the root and the stale writer's row");
+        let stored = secrets::get(&pool, ws.id, by_a).await.unwrap().unwrap();
+        assert_eq!(stored.sealed.key_id, b.key_id());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_without_an_hmac_root_is_refused(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+
+        let error = write_with(&pool, &keyring(&MasterKey::generate(), None), ws.id)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no HMAC root"), "{error}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_insert_waits_for_a_rotation_and_is_refused_after_it(pool: PgPool) {
+        use std::time::Duration;
+
+        migrated(&pool).await;
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        let only_a = keyring(&a, None);
+        seed_root(&pool, &only_a).await;
+        // An in-progress rotation: the root is locked FOR UPDATE.
+        let mut rotation = zirv_flow_store::begin(&pool).await.unwrap();
+        secrets::lock_root_for_rotation(&mut rotation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let writer = {
+            let pool = pool.clone();
+            let ws = ws.id;
+            tokio::spawn(async move { write_with(&pool, &only_a, ws).await })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!writer.is_finished(), "the insert waits for the rotation");
+
+        // The rotation re-wraps the root to B and commits.
+        let root = secrets::hmac_root(&mut *rotation).await.unwrap().unwrap();
+        let wrapped = rewrap(&keyring(&b, Some(&a)), &root).unwrap();
+        let row = secrets::WrappedRow::Deployment(secrets::HMAC_ROOT.to_owned());
+        secrets::set_wrapped_key(&mut rotation, &row, &wrapped.key_id, &wrapped.wrapped_key)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(rotation).await.unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("outdated"), "{error}");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

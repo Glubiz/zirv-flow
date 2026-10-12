@@ -156,7 +156,9 @@ To rotate the master key:
 1. Create a new key with `zirv-flow admin generate-master-key`.
 2. Set it as `secrets.master_key_file`, and set the old key as
    `secrets.previous_master_key_file`.
-3. Restart every `serve` and `worker` process.
+3. Restart every `serve` and `worker` process. A process left on the old key cannot
+   write secrets once the rotation has run: it is refused with an error until it
+   restarts with the current key.
 4. Run `zirv-flow admin rotate-master-key`. It re-wraps every data key, and the
    HMAC root, in one transaction, leaves the ciphertexts alone, writes an audit
    entry with the key ids and the count, and prints the count. A second run
@@ -165,7 +167,8 @@ To rotate the master key:
 5. Remove the previous key from the configuration and restart.
 
 A start with a previous key configured and no stored HMAC root is refused, as is
-a previous key equal to the current one. The rotation holds every row in one
+a previous key equal to the current one. `rotate-master-key` is refused, changing
+nothing, when no HMAC root exists. The rotation holds every row in one
 transaction, which suits secrets in the thousands.
 
 Run `zirv-flow config check` to validate the effective configuration and print

@@ -228,6 +228,15 @@ impl Keyring {
         self.previous.is_some()
     }
 
+    /// The ids of the configured keys: the current one, then the previous one if any.
+    pub fn key_ids(&self) -> Vec<String> {
+        [Some(&self.current), self.previous.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(MasterKey::key_id)
+            .collect()
+    }
+
     /// The configured key with this id.
     pub fn key(&self, key_id: &str) -> Option<&MasterKey> {
         [Some(&self.current), self.previous.as_ref()]

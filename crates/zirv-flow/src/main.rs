@@ -2326,4 +2326,29 @@ endpoint = \"http://collector:4318/\""
         let stored = secrets::get(&pool, workspace, id).await.unwrap().unwrap();
         assert_eq!(stored.sealed.key_id, a.key_id());
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_with_no_hmac_root_exits_one_and_changes_nothing(pool: PgPool) {
+        use zirv_flow_store::{MasterKey, secrets};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let mut stderr = Vec::new();
+
+        let code = run_rotate_master_key(
+            &keyring_of(&b, Some(&a)),
+            &pool,
+            &mut Vec::new(),
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(code, 1);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains(secrets::NO_HMAC_ROOT), "{stderr}");
+        assert!(secrets::hmac_root(&pool).await.unwrap().is_none());
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(entries.is_empty(), "{entries:?}");
+    }
 }
