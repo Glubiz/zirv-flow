@@ -397,15 +397,19 @@ one row per item to `ingest_inbox` with the request's trace id in a single trans
 also enqueues `ingest.drain` for the workspace (`unique_key = ingest.drain:<workspace>`). The
 inbox row's `message_id` is the client's or a server-assigned UUID v7. Each row also
 stores `affinity`, the first byte of the SHA-256 of its record key (the strongest identifier)
-modulo 64, fixed forever; rows appended before the column existed hold NULL. A drain job first
-loops `drain_batch` over the NULL rows (they have lower ids than every bucketed row), then runs
-`ingest.drain_shards` such loops concurrently, each over the buckets with `affinity % shards =
-index`, as joined futures so a lost lease drops them all. A key lives in one bucket, so its
+modulo 64, fixed forever; rows appended before the column existed, or by a pre-0.29 serve
+during a rolling upgrade, hold NULL. A drain job first buckets the workspace's NULL rows (a
+blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
+deadlock; the bucket comes from the same function as the append's), then runs
+`ingest.drain_shards` loops concurrently, each owning the buckets with `affinity % shards =
+index`, as joined futures so a lost lease drops them all. A batch takes the oldest rows of
+each owned bucket through `(workspace_id, affinity, id)`, so a scan never walks another
+shard's backlog and a hot bucket cannot starve its siblings. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
 deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
 shards) + 1` connections. Each loop is `drain_batch`: in one transaction it selects the
-shard's oldest rows with `FOR UPDATE SKIP LOCKED`, applies them in id order through the transaction-taking profile and event paths of
-apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
+those rows with `FOR UPDATE SKIP LOCKED`, applies them in id order through the
+transaction-taking profile and event paths of apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
 still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it

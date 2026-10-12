@@ -2,10 +2,11 @@
 //! batch is one transaction of its own that applies the oldest rows in id order and deletes
 //! them, so the job's transaction only holds the lease.
 //!
-//! The rows appended before bucketing existed drain first, in one loop. Then `shards` loops
-//! drain the buckets concurrently, one shard each; the rows of one record key share a bucket,
-//! so each key still applies in id order. The loops are futures joined in the handler, so
-//! losing the lease drops them all and rolls their transactions back.
+//! A run first buckets the workspace's rows that have no bucket yet (appended before the
+//! column existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Then
+//! `shards` loops drain the buckets concurrently, one shard each; the rows of one record key
+//! share a bucket, so each key still applies in id order. The loops are futures joined in the
+//! handler, so losing the lease drops them all and rolls their transactions back.
 //!
 //! A batch that fails with a retryable error is retried with jittered backoff. A batch that
 //! fails otherwise holds a poison row: its rows are applied one at a time, and the row that
@@ -23,8 +24,8 @@ use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
-    DRAIN_JOB_KIND, DrainOutcome, HmacKey, PgPool, Shard, StoreError, drain_batch,
-    drain_batch_singly,
+    DRAIN_JOB_KIND, DrainOutcome, HmacKey, PgPool, Shard, StoreError, backfill_affinity,
+    drain_batch, drain_batch_singly,
 };
 
 use crate::metrics::record_drained;
@@ -63,18 +64,16 @@ impl JobKind for IngestDrain {
 
         let started = Instant::now();
         let pool = &settings.pool;
-        // Legacy rows have lower ids than every bucketed row: they apply first, or per-key
-        // order would break across an upgrade.
-        if !drain_shard(pool, workspace, key, Shard::Legacy, limit, started).await? {
+        if !backfill(pool, workspace, limit, started, TIME_BUDGET).await? {
             return Ok(());
         }
         let shards = settings.shards.max(1);
         let loops = (0..shards).map(|index| {
-            let shard = Shard::Of {
+            let shard = Shard {
                 index,
                 count: shards,
             };
-            drain_shard(pool, workspace, key, shard, limit, started)
+            drain_shard(pool, workspace, key, shard, limit, started, TIME_BUDGET)
         });
         // Every loop runs to its end; the batches the others committed stand.
         join_all(loops)
@@ -84,8 +83,36 @@ impl JobKind for IngestDrain {
     }
 }
 
-/// Drains one shard until a short batch or the time budget. Returns whether the shard was
-/// left empty.
+/// Buckets the workspace's unbucketed rows until none are left. Returns whether it finished
+/// before `budget` ran out; the shards must not start while older rows have no bucket.
+async fn backfill(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    limit: i64,
+    started: Instant,
+    budget: Duration,
+) -> Result<bool, JobError> {
+    loop {
+        let done = retrying(|| backfill_affinity(pool, workspace, limit))
+            .await
+            .map_err(|error| {
+                if error.is_retryable() {
+                    CONFLICTED
+                } else {
+                    JobError::new("the inbox rows could not be bucketed")
+                }
+            })?;
+        if i64::try_from(done).is_ok_and(|done| done < limit) {
+            return Ok(true);
+        }
+        if started.elapsed() >= budget {
+            return Ok(false);
+        }
+    }
+}
+
+/// Drains one shard until its buckets are empty or `budget` runs out. Returns whether the
+/// shard was left empty.
 async fn drain_shard(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -93,14 +120,15 @@ async fn drain_shard(
     shard: Shard,
     limit: i64,
     started: Instant,
+    budget: Duration,
 ) -> Result<bool, JobError> {
     loop {
         let outcome = drain_once(pool, workspace, key, shard, limit).await?;
         record_drained(&outcome);
-        if i64::try_from(outcome.rows).is_ok_and(|rows| rows < limit) {
+        if !outcome.more {
             return Ok(true);
         }
-        if started.elapsed() >= TIME_BUDGET {
+        if started.elapsed() >= budget {
             return Ok(false);
         }
     }
@@ -465,7 +493,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn legacy_rows_apply_before_bucketed_rows_of_the_same_key(pool: PgPool) {
+    async fn unbucketed_rows_apply_before_newer_bucketed_rows_of_the_same_key(pool: PgPool) {
         let ws = workspace(&pool).await;
         append_items(&pool, ws, &[identify("k", "old", "older")]).await;
         sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
@@ -515,5 +543,77 @@ mod tests {
         run_job_with(&pool, key(), 4, 1).await.unwrap();
 
         assert_eq!(inbox(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_an_old_serve_appended_after_a_bucketed_one_of_its_key_applies_after_it(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        append_items(&pool, ws, &[identify("k", "first", "old")]).await;
+        append_items(&pool, ws, &[identify("k", "second", "new")]).await;
+        sqlx::query("UPDATE ingest_inbox SET affinity = NULL WHERE message_id = 'second'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_job_with(&pool, key(), 500, 4).await.unwrap();
+
+        assert_eq!(inbox(&pool).await, 0);
+        assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_spent_budget_ends_the_backfill_and_the_shard_loop_after_one_batch(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let items: Vec<IngestItem> = (0..30)
+            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
+            .collect();
+        append_items(&pool, ws, &items).await;
+        sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let spent = Duration::ZERO;
+
+        let finished = backfill(&pool, ws, 10, Instant::now(), spent)
+            .await
+            .unwrap();
+
+        assert!(!finished, "ten of thirty rows are bucketed");
+        let unbucketed: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unbucketed, 20);
+        assert!(
+            backfill(&pool, ws, 10, Instant::now(), Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+
+        // One bucket with more rows than a batch holds.
+        sqlx::query("UPDATE ingest_inbox SET affinity = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hmac = key().unwrap();
+        let finished = drain_shard(
+            &pool,
+            ws,
+            &hmac,
+            Shard { index: 0, count: 1 },
+            10,
+            Instant::now(),
+            spent,
+        )
+        .await
+        .unwrap();
+
+        assert!(!finished);
+        assert!(inbox(&pool).await > 0, "one batch is not the backlog");
     }
 }
