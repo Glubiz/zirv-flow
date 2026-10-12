@@ -25,6 +25,7 @@ mkdir -p "$scratch/raw" "$data"
 pw="bench-pass-12345"          # local, throwaway stack only
 step_s="${BENCH_STEP_SECONDS:-90}"   # seconds per ramp step
 ramp_max="${BENCH_RAMP_MAX:-8000}"  # last ramp step, items/s
+host="${BENCH_HOST:-127.0.0.1}"          # the generator's target; "localhost" costs ~140 ms of API p99 on Windows + Docker Desktop
 ramp_min="${BENCH_RAMP_MIN:-250}"   # first ramp step, items/s
 ramp_step="${BENCH_RAMP_STEP:-250}" # rung size, items/s
 
@@ -174,7 +175,7 @@ ramp() {
     per=$((rate / nws)); files=(); pids=()
     for i in $(seq 1 "$nws"); do
       f="$scratch/raw/$name-$rate-$i.json"; files+=("$f")
-      "$loadgen" --url http://localhost:8080 --key-file "$scratch/key-$i" --mode "$mode" --rate "$per" \
+      "$loadgen" --url "http://$host:8080" --key-file "$scratch/key-$i" --mode "$mode" --rate "$per" \
         --duration "$step_s" --people "$people" --run-id "$name-$rate-$i" --out "$f" 2>/dev/null & pids+=($!)
     done
     for p in "${pids[@]}"; do wait "$p" || die "a load generator failed in step $rate"; done
@@ -220,7 +221,7 @@ single() {
   local name="$1" cap="$2"; shift 2
   stack_up; mkkey 1; start_samplers
   since=$(now_iso); t0=$(date +%s)
-  "$loadgen" --url http://localhost:8080 --key-file "$scratch/key-1" --run-id "$name" --out "$data/$name.json" "$@" \
+  "$loadgen" --url "http://$host:8080" --key-file "$scratch/key-1" --run-id "$name" --out "$data/$name.json" "$@" \
     2>"$data/$name-generator.log" || die "the load generator failed"
   t1=$(date +%s)
   rows_end=$(q -Atc "select count(*)||','||coalesce(round(extract(epoch from now()-min(received_at))::numeric,1),0) from ingest_inbox")
@@ -254,7 +255,7 @@ case "$test_name" in
     # Build the release test binary first (`cargo test --release -p zirv-flow-store --no-run`) and run
     # it directly, so no compile happens during the measurement.
     testbin="$(ls -t "$root"/target/release/deps/zirv_flow_store-*.exe 2>/dev/null | head -n1)"
-    DATABASE_URL="postgres://zirv:zirv-quickstart@localhost:55432/postgres" ZIRV_FLOW_BENCH_DECISIONS=500 \
+    DATABASE_URL="postgres://zirv:zirv-quickstart@127.0.0.1:55432/postgres" ZIRV_FLOW_BENCH_DECISIONS=500 \
       "$testbin" a_drain_batch_of_decisions --ignored --nocapture 2>/dev/null \
       | grep '^{"benchmark":"decision_append"' >"$data/decision-append.json"; [ -s "$data/decision-append.json" ] || { log "decision-append produced no output"; exit 1; }
     cat "$data/decision-append.json" ;;
