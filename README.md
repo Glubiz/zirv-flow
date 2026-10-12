@@ -1135,6 +1135,14 @@ For UI work, run the server (`cargo run -- all`), then in `web/` run `npm ci` on
 and `npm run gen:api:check` fails when it is stale. The Docker image and the release
 build compile the app first, so released binaries always carry it.
 
+## Benchmarks
+
+The ingestion and trait-storage benchmarks (architecture section 19 and OQ-1) live in
+[docs/benchmarks/m2-ingestion.md](docs/benchmarks/m2-ingestion.md): method, environment, results against each
+target, and the capacity ceilings at three resource sizes. The load generator is `tools/loadgen` and the
+runbook is [scripts/bench/README.md](scripts/bench/README.md). Results are from a development machine, not
+reference hardware.
+
 ## Development
 
 Install the stable Rust toolchain and [cargo-nextest](https://nexte.st), then:
