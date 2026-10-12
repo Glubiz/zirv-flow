@@ -56,6 +56,15 @@ impl fmt::Display for Denied {
 
 impl Error for Denied {}
 
+impl From<Denied> for HttpError {
+    fn from(denied: Denied) -> Self {
+        Self::EgressDenied {
+            host: denied.host,
+            class: denied.class,
+        }
+    }
+}
+
 /// The redirect policy's refusal to follow another hop.
 #[derive(Debug)]
 pub(crate) struct TooManyRedirects;

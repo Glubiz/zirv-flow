@@ -23,8 +23,8 @@ flate2 = { version = "1.1.9", default-features = false, features = ["rust_backen
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
-ipnet = "2.12.2"
 http-body-util = "0.1.5"
+ipnet = "2.12.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }

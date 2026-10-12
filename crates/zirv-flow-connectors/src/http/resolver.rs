@@ -46,12 +46,8 @@ pub(crate) fn record_denial(host: &str, class: AddressClass) {
     );
 }
 
-/// Checks a host's address against the policy, recording a refusal.
-pub(crate) fn check_one(policy: &EgressPolicy, host: &str, ip: IpAddr) -> Result<(), Denied> {
-    check_all(policy, host, &[ip])
-}
-
-/// Checks a resolved set against the policy: one refused address refuses them all.
+/// Checks a resolved set against the policy, recording a refusal: one refused address refuses
+/// them all.
 pub(crate) fn check_all(policy: &EgressPolicy, host: &str, ips: &[IpAddr]) -> Result<(), Denied> {
     match policy.decide_all(ips) {
         Decision::Allow => Ok(()),
@@ -177,8 +173,8 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             let policy = EgressPolicy::default();
-            assert!(check_one(&policy, "a.test", "10.0.0.1".parse().unwrap()).is_err());
-            assert!(check_one(&policy, "b.test", "8.8.8.8".parse().unwrap()).is_ok());
+            assert!(check_all(&policy, "a.test", &["10.0.0.1".parse().unwrap()]).is_err());
+            assert!(check_all(&policy, "b.test", &["8.8.8.8".parse().unwrap()]).is_ok());
         });
         let rendered = handle.render();
         assert!(

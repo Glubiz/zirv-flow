@@ -9,8 +9,8 @@ use url::Host;
 use zirv_flow_core::egress::EgressPolicy;
 
 use super::body::DEFAULT_MAX_BODY_BYTES;
-use super::error::{HttpError, TooManyRedirects};
-use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_one};
+use super::error::{Denied, HttpError, TooManyRedirects};
+use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all};
 
 /// How long and how large an outbound exchange may be.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,14 +85,7 @@ impl GuardedClient {
     /// Sends the request. An IP-literal host is decided here; any other host is decided by the
     /// resolver when the connection is made.
     pub async fn execute(&self, request: reqwest::Request) -> Result<reqwest::Response, HttpError> {
-        if let Some(ip) = literal_ip(request.url().host()) {
-            check_one(&self.policy, &ip.to_string(), ip).map_err(|denied| {
-                HttpError::EgressDenied {
-                    host: denied.host,
-                    class: denied.class,
-                }
-            })?;
-        }
+        check_literal(&self.policy, request.url().host())?;
         self.inner
             .execute(request)
             .await
@@ -100,12 +93,14 @@ impl GuardedClient {
     }
 }
 
-fn literal_ip(host: Option<Host<&str>>) -> Option<IpAddr> {
-    match host? {
-        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
-        Host::Domain(_) => None,
-    }
+/// Decides an IP-literal host; a name passes, because the resolver decides it when connecting.
+fn check_literal(policy: &EgressPolicy, host: Option<Host<&str>>) -> Result<(), Denied> {
+    let ip = match host {
+        Some(Host::Ipv4(ip)) => IpAddr::V4(ip),
+        Some(Host::Ipv6(ip)) => IpAddr::V6(ip),
+        Some(Host::Domain(_)) | None => return Ok(()),
+    };
+    check_all(policy, &ip.to_string(), &[ip])
 }
 
 fn redirect_policy(policy: Arc<EgressPolicy>, max_redirects: usize) -> Policy {
@@ -114,13 +109,10 @@ fn redirect_policy(policy: Arc<EgressPolicy>, max_redirects: usize) -> Policy {
         if attempt.previous().len() > max_redirects {
             return attempt.error(TooManyRedirects);
         }
-        match literal_ip(attempt.url().host()) {
-            Some(ip) => match check_one(&policy, &ip.to_string(), ip) {
-                Ok(()) => attempt.follow(),
-                Err(denied) => attempt.error(denied),
-            },
-            // A name is resolved, and so checked, when the next hop connects.
-            None => attempt.follow(),
+        // A name is resolved, and so checked, when the next hop connects.
+        match check_literal(&policy, attempt.url().host()) {
+            Ok(()) => attempt.follow(),
+            Err(denied) => attempt.error(denied),
         }
     })
 }
