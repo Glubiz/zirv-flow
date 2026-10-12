@@ -1,0 +1,11 @@
+deadlocks=6
+ip.postgres=172.19.0.3
+ip.zirv-flow=172.19.0.2
+ip.zirv-flow-worker=172.19.0.5
+ip.zirv-flow-scheduler=172.19.0.4
+2026-10-12 16:03:39.884 UTC [220] ERROR:  deadlock detected
+2026-10-12 16:03:40.884 UTC [85] ERROR:  deadlock detected
+2026-10-12 16:03:41.885 UTC [221] ERROR:  deadlock detected
+2026-10-12 16:03:42.885 UTC [88] ERROR:  deadlock detected
+2026-10-12 16:03:42.987 UTC [224] ERROR:  deadlock detected
+2026-10-12 16:03:43.886 UTC [86] ERROR:  deadlock detected

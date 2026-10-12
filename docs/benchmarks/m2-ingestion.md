@@ -14,7 +14,7 @@ here changes a target.
 | Target (section 19) | Measured | |
 |---|---|---|
 | Sustained ingestion, 2,000 items/s | 2,000/s for 10 min on one workspace in tiers S, M and L, no errors, generator on schedule | HIT |
-| Burst 10,000/s for 10 min, backlog drained within 15 min | measured a 2-minute burst: drained 237 to 243 s after it stopped. The 10-minute case is a projection of about 19 min | MISS, projected (issue: #74) |
+| Burst 10,000/s for 10 min, backlog drained within 15 min | 6 million items in 10 min, backlog drained 890 s (14.8 min) after the generator stopped, with each drain shard on its own task (section 5.1). Before: 2-minute bursts drained 237 to 243 s after stopping and the 10-minute case projected to about 19 min | HIT, by 10 s (issue: #74) |
 | Ingestion API p99 under 100 ms at the sustained rate | 80.2 ms (S), 11.0 ms (M), 12.7 ms (L), judged on the schedule-based latency | HIT |
 | Inbox to applied profile p95 under 5 s at the sustained rate | 45.8 ms (S), 38.1 ms (M), 35.1 ms (L) | HIT |
 | Decision-log append: added transaction time p95 under 5 ms | 52.9 ms per 500-event drain transaction in the container network (184.5 ms from the host); about 0.1 ms per decision | MISS (issue: #75) |
@@ -154,12 +154,18 @@ Peaks at the ceiling step (percent of one core / MiB not shown):
   182,107 late dispatches with service p99 of 4.2 s, and at L's 3,000/s four-workspace step 37,558
   requests failed as transport errors. L's track ceilings (3,000 and 2,750) are therefore lower bounds set by
   the measuring path, not by the server.
-- **One workspace's drain is bound near one core.** The worker peaks at 100% in the batch ramps (4,000
-  items/s step), 103 to 105% in the 10,000/s burst of every tier and 73 to 97% in the single-workspace
-  ceilings, regardless of tier. The burst drain rate (about 3,400 items/s of mixed identify and track) is
-  the same in S, M and L (section 5). With four workspaces the worker reaches 162% (M) and 233% (L), so
-  the limit is per workspace: one workspace's drain joins its shard loops in one task, which runs on one
-  thread at a time (#74).
+- **One workspace's drain was bound near one core (before #74).** The worker peaked at 100% in the batch
+  ramps (4,000 items/s step), 103 to 105% in the 10,000/s burst of every tier and 73 to 97% in the
+  single-workspace ceilings, regardless of tier. The burst drain rate (about 3,400 items/s of mixed
+  identify and track) was the same in S, M and L (section 5). With four workspaces the worker reached 162%
+  (M) and 233% (L), so the limit was per workspace: one workspace's drain joined its shard loops in one
+  task, which runs on one thread at a time (#74).
+  **After #74** (each shard its own task, section 5.1) the same burst takes the worker to 177% (S, of 200%
+  available), 238% (M) and 274% (L), and the drain rate rises to about 4,400 (S), 4,000 (M) and 4,000 (L)
+  items/s: the per-workspace cap of one core is gone, but the rate gained is about 18 to 29%, not the
+  2 to 4 times the extra cores might suggest, and it no longer follows the vCPU count (M and L are equal;
+  L's worker uses 0.36 core more for the same rate). PostgreSQL peaks at 450 to 490% in these bursts, so
+  the next limit was not located by these runs.
 - PostgreSQL peaks at 300 to 700% of the cores it has (24), it is not the limit.
 
 ### 3.2 Scaling and how to predict
@@ -181,8 +187,10 @@ Predicting a ceiling for another setup:
   treat the model as accurate to about 20% for small budgets.
 - Beyond about 4 vCPU the ceiling stops following the CPU budget. Use the smaller of three limits: the CPU
   model above, about 3,000 single-item requests per second from this host path (use batch requests above
-  that), and a drain of about 3,400 mixed items per second per workspace for sustained load (one
-  workspace's drain saturates one core, so more vCPU does not raise it until #74 is fixed).
+  that), and a drain of about 3,400 mixed items per second per workspace for sustained load before #74
+  (one workspace's drain saturated one core, so more vCPU did not raise it). After #74 the measured drain
+  is about 4,000 to 4,400 mixed items per second per workspace, the same in M and L, so it is not
+  predicted by the vCPU count either; use 4,000 until a run locates the next limit.
 - Do not extrapolate beyond about twice the largest tier (16 vCPU): there are only three points, two of them
   are bounded by the measuring path rather than the server, and the drain limit is a property of the code at
   this commit.
@@ -243,6 +251,53 @@ items accepted, API p99 124.9 ms (32.5 ms) across 4 requests per second, applied
 253 ms / 359 ms / 3.7 s / 7.8 s (352 / 710 / 743 / 751 s), drain 3 s (752 s). The API p99 target is missed
 for 500-item requests; a batch is a larger body to parse before it is appended
 (issue: #76).
+
+### 5.1 After #74: each drain shard on its own task
+
+Issue #74: one workspace's `ingest.drain` joined its 8 shard loops in one task and so used one core. The
+branch `fix/drain-cores` (version 0.31.0, on `main` at eb79a11, tooling commit 201a699) spawns each shard as its
+own tokio task. Measured with the same harness, tiers and settings as above, on a fresh stack per run, on a
+quiet host (no `cargo`, `rustc` or `nextest` process from 17:48 local time until the last run ended at
+18:45), release image `sha256:58e3c73f347c...`, generator on `127.0.0.1`. Everything before this subsection is
+unchanged. Raw outputs: `data/after-74/{S,M,L}` and `data/after-74/burst600/M`.
+
+Burst, 10,000 items/s for 2 minutes (batches of 100, mixed identify and track); the first value is after
+#74, the before value from the table above in brackets. The drain rate is the backlog at the generator's stop
+divided by the drain time:
+
+| Tier | Largest backlog | Drain after the generator stopped | Drain rate | Applied p95, per kind | API p99 | Worker / PostgreSQL peak CPU | Deadlocks |
+|---|---|---|---|---|---|---|---|
+| S | 703,783 rows (814,411) | 160 s (243 s) | 4,400/s (3,350/s) | identify 149.8 s, track 147.3 s (225.7 s, 223.6 s) | 24.6 ms (23.2 ms) | 177% / 454% (105% / n/a) | 4 (1) |
+| M | 743,392 (796,475) | 186 s (237 s) | 4,000/s (3,360/s) | identify 174.8 s, track 172.1 s (223.2 s, 220.7 s) | 23.5 ms (22.4 ms) | 238% / 488% (103% / n/a) | 5 (9) |
+| L | 737,813 (806,822) | 186 s (240 s) | 3,970/s (3,360/s) | identify 171.5 s, track 169.2 s (223.0 s, 220.9 s) | 25.5 ms (22.6 ms) | 274% / 469% (104% / n/a) | 6 (1) |
+
+Largest backlog is the larger of the inbox samples and the count at the generator's stop. The drain is 22 to
+34% shorter, not the 2 to 4 times the extra cores would allow; M and L drain at the same rate (section 3.1).
+Applied p95 falls with the shorter drain but stays above 140 s because a burst of this size is a standing
+backlog. All three runs were valid: 1,199,900 to 1,200,000 items accepted (all 202), achieved at least 99.97%
+of the target, `late_dispatch` 0, no 5xx, 429 or transport errors, and no container crashed.
+The deadlocks were retried by the drain (as in section 8).
+
+Sustained regression check, tier M, track 2,000/s for 10 minutes (before in brackets, section 5): applied p50
+/ p95 / p99 / max 11.4 / 39.8 / 62.1 / 2,397 ms (11.9 / 38.1 / 448.1 / 1,674 ms), drain after stop 3 s (0 s),
+largest backlog 792 rows (4,489), API p99 21.9 ms (11.0 ms), peak CPU serve / worker / PostgreSQL 156 / 112 /
+666% (166 / 89 / 702%), 0 deadlocks. 1,200,000 items accepted, `late_dispatch` 0, no errors. Applied p95 is
+within 5% of the earlier run and every target still holds. API p99 is twice the earlier figure (still a
+tenth of the 100 ms limit); this is one run and the earlier figure is one run, so whether the difference
+is the change or run-to-run variation is not known from these two measurements.
+
+The section 19 case, tier M, burst 10,000 items/s for 10 minutes (6 million items in batches of 100),
+then the drain to empty:
+
+| Largest backlog | Drain after the generator stopped | Drain rate | Applied p95, per kind | API p99 | Worker / PostgreSQL peak CPU | Deadlocks | Result |
+|---|---|---|---|---|---|---|---|
+| 3,640,933 rows (oldest 369 s) | 890 s (14.8 min) | 4,090/s | identify 867.7 s, track 839.2 s | 23.9 ms | 245% / 542% | 7 | HIT, 10 s inside 15 min |
+
+All 6,000,000 items were accepted (60,000 requests, all 202, achieved 9,999.7/s, `late_dispatch` 0, no
+errors); 3,001,301 track events and 997,535 people were stored and the inbox ended at 0. The worker held
+225 to 243% for the whole drain. The margin is 1.1% of the target: the result is a pass on this host, one
+run, and 4,090 items/s is the measured rate for this workload (mixed identify and track, 1,000,000 people), so
+a run a little slower would miss. It is a development machine, not reference hardware.
 
 ## 6. Decision-log overhead
 
@@ -349,5 +404,6 @@ Raw outputs are in `docs/benchmarks/data/`, one directory per tier (`S`, `M`, `L
 report (`<test>.json`), the ramp steps (`<test>-steps.jsonl`), the applied-latency CSV, the inbox and
 `docker stats` samples, PostgreSQL facts (deadlocks, connections), the settings (`<test>-stack.txt`). Also
 `baseline/` (before), `shards-4/` and `shards-8/` (section 4), `ab/` (section 6) and
-`M/decision-append*.json`, `M/oq1.json`. They contain no keys or secrets. The harness is
+`M/decision-append*.json`, `M/oq1.json`. Section 5.1 (after #74): `after-74/{S,M,L}` (2-minute burst in
+each tier, tier M also the sustained regression check) and `after-74/burst600/M` (the 10-minute burst). They contain no keys or secrets. The harness is
 `scripts/bench/` (runbook: `scripts/bench/README.md`).

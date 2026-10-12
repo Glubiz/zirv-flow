@@ -1523,10 +1523,12 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 hardware, at three sizes of the zirv-flow stack (2, 4 and 8 vCPU) in
 [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md). Sustained 2,000 items/s on one workspace
 holds (API p99 11 to 80 ms, inbox to applied p95 35 to 46 ms). Missed there: the decision-log append
-(52.9 ms of added p95 per 500-event drain transaction, 34% throughput loss; #75), the 10-minute burst
-drain (projected at about 19 minutes from a 2-minute run; #74) and the API p99 of 500-item batches
-(125 ms; #76). One workspace's drain applies about 3,400 mixed items per second whatever the vCPU count,
-because its shards share one task (#74). The figures
+(52.9 ms of added p95 per 500-event drain transaction, 34% throughput loss; #75) and the API p99 of
+500-item batches (125 ms; #76). The 10-minute burst drain first missed (projected at about 19 minutes
+from a 2-minute run; #74): one workspace's drain applied about 3,400 mixed items per second because its
+shards shared one task. With each shard on its own task (#74) the drain applies about 4,000 to 4,400
+items per second, and a measured 10-minute burst at 10,000/s drained in 890 s (14.8 minutes), 10 s inside
+the 15-minute target, a thin margin. The figures
 are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
 
 ## 20. Key decisions
