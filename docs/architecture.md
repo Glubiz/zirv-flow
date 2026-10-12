@@ -395,9 +395,16 @@ As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batc
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
 one row per item to `ingest_inbox` with the request's trace id in a single transaction that
 also enqueues `ingest.drain` for the workspace (`unique_key = ingest.drain:<workspace>`). The
-inbox row's `message_id` is the client's or a server-assigned UUID v7. A drain job loops
-`drain_batch`: in one transaction it selects the workspace's oldest rows with `FOR UPDATE SKIP
-LOCKED`, applies them in id order through the transaction-taking profile and event paths of
+inbox row's `message_id` is the client's or a server-assigned UUID v7. Each row also
+stores `affinity`, the first byte of the SHA-256 of its record key (the strongest identifier)
+modulo 64, fixed forever; rows appended before the column existed hold NULL. A drain job first
+loops `drain_batch` over the NULL rows (they have lower ids than every bucketed row), then runs
+`ingest.drain_shards` such loops concurrently, each over the buckets with `affinity % shards =
+index`, as joined futures so a lost lease drops them all. A key lives in one bucket, so its
+rows still apply in id order; two shards may share a person under different keys, and a
+deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
+shards) + 1` connections. Each loop is `drain_batch`: in one transaction it selects the
+shard's oldest rows with `FOR UPDATE SKIP LOCKED`, applies them in id order through the transaction-taking profile and event paths of
 apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
