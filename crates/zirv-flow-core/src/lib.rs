@@ -5,6 +5,7 @@
 pub mod consent;
 pub mod contacts;
 pub mod csv_file;
+pub mod egress;
 mod email;
 pub mod events;
 mod ids;
