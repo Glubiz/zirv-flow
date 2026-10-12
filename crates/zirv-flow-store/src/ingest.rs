@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::Connection;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
@@ -68,6 +69,58 @@ pub struct IngestItem {
     /// The client's retry key; a server-assigned UUID v7 when absent.
     pub message_id: Option<String>,
     pub payload: IngestPayload,
+}
+
+/// The number of buckets a record key hashes into; `affinity` is in `0..BUCKETS`.
+const BUCKETS: u8 = 64;
+
+/// Which of a workspace's inbox rows a drain takes. Rows of one record key always fall in
+/// one shard, so shards drain concurrently and each key still applies in id order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shard {
+    /// Rows appended before bucketing existed (`affinity IS NULL`). They have lower ids than
+    /// every bucketed row, so a drain takes them before any shard.
+    Legacy,
+    /// The bucketed rows whose bucket is `index` modulo `count`.
+    Of { index: u32, count: u32 },
+}
+
+impl Shard {
+    /// Every bucketed row: one shard of one.
+    pub const ALL: Self = Self::Of { index: 0, count: 1 };
+
+    /// The `(legacy, index, count)` the take query binds.
+    fn bind(self) -> (bool, i32, i32) {
+        match self {
+            Self::Legacy => (true, 0, 1),
+            Self::Of { index, count } => (
+                false,
+                i32::try_from(index).unwrap_or(i32::MAX),
+                i32::try_from(count.max(1)).unwrap_or(i32::MAX),
+            ),
+        }
+    }
+}
+
+/// The bucket of a record key: the first byte of its SHA-256, modulo [`BUCKETS`]. Stored
+/// buckets must match those of later rows of the same key, so the algorithm never changes.
+fn bucket(record_key: &str) -> i16 {
+    let digest = Sha256::digest(record_key.as_bytes());
+    i16::from(digest[0] % BUCKETS)
+}
+
+/// The bucket of `item`'s record key: the contact key for a contact, else the strongest
+/// identifier; bucket 0 when there is none, since such a row is poison anyway.
+fn item_bucket(item: &IngestItem) -> i16 {
+    let key = match item.payload {
+        IngestPayload::Contact { .. } => item
+            .identifiers
+            .iter()
+            .find(|(kind, _)| kind == contacts::KEY_KIND)
+            .map(|(_, value)| value.clone()),
+        _ => strongest_identifier(&item.identifiers),
+    };
+    key.map_or(0, |key| bucket(&key))
 }
 
 /// An item as kept in the `item` column, read back.
@@ -151,13 +204,15 @@ pub async fn append_inbox(
         })
         .collect();
 
+    let affinities: Vec<i16> = items.iter().map(item_bucket).collect();
+
     let mut tx = begin(pool).await?;
     let inserted = sqlx::query(
         "INSERT INTO ingest_inbox \
-            (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id) \
-         SELECT $1, $2, i.kind, i.item, i.message_id, now(), $3 \
-         FROM unnest($4::text[], $5::jsonb[], $6::text[]) WITH ORDINALITY \
-            AS i(kind, item, message_id, n) \
+            (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, affinity) \
+         SELECT $1, $2, i.kind, i.item, i.message_id, now(), $3, i.affinity \
+         FROM unnest($4::text[], $5::jsonb[], $6::text[], $7::smallint[]) WITH ORDINALITY \
+            AS i(kind, item, message_id, affinity, n) \
          ORDER BY i.n",
     )
     .bind(workspace.as_uuid())
@@ -166,6 +221,7 @@ pub async fn append_inbox(
     .bind(&kinds)
     .bind(&stored)
     .bind(&message_ids)
+    .bind(&affinities)
     .execute(&mut *tx)
     .await
     .map_err(StoreError::query)?;
@@ -335,14 +391,20 @@ fn strongest_identifier(identifiers: &[(String, String)]) -> Option<String> {
 async fn take_rows(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
+    shard: Shard,
     limit: i64,
 ) -> Result<Vec<InboxRow>, StoreError> {
+    let (legacy, index, count) = shard.bind();
     sqlx::query_as(
         "SELECT id, api_key_id, kind, item, message_id, received_at, trace_id \
          FROM ingest_inbox WHERE workspace_id = $1 \
-         ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED",
+            AND CASE WHEN $4 THEN affinity IS NULL ELSE affinity % $3 = $2 END \
+         ORDER BY id LIMIT $5 FOR UPDATE SKIP LOCKED",
     )
     .bind(workspace.as_uuid())
+    .bind(index)
+    .bind(count)
+    .bind(legacy)
     .bind(limit)
     .fetch_all(connection)
     .await
@@ -432,7 +494,7 @@ fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
     outcome.count("track", label);
 }
 
-/// Applies up to `limit` of the workspace's oldest inbox rows in id order and deletes them,
+/// Applies up to `limit` of the oldest inbox rows of `shard` of the workspace in id order and deletes them,
 /// all in one transaction. Concurrent drainers skip each other's locked rows, so a row is
 /// never applied twice, and a crash leaves every row in place.
 ///
@@ -442,11 +504,12 @@ fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
 pub async fn drain_batch(
     pool: &PgPool,
     workspace: WorkspaceId,
+    shard: Shard,
     key: &HmacKey,
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    let rows = take_rows(&mut tx, workspace, limit).await?;
+    let rows = take_rows(&mut tx, workspace, shard, limit).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
@@ -486,11 +549,12 @@ pub async fn drain_batch(
 pub async fn drain_batch_singly(
     pool: &PgPool,
     workspace: WorkspaceId,
+    shard: Shard,
     key: &HmacKey,
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    let rows = take_rows(&mut tx, workspace, limit).await?;
+    let rows = take_rows(&mut tx, workspace, shard, limit).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
@@ -914,7 +978,9 @@ mod tests {
         )
         .await;
 
-        let outcome = drain_batch(&pool, ws, &key(), 500).await.unwrap();
+        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.rows, 4);
         assert_eq!(outcome.applied[&("identify", "valid")], 2);
@@ -953,7 +1019,9 @@ mod tests {
         append(&pool, one, &trace, &items).await;
         append(&pool, two, &trace, &items).await;
 
-        let outcome = drain_batch(&pool, one, &key(), 3).await.unwrap();
+        let outcome = drain_batch(&pool, one, Shard::ALL, &key(), 3)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.rows, 3);
         let left: Vec<(Uuid, String)> = sqlx::query_as(
@@ -1043,7 +1111,9 @@ mod tests {
             ]
         };
         append(&pool, ws, &trace, &batch()).await;
-        drain_batch(&pool, ws, &key(), 500).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
         let before = dump(&pool).await;
         assert!(
             before.iter().all(|(_, rows)| !rows.is_empty()),
@@ -1051,7 +1121,9 @@ mod tests {
         );
 
         append(&pool, ws, &trace, &batch()).await;
-        let replay = drain_batch(&pool, ws, &key(), 500).await.unwrap();
+        let replay = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
 
         assert_eq!(replay.rows, 6);
         assert_eq!(dump(&pool).await, before);
@@ -1069,12 +1141,13 @@ mod tests {
         let ws = workspace(&pool, "ours").await;
         let trace = TraceContext::root(Cause::api("req"));
         sqlx::query(
-            "INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, trace_id) \
+            "INSERT INTO ingest_inbox \
+                (workspace_id, api_key_id, kind, item, message_id, trace_id, affinity) \
              SELECT $1, gen_random_uuid(), 'track', \
                     jsonb_build_object('identifiers', \
                         jsonb_build_array(jsonb_build_array('external:user_id', 'u' || (n % 400))), \
                         'timestamp', null, 'event', 'seen', 'properties', jsonb_build_object('n', n)), \
-                    'm-' || n, $2 \
+                    'm-' || n, $2, n % 64 \
              FROM generate_series(1, 2000) AS n",
         )
         .bind(ws.as_uuid())
@@ -1086,7 +1159,7 @@ mod tests {
 
         let drainer = |pool: PgPool, key: std::sync::Arc<HmacKey>| async move {
             loop {
-                match drain_batch(&pool, ws, &key, 100).await {
+                match drain_batch(&pool, ws, Shard::ALL, &key, 100).await {
                     Ok(outcome) if outcome.rows == 0 => break,
                     Ok(_) => {}
                     Err(error) if error.is_retryable() => {}
@@ -1135,14 +1208,18 @@ mod tests {
         .unwrap();
         let key = key();
 
-        let whole = drain_batch(&pool, ws, &key, 500).await.unwrap_err();
+        let whole = drain_batch(&pool, ws, Shard::ALL, &key, 500)
+            .await
+            .unwrap_err();
         assert!(!whole.is_retryable());
         assert_eq!(
             inbox_count(&pool).await,
             3,
             "the failed batch left every row"
         );
-        let outcome = drain_batch_singly(&pool, ws, &key, 500).await.unwrap();
+        let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key, 500)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.rows, 3);
         assert_eq!(outcome.applied[&("track", "apply_failed")], 1);
@@ -1189,7 +1266,9 @@ mod tests {
             .await
             .unwrap();
 
-        let outcome = drain_batch_singly(&pool, ws, &key(), 500).await.unwrap();
+        let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.applied[&("identify", "apply_failed")], 1);
         let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM ingest_rejects")
@@ -1220,5 +1299,136 @@ mod tests {
         assert_eq!(heads[0].workspace_id, one);
         assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
         assert!(heads.iter().all(|head| head.workspace_id != two));
+    }
+
+    #[test]
+    fn the_bucket_of_a_key_is_pinned() {
+        assert_eq!(bucket("external:user_id:u1"), 19);
+        assert_eq!(bucket("email:ada@example.com"), 27);
+        assert!((0..500).all(|n| (0..64).contains(&bucket(&format!("external:user_id:u{n}")))));
+    }
+
+    #[test]
+    fn an_items_bucket_is_that_of_its_strongest_identifier_whatever_the_order() {
+        let mut item = identify("u1", "m-1", json!({}));
+        item.identifiers = pairs(&[("external:user_id", "u1"), ("email", "Ada@Example.com")]);
+        let one = item_bucket(&item);
+        item.identifiers.reverse();
+
+        assert_eq!(item_bucket(&item), one);
+        assert_eq!(one, bucket("external:user_id:u1"));
+    }
+
+    #[test]
+    fn an_item_without_a_valid_identifier_is_in_bucket_zero() {
+        let mut item = identify("u1", "m-1", json!({}));
+        item.identifiers = pairs(&[("not-a-kind", "x")]);
+
+        assert_eq!(item_bucket(&item), 0);
+        item.identifiers.clear();
+        assert_eq!(item_bucket(&item), 0);
+    }
+
+    #[test]
+    fn a_contact_is_bucketed_by_its_contact_key_whatever_its_other_identifiers() {
+        let contact = |extra: &[(&str, &str)]| {
+            let mut identifiers = pairs(&[(contacts::KEY_KIND, "c-1")]);
+            identifiers.extend(pairs(extra));
+            IngestItem {
+                identifiers,
+                timestamp: None,
+                message_id: None,
+                payload: IngestPayload::Contact { traits: Map::new() },
+            }
+        };
+
+        assert_eq!(item_bucket(&contact(&[])), bucket("c-1"));
+        assert_eq!(
+            item_bucket(&contact(&[("email", "ada@example.com")])),
+            bucket("c-1")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_append_stores_the_bucket_of_each_items_record_key(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let mut unkeyed = identify("u1", "m-3", json!({}));
+        unkeyed.identifiers.clear();
+
+        append(
+            &pool,
+            ws,
+            &trace,
+            &[
+                identify("u1", "m-1", json!({})),
+                track("u1", "m-2", "seen", json!({})),
+                unkeyed,
+            ],
+        )
+        .await;
+
+        let stored: Vec<Option<i16>> =
+            sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, [Some(19), Some(19), Some(0)]);
+    }
+
+    /// The ids `shard` takes from the workspace's inbox, in the order it takes them.
+    async fn taken(pool: &PgPool, ws: WorkspaceId, shard: Shard) -> Vec<i64> {
+        let mut tx = begin(pool).await.unwrap();
+        let rows = take_rows(&mut tx, ws, shard, 1000).await.unwrap();
+        rows.iter().map(|row| row.id).collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_shard_takes_only_its_own_buckets_and_legacy_only_the_unbucketed_rows(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let items: Vec<IngestItem> = (0..60)
+            .map(|n| track(&format!("u{n}"), &format!("m-{n}"), "seen", json!({})))
+            .collect();
+        append(&pool, ws, &trace, &items).await;
+        sqlx::query("UPDATE ingest_inbox SET affinity = NULL WHERE message_id IN ('m-0', 'm-1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let all: Vec<(i64, Option<i16>)> =
+            sqlx::query_as("SELECT id, affinity FROM ingest_inbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        let legacy = taken(&pool, ws, Shard::Legacy).await;
+        let mut shards = Vec::new();
+        for index in 0..4 {
+            shards.push(taken(&pool, ws, Shard::Of { index, count: 4 }).await);
+        }
+
+        let expected_legacy: Vec<i64> = all
+            .iter()
+            .filter(|(_, affinity)| affinity.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(legacy, expected_legacy);
+        assert_eq!(legacy.len(), 2);
+        for (index, ids) in shards.iter().enumerate() {
+            let expected: Vec<i64> = all
+                .iter()
+                .filter(|(_, affinity)| {
+                    affinity.is_some_and(|a| usize::try_from(a).unwrap() % 4 == index)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(ids, &expected, "shard {index}");
+        }
+        let mut union: Vec<i64> = shards.concat();
+        union.extend(&legacy);
+        union.sort_unstable();
+        assert_eq!(union, all.iter().map(|(id, _)| *id).collect::<Vec<_>>());
     }
 }
