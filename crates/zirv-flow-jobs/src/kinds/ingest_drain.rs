@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::task::JoinSet;
+use tracing::{Instrument, Span};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
@@ -79,9 +80,12 @@ impl JobKind for IngestDrain {
                 count: shards,
             };
             let (pool, key) = (pool.clone(), Arc::clone(&key));
-            tasks.spawn(async move {
-                drain_shard(&pool, workspace, &key, shard, limit, started, TIME_BUDGET).await
-            });
+            tasks.spawn(
+                async move {
+                    drain_shard(&pool, workspace, &key, shard, limit, started, TIME_BUDGET).await
+                }
+                .instrument(Span::current()),
+            );
         }
         join_shards(tasks).await
     }
@@ -700,11 +704,19 @@ mod tests {
         handler.abort();
         assert!(handler.await.unwrap_err().is_cancelled());
 
-        // Give a shard that outlived the handler time to commit another batch.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Every connection must come back: a shard that outlived the handler would hold one.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.num_idle() != pool.size() as usize {
+            assert!(
+                Instant::now() < deadline,
+                "a shard still holds a connection"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let left = inbox(&pool).await;
         assert!(left > 0, "the run was cut off with rows remaining");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // With no connection checked out, nothing can commit anymore.
+        tokio::task::yield_now().await;
         assert_eq!(
             inbox(&pool).await,
             left,
@@ -713,7 +725,7 @@ mod tests {
         assert_eq!(
             busy_connections(&pool).await,
             0,
-            "no shard holds a connection"
+            "no query is still running"
         );
     }
 
