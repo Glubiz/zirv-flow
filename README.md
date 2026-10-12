@@ -109,6 +109,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `explorer.export_timeout_ms` | u64 | 60000 | at least 1; the same for each page query of a CSV export |
 | `explorer.interactive_row_limit` | u32 | 10000 | at least 1; the most buckets or rows an interactive explorer query returns (`truncated` is set when more matched) |
 | `explorer.export_row_limit` | u32 | 1000000 | at least 1; the most rows an export writes; a final `#` comment line says when it stopped there |
+| `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -138,6 +139,29 @@ Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password, the OIDC client secret and the master key redacted.
 Supply the client secret as `ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET` rather than in
 a file.
+
+## Egress
+
+Outbound HTTP calls made for data sources and destinations go through a guarded client that
+refuses any destination that is not a public address: loopback, private ranges, link-local,
+carrier-grade NAT, cloud metadata, multicast and other special ranges are all blocked, whether the
+URL names them directly, a host name resolves to them, or a redirect points at them. A host name
+that resolves to a mix of allowed and blocked addresses is refused whole. Proxy environment
+variables (`HTTP_PROXY`, `HTTPS_PROXY`) are ignored by this client.
+
+To reach an internal system on purpose, list it in `egress.allow` as CIDR ranges:
+
+```toml
+[egress]
+allow = ["10.0.5.7/32", "192.168.0.0/16"]
+```
+
+or `ZIRV_FLOW_EGRESS__ALLOW='["10.0.5.7/32", "192.168.0.0/16"]'`. Entries are CIDR only (no host
+names or ports), and an invalid entry fails startup and `zirv-flow config check` with the key and
+the reason. A cloud metadata address such as `169.254.169.254` (or the Azure WireServer, `168.63.129.16`) is unlocked only by an entry
+naming exactly that address (`169.254.169.254/32`); a broader range never unlocks it. Each refusal
+increments `zirv_flow_egress_denied_total{class}` and logs the host and class. Sign-in with an OIDC
+provider is not covered, because the operator configures that URL.
 
 ## Logs and traces
 

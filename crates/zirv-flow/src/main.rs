@@ -375,6 +375,7 @@ async fn run_roles_reporting(
             .map(|key| Arc::new(key.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
+        worker_config.egress = config.egress_policy();
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
             zirv_flow_jobs::Registry::built_in(),
@@ -590,7 +591,8 @@ fn http_state(
         .with_event_retention(config.events_retention())
         .with_ingest_limits(config.ingest_limits())
         .with_import_limits(config.import_limits())
-        .with_explorer_limits(config.explorer_limits());
+        .with_explorer_limits(config.explorer_limits())
+        .with_egress_policy(config.egress_policy());
     if let Some(key) = master_key {
         state = state.with_master_key(key);
     }

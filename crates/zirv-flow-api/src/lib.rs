@@ -54,6 +54,7 @@ pub use openapi::openapi;
 pub use ops::{OpsState, ops_router, serve_ops};
 pub use problem::Problem;
 pub use state::AppState;
+pub use zirv_flow_core::egress::{Decision as EgressDecision, EgressConfigError, EgressPolicy};
 pub use zirv_flow_identity::{IdentityError, OidcSettings, SecretString};
 
 /// Builds the router for every HTTP surface of the server.

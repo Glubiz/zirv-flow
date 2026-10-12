@@ -1450,6 +1450,28 @@ second lookup cannot swap it. Redirects, retries and endpoints a driver
 discovers (Kafka broker metadata) are checked again. No new crate or edge is
 needed (5.1).
 
+As built (M3): `zirv_flow_core::egress` holds the pure policy and `zirv-flow-connectors` enforces it
+for HTTP through `GuardedClient`; the database and Kafka drivers and the `ai` crate call the same
+policy at their own connect points when they land.
+
+- **Classes.** An address is public, loopback, private, unique-local, link-local, shared CGNAT,
+  metadata, unspecified, multicast, broadcast, documentation, benchmarking or reserved. IPv4-mapped,
+  IPv4-compatible, NAT64 and 6to4 IPv6 addresses are classified by the IPv4 address they embed;
+  Teredo is reserved. Only public addresses are reachable by default.
+- **Allowlist.** `egress.allow` takes CIDR ranges only (no host names, no ports); a bare address or
+  an entry with host bits set fails startup and `config check`. A range unlocks the non-public
+  addresses it contains. A metadata address (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`,
+  `100.100.100.200`, `168.63.129.16`) is unlocked only by an entry naming exactly it (`/32` or `/128`), never by a
+  broader range.
+- **Mixed resolutions.** A host name that resolves to several addresses is refused whole if any one
+  is denied; the denied address is never filtered out silently.
+- **Connect point.** The reqwest DNS hook checks every resolved address and returns only those, so
+  the connector dials the checked addresses and DNS cannot change between check and connect. An
+  IP-literal URL never reaches DNS and is decided before sending; each redirect hop is checked
+  again; environment proxies are ignored. Denials count in `zirv_flow_egress_denied_total{class}`
+  and log the host and class, never the path or query.
+- **Exempt.** The OIDC provider calls in `zirv-flow-identity` stay outside the policy, as above.
+
 ### 16.2 Secrets, RBAC, audit
 
 Connector credentials, OAuth tokens and AI provider keys use **envelope encryption**: a random

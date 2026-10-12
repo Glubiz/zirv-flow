@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen"]
 resolver = "3"
 
 [workspace.package]
-version = "0.31.0"
+version = "0.32.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -11,6 +11,7 @@ repository = "https://github.com/Glubiz/zirv-flow"
 
 [workspace.dependencies]
 argon2 = { version = "0.6.0", features = ["alloc", "password-hash"] }
+bytes = "1.12.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "matched-path"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
@@ -24,6 +25,7 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 http-body-util = "0.1.5"
+ipnet = "2.12.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
@@ -54,6 +56,7 @@ url = "2.5.8"
 futures-util = { version = "0.3.34", default-features = false }
 uuid = { version = "1.28.0", features = ["v4", "v7", "serde"] }
 zirv-flow-api = { path = "crates/zirv-flow-api" }
+zirv-flow-connectors = { path = "crates/zirv-flow-connectors" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
