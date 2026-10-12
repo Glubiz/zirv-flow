@@ -6,6 +6,10 @@
 #
 # BENCH_RATE_PER_KEY and BENCH_BURST_PER_KEY raise the per-key ingestion limit for the burst
 # run; the defaults are the shipped ones. Local use only.
+# The project name is fixed here so `down -v` never touches the quickstart stack's volumes (Compose
+# would otherwise name the project after the checkout directory). Containers are zirv-flow-bench-<service>-1.
+name: zirv-flow-bench
+
 x-bench-env: &bench-env
   ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
   ZIRV_FLOW_DATABASE__URL: postgres://${POSTGRES_USER:-zirv}:${POSTGRES_PASSWORD:-zirv-quickstart}@postgres:5432/${POSTGRES_DB:-zirv_flow}

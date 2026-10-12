@@ -7,7 +7,8 @@
 #   1. the guard works: `cargo check --features bench-no-decisions` without the variable must FAIL
 #      with the guard's message;
 #   2. neither the variable nor the feature name appears on a non-comment line of a shipped-build
-#      input: any workflow but ci.yaml, a Dockerfile, a compose file, or a script those invoke.
+#      input: any workflow but ci.yaml, a Dockerfile, a compose file, cargo config (.cargo/config.toml,
+#      .cargo/config), or a script those invoke (any scripts/... path, whatever its suffix).
 #
 # Usage: check-bench-features.sh [ROOT]   |   check-bench-features.sh --self-test
 # Exits 1 listing the offences, 2 on a setup error. Requires bash, grep and (for 1) cargo.
@@ -18,6 +19,8 @@ scan() {
   cd "$1"
   seeds="$(
     {
+      # cargo config can set the variable ([env]) or alias the feature into every build
+      for cfg in .cargo/config.toml .cargo/config; do [ ! -f "$cfg" ] || echo "$cfg"; done
       find .github/workflows -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name ci.yaml 2>/dev/null
       find . -maxdepth 3 -type f \( -name 'Dockerfile*' -o -name 'docker-compose*' -o -name 'compose*.y*ml' \) \
         -not -path './node_modules/*' -not -path './target/*' -not -path './.git/*' -not -path './.zirv/*' \
@@ -31,7 +34,7 @@ scan() {
     while IFS= read -r token; do
       token="${token#./}"
       [ -f "$token" ] && [ -z "${seen[$token]+x}" ] && { seen[$token]=1; queue+=("$token"); }
-    done < <(grep -v '^[[:space:]]*#' "${queue[$i]}" | grep -oE '[A-Za-z0-9_./-]+\.sh' || true)
+    done < <(grep -v '^[[:space:]]*#' "${queue[$i]}" | grep -oE '[A-Za-z0-9_./-]+\.sh|scripts/[A-Za-z0-9_./-]+' || true)
   done
   [ "${#queue[@]}" -eq 0 ] && return 0
   grep -nHE 'ZIRV_FLOW_BENCH_BUILD|bench-no-decisions' -- "${queue[@]}" \
@@ -87,6 +90,16 @@ run_self_test() {
     'echo "bash scripts/inner.sh" >>scripts/build.sh; echo "export ZIRV_FLOW_BENCH_BUILD=1" >scripts/inner.sh'
   expect "the feature name in the compose file fails" 1 'echo "# x" >>docker-compose.yml; echo "  command: --features bench-no-decisions" >>docker-compose.yml'
   expect "the feature name in the CD workflow fails" 1 'echo "  - run: cargo build --features bench-no-decisions" >>.github/workflows/cd.yaml'
+  expect "the variable in a script without .sh fails" 1 \
+    'echo "scripts/release" >>scripts/build.sh; echo "export ZIRV_FLOW_BENCH_BUILD=1" >scripts/release'
+  expect "a workflow-invoked script without .sh fails" 1 \
+    'echo "  - run: scripts/ship" >>.github/workflows/cd.yaml; echo "cargo build --features bench-no-decisions" >scripts/ship'
+  expect "the variable in .cargo/config.toml [env] fails" 1 \
+    'mkdir .cargo; printf "[env]\nZIRV_FLOW_BENCH_BUILD = \"1\"\n" >.cargo/config.toml'
+  expect "the feature in a .cargo/config alias fails" 1 \
+    'mkdir .cargo; printf "[alias]\nb = \"build --features bench-no-decisions\"\n" >.cargo/config'
+  expect "a comment in .cargo/config.toml is not a use" 0 \
+    'mkdir .cargo; printf "# not ZIRV_FLOW_BENCH_BUILD\n[build]\njobs = 4\n" >.cargo/config.toml'
   [ "$failures" -eq 0 ] || { echo "check-bench-features.sh --self-test: $failures scenario(s) failed" >&2; return 1; }
   echo "check-bench-features.sh --self-test: all scenarios passed"
 }

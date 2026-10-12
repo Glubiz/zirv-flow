@@ -38,7 +38,11 @@ case "$tier" in
   *) echo "tier must be S, M or L" >&2; exit 2 ;;
 esac
 export BENCH_APP_CPUSET="$cpuset" BENCH_MEM_WORKER="${1}m" BENCH_MEM_SERVE="${2}m" BENCH_MEM_SCHEDULER="${3}m"
+# The project name is fixed in compose.bench.yaml (name:), so every invocation shares it; containers
+# are <project>-<service>-1.
 c="docker compose -f docker-compose.yml -f scripts/bench/compose.bench.yaml -f scripts/bench/compose.tiers.yaml"
+project="$($c config --format json | jq -r .name)"; cprefix="$project-"
+[ -n "$project" ] && [ "$project" != null ] || { echo "could not read the compose project name" >&2; exit 2; }
 log() { echo "[$tier/$test_name $(date -u +%T)] $*" >&2; }
 die() { log "FAILED: $*"; stop_samplers; exit 1; }
 
@@ -83,10 +87,14 @@ start_samplers() {
   statsfile="$data/$test_name-docker-stats.csv"; inboxfile="$data/$test_name-inbox-samples.csv"
   echo "epoch_s,container,cpu_pct,mem_usage_limit" >"$statsfile"
   echo "epoch_s,inbox_rows,oldest_age_s" >"$inboxfile"
+  # One sample now, so a prefix that matches no container fails the run instead of leaving an empty file.
+  docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' 2>/dev/null \
+    | grep "^$cprefix" | sed "s/^/$(date +%s),/" >>"$statsfile"
+  [ "$(wc -l <"$statsfile")" -gt 1 ] || die "docker stats matched no container named ${cprefix}*"
   ( while true; do
       ts=$(date +%s)
       docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' 2>/dev/null \
-        | grep '^bench-' | sed "s/^/$ts,/" >>"$statsfile"
+        | grep "^$cprefix" | sed "s/^/$ts,/" >>"$statsfile"
       sleep 2
     done ) & samplers+=($!)
   connfile="$data/$test_name-pg-connections.csv"
@@ -106,9 +114,9 @@ trap 'stop_samplers' EXIT
 
 # peaks <t0> <t1>: peak CPU% (of one core) and memory (MiB) per container in the window, as JSON.
 peaks() {
-  awk -F, -v a="$1" -v b="$2" '
+  awk -F, -v a="$1" -v b="$2" -v pre="$cprefix" '
     $1 >= a && $1 <= b {
-      n = $2; sub(/^bench-/, "", n); sub(/-1$/, "", n); cpu = $3; sub(/%/, "", cpu)
+      n = $2; sub("^" pre, "", n); sub(/-1$/, "", n); cpu = $3; sub(/%/, "", cpu)
       split($4, m, " "); v = m[1]
       if (v ~ /GiB$/) { sub(/GiB/, "", v); v = v * 1024 } else if (v ~ /MiB$/) { sub(/MiB/, "", v) }
       else if (v ~ /KiB$/) { sub(/KiB/, "", v); v = v / 1024 } else { v = 0 }
@@ -156,7 +164,7 @@ pg_facts() {
   {
     echo "deadlocks=$(docker logs "$pg" 2>&1 | grep -c 'deadlock detected')"
     for s in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do
-      echo "ip.$s=$(docker inspect "bench-$s-1" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
+      echo "ip.$s=$(docker inspect "$cprefix$s-1" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
     done
     docker logs "$pg" 2>&1 | grep -E 'deadlock|ERROR' | head -20
   } >"$data/$1-pg-facts.txt"

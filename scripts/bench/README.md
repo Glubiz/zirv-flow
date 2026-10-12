@@ -32,6 +32,10 @@ curl -fsS localhost:8080/readyz
 `BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000` and say so in the report. Between runs reset the
 database with `docker compose -f docker-compose.yml -f scripts/bench/compose.bench.yaml down -v`
 and start again, so a run never sees an earlier run's data.
+`compose.bench.yaml` sets the Compose project name `zirv-flow-bench`, so `down -v` removes only this
+stack's volumes and never the quickstart's `postgres-data` and `zirv-flow-secrets`, whatever the
+checkout directory is called. Always pass both `-f` files (the name lives in the second); the
+containers are `zirv-flow-bench-<service>-1`.
 
 ## 2. Create the `ingest` API key
 
