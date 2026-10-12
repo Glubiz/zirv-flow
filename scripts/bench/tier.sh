@@ -25,6 +25,8 @@ mkdir -p "$scratch/raw" "$data"
 pw="bench-pass-12345"          # local, throwaway stack only
 step_s="${BENCH_STEP_SECONDS:-90}"   # seconds per ramp step
 ramp_max="${BENCH_RAMP_MAX:-8000}"  # last ramp step, items/s
+ramp_min="${BENCH_RAMP_MIN:-250}"   # first ramp step, items/s
+ramp_step="${BENCH_RAMP_STEP:-250}" # rung size, items/s
 
 # Tier budget for zirv-flow only (serve, worker, scheduler): cpuset, then memory in MB for the
 # worker (50%), serve (40%) and scheduler (10%). PostgreSQL is outside the budget (compose.tiers.yaml).
@@ -37,6 +39,7 @@ esac
 export BENCH_APP_CPUSET="$cpuset" BENCH_MEM_WORKER="${1}m" BENCH_MEM_SERVE="${2}m" BENCH_MEM_SCHEDULER="${3}m"
 c="docker compose -f docker-compose.yml -f scripts/bench/compose.bench.yaml -f scripts/bench/compose.tiers.yaml"
 log() { echo "[$tier/$test_name $(date -u +%T)] $*" >&2; }
+die() { log "FAILED: $*"; stop_samplers; exit 1; }
 
 pg=""
 q() { docker exec -i "$pg" psql -U zirv -d zirv_flow "$@"; }
@@ -84,6 +87,12 @@ start_samplers() {
       docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' 2>/dev/null \
         | grep '^bench-' | sed "s/^/$ts,/" >>"$statsfile"
       sleep 2
+    done ) & samplers+=($!)
+  connfile="$data/$test_name-pg-connections.csv"
+  echo "epoch_s,client_addr,connections" >"$connfile"
+  ( while true; do
+      q -Atc "select extract(epoch from now())::int||','||coalesce(client_addr::text,'local')||','||count(*) from pg_stat_activity where datname='zirv_flow' group by client_addr"         2>/dev/null >>"$connfile"
+      sleep 5
     done ) & samplers+=($!)
   ( while true; do
       row=$(q -Atc "select count(*)||','||coalesce(round(extract(epoch from now()-min(received_at))::numeric,1),0) from ingest_inbox" 2>/dev/null)
@@ -140,13 +149,25 @@ totals() {
           gave_up: (map(.total.gave_up_after_retries) | add)}' "$@"
 }
 
+# pg_facts <name>: deadlocks in the PostgreSQL log, the container addresses (to read the connection
+# samples) and the error lines, after a test.
+pg_facts() {
+  {
+    echo "deadlocks=$(docker logs "$pg" 2>&1 | grep -c 'deadlock detected')"
+    for s in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do
+      echo "ip.$s=$(docker inspect "bench-$s-1" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
+    done
+    docker logs "$pg" 2>&1 | grep -E 'deadlock|ERROR' | head -20
+  } >"$data/$1-pg-facts.txt"
+}
+
 # ramp <name> <mode> <workspaces> <people>
 ramp() {
   local name="$1" mode="$2" nws="$3" people="$4" prev=0 ceiling=0 verdict_all=held
   stack_up; for i in $(seq 1 "$nws"); do mkkey "$i"; done
   start_samplers
   : >"$data/$name-steps.jsonl"
-  for rate in $(seq 500 500 "$ramp_max"); do
+  for rate in $(seq "$ramp_min" "$ramp_step" "$ramp_max"); do
     drained=$(wait_empty 300)
     [ "$drained" != null ] || { log "inbox not empty before step $rate"; verdict_all="inbox not empty before step $rate"; break; }
     since=$(now_iso); t0=$(date +%s)
@@ -156,7 +177,7 @@ ramp() {
       "$loadgen" --url http://localhost:8080 --key-file "$scratch/key-$i" --mode "$mode" --rate "$per" \
         --duration "$step_s" --people "$people" --run-id "$name-$rate-$i" --out "$f" 2>/dev/null & pids+=($!)
     done
-    wait "${pids[@]}"
+    for p in "${pids[@]}"; do wait "$p" || die "a load generator failed in step $rate"; done
     t1=$(date +%s)
     age_end=$(q -Atc "select coalesce(round(extract(epoch from now()-min(received_at))::numeric,1),0)||','||count(*) from ingest_inbox")
     age_mid=$(awk -F, -v a=$((t0 + step_s * 4 / 9)) -v b=$((t0 + step_s * 6 / 9)) '$1 >= a && $1 <= b && $3 + 0 > m { m = $3 + 0 } END { print m + 0 }' "$inboxfile")
@@ -183,12 +204,12 @@ ramp() {
             (if .inbox_age_end_s > .inbox_age_mid_s + 3 then "inbox_age_growing" else empty end)
           ])}
         | . + {held: (.reasons | length == 0), invalid_generator_bound: (.late_dispatch > 0)}' \
-      >>"$data/$name-steps.jsonl"
+      >>"$data/$name-steps.jsonl" || die "the step summary failed"
     last=$(tail -n1 "$data/$name-steps.jsonl")
     log "step $rate: $(jq -c '{achieved, p99_schedule_ms, age_end: .inbox_age_end_s, applied_p95_ms, reasons}' <<<"$last")"
     if [ "$(jq -r .held <<<"$last")" = true ]; then ceiling=$rate; else break; fi
   done
-  stop_samplers
+  stop_samplers; pg_facts "$name"
   jq -nc --arg name "$name" --argjson ceiling "$ceiling" --arg note "$verdict_all" \
     '{test: $name, ceiling_items_per_s: $ceiling, note: $note}' >"$data/$name-ceiling.json"
   log "ceiling $ceiling"
@@ -200,7 +221,7 @@ single() {
   stack_up; mkkey 1; start_samplers
   since=$(now_iso); t0=$(date +%s)
   "$loadgen" --url http://localhost:8080 --key-file "$scratch/key-1" --run-id "$name" --out "$data/$name.json" "$@" \
-    2>"$data/$name-generator.log"
+    2>"$data/$name-generator.log" || die "the load generator failed"
   t1=$(date +%s)
   rows_end=$(q -Atc "select count(*)||','||coalesce(round(extract(epoch from now()-min(received_at))::numeric,1),0) from ingest_inbox")
   drain_s=$(wait_empty "$cap"); t2=$(date +%s)
@@ -208,11 +229,11 @@ single() {
   q -A --csv -c "select (select count(*) from events) events, (select count(*) from people) people, (select count(*) from decision_records) decisions, (select count(*) from ingest_rejects) rejects, '$since' since, $drain_s drain_s_after_generator_stopped, '$rows_end' inbox_rows_age_at_generator_stop, $rest inbox_rows_left" \
     >"$data/$name-counts.csv"
   docker exec -i -e PGOPTIONS="-c bench.since=$since" "$pg" psql -U zirv -d zirv_flow -A --csv -f - \
-    <scripts/bench/applied-latency.sql >"$data/$name-applied-latency.csv"
+    <scripts/bench/applied-latency.sql >"$data/$name-applied-latency.csv" || die "applied-latency failed"
   peaks "$t0" "$t2" >"$data/$name-peaks.json"
   { curl -fsS localhost:9100/metrics; curl -fsS localhost:9101/metrics; curl -fsS localhost:8080/metrics; } 2>/dev/null \
     | grep -E '^zirv_flow_(ingest|job_duration|job_claim|jobs)' >"$data/$name-metrics.txt"
-  stop_samplers
+  stop_samplers; pg_facts "$name"
   log "generator done $((t1 - t0)) s; drain $drain_s s; inbox left $rest"
 }
 

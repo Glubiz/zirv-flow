@@ -309,7 +309,9 @@ mod tests {
     /// 500 are run; `ZIRV_FLOW_BENCH_DRAIN_BATCH` sets the batch size, default 500, the shipped
     /// `ingest.drain_batch_size`); without the variable it does nothing. It appends what a drain
     /// writes, one `append_decision` per decision on the batch's transaction, and prints JSON
-    /// with the p50, p95 and p99 per batch in milliseconds, with and without the commit.
+    /// with the p50, p95 and p99 per batch in milliseconds, with and without the commit. Progress goes to
+    /// standard error every 50 batches; `ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S` (default 600) caps the time per
+    /// shape and a capped shape is reported with `partial_time_budget_hit` and the batches it ran.
     #[cfg(not(feature = "bench-no-decisions"))]
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_DECISIONS to measure"]
@@ -328,6 +330,12 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(500);
+        let budget = std::time::Duration::from_secs(
+            std::env::var("ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(600),
+        );
         let ws = workspace(&pool, "bench").await;
 
         // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
@@ -355,7 +363,16 @@ mod tests {
         for (name, per_item) in shapes {
             let mut inside = Vec::with_capacity(batches);
             let mut committed = Vec::with_capacity(batches);
-            for _ in 0..batches {
+            let shape_started = Instant::now();
+            let mut partial = false;
+            for number in 0..batches {
+                if shape_started.elapsed() > budget {
+                    partial = true;
+                    break;
+                }
+                if number % 50 == 0 {
+                    eprintln!("{name}: batch {number} of {batches}");
+                }
                 let trace = TraceContext::root(Cause::api("bench"));
                 let started = Instant::now();
                 let mut tx = crate::begin(&pool).await.unwrap();
@@ -384,6 +401,7 @@ mod tests {
                 crate::commit(tx).await.unwrap();
                 committed.push(started.elapsed().as_secs_f64() * 1000.0);
             }
+            let batches_run = inside.len();
             let summary = |mut values: Vec<f64>| {
                 values.sort_by(f64::total_cmp);
                 serde_json::json!({
@@ -395,7 +413,9 @@ mod tests {
             report.push(serde_json::json!({
                 "shape": name,
                 "decisions_per_batch": size * per_item.len(),
-                "batches": batches,
+                "batches_planned": batches,
+                "batches_run": batches_run,
+                "partial_time_budget_hit": partial,
                 "inside_transaction": summary(inside),
                 "with_commit": summary(committed),
             }));

@@ -1143,7 +1143,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        drain_batch(&pool, ws, &key(), 500).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
 
         let rows = applied_latency(&pool).await;
         for (kind, items, p50, p99) in &rows {
@@ -1166,7 +1168,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        drain_batch(&pool, ws, &key(), 500).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
 
         let rows = applied_latency(&pool).await;
         let (kind, items, p50, _) = &rows[0];
