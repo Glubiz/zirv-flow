@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
@@ -44,6 +45,8 @@ pub struct AppState {
     /// Fires when the server is shutting down, so long-lived streams end and do not hold the
     /// graceful shutdown up. Absent when nothing tells the state about shutdown.
     pub(crate) stop: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Which non-public destinations outbound connections may reach.
+    egress: Arc<EgressPolicy>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -76,6 +79,7 @@ impl AppState {
             identifier_key: None,
             explorer: ExplorerLimits::default(),
             stop: None,
+            egress: Arc::default(),
         }
     }
 
@@ -96,6 +100,18 @@ impl AppState {
     pub fn with_event_retention(mut self, settings: EventRetention) -> Self {
         self.event_retention = settings;
         self
+    }
+
+    /// The egress policy outbound connections are checked against; the default allows public
+    /// addresses only.
+    pub fn with_egress_policy(mut self, policy: Arc<EgressPolicy>) -> Self {
+        self.egress = policy;
+        self
+    }
+
+    /// The egress policy outbound connections are checked against.
+    pub fn egress_policy(&self) -> &Arc<EgressPolicy> {
+        &self.egress
     }
 
     /// The explorer's query timeouts and row limits.
@@ -169,6 +185,19 @@ mod tests {
     async fn cookies_are_secure_unless_turned_off() {
         assert!(state().cookie_secure);
         assert!(!state().with_cookie_secure(false).cookie_secure);
+    }
+
+    #[tokio::test]
+    async fn the_egress_policy_denies_non_public_addresses_until_one_is_set() {
+        let ip = "10.0.0.1".parse().unwrap();
+        let allow = Arc::new(EgressPolicy::parse(&["10.0.0.0/8".to_owned()]).unwrap());
+
+        assert!(state().egress_policy().decide(ip) != zirv_flow_core::egress::Decision::Allow);
+        let set = state().with_egress_policy(allow);
+        assert_eq!(
+            set.egress_policy().decide(ip),
+            zirv_flow_core::egress::Decision::Allow
+        );
     }
 
     #[tokio::test]

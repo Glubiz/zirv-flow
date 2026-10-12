@@ -4,6 +4,7 @@ use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use figment::Figment;
 use figment::error::Kind;
@@ -17,7 +18,7 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
-const CONFIG_KEYS: [&str; 36] = [
+const CONFIG_KEYS: [&str; 37] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -51,6 +52,7 @@ const CONFIG_KEYS: [&str; 36] = [
     "explorer.export_timeout_ms",
     "explorer.interactive_row_limit",
     "explorer.export_row_limit",
+    "egress.allow",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -76,7 +78,20 @@ pub(crate) struct Config {
     ingest: IngestConfig,
     imports: ImportsConfig,
     explorer: ExplorerConfig,
+    #[serde(default)]
+    egress: EgressConfig,
     log: LogConfig,
+}
+
+/// Which non-public destinations outbound connections may reach.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EgressConfig {
+    /// CIDR ranges such as `10.0.5.7/32` that outbound connections may reach although they are
+    /// loopback, private, link-local and so on. Cloud metadata addresses are unlocked only by an
+    /// entry naming exactly that address.
+    #[serde(default)]
+    allow: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -559,6 +574,14 @@ impl Config {
             }
         }
 
+        if let Err(error) = zirv_flow_api::EgressPolicy::parse(&config.egress.allow) {
+            return Err(ConfigError::new(
+                "egress.allow",
+                error.to_string(),
+                source_for("egress.allow", path, &env_sources),
+            ));
+        }
+
         config.validate_events(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
         if config.imports.max_file_bytes == 0 {
@@ -846,6 +869,13 @@ impl Config {
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub(crate) fn ingest_drain_shards(&self) -> u32 {
         self.ingest.drain_shards
+    }
+
+    /// The egress policy built from `egress.allow`, which `load` has validated.
+    pub(crate) fn egress_policy(&self) -> Arc<zirv_flow_api::EgressPolicy> {
+        let policy = zirv_flow_api::EgressPolicy::parse(&self.egress.allow)
+            .expect("egress.allow is validated when the configuration loads");
+        Arc::new(policy)
     }
 
     /// The most jobs of one workspace that run at once; none means unlimited.
@@ -1762,6 +1792,59 @@ endpoint = \"http://collector:4318\"
         assert_eq!(defaults.import_limits().max_file_bytes, 536_870_912);
         assert_eq!(set.import_limits().max_file_bytes, 2048);
         assert!(toml::to_string(&defaults).unwrap().contains("[imports]"));
+    }
+
+    #[test]
+    fn the_egress_allowlist_is_empty_by_default_and_read_from_a_file_or_the_environment() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let loopback = "127.0.0.1".parse().unwrap();
+        let office = "10.0.5.7".parse().unwrap();
+        assert!(defaults.egress.allow.is_empty());
+        assert_ne!(
+            defaults.egress_policy().decide(loopback),
+            zirv_flow_api::EgressDecision::Allow
+        );
+        assert!(toml::to_string(&defaults).unwrap().contains("[egress]"));
+
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[egress]
+allow = [\"10.0.5.7/32\", \"192.168.0.0/16\"]
+",
+        );
+        let from_file = Config::load(Some(&file.0), []).unwrap();
+        assert_eq!(from_file.egress.allow, ["10.0.5.7/32", "192.168.0.0/16"]);
+        assert_eq!(
+            from_file.egress_policy().decide(office),
+            zirv_flow_api::EgressDecision::Allow
+        );
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_EGRESS__ALLOW".into(), "[\"10.0.5.7/32\"]".into()));
+        let from_env = Config::load(None, env).unwrap();
+        assert_eq!(from_env.egress.allow, ["10.0.5.7/32"]);
+    }
+
+    #[test]
+    fn an_invalid_egress_entry_fails_naming_the_key_and_the_reason() {
+        for (entry, reason) in [
+            ("10.0.5.7", "is not a CIDR range"),
+            ("10.0.0.9/8", "has host bits set; write it as 10.0.0.0/8"),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((
+                "ZIRV_FLOW_EGRESS__ALLOW".into(),
+                format!("[\"10.0.0.0/8\", \"{entry}\"]").into(),
+            ));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.starts_with("egress.allow: "), "{error}");
+            assert!(error.contains(entry), "{error}");
+            assert!(error.contains(reason), "{error}");
+            assert!(error.contains("ZIRV_FLOW_EGRESS__ALLOW"), "{error}");
+        }
     }
 
     #[test]

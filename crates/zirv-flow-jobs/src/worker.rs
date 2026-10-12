@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
+use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     ClaimedJob, EventRetention, FailOutcome, HmacKey, PgPool, begin, claim_job, complete_job,
@@ -48,6 +49,8 @@ pub struct WorkerConfig {
     pub ingest_drain_batch_size: u32,
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub ingest_drain_shards: u32,
+    /// Which non-public destinations outbound connections may reach.
+    pub egress: Arc<EgressPolicy>,
 }
 
 impl WorkerConfig {
@@ -64,6 +67,7 @@ impl WorkerConfig {
             identifier_key: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
+            egress: Arc::default(),
         }
     }
 }
@@ -569,6 +573,7 @@ mod tests {
             identifier_key: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,
+            egress: Arc::default(),
         }
     }
 
