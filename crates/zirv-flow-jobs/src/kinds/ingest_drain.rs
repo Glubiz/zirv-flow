@@ -715,8 +715,9 @@ mod tests {
         }
         let left = inbox(&pool).await;
         assert!(left > 0, "the run was cut off with rows remaining");
-        // With no connection checked out, nothing can commit anymore.
-        tokio::task::yield_now().await;
+        // A shard that outlived the handler, even one asleep in its longest retry backoff
+        // (400 ms), would commit another one-row batch within this window.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(
             inbox(&pool).await,
             left,
