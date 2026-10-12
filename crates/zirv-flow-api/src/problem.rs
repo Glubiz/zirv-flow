@@ -212,6 +212,7 @@ impl From<crate::admin::AdminError> for ApiError {
             AdminError::Conflict(detail) => Self::new(StatusCode::CONFLICT, detail),
             AdminError::NotFound(_) => Self::not_found(),
             AdminError::Store(error) => error.into(),
+            AdminError::Secret(_) => Self::internal(),
         }
     }
 }

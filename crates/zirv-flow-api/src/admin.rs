@@ -11,9 +11,11 @@ use std::fmt;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zirv_flow_core::{
-    ApiKeyId, Cause, Email, HmacPurpose, HmacRoot, Role, Scope, Slug, TraceContext, UserId,
-    ValidationError, WorkspaceId, WorkspaceName, password,
+    ApiKeyId, Cause, Email, HmacPurpose, HmacRoot, Keyring, Role, Scope, SecretBytes, SecretError,
+    SecretId, SecretPurpose, Slug, TraceContext, UserId, ValidationError, WorkspaceId,
+    WorkspaceName, password, rewrap, seal, secret_aad,
 };
+use zirv_flow_store::secrets;
 use zirv_flow_store::{
     Actor, ApiKey, Membership, NewAuditEntry, PgConnection, PgPool, ReplayReport, StoreError, User,
     Workspace,
@@ -72,6 +74,8 @@ pub enum AdminError {
     Conflict(&'static str),
     NotFound(&'static str),
     Store(StoreError),
+    /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
+    Secret(SecretError),
 }
 
 impl fmt::Display for AdminError {
@@ -81,6 +85,7 @@ impl fmt::Display for AdminError {
             Self::Conflict(message) => formatter.write_str(message),
             Self::NotFound(what) => write!(formatter, "no such {what}"),
             Self::Store(error) => error.fmt(formatter),
+            Self::Secret(error) => error.fmt(formatter),
         }
     }
 }
@@ -90,6 +95,7 @@ impl Error for AdminError {
         match self {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
+            Self::Secret(error) => Some(error),
             Self::Conflict(_) | Self::NotFound(_) => None,
         }
     }
@@ -98,6 +104,12 @@ impl Error for AdminError {
 impl From<ValidationError> for AdminError {
     fn from(error: ValidationError) -> Self {
         Self::Invalid(error)
+    }
+}
+
+impl From<SecretError> for AdminError {
+    fn from(error: SecretError) -> Self {
+        Self::Secret(error)
     }
 }
 
@@ -472,9 +484,148 @@ pub async fn replay_erasures(
     Ok(report)
 }
 
+/// What [`rotate_master_key`] re-wrapped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationReport {
+    /// Data keys now wrapped by the current master key that another key wrapped before.
+    pub rows: usize,
+    /// The ids of the master keys that wrapped them, sorted.
+    pub from_key_ids: Vec<String>,
+    /// The id of the current master key.
+    pub key_id: String,
+}
+
+/// Re-wraps every data key, the deployment HMAC root included, with the current master key in
+/// one transaction. Ciphertexts are untouched, and a second run re-wraps nothing. A row
+/// wrapped by a key the keyring does not hold aborts the whole rotation. Audited as
+/// `secrets.master_key_rotated`, with key ids and the count only.
+pub async fn rotate_master_key(
+    pool: &PgPool,
+    context: &Context,
+    keyring: &Keyring,
+) -> Result<RotationReport, AdminError> {
+    let key_id = keyring.current().key_id();
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let rows = secrets::rows_not_wrapped_by(&mut tx, &key_id).await?;
+    let mut from_key_ids = std::collections::BTreeSet::new();
+    for row in &rows {
+        let wrapped = rewrap(keyring, &row.sealed)?;
+        secrets::set_wrapped_key(&mut tx, &row.row, &wrapped.key_id, &wrapped.wrapped_key).await?;
+        from_key_ids.insert(row.sealed.key_id.clone());
+    }
+    let report = RotationReport {
+        rows: rows.len(),
+        from_key_ids: from_key_ids.into_iter().collect(),
+        key_id,
+    };
+    audit(
+        &mut tx,
+        context,
+        None,
+        "secrets.master_key_rotated",
+        None,
+        json!({
+            "from_key_ids": report.from_key_ids,
+            "key_id": report.key_id,
+            "rows": report.rows,
+        }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(report)
+}
+
+/// Seals `plaintext` and stores it as a secret of the workspace. Audited as `secret.created`
+/// with the purpose and the wrapping key id, never the value.
+pub async fn create_secret(
+    pool: &PgPool,
+    context: &Context,
+    keyring: &Keyring,
+    workspace: WorkspaceId,
+    purpose: SecretPurpose,
+    plaintext: &SecretBytes,
+) -> Result<SecretId, AdminError> {
+    let id = SecretId::new();
+    let sealed = seal(
+        keyring,
+        plaintext.expose(),
+        &secret_aad(workspace, id, purpose),
+    );
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    secrets::insert(&mut *tx, workspace, purpose, id, &sealed).await?;
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "secret.created",
+        Some(("secret", id.as_uuid())),
+        json!({"purpose": purpose.as_str(), "key_id": sealed.key_id}),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(id)
+}
+
+/// Seals a new value over an existing secret of the workspace. Audited as `secret.replaced`.
+pub async fn replace_secret(
+    pool: &PgPool,
+    context: &Context,
+    keyring: &Keyring,
+    workspace: WorkspaceId,
+    id: SecretId,
+    plaintext: &SecretBytes,
+) -> Result<(), AdminError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let stored = secrets::get(&mut *tx, workspace, id)
+        .await?
+        .ok_or(AdminError::NotFound("secret"))?;
+    let sealed = seal(
+        keyring,
+        plaintext.expose(),
+        &secret_aad(workspace, id, stored.purpose),
+    );
+    secrets::replace(&mut *tx, workspace, id, &sealed).await?;
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "secret.replaced",
+        Some(("secret", id.as_uuid())),
+        json!({"purpose": stored.purpose.as_str(), "key_id": sealed.key_id}),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(())
+}
+
+/// Deletes a secret of the workspace. Audited as `secret.deleted`.
+pub async fn delete_secret(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    id: SecretId,
+) -> Result<(), AdminError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    if !secrets::delete(&mut *tx, workspace, id).await? {
+        return Err(AdminError::NotFound("secret"));
+    }
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "secret.deleted",
+        Some(("secret", id.as_uuid())),
+        json!({}),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
+    use zirv_flow_core::{MasterKey, deployment_key_aad, open};
 
     use super::*;
 
@@ -702,5 +853,208 @@ mod tests {
         assert!(matches!(no_scopes, Err(AdminError::Invalid(_))));
         assert!(matches!(no_name, Err(AdminError::Invalid(_))));
         assert!(matches!(unknown_key, Err(AdminError::NotFound(_))));
+    }
+
+    fn keyring(current: &MasterKey, previous: Option<&MasterKey>) -> Keyring {
+        let copy = |key: &MasterKey| MasterKey::parse(&key.to_base64()).unwrap();
+        Keyring::new(copy(current), previous.map(copy)).unwrap()
+    }
+
+    fn actions(entries: &[zirv_flow_store::AuditEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.action.as_str()).collect()
+    }
+
+    #[test]
+    fn a_secret_error_names_a_key_and_is_an_internal_error_over_http() {
+        use axum::response::IntoResponse;
+
+        let error = AdminError::from(SecretError::UnknownKey {
+            key_id: "0123456789abcdef".into(),
+        });
+
+        assert!(error.to_string().contains("0123456789abcdef"));
+        assert_eq!(
+            crate::problem::ApiError::from(error)
+                .into_response()
+                .status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn secret_writes_are_audited_without_the_value(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let keys = keyring(&MasterKey::generate(), None);
+
+        let id = create_secret(
+            &pool,
+            &context,
+            &keys,
+            ws.id,
+            SecretPurpose::OAuthToken,
+            &SecretBytes::new(b"hunter2-token".to_vec()),
+        )
+        .await
+        .unwrap();
+        replace_secret(
+            &pool,
+            &context,
+            &keys,
+            ws.id,
+            id,
+            &SecretBytes::new(b"hunter3-token".to_vec()),
+        )
+        .await
+        .unwrap();
+        let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+        let aad = secret_aad(ws.id, id, stored.purpose);
+        let opened = open(&keys, &stored.sealed, &aad).unwrap();
+        delete_secret(&pool, &context, ws.id, id).await.unwrap();
+        let missing = delete_secret(&pool, &context, ws.id, id).await;
+        let replace_missing = replace_secret(
+            &pool,
+            &context,
+            &keys,
+            ws.id,
+            id,
+            &SecretBytes::new(b"x".to_vec()),
+        )
+        .await;
+
+        assert_eq!(opened.expose(), b"hunter3-token");
+        assert!(matches!(missing, Err(AdminError::NotFound(_))));
+        assert!(matches!(replace_missing, Err(AdminError::NotFound(_))));
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let secret_actions: Vec<&str> = actions(&entries)
+            .into_iter()
+            .filter(|action| action.starts_with("secret."))
+            .collect();
+        assert_eq!(
+            secret_actions,
+            ["secret.deleted", "secret.replaced", "secret.created"]
+        );
+        let text = format!("{entries:?}");
+        assert!(!text.contains("hunter"), "{text}");
+        assert!(text.contains("oauth_token"), "{text}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotation_rewraps_every_row_once_keeps_ciphertexts_and_is_audited(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let old = MasterKey::generate();
+        let new = MasterKey::generate();
+        let before = keyring(&old, None);
+        let id = create_secret(
+            &pool,
+            &context,
+            &before,
+            ws.id,
+            SecretPurpose::ConnectorCredential,
+            &SecretBytes::new(b"hunter2".to_vec()),
+        )
+        .await
+        .unwrap();
+        let root_bytes = HmacRoot::bootstrap_from(&old).to_secret_bytes();
+        let root = seal(
+            &before,
+            root_bytes.expose(),
+            &deployment_key_aad(secrets::HMAC_ROOT),
+        );
+        secrets::insert_hmac_root_if_absent(&pool, &root)
+            .await
+            .unwrap();
+        let ciphertext = secrets::get(&pool, ws.id, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sealed
+            .ciphertext;
+        let both = keyring(&new, Some(&old));
+
+        let first = rotate_master_key(&pool, &context, &both).await.unwrap();
+        let second = rotate_master_key(&pool, &context, &both).await.unwrap();
+
+        assert_eq!(first.rows, 2);
+        assert_eq!(first.from_key_ids, [old.key_id()]);
+        assert_eq!(first.key_id, new.key_id());
+        assert_eq!(second.rows, 0);
+        let only_new = keyring(&new, None);
+        let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+        assert_eq!(stored.sealed.ciphertext, ciphertext);
+        assert_eq!(stored.sealed.key_id, new.key_id());
+        let aad = secret_aad(ws.id, id, stored.purpose);
+        let opened = open(&only_new, &stored.sealed, &aad).unwrap();
+        assert_eq!(opened.expose(), b"hunter2");
+        let root = secrets::hmac_root(&pool).await.unwrap().unwrap();
+        let aad = deployment_key_aad(secrets::HMAC_ROOT);
+        let opened = open(&only_new, &root, &aad).unwrap();
+        assert_eq!(opened.expose(), root_bytes.expose());
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let rotations: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.action == "secrets.master_key_rotated")
+            .collect();
+        assert_eq!(rotations.len(), 2);
+        assert_eq!(rotations[1].summary["rows"], 2);
+        assert_eq!(rotations[1].summary["key_id"], new.key_id());
+        assert_eq!(rotations[1].summary["from_key_ids"], json!([old.key_id()]));
+        assert_eq!(rotations[0].summary["rows"], 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_wrapped_by_an_unknown_key_aborts_the_whole_rotation(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let (a, b, c) = (
+            MasterKey::generate(),
+            MasterKey::generate(),
+            MasterKey::generate(),
+        );
+        let known = create_secret(
+            &pool,
+            &context,
+            &keyring(&a, None),
+            ws.id,
+            SecretPurpose::AiProviderKey,
+            &SecretBytes::new(b"one".to_vec()),
+        )
+        .await
+        .unwrap();
+        let stray = create_secret(
+            &pool,
+            &context,
+            &keyring(&b, None),
+            ws.id,
+            SecretPurpose::AiProviderKey,
+            &SecretBytes::new(b"two".to_vec()),
+        )
+        .await
+        .unwrap();
+
+        let error = rotate_master_key(&pool, &context, &keyring(&c, Some(&a)))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains(&b.key_id()), "{error}");
+        for (id, expected) in [(known, a.key_id()), (stray, b.key_id())] {
+            let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+            assert_eq!(stored.sealed.key_id, expected);
+        }
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(!actions(&entries).contains(&"secrets.master_key_rotated"));
     }
 }
