@@ -196,6 +196,7 @@ mod tests {
                 pool: pool.clone(),
                 redaction_key: Some(key.clone()),
                 batch_size: 10,
+                shards: 1,
             });
             IngestReplay
                 .run(&mut ctx, claimed.payload.clone())

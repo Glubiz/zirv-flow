@@ -46,6 +46,8 @@ pub struct WorkerConfig {
     pub identifier_key: Option<Arc<HmacKey>>,
     /// Inbox rows `ingest.drain` applies per transaction.
     pub ingest_drain_batch_size: u32,
+    /// Concurrent drain loops per workspace in `ingest.drain`.
+    pub ingest_drain_shards: u32,
 }
 
 impl WorkerConfig {
@@ -61,15 +63,16 @@ impl WorkerConfig {
             redaction_key: None,
             identifier_key: None,
             ingest_drain_batch_size: 500,
+            ingest_drain_shards: 4,
         }
     }
 }
 
 /// A pool of workers over one database. It runs on pools of its own, so neither the HTTP
 /// server nor running handlers can starve a claim, a handler transaction or a heartbeat:
-/// `2 * concurrency + 1` connections for claims, handler transactions, the transactions a
-/// handler such as the ingest drain commits on its own beside its job transaction, and
-/// failures, and `concurrency` for heartbeats only.
+/// `concurrency * (1 + drain_shards) + 1` connections for claims, handler transactions, the
+/// transactions a handler such as the ingest drain commits on its own beside its job
+/// transaction (one per drain shard), and failures, and `concurrency` for heartbeats only.
 pub struct Worker {
     pool: PgPool,
     registry: Registry,
@@ -108,7 +111,7 @@ impl Worker {
             kinds: self.registry.kinds(),
             pool: sized_like(
                 &self.pool,
-                slots.saturating_mul(2).saturating_add(1),
+                pool_size(slots, self.config.ingest_drain_shards),
                 0,
                 ACQUIRE_TIMEOUT,
             ),
@@ -131,6 +134,14 @@ impl Worker {
         drop(listener);
         drop(sampler);
     }
+}
+
+/// The shared pool's size: each slot holds its job transaction plus up to `drain_shards`
+/// drain-batch transactions, and one connection is kept for failures.
+fn pool_size(slots: u32, drain_shards: u32) -> u32 {
+    slots
+        .saturating_mul(drain_shards.max(1).saturating_add(1))
+        .saturating_add(1)
 }
 
 /// Publishes the worker pools' gauges, until the task is aborted.
@@ -340,6 +351,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
                 pool: shared.pool.clone(),
                 redaction_key: shared.config.redaction_key.clone(),
                 batch_size: shared.config.ingest_drain_batch_size,
+                shards: shared.config.ingest_drain_shards,
             });
         let handler = kind.run(&mut ctx, job.payload.clone());
         tokio::select! {
@@ -406,6 +418,15 @@ mod tests {
 
     use super::*;
     use crate::{JobError, JobKind};
+
+    #[test]
+    fn the_pool_holds_a_job_transaction_and_a_batch_per_shard_for_every_slot_and_one_spare() {
+        assert_eq!(pool_size(4, 4), 21);
+        assert_eq!(pool_size(1, 1), 3);
+        assert_eq!(pool_size(8, 16), 137);
+        assert_eq!(pool_size(2, 0), 5, "no shards still holds one batch");
+        assert_eq!(pool_size(u32::MAX, 16), u32::MAX);
+    }
 
     /// Records the job's index in `effects` (primary key: a repeat is an error), failing the
     /// first attempt of every `fail_every`-th job.
@@ -546,6 +567,7 @@ mod tests {
             redaction_key: None,
             identifier_key: None,
             ingest_drain_batch_size: 500,
+            ingest_drain_shards: 4,
         }
     }
 

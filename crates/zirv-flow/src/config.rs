@@ -13,7 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
-const CONFIG_KEYS: [&str; 35] = [
+
+/// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
+const MAX_DRAIN_SHARDS: u32 = 16;
+
+const CONFIG_KEYS: [&str; 36] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -41,6 +45,7 @@ const CONFIG_KEYS: [&str; 35] = [
     "ingest.rate_per_key",
     "ingest.burst_per_key",
     "ingest.drain_batch_size",
+    "ingest.drain_shards",
     "imports.max_file_bytes",
     "explorer.interactive_timeout_ms",
     "explorer.export_timeout_ms",
@@ -267,6 +272,8 @@ struct IngestConfig {
     burst_per_key: u32,
     /// Inbox rows applied per transaction by `ingest.drain`.
     drain_batch_size: u32,
+    /// Concurrent drain loops per workspace in `ingest.drain`.
+    drain_shards: u32,
 }
 
 /// What a CSV upload may be.
@@ -432,6 +439,7 @@ impl Config {
             .merge(Serialized::default("ingest.rate_per_key", 10_000_u32))
             .merge(Serialized::default("ingest.burst_per_key", 20_000_u32))
             .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
+            .merge(Serialized::default("ingest.drain_shards", 4_u32))
             .merge(Serialized::default(
                 "imports.max_file_bytes",
                 536_870_912_u64,
@@ -642,6 +650,9 @@ impl Config {
                 "must be at least ingest.max_batch_items, or a full batch could never pass",
             ));
         }
+        if !(1..=MAX_DRAIN_SHARDS).contains(&ingest.drain_shards) {
+            return Err(fail("ingest.drain_shards", "must be between 1 and 16"));
+        }
         Ok(())
     }
 
@@ -830,6 +841,11 @@ impl Config {
     /// Inbox rows `ingest.drain` applies per transaction.
     pub(crate) fn ingest_drain_batch_size(&self) -> u32 {
         self.ingest.drain_batch_size
+    }
+
+    /// Concurrent drain loops per workspace in `ingest.drain`.
+    pub(crate) fn ingest_drain_shards(&self) -> u32 {
+        self.ingest.drain_shards
     }
 
     /// The most jobs of one workspace that run at once; none means unlimited.
@@ -1685,6 +1701,7 @@ endpoint = \"http://collector:4318\"
 
         assert_eq!(limits, zirv_flow_api::IngestLimits::default());
         assert_eq!(config.ingest_drain_batch_size(), 500);
+        assert_eq!(config.ingest_drain_shards(), 4);
         assert!(toml::to_string(&config).unwrap().contains("[ingest]"));
     }
 
@@ -1697,6 +1714,7 @@ endpoint = \"http://collector:4318\"
             ("RATE_PER_KEY", "5"),
             ("BURST_PER_KEY", "50"),
             ("DRAIN_BATCH_SIZE", "25"),
+            ("DRAIN_SHARDS", "8"),
         ] {
             env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), value.into()));
         }
@@ -1714,6 +1732,20 @@ endpoint = \"http://collector:4318\"
             (2048, 10, 5, 50)
         );
         assert_eq!(config.ingest_drain_batch_size(), 25);
+        assert_eq!(config.ingest_drain_shards(), 8);
+    }
+
+    #[test]
+    fn drain_shards_outside_one_to_sixteen_name_their_key() {
+        for value in ["0", "17"] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_INGEST__DRAIN_SHARDS".into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains("ingest.drain_shards"), "{error}");
+            assert!(error.contains("between 1 and 16"), "{error}");
+        }
     }
 
     #[test]

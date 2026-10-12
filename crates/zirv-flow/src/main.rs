@@ -374,6 +374,7 @@ async fn run_roles_reporting(
             .as_deref()
             .map(|key| Arc::new(key.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
+        worker_config.ingest_drain_shards = config.ingest_drain_shards();
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
             zirv_flow_jobs::Registry::built_in(),
