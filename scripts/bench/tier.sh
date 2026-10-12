@@ -258,7 +258,8 @@ case "$test_name" in
   sustained) single sustained 1800 --mode track --rate 2000 --duration 600 --people 100000 ;;
   burst)
     export BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000
-    single burst 1800 --mode batch --batch-size 100 --burst-rate 10000 --burst-duration "$burst_s" --people 1000000 ;;
+    name=burst; [ "$burst_s" = 120 ] || name="burst$burst_s"  # keep a longer run from overwriting the default one
+    single "$name" 1800 --mode batch --batch-size 100 --burst-rate 10000 --burst-duration "$burst_s" --people 1000000 ;;
   batch)
     [ "$tier" = M ] || { echo "batch runs on tier M only" >&2; exit 2; }
     single batch 1800 --mode batch --batch-size 500 --rate 2000 --duration 600 --people 1000000 ;;

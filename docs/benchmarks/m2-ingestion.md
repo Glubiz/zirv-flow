@@ -162,10 +162,10 @@ Peaks at the ceiling step (percent of one core / MiB not shown):
   task, which runs on one thread at a time (#74).
   **After #74** (each shard its own task, section 5.1) the same burst takes the worker to 177% (S, of 200%
   available), 238% (M) and 274% (L), and the drain rate rises to about 4,400 (S), 4,000 (M) and 4,000 (L)
-  items/s: the per-workspace cap of one core is gone, but the rate gained is about 18 to 29%, not the
+  items/s: the per-workspace cap of one core is gone, but the rate gained is about 18 to 31%, not the
   2 to 4 times the extra cores might suggest, and it no longer follows the vCPU count (M and L are equal;
-  L's worker uses 0.36 core more for the same rate). PostgreSQL peaks at 450 to 490% in these bursts, so
-  the next limit was not located by these runs.
+  L's worker uses 0.36 core more for the same rate). PostgreSQL peaks at 450 to 490% in these bursts (325
+  to 345% before), so the next limit was not located by these runs.
 - PostgreSQL peaks at 300 to 700% of the cores it has (24), it is not the limit.
 
 ### 3.2 Scaling and how to predict
@@ -267,9 +267,9 @@ divided by the drain time:
 
 | Tier | Largest backlog | Drain after the generator stopped | Drain rate | Applied p95, per kind | API p99 | Worker / PostgreSQL peak CPU | Deadlocks |
 |---|---|---|---|---|---|---|---|
-| S | 703,783 rows (814,411) | 160 s (243 s) | 4,400/s (3,350/s) | identify 149.8 s, track 147.3 s (225.7 s, 223.6 s) | 24.6 ms (23.2 ms) | 177% / 454% (105% / n/a) | 4 (1) |
-| M | 743,392 (796,475) | 186 s (237 s) | 4,000/s (3,360/s) | identify 174.8 s, track 172.1 s (223.2 s, 220.7 s) | 23.5 ms (22.4 ms) | 238% / 488% (103% / n/a) | 5 (9) |
-| L | 737,813 (806,822) | 186 s (240 s) | 3,970/s (3,360/s) | identify 171.5 s, track 169.2 s (223.0 s, 220.9 s) | 25.5 ms (22.6 ms) | 274% / 469% (104% / n/a) | 6 (1) |
+| S | 703,783 rows (814,411) | 160 s (243 s) | 4,400/s (3,350/s) | identify 149.8 s, track 147.3 s (225.7 s, 223.6 s) | 24.6 ms (23.2 ms) | 177% / 454% (105% / 345%) | 4 (1) |
+| M | 743,392 (796,475) | 186 s (237 s) | 4,000/s (3,360/s) | identify 174.8 s, track 172.1 s (223.2 s, 220.7 s) | 23.5 ms (22.4 ms) | 238% / 488% (103% / 340%) | 5 (9) |
+| L | 737,813 (806,822) | 186 s (240 s) | 3,970/s (3,360/s) | identify 171.5 s, track 169.2 s (223.0 s, 220.9 s) | 25.5 ms (22.6 ms) | 274% / 469% (104% / 325%) | 6 (1) |
 
 Largest backlog is the larger of the inbox samples and the count at the generator's stop. The drain is 22 to
 34% shorter, not the 2 to 4 times the extra cores would allow; M and L drain at the same rate (section 3.1).
@@ -294,8 +294,8 @@ then the drain to empty:
 | 3,640,933 rows (oldest 369 s) | 890 s (14.8 min) | 4,090/s | identify 867.7 s, track 839.2 s | 23.9 ms | 245% / 542% | 7 | HIT, 10 s inside 15 min |
 
 All 6,000,000 items were accepted (60,000 requests, all 202, achieved 9,999.7/s, `late_dispatch` 0, no
-errors); 3,001,301 track events and 997,535 people were stored and the inbox ended at 0. The worker held
-225 to 243% for the whole drain. The margin is 1.1% of the target: the result is a pass on this host, one
+errors); 3,001,301 track events and 997,535 people were stored and the inbox ended at 0. The worker averaged
+224% over the drain; from about 350 s in, single samples dip as low as 72%. The margin is 1.1% of the target: the result is a pass on this host, one
 run, and 4,090 items/s is the measured rate for this workload (mixed identify and track, 1,000,000 people), so
 a run a little slower would miss. It is a development machine, not reference hardware.
 

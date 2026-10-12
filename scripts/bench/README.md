@@ -219,7 +219,7 @@ scripts/bench/tier.sh M decappend                                 # tier M only
   is generator-bound and invalid. `BENCH_STEP_SECONDS` and `BENCH_RAMP_MAX` shorten a smoke run.
 - `batch1` is a ramp in batches of 100 (identify and track mixed) from 2,000 items/s in steps of 2,000 with the
   per-key limit raised, to measure limits the single-item host path hides.
-- `sustained` is track at 2,000/s for 10 minutes; `burst` is 10,000/s for 2 minutes (`BENCH_BURST_SECONDS`, default 120; 600 is the section 19 case) (batch mode, key
+- `sustained` is track at 2,000/s for 10 minutes; `burst` is 10,000/s for 2 minutes (`BENCH_BURST_SECONDS`, default 120; 600 is the section 19 case, written as `burst600`) (batch mode, key
   limit raised to 20,000/40,000) then the drain to empty, capped at 30 minutes, which also covers a 10-minute burst (15-minute target); `batch` is 500 per
   request at 2,000 items/s for 10 minutes.
 - Every test recreates the stack on a fresh volume, samples `docker stats` and the inbox, and writes
