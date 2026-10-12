@@ -211,4 +211,12 @@ mod tests {
             "ab049ff71bfc0bf229a7db6382c360fcff22ae0a54d5bb4127495c0008a76363"
         );
     }
+
+    #[test]
+    fn the_redaction_key_and_digest_match_the_known_answers() {
+        let key = fixed().hmac_key(HmacPurpose::Redaction);
+
+        assert_eq!(hex(&key.0), "74aaeb1f803248b5f753665c4ef4eecc917622ba5c8a4fe3427673b86f72b7cf");
+        assert_eq!(hex(&key.digest(b"person@example.com")), "b635a803eeae338f38ccf4bcadadbac624740b469fe9113628e36f153134bf71");
+    }
 }
