@@ -318,23 +318,19 @@ mod tests {
     async fn a_drain_batch_of_decisions_records_its_duration(pool: PgPool) {
         use std::time::Instant;
 
-        let Some(batches) = std::env::var("ZIRV_FLOW_BENCH_DECISIONS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-        else {
+        fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+        }
+        let Some(batches) = env_number::<usize>("ZIRV_FLOW_BENCH_DECISIONS") else {
             eprintln!("ZIRV_FLOW_BENCH_DECISIONS is not set: skipping the timing run");
             return;
         };
         let batches = batches.max(500);
-        let size = std::env::var("ZIRV_FLOW_BENCH_DRAIN_BATCH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(500);
+        let size = env_number::<usize>("ZIRV_FLOW_BENCH_DRAIN_BATCH").unwrap_or(500);
         let budget = std::time::Duration::from_secs(
-            std::env::var("ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(600),
+            env_number::<u64>("ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S").unwrap_or(600),
         );
         let ws = workspace(&pool, "bench").await;
 
@@ -428,7 +424,6 @@ mod tests {
 
     #[test]
     fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
-        assert_eq!(BENCH_NO_DECISIONS, cfg!(feature = "bench-no-decisions"));
         #[cfg(not(feature = "bench-no-decisions"))]
         const {
             assert!(!BENCH_NO_DECISIONS)

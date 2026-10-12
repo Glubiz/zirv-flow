@@ -71,22 +71,14 @@ impl Config {
 
     fn body(&self, first_seq: u64, count: u64) -> Vec<u8> {
         let value = match self.mode {
-            Mode::Identify => item(
-                self.seed,
-                &self.run_id,
-                self.people,
-                first_seq,
-                Kind::Identify,
-                false,
-            ),
-            Mode::Track => item(
-                self.seed,
-                &self.run_id,
-                self.people,
-                first_seq,
-                Kind::Track,
-                false,
-            ),
+            Mode::Identify | Mode::Track => {
+                let kind = if self.mode == Mode::Identify {
+                    Kind::Identify
+                } else {
+                    Kind::Track
+                };
+                item(self.seed, &self.run_id, self.people, first_seq, kind, false)
+            }
             Mode::Batch => {
                 let items: Vec<_> = (first_seq..first_seq + count)
                     .map(|seq| {
