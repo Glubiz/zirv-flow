@@ -115,7 +115,8 @@ pub async fn get<'e>(
     id: SecretId,
 ) -> Result<Option<StoredSecret>, StoreError> {
     let row: Option<SecretRow> = sqlx::query_as(
-        "SELECT purpose, key_id, wrapped_key, nonce, ciphertext          FROM encrypted_secrets WHERE workspace_id = $1 AND id = $2",
+        "SELECT purpose, key_id, wrapped_key, nonce, ciphertext \
+         FROM encrypted_secrets WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace.as_uuid())
     .bind(id.as_uuid())
@@ -211,14 +212,16 @@ pub async fn rows_not_wrapped_by(
     key_id: &str,
 ) -> Result<Vec<WrappedKey>, StoreError> {
     let secrets: Vec<IdRow> = sqlx::query_as(
-        "SELECT id, key_id, wrapped_key, nonce, ciphertext FROM encrypted_secrets          WHERE key_id <> $1 ORDER BY id FOR UPDATE",
+        "SELECT id, key_id, wrapped_key, nonce, ciphertext FROM encrypted_secrets \
+         WHERE key_id <> $1 ORDER BY id FOR UPDATE",
     )
     .bind(key_id)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let deployment: Vec<NameRow> = sqlx::query_as(
-        "SELECT name, key_id, wrapped_key, nonce, ciphertext FROM deployment_keys          WHERE key_id <> $1 ORDER BY name FOR UPDATE",
+        "SELECT name, key_id, wrapped_key, nonce, ciphertext FROM deployment_keys \
+         WHERE key_id <> $1 ORDER BY name FOR UPDATE",
     )
     .bind(key_id)
     .fetch_all(&mut *connection)
