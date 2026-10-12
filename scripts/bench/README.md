@@ -202,22 +202,29 @@ all in `compose.tiers.yaml`. The generator runs on the host. Build `loadgen` and
 
 ```sh
 export BENCH_LOADGEN=target/release/loadgen BENCH_SCRATCH=/tmp/zirv-bench
-for t in track1 identify1 track4 sustained burst; do scripts/bench/tier.sh M "$t"; done
+for t in track1 identify1 track4 batch1 sustained burst; do scripts/bench/tier.sh M "$t"; done
 scripts/bench/tier.sh M batch; scripts/bench/tier.sh M oq1       # tier M only
 cargo test --release -p zirv-flow-store --no-run                  # once, before decappend
 scripts/bench/tier.sh M decappend                                 # tier M only
 ```
 
-- `track1`, `identify1` and `track4` (four workspaces, four generators at rate/4) ramp from 500 items/s
-  in steps of 500 for 90 s, up to 8,000, and stop at the first step that fails: schedule-based API p99
+- `track1`, `identify1` and `track4` (four workspaces, four generators at rate/4) ramp from 250 items/s
+  in steps of 250 for 90 s, up to 8,000 (`BENCH_RAMP_MIN`, `BENCH_RAMP_STEP`, `BENCH_RAMP_MAX`), and stop at the first step that fails: schedule-based API p99
   under 100 ms, no 5xx or 429, inbox oldest-row age under 5 s and not growing, the generator on
   schedule (`late_dispatch` 0, achieved at least 98% of the target). A step with `late_dispatch` above 0
   is generator-bound and invalid. `BENCH_STEP_SECONDS` and `BENCH_RAMP_MAX` shorten a smoke run.
+- `batch1` is a ramp in batches of 100 (identify and track mixed) from 2,000 items/s in steps of 2,000 with the
+  per-key limit raised, to measure limits the single-item host path hides.
 - `sustained` is track at 2,000/s for 10 minutes; `burst` is 10,000/s for 2 minutes (batch mode, key
   limit raised to 20,000/40,000) then the drain to empty, capped at 30 minutes; `batch` is 500 per
   request at 2,000 items/s for 10 minutes.
 - Every test recreates the stack on a fresh volume, samples `docker stats` and the inbox, and writes
   to `docs/benchmarks/data/<tier>/`. Peak CPU is in percent of one core.
+
+Clients on the host aim at `127.0.0.1` (`BENCH_HOST`): through the name `localhost`, Docker Desktop on Windows
+makes new connections about 140 ms slower at p99 and each PostgreSQL round trip about 4.4 ms. The decision
+append test (`decappend`) prints progress and stops a shape at `ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S` (default 600);
+the deployment-shaped figure is the same 500-insert transaction timed with `pgbench` inside the container network.
 
 `scripts/bench/ab.sh <on|off> <n> <zirv-flow-binary> <loadgen-binary>` is the decision-log A/B:
 native release builds (the `off` one built as in section 6), unconstrained, against the tier PostgreSQL;

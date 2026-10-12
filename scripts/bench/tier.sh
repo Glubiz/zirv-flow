@@ -164,7 +164,7 @@ pg_facts() {
 
 # ramp <name> <mode> <workspaces> <people>
 ramp() {
-  local name="$1" mode="$2" nws="$3" people="$4" prev=0 ceiling=0 verdict_all=held
+  local name="$1" mode="$2" nws="$3" people="$4" extra="${5:-}" prev=0 ceiling=0 verdict_all=held
   stack_up; for i in $(seq 1 "$nws"); do mkkey "$i"; done
   start_samplers
   : >"$data/$name-steps.jsonl"
@@ -176,7 +176,7 @@ ramp() {
     for i in $(seq 1 "$nws"); do
       f="$scratch/raw/$name-$rate-$i.json"; files+=("$f")
       "$loadgen" --url "http://$host:8080" --key-file "$scratch/key-$i" --mode "$mode" --rate "$per" \
-        --duration "$step_s" --people "$people" --run-id "$name-$rate-$i" --out "$f" 2>/dev/null & pids+=($!)
+        --duration "$step_s" --people "$people" $extra --run-id "$name-$rate-$i" --out "$f" 2>/dev/null & pids+=($!)
     done
     for p in "${pids[@]}"; do wait "$p" || die "a load generator failed in step $rate"; done
     t1=$(date +%s)
@@ -184,7 +184,7 @@ ramp() {
     age_mid=$(awk -F, -v a=$((t0 + step_s * 4 / 9)) -v b=$((t0 + step_s * 6 / 9)) '$1 >= a && $1 <= b && $3 + 0 > m { m = $3 + 0 } END { print m + 0 }' "$inboxfile")
     drain_s=$(wait_empty 180)
     tot=$(totals "${files[@]}")
-    ap=$(applied "$since" "$mode")
+    ap=$(applied "$since" "$([ "$mode" = batch ] && echo track || echo "$mode")")
     pk=$(peaks "$t0" "$t1")
     jq -nc --argjson tot "$tot" --argjson peaks "$pk" --arg ap "${ap:-}" --arg age "$age_end" \
       --argjson mid "$age_mid" --argjson drain "$drain_s" --argjson rate "$rate" --argjson nws "$nws" \
@@ -242,6 +242,10 @@ case "$test_name" in
   track1)    ramp track1 track 1 100000 ;;
   identify1) ramp identify1 identify 1 5000000 ;;
   track4)    ramp track4 track 4 100000 ;;
+  batch1)    # batch requests keep the host path out of the way; the per-key limit is raised so it is not the cap
+             export BENCH_RATE_PER_KEY=40000 BENCH_BURST_PER_KEY=80000
+             ramp_min=2000; ramp_step=2000; ramp_max=24000
+             ramp batch1 batch 1 1000000 "--batch-size 100 --max-in-flight 1000" ;;
   sustained) single sustained 1800 --mode track --rate 2000 --duration 600 --people 100000 ;;
   burst)
     export BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000

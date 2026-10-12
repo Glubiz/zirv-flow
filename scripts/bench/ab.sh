@@ -26,7 +26,7 @@ $c up -d --wait --wait-timeout 180 postgres >/dev/null 2>&1 || { echo "postgres 
 pg="$($c ps -q postgres)"
 q() { docker exec -i "$pg" psql -U zirv -d zirv_flow "$@"; }
 
-export ZIRV_FLOW_DATABASE__URL="postgres://zirv:zirv-quickstart@localhost:55432/zirv_flow"
+export ZIRV_FLOW_DATABASE__URL="postgres://zirv:zirv-quickstart@127.0.0.1:55432/zirv_flow"
 export ZIRV_FLOW_SECRETS__MASTER_KEY_FILE="$scratch/ab-master.key" ZIRV_FLOW_DATABASE__MIGRATE_ON_START=true
 export ZIRV_FLOW_SERVER__BIND=127.0.0.1:18080 ZIRV_FLOW_SERVER__COOKIE_SECURE=false ZIRV_FLOW_LOG__FILTER=warn
 export ZIRV_FLOW_WORKER__CONCURRENCY=4 ZIRV_FLOW_LOG__FORMAT=text
@@ -35,21 +35,25 @@ rm -f "$scratch/ab-master.key"; "$exe" admin generate-master-key --out "$scratch
 # start <name> <role> [ops-bind]: starts a native role through PowerShell and records its PID.
 start() {
   local env_ops=""; [ -z "${3:-}" ] || env_ops="\$env:ZIRV_FLOW_OPS__BIND='$3';"
-  powershell -NoProfile -Command "$env_ops \$p = Start-Process -FilePath '$(cygpath -w "$exe")' -ArgumentList '$2' -PassThru -WindowStyle Hidden -RedirectStandardOutput '$(cygpath -w "$scratch")\\ab-$1.out' -RedirectStandardError '$(cygpath -w "$scratch")\\ab-$1.err'; \$p.Id" | tr -d '\r' | tail -n1
+  local pidfile="$scratch/ab-$1.pid"; rm -f "$pidfile"
+  # The PID goes to a file, not stdout: the started process would otherwise keep a command
+  # substitution's pipe open and the call would never return.
+  powershell -NoProfile -Command "$env_ops \$p = Start-Process -FilePath '$(cygpath -w "$exe")' -ArgumentList '$2' -PassThru -WindowStyle Hidden -RedirectStandardOutput '$(cygpath -w "$scratch")\ab-$1.out' -RedirectStandardError '$(cygpath -w "$scratch")\ab-$1.err'; Set-Content -Path '$(cygpath -w "$pidfile")' -Value \$p.Id" >/dev/null 2>&1
+tr -d '[:space:]' <"$pidfile"
 }
 stop() { [ -z "${1:-}" ] || powershell -NoProfile -Command "Stop-Process -Id $1 -ErrorAction SilentlyContinue"; }
 
 serve_pid=$(start serve serve)
-until curl -fsS localhost:18080/readyz >/dev/null 2>&1; do sleep 1; done
+until curl -fsS 127.0.0.1:18080/readyz >/dev/null 2>&1; do sleep 1; done
 echo "$pw" | "$exe" admin create-owner --email bench@example.com >/dev/null
 headers="$(mktemp)"
-csrf=$(jq -n --arg p "$pw" '{email:"bench@example.com",password:$p}' | curl -fsS -D "$headers" -X POST localhost:18080/api/v1/session -H 'content-type: application/json' --data-binary @- | jq -r .csrf_token)
+csrf=$(jq -n --arg p "$pw" '{email:"bench@example.com",password:$p}' | curl -fsS -D "$headers" -X POST 127.0.0.1:18080/api/v1/session -H 'content-type: application/json' --data-binary @- | jq -r .csrf_token)
 session=$(tr -d '\r' <"$headers" | sed -nE 's/^[Ss]et-[Cc]ookie: (zf_session=[^;]+).*/\1/p' | head -n1)
-ws=$(curl -fsS -X POST localhost:18080/api/v1/workspaces -H "cookie: $session" -H "x-csrf-token: $csrf" -H 'content-type: application/json' -d '{"name":"ab"}' | jq -r .id)
-curl -fsS -X POST "localhost:18080/api/v1/workspaces/$ws/api-keys" -H "cookie: $session" -H "x-csrf-token: $csrf" -H 'content-type: application/json' -d '{"name":"loadgen","scopes":["ingest"]}' | jq -r .key >"$scratch/ab-key"
+ws=$(curl -fsS -X POST 127.0.0.1:18080/api/v1/workspaces -H "cookie: $session" -H "x-csrf-token: $csrf" -H 'content-type: application/json' -d '{"name":"ab"}' | jq -r .id)
+curl -fsS -X POST "127.0.0.1:18080/api/v1/workspaces/$ws/api-keys" -H "cookie: $session" -H "x-csrf-token: $csrf" -H 'content-type: application/json' -d '{"name":"loadgen","scopes":["ingest"]}' | jq -r .key >"$scratch/ab-key"
 
 # The backlog: no worker is running, so the inbox only fills.
-"$loadgen" --url http://localhost:18080 --key-file "$scratch/ab-key" --mode track --rate 5000 \
+"$loadgen" --url http://127.0.0.1:18080 --key-file "$scratch/ab-key" --mode track --rate 5000 \
   --duration $((items / 5000)) --people 100000 --run-id "ab-$side-$n" --out "$scratch/ab-load.json" 2>/dev/null
 backlog=$(q -Atc 'select count(*) from ingest_inbox')
 
