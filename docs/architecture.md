@@ -403,7 +403,7 @@ during a rolling upgrade, hold NULL. A drain job first buckets the workspace's N
 blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
 deadlock; the bucket comes from the same function as the append's), then runs
 `ingest.drain_shards` (default 8) loops concurrently, each owning the buckets with `affinity % shards =
-index`, as joined futures so a lost lease drops them all. A batch is up to `ingest.drain_batch_size` of the
+index`, each a tokio task of its own owned by the job (so the shards use several runtime threads, and a lost lease aborts them all). A batch is up to `ingest.drain_batch_size` of the
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a

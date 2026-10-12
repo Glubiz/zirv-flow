@@ -4557,7 +4557,6 @@ dependencies = [
 name = "zirv-flow-jobs"
 version = "0.30.0"
 dependencies = [
- "futures-util",
  "getrandom 0.4.3",
  "metrics",
  "metrics-exporter-prometheus",

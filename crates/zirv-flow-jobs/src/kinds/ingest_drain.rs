@@ -5,8 +5,10 @@
 //! A run first buckets the workspace's rows that have no bucket yet (appended before the
 //! column existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Then
 //! `shards` loops drain the buckets concurrently, one shard each; the rows of one record key
-//! share a bucket, so each key still applies in id order. The loops are futures joined in the
-//! handler, so losing the lease drops them all and rolls their transactions back.
+//! share a bucket, so each key still applies in id order. Each loop is a tokio task of its own, owned by the
+//! handler in a `JoinSet`, so the shards spread over the runtime threads instead of polling in one
+//! task. Losing the lease drops the handler, which aborts every shard task and rolls back their
+//! transactions.
 //!
 //! A batch that fails with a retryable error is retried with jittered backoff. A batch that
 //! fails otherwise holds a poison row: its rows are applied one at a time, and the row that
@@ -17,10 +19,11 @@
 //! Nothing here logs an identifier, a value or an event name.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::future::join_all;
 use serde_json::Value;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
@@ -58,7 +61,7 @@ impl JobKind for IngestDrain {
             .ok_or(JobError::new("the worker has no pool for the ingest drain"))?;
         let key = settings
             .redaction_key
-            .as_deref()
+            .clone()
             .ok_or(JobError::new("the worker has no master key"))?;
         let limit = i64::from(settings.batch_size.max(1));
 
@@ -68,19 +71,36 @@ impl JobKind for IngestDrain {
             return Ok(());
         }
         let shards = settings.shards.max(1);
-        let loops = (0..shards).map(|index| {
+        // The set owns the tasks: dropping it, as a lost lease drops this future, aborts them all.
+        let mut tasks = JoinSet::new();
+        for index in 0..shards {
             let shard = Shard {
                 index,
                 count: shards,
             };
-            drain_shard(pool, workspace, key, shard, limit, started, TIME_BUDGET)
-        });
-        // Every loop runs to its end; the batches the others committed stand.
-        join_all(loops)
-            .await
-            .into_iter()
-            .try_for_each(|result| result.map(drop))
+            let (pool, key) = (pool.clone(), Arc::clone(&key));
+            tasks.spawn(async move {
+                drain_shard(&pool, workspace, &key, shard, limit, started, TIME_BUDGET).await
+            });
+        }
+        join_shards(tasks).await
     }
+}
+
+/// Waits for every shard task to end; the batches the others committed stand. Returns the
+/// first error, and a task that panicked counts as one.
+async fn join_shards(mut tasks: JoinSet<Result<bool, JobError>>) -> Result<(), JobError> {
+    let mut first = Ok(());
+    while let Some(joined) = tasks.join_next().await {
+        let result = match joined {
+            Ok(result) => result.map(drop),
+            Err(_) => Err(JobError::new("a drain shard panicked")),
+        };
+        if first.is_ok() {
+            first = result;
+        }
+    }
+    first
 }
 
 /// Buckets the workspace's unbucketed rows until none are left. Returns whether it finished
@@ -615,5 +635,111 @@ mod tests {
 
         assert!(!finished);
         assert!(inbox(&pool).await > 0, "one batch is not the backlog");
+    }
+
+    #[tokio::test]
+    async fn a_shard_task_that_panics_fails_the_job_after_the_others_ended() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { panic!("a shard blew up") });
+        tasks.spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(true)
+        });
+
+        let error = join_shards(tasks).await.unwrap_err();
+
+        assert_eq!(error.message(), "a drain shard panicked");
+    }
+
+    #[tokio::test]
+    async fn the_first_error_is_returned_and_a_later_one_does_not_replace_it() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { Err(CONFLICTED) });
+        tasks.spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Err(JobError::new("later"))
+        });
+
+        assert_eq!(join_shards(tasks).await.unwrap_err(), CONFLICTED);
+    }
+
+    /// Queries that are not idle on other connections of the test's database.
+    async fn busy_connections(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+             AND pid <> pg_backend_pid() AND state <> 'idle' AND backend_type = 'client backend'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn dropping_the_handler_aborts_every_shard_task(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        append(&pool, ws, 4000).await;
+        let total = inbox(&pool).await;
+        let handler = tokio::spawn({
+            let pool = pool.clone();
+            async move { run_job_with(&pool, key(), 1, 4).await }
+        });
+        while inbox(&pool).await == total {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+
+        // Give a shard that outlived the handler time to commit another batch.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let left = inbox(&pool).await;
+        assert!(left > 0, "the run was cut off with rows remaining");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            inbox(&pool).await,
+            left,
+            "no shard committed after the drop"
+        );
+        assert_eq!(
+            busy_connections(&pool).await,
+            0,
+            "no shard holds a connection"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failing_shard_fails_the_job_after_the_others_drained_their_rows(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let items: Vec<IngestItem> = (0..80)
+            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
+            .collect();
+        append_items(&pool, ws, &items).await;
+        for statement in [
+            "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+               IF OLD.affinity % 4 = 0 THEN \
+                 RAISE EXCEPTION 'flaky' USING ERRCODE = '40001'; \
+               END IF; RETURN OLD; END $$",
+            "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
+             FOR EACH ROW EXECUTE FUNCTION flake()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let failing: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity % 4 = 0")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(failing > 0 && failing < 80);
+
+        let error = run_job_with(&pool, key(), 5, 4).await.unwrap_err();
+
+        assert_eq!(error, CONFLICTED);
+        assert_eq!(
+            inbox(&pool).await,
+            failing,
+            "the other shards drained theirs"
+        );
     }
 }
