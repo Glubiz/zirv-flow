@@ -16,36 +16,43 @@ pub const HMAC_ROOT: &str = "hmac_root";
 /// both refuse with this text.
 pub const NO_HMAC_ROOT: &str = "no HMAC root exists yet; start once with only the master key that produced the existing hashes before rotating";
 
-/// Whether a secret write may proceed, per the HMAC root's wrapping key.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WriterCheck {
-    /// The root's key is one the writer holds.
-    Allowed,
-    /// There is no root row.
+/// Why a workspace secret write was refused or failed.
+#[derive(Debug)]
+pub enum SecretWriteError {
+    /// There is no HMAC root row, so the write cannot be ordered against a rotation.
     NoRoot,
-    /// The root is wrapped by a key the writer does not hold: the writer is stale.
+    /// The root is wrapped by a key the writer's keyring does not hold: the writer is stale and
+    /// would store a row no later keyring opens.
     Outdated { root_key_id: String },
+    /// The database failed.
+    Store(StoreError),
+}
+
+impl From<StoreError> for SecretWriteError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
 }
 
 /// Locks the HMAC root row `FOR SHARE` for the rest of the transaction and checks that its
 /// wrapping key is one of `allowed_key_ids`. A rotation holds the row `FOR UPDATE`, so a write
 /// waits for it and then sees the new key id, and a rotation waits for writes in flight and
-/// then re-wraps what they stored. Call it in the transaction that inserts or replaces.
-pub async fn check_writer(
+/// then re-wraps what they stored.
+async fn check_writer(
     connection: &mut PgConnection,
     allowed_key_ids: &[String],
-) -> Result<WriterCheck, StoreError> {
+) -> Result<(), SecretWriteError> {
     let root: Option<String> =
         sqlx::query_scalar("SELECT key_id FROM deployment_keys WHERE name = $1 FOR SHARE")
             .bind(HMAC_ROOT)
             .fetch_optional(connection)
             .await
             .map_err(StoreError::query)?;
-    Ok(match root {
-        None => WriterCheck::NoRoot,
-        Some(id) if allowed_key_ids.contains(&id) => WriterCheck::Allowed,
-        Some(root_key_id) => WriterCheck::Outdated { root_key_id },
-    })
+    match root {
+        None => Err(SecretWriteError::NoRoot),
+        Some(id) if allowed_key_ids.contains(&id) => Ok(()),
+        Some(root_key_id) => Err(SecretWriteError::Outdated { root_key_id }),
+    }
 }
 
 /// Locks the HMAC root row `FOR UPDATE` and returns its wrapping key id; `None` when absent.
@@ -130,8 +137,37 @@ impl SealedRow {
     }
 }
 
-/// Stores a new secret. The id is the one the sealing bound into the associated data.
-pub async fn insert<'e>(
+/// Stores a new secret after checking the writer against the HMAC root. The id is the one the
+/// sealing bound into the associated data. The caller must hold a transaction: the check's
+/// `FOR SHARE` lock on the root lasts until it ends, which orders the write against a rotation.
+/// Refuses with [`SecretWriteError::NoRoot`] or [`SecretWriteError::Outdated`] and stores
+/// nothing when `allowed_key_ids` (the writer's keyring) does not hold the root's key.
+pub async fn insert(
+    connection: &mut PgConnection,
+    allowed_key_ids: &[String],
+    workspace: WorkspaceId,
+    purpose: SecretPurpose,
+    id: SecretId,
+    sealed: &Sealed,
+) -> Result<(), SecretWriteError> {
+    check_writer(connection, allowed_key_ids).await?;
+    insert_row(&mut *connection, workspace, purpose, id, sealed).await?;
+    Ok(())
+}
+
+/// Plants a secret row with no writer check. For tests that need a row the check would refuse.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn insert_unchecked<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    purpose: SecretPurpose,
+    id: SecretId,
+    sealed: &Sealed,
+) -> Result<(), StoreError> {
+    insert_row(executor, workspace, purpose, id, sealed).await
+}
+
+async fn insert_row<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     purpose: SecretPurpose,
@@ -181,8 +217,31 @@ pub async fn get<'e>(
     .transpose()
 }
 
-/// Replaces the sealed value of a secret of this workspace; false when there is none.
-pub async fn replace<'e>(
+/// Replaces the sealed value of a secret of this workspace after checking the writer against the
+/// HMAC root; false when there is none. The caller must hold a transaction, as for [`insert`].
+pub async fn replace(
+    connection: &mut PgConnection,
+    allowed_key_ids: &[String],
+    workspace: WorkspaceId,
+    id: SecretId,
+    sealed: &Sealed,
+) -> Result<bool, SecretWriteError> {
+    check_writer(connection, allowed_key_ids).await?;
+    Ok(replace_row(&mut *connection, workspace, id, sealed).await?)
+}
+
+/// Replaces a secret row with no writer check. For tests only.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn replace_unchecked<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: SecretId,
+    sealed: &Sealed,
+) -> Result<bool, StoreError> {
+    replace_row(executor, workspace, id, sealed).await
+}
+
+async fn replace_row<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: SecretId,
@@ -374,7 +433,7 @@ mod tests {
         let id = SecretId::new();
         let sealed = sealed_for(&keys, ws, id, b"first");
 
-        insert(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
+        insert_unchecked(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
             .await
             .unwrap();
         let stored = get(&pool, ws, id).await.unwrap().unwrap();
@@ -387,7 +446,7 @@ mod tests {
         );
 
         let second = sealed_for(&keys, ws, id, b"second");
-        assert!(replace(&pool, ws, id, &second).await.unwrap());
+        assert!(replace_unchecked(&pool, ws, id, &second).await.unwrap());
         let stored = get(&pool, ws, id).await.unwrap().unwrap();
         assert_eq!(
             open(&keys, &stored.sealed, &aad).unwrap().expose(),
@@ -397,7 +456,7 @@ mod tests {
         assert!(delete(&pool, ws, id).await.unwrap());
         assert!(get(&pool, ws, id).await.unwrap().is_none());
         assert!(!delete(&pool, ws, id).await.unwrap());
-        assert!(!replace(&pool, ws, id, &second).await.unwrap());
+        assert!(!replace_unchecked(&pool, ws, id, &second).await.unwrap());
     }
 
     #[sqlx::test]
@@ -408,13 +467,13 @@ mod tests {
         let keys = keyring();
         let id = SecretId::new();
         let sealed = sealed_for(&keys, one, id, b"mine");
-        insert(&pool, one, SecretPurpose::OAuthToken, id, &sealed)
+        insert_unchecked(&pool, one, SecretPurpose::OAuthToken, id, &sealed)
             .await
             .unwrap();
 
         assert!(get(&pool, two, id).await.unwrap().is_none());
         assert!(
-            !replace(&pool, two, id, &sealed_for(&keys, two, id, b"x"))
+            !replace_unchecked(&pool, two, id, &sealed_for(&keys, two, id, b"x"))
                 .await
                 .unwrap()
         );
@@ -434,7 +493,7 @@ mod tests {
         let sealed = sealed_for(&keys, one, id, b"mine");
         // The same sealed value filed under another row and another workspace.
         let other = SecretId::new();
-        insert(
+        insert_unchecked(
             &pool,
             two,
             SecretPurpose::ConnectorCredential,
@@ -458,7 +517,7 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let keys = keyring();
         let id = SecretId::new();
-        insert(
+        insert_unchecked(
             &pool,
             ws,
             SecretPurpose::AiProviderKey,
@@ -524,6 +583,51 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_checked_write_without_the_roots_key_is_refused_and_stores_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let keys = keyring();
+        let id = SecretId::new();
+        let sealed = sealed_for(&keys, ws, id, b"v");
+        let purpose = SecretPurpose::AiProviderKey;
+        let stale = vec!["not-the-roots-key".to_string()];
+        let mut tx = begin(&pool).await.unwrap();
+
+        // No root yet.
+        let error = insert(&mut tx, &stale, ws, purpose, id, &sealed)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SecretWriteError::NoRoot), "{error:?}");
+        commit(tx).await.unwrap();
+
+        let root = seal(&keys, b"root", &deployment_key_aad(HMAC_ROOT));
+        insert_hmac_root_if_absent(&pool, &root).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+
+        let error = insert(&mut tx, &stale, ws, purpose, id, &sealed)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, SecretWriteError::Outdated { root_key_id } if *root_key_id == root.key_id),
+            "{error:?}"
+        );
+        assert!(
+            replace(&mut tx, &stale, ws, id, &sealed).await.is_err(),
+            "replace is guarded too"
+        );
+        commit(tx).await.unwrap();
+        assert!(get(&pool, ws, id).await.unwrap().is_none());
+        let mut tx = begin(&pool).await.unwrap();
+        let held = vec![root.key_id.clone()];
+        insert(&mut tx, &held, ws, purpose, id, &sealed)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        assert!(get(&pool, ws, id).await.unwrap().is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_first_starts_leave_one_root_that_every_task_opens(pool: PgPool) {
         let keys = std::sync::Arc::new(keyring());
         let aad = deployment_key_aad(HMAC_ROOT);
@@ -562,7 +666,7 @@ mod tests {
         let old = Keyring::new(MasterKey::generate(), None).unwrap();
         let id = SecretId::new();
         let sealed = sealed_for(&old, ws, id, b"secret");
-        insert(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
+        insert_unchecked(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
             .await
             .unwrap();
         let root = seal(&old, b"root", &deployment_key_aad(HMAC_ROOT));
@@ -654,7 +758,7 @@ mod tests {
         let keys = keyring();
         let marker = format!("zirv-marker-{}", Uuid::new_v4());
         let id = SecretId::new();
-        insert(
+        insert_unchecked(
             &pool,
             ws,
             SecretPurpose::ConnectorCredential,

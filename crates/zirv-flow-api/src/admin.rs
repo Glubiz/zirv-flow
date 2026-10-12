@@ -540,20 +540,18 @@ pub async fn rotate_master_key(
     Ok(report)
 }
 
-/// Refuses a secret write by a process whose keyring does not hold the key that wraps the
-/// HMAC root: after a rotation such a process would store a row no later keyring opens. A
-/// missing root also refuses, because serve and worker create it at start and the write
-/// cannot be ordered against a rotation without it. Holds the root `FOR SHARE` until the
-/// transaction ends.
-async fn check_writer(tx: &mut PgConnection, keyring: &Keyring) -> Result<(), AdminError> {
-    match secrets::check_writer(tx, &keyring.key_ids()).await? {
-        secrets::WriterCheck::Allowed => Ok(()),
-        secrets::WriterCheck::NoRoot => Err(AdminError::Conflict(
+/// Maps the store's refusal of a secret write: a process whose keyring does not hold the key
+/// that wraps the HMAC root would store a row no later keyring opens after a rotation, and a
+/// missing root cannot be ordered against a rotation (serve and worker create it at start).
+fn write_refusal(error: secrets::SecretWriteError) -> AdminError {
+    match error {
+        secrets::SecretWriteError::NoRoot => AdminError::Conflict(
             "no HMAC root exists yet; start the server or worker once before storing secrets",
-        )),
-        secrets::WriterCheck::Outdated { .. } => Err(AdminError::Conflict(
+        ),
+        secrets::SecretWriteError::Outdated { .. } => AdminError::Conflict(
             "this process's master key is outdated; restart it with the current master key",
-        )),
+        ),
+        secrets::SecretWriteError::Store(error) => error.into(),
     }
 }
 
@@ -574,8 +572,9 @@ pub async fn create_secret(
         &secret_aad(workspace, id, purpose),
     );
     let mut tx = zirv_flow_store::begin(pool).await?;
-    check_writer(&mut tx, keyring).await?;
-    secrets::insert(&mut *tx, workspace, purpose, id, &sealed).await?;
+    secrets::insert(&mut tx, &keyring.key_ids(), workspace, purpose, id, &sealed)
+        .await
+        .map_err(write_refusal)?;
     audit(
         &mut tx,
         context,
@@ -599,7 +598,6 @@ pub async fn replace_secret(
     plaintext: &SecretBytes,
 ) -> Result<(), AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
-    check_writer(&mut tx, keyring).await?;
     let stored = secrets::get(&mut *tx, workspace, id)
         .await?
         .ok_or(AdminError::NotFound("secret"))?;
@@ -608,7 +606,9 @@ pub async fn replace_secret(
         plaintext.expose(),
         &secret_aad(workspace, id, stored.purpose),
     );
-    secrets::replace(&mut *tx, workspace, id, &sealed).await?;
+    secrets::replace(&mut tx, &keyring.key_ids(), workspace, id, &sealed)
+        .await
+        .map_err(write_refusal)?;
     audit(
         &mut tx,
         context,
@@ -1089,7 +1089,7 @@ mod tests {
             b"two",
             &secret_aad(ws.id, stray, SecretPurpose::AiProviderKey),
         );
-        secrets::insert(&pool, ws.id, SecretPurpose::AiProviderKey, stray, &sealed)
+        secrets::insert_unchecked(&pool, ws.id, SecretPurpose::AiProviderKey, stray, &sealed)
             .await
             .unwrap();
 
@@ -1121,7 +1121,7 @@ mod tests {
             b"x",
             &secret_aad(ws.id, id, SecretPurpose::OAuthToken),
         );
-        secrets::insert(&pool, ws.id, SecretPurpose::OAuthToken, id, &sealed)
+        secrets::insert_unchecked(&pool, ws.id, SecretPurpose::OAuthToken, id, &sealed)
             .await
             .unwrap();
 
