@@ -158,7 +158,7 @@ allow = ["10.0.5.7/32", "192.168.0.0/16"]
 
 or `ZIRV_FLOW_EGRESS__ALLOW='["10.0.5.7/32", "192.168.0.0/16"]'`. Entries are CIDR only (no host
 names or ports), and an invalid entry fails startup and `zirv-flow config check` with the key and
-the reason. A cloud metadata address such as `169.254.169.254` is unlocked only by an entry
+the reason. A cloud metadata address such as `169.254.169.254` (or the Azure WireServer, `168.63.129.16`) is unlocked only by an entry
 naming exactly that address (`169.254.169.254/32`); a broader range never unlocks it. Each refusal
 increments `zirv_flow_egress_denied_total{class}` and logs the host and class. Sign-in with an OIDC
 provider is not covered, because the operator configures that URL.

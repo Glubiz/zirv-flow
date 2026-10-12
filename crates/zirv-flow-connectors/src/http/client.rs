@@ -4,11 +4,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 use zirv_flow_core::egress::EgressPolicy;
 
-use super::body::DEFAULT_MAX_BODY_BYTES;
+use super::body::{DEFAULT_MAX_BODY_BYTES, read_body};
 use super::error::{Denied, HttpError, TooManyRedirects};
 use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all};
 
@@ -20,7 +23,7 @@ pub struct HttpLimits {
     pub connect_timeout: Duration,
     /// The whole exchange, response body included.
     pub timeout: Duration,
-    /// The cap callers pass to [`read_body`](super::read_body).
+    /// The cap on every response body, applied by [`GuardedResponse::body`].
     pub max_body_bytes: u64,
 }
 
@@ -84,12 +87,49 @@ impl GuardedClient {
 
     /// Sends the request. An IP-literal host is decided here; any other host is decided by the
     /// resolver when the connection is made.
-    pub async fn execute(&self, request: reqwest::Request) -> Result<reqwest::Response, HttpError> {
+    pub async fn execute(&self, request: reqwest::Request) -> Result<GuardedResponse, HttpError> {
         check_literal(&self.policy, request.url().host())?;
-        self.inner
+        let inner = self
+            .inner
             .execute(request)
             .await
-            .map_err(HttpError::from_reqwest)
+            .map_err(HttpError::from_reqwest)?;
+        Ok(GuardedResponse {
+            inner,
+            max_body_bytes: self.limits.max_body_bytes,
+        })
+    }
+}
+
+/// A response whose body can only be read under the client's `max_body_bytes`.
+///
+/// The underlying `reqwest::Response` is not exposed, so no caller can read the body unbounded.
+#[derive(Debug)]
+pub struct GuardedResponse {
+    inner: reqwest::Response,
+    max_body_bytes: u64,
+}
+
+impl GuardedResponse {
+    pub fn status(&self) -> StatusCode {
+        self.inner.status()
+    }
+
+    pub fn headers(&self) -> &HeaderMap {
+        self.inner.headers()
+    }
+
+    /// The final URL, after any redirects.
+    pub fn url(&self) -> &url::Url {
+        self.inner.url()
+    }
+
+    /// Reads the whole body, failing with [`HttpError::BodyTooLarge`] once it exceeds the
+    /// client's `max_body_bytes`.
+    pub async fn body(self) -> Result<Bytes, HttpError> {
+        read_body(self.inner, self.max_body_bytes)
+            .await
+            .map(Bytes::from)
     }
 }
 
@@ -135,8 +175,6 @@ mod tests {
     use reqwest::Method;
     use zirv_flow_core::egress::AddressClass;
 
-    use crate::http::read_body;
-
     struct Names(HashMap<&'static str, Vec<IpAddr>>);
 
     impl Lookup for Names {
@@ -169,7 +207,7 @@ mod tests {
         GuardedClient::with_lookup(policy, limits, names()).unwrap()
     }
 
-    async fn get_url(client: &GuardedClient, url: &str) -> Result<reqwest::Response, HttpError> {
+    async fn get_url(client: &GuardedClient, url: &str) -> Result<GuardedResponse, HttpError> {
         client
             .execute(reqwest::Request::new(Method::GET, url.parse().unwrap()))
             .await
@@ -259,7 +297,7 @@ mod tests {
         ] {
             let response = get_url(&guarded, &url).await.unwrap();
             assert_eq!(response.status(), 200);
-            assert_eq!(read_body(response, 100).await.unwrap(), b"hello");
+            assert_eq!(response.body().await.unwrap(), "hello");
         }
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
@@ -398,23 +436,47 @@ mod tests {
         assert_eq!(proxied.load(Ordering::SeqCst), 0);
     }
 
+    fn capped(max_body_bytes: u64) -> GuardedClient {
+        let limits = HttpLimits {
+            max_body_bytes,
+            ..HttpLimits::default()
+        };
+        client(&["127.0.0.1/32"], limits)
+    }
+
     #[tokio::test]
     async fn oversized_bodies_stop_at_the_cap_with_and_without_a_length() {
         let (port, _) = serve().await;
-        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+        let guarded = capped(999);
         let sized = get_url(&guarded, &format!("http://local.test:{port}/big"))
             .await
             .unwrap();
-        assert_eq!(read_body(sized, 999).await, Err(HttpError::BodyTooLarge));
+        assert_eq!(sized.body().await, Err(HttpError::BodyTooLarge));
         let streamed = get_url(&guarded, &format!("http://local.test:{port}/stream"))
             .await
             .unwrap();
-        assert_eq!(streamed.content_length(), None);
-        assert_eq!(read_body(streamed, 999).await, Err(HttpError::BodyTooLarge));
+        assert_eq!(streamed.inner.content_length(), None);
+        assert_eq!(streamed.body().await, Err(HttpError::BodyTooLarge));
+        let guarded = capped(1000);
         let streamed = get_url(&guarded, &format!("http://local.test:{port}/stream"))
             .await
             .unwrap();
-        assert_eq!(read_body(streamed, 1000).await.unwrap().len(), 1000);
+        assert_eq!(streamed.body().await.unwrap().len(), 1000);
+    }
+
+    #[tokio::test]
+    async fn the_body_is_capped_by_the_client_without_the_caller_passing_a_limit() {
+        let (port, _) = serve().await;
+        let guarded = capped(10);
+        let response = guarded
+            .execute(reqwest::Request::new(
+                Method::GET,
+                format!("http://local.test:{port}/big").parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body().await, Err(HttpError::BodyTooLarge));
     }
 
     #[tokio::test]

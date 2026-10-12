@@ -11,6 +11,7 @@ repository = "https://github.com/Glubiz/zirv-flow"
 
 [workspace.dependencies]
 argon2 = { version = "0.6.0", features = ["alloc", "password-hash"] }
+bytes = "1.12.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "matched-path"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

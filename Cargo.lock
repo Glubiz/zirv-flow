@@ -4522,6 +4522,7 @@ name = "zirv-flow-connectors"
 version = "0.32.0"
 dependencies = [
  "axum",
+ "bytes",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",

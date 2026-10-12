@@ -1461,7 +1461,7 @@ policy at their own connect points when they land.
 - **Allowlist.** `egress.allow` takes CIDR ranges only (no host names, no ports); a bare address or
   an entry with host bits set fails startup and `config check`. A range unlocks the non-public
   addresses it contains. A metadata address (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`,
-  `100.100.100.200`) is unlocked only by an entry naming exactly it (`/32` or `/128`), never by a
+  `100.100.100.200`, `168.63.129.16`) is unlocked only by an entry naming exactly it (`/32` or `/128`), never by a
   broader range.
 - **Mixed resolutions.** A host name that resolves to several addresses is refused whole if any one
   is denied; the denied address is never filtered out silently.

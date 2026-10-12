@@ -61,10 +61,12 @@ impl fmt::Display for AddressClass {
 }
 
 /// Cloud metadata endpoints: AWS and GCP/Azure, ECS task credentials, Alibaba, and AWS over IPv6.
-const METADATA_V4: [Ipv4Addr; 3] = [
+const METADATA_V4: [Ipv4Addr; 4] = [
     Ipv4Addr::new(169, 254, 169, 254),
     Ipv4Addr::new(169, 254, 170, 2),
     Ipv4Addr::new(100, 100, 100, 200),
+    // The Azure WireServer.
+    Ipv4Addr::new(168, 63, 129, 16),
 ];
 const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
@@ -329,6 +331,7 @@ mod tests {
                     "169.254.169.254",
                     "169.254.170.2",
                     "100.100.100.200",
+                    "168.63.129.16",
                     "fd00:ec2::254",
                 ],
             ),
@@ -475,7 +478,13 @@ mod tests {
 
     #[test]
     fn a_broad_range_never_unlocks_metadata_but_the_exact_address_does() {
-        let broad = policy(&["169.254.0.0/16", "100.64.0.0/10", "0.0.0.0/0", "fd00::/8"]);
+        let broad = policy(&[
+            "169.254.0.0/16",
+            "100.64.0.0/10",
+            "168.63.0.0/16",
+            "0.0.0.0/0",
+            "fd00::/8",
+        ]);
         assert_eq!(
             broad.decide(ip("169.254.169.254")),
             Decision::Deny(Metadata)
@@ -484,6 +493,7 @@ mod tests {
             broad.decide(ip("100.100.100.200")),
             Decision::Deny(Metadata)
         );
+        assert_eq!(broad.decide(ip("168.63.129.16")), Decision::Deny(Metadata));
         assert_eq!(broad.decide(ip("fd00:ec2::254")), Decision::Deny(Metadata));
         assert_eq!(
             broad.decide(ip("::ffff:169.254.169.254")),
@@ -496,6 +506,9 @@ mod tests {
         assert_eq!(exact.decide(ip("169.254.169.254")), Decision::Allow);
         assert_eq!(exact.decide(ip("169.254.170.2")), Decision::Deny(Metadata));
         assert_eq!(exact.decide(ip("fd00:ec2::254")), Decision::Allow);
+        assert_eq!(exact.decide(ip("168.63.129.16")), Decision::Deny(Metadata));
+        let wire = policy(&["168.63.129.16/32"]);
+        assert_eq!(wire.decide(ip("168.63.129.16")), Decision::Allow);
         assert_eq!(exact.decide(ip("169.254.1.1")), Decision::Deny(LinkLocal));
     }
 

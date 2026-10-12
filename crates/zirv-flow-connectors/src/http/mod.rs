@@ -5,7 +5,7 @@ mod client;
 mod error;
 mod resolver;
 
-pub use body::{DEFAULT_MAX_BODY_BYTES, read_body};
-pub use client::{GuardedClient, HttpLimits};
+pub use body::DEFAULT_MAX_BODY_BYTES;
+pub use client::{GuardedClient, GuardedResponse, HttpLimits};
 pub use error::HttpError;
 pub use resolver::Lookup;

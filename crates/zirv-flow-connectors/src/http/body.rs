@@ -1,4 +1,4 @@
-//! Reading a response body under a size cap.
+//! Reading a response body under a size cap; reached only through `GuardedResponse::body`.
 
 use super::error::HttpError;
 
@@ -8,7 +8,7 @@ pub const DEFAULT_MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 /// Reads the whole body, failing with [`HttpError::BodyTooLarge`] as soon as it exceeds
 /// `max_bytes`. A declared `Content-Length` over the cap fails before any byte is read; a body
 /// without one is cut off while streaming.
-pub async fn read_body(
+pub(super) async fn read_body(
     mut response: reqwest::Response,
     max_bytes: u64,
 ) -> Result<Vec<u8>, HttpError> {
