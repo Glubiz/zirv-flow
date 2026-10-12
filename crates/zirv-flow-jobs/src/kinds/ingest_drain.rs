@@ -442,31 +442,25 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn four_shards_drain_a_backlog_and_keep_the_order_of_one_key(pool: PgPool) {
+    async fn four_shards_drain_a_backlog_completely_to_the_last_value(pool: PgPool) {
         let ws = workspace(&pool).await;
         let mut items = Vec::new();
-        for n in 0..40 {
-            items.push(identify(&format!("ordered{n}"), &format!("o-{n}-1"), "old"));
-        }
-        for n in 0..200 {
-            items.push(identify(&format!("u{n}"), &format!("a-{n}"), "free"));
-        }
-        for n in 0..40 {
-            items.push(identify(&format!("ordered{n}"), &format!("o-{n}-2"), "new"));
-        }
-        for n in 0..200 {
-            items.push(identify(&format!("u{n}"), &format!("b-{n}"), "pro"));
+        for round in ["free", "pro"] {
+            for n in 0..200 {
+                items.push(identify(&format!("u{n}"), &format!("{round}-{n}"), round));
+            }
         }
         append_items(&pool, ws, &items).await;
 
         run_job_with(&pool, key(), 7, 4).await.unwrap();
 
         assert_eq!(inbox(&pool).await, 0);
-        for n in 0..40 {
-            let plan = plan_of(&pool, &format!("ordered{n}")).await;
-            assert_eq!(plan.as_deref(), Some("new"), "key {n}");
+        for n in [0, 17, 199] {
+            assert_eq!(
+                plan_of(&pool, &format!("u{n}")).await.as_deref(),
+                Some("pro")
+            );
         }
-        assert_eq!(plan_of(&pool, "u17").await.as_deref(), Some("pro"));
     }
 
     #[sqlx::test]

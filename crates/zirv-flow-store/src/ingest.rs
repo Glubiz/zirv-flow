@@ -494,8 +494,8 @@ fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
     outcome.count("track", label);
 }
 
-/// Applies up to `limit` of the oldest inbox rows of `shard` of the workspace in id order and deletes them,
-/// all in one transaction. Concurrent drainers skip each other's locked rows, so a row is
+/// Applies up to `limit` of the workspace's oldest inbox rows of `shard` in id order and
+/// deletes them, all in one transaction. Concurrent drainers skip each other's locked rows, so a row is
 /// never applied twice, and a crash leaves every row in place.
 ///
 /// An error rolls the whole batch back. When it is [`StoreError::is_retryable`] the caller
