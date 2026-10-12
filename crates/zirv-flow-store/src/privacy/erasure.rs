@@ -808,7 +808,9 @@ mod tests {
         let key = zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
             .unwrap()
             .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
-        let drained = crate::drain_batch(&pool, ws, &key, 100).await.unwrap();
+        let drained = crate::drain_batch(&pool, ws, crate::Shard::ALL, &key, 100)
+            .await
+            .unwrap();
         assert_eq!(drained.rows, 1);
         let again = crate::people::find_person_by_identifier(
             &pool,

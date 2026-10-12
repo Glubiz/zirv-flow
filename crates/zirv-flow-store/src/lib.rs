@@ -78,8 +78,8 @@ pub use imports::{
     set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use ingest::{
-    DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, append_inbox, drain_batch,
-    drain_batch_singly, enqueue_drain, inbox_heads,
+    DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
+    backfill_affinity, drain_batch, drain_batch_singly, enqueue_drain, inbox_heads,
 };
 pub use jobs::{
     ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,

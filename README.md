@@ -103,6 +103,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
 | `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
 | `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
+| `ingest.drain_shards` | u32 | 8 | 1 to 16; concurrent drain loops per workspace in `ingest.drain` |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
 | `explorer.interactive_timeout_ms` | u64 | 5000 | at least 1; how long an explorer count, breakdown or page of rows may run before it is cancelled (`503`, code `query_timeout`) |
 | `explorer.export_timeout_ms` | u64 | 60000 | at least 1; the same for each page query of a CSV export |
@@ -234,9 +235,9 @@ to `worker.max_running_per_workspace` running jobs when that is set, so one busy
 workspace cannot take every worker.
 
 The worker runs on pools of its own, so HTTP traffic and running jobs cannot
-starve a heartbeat: it opens up to `3 * worker.concurrency + 1` connections (one
-pool for claims, job transactions and the transactions a handler such as
-`ingest.drain` commits on its own, one for heartbeats), in addition to
+starve a heartbeat: it opens up to `(2 + ingest.drain_shards) * worker.concurrency + 1`
+connections (41 at the defaults, `(2 + 8) * 4 + 1`) (one pool for claims, job transactions and the transactions a handler such as
+`ingest.drain` commits on its own, one per drain shard, one for heartbeats), in addition to
 `database.max_connections`. The `LISTEN` connection and the scheduler's leader
 lock each take one connection from `database.max_connections`, as does all HTTP
 and admin work, so keep it above a few.
@@ -936,9 +937,16 @@ an event twice. An item that cannot be applied at all becomes an `apply_failed` 
 of blocking the workspace's inbox.
 
 **Operation.** The `ingest.drain` job applies up to `ingest.drain_batch_size` inbox rows per
-transaction, in arrival order, and deletes them in that transaction. Concurrent workers never
-apply a row twice. The scheduler leader enqueues a drain for any workspace whose oldest row
-has waited more than 2 seconds, which covers an append that lands as a drain finishes. The
+transaction, in arrival order, and deletes them in that transaction. Rows are bucketed by
+record key (the strongest identifier) when they are appended, and the job runs
+`ingest.drain_shards` loops at once, one per share of the buckets, so a single workspace is
+not bound by one transaction's round trips; the rows of one record key always land in one
+loop and still apply in arrival order. A batch is up to `ingest.drain_batch_size` of the oldest rows of the
+shard's buckets. Rows a pre-0.29 serve appends (during a rolling
+upgrade) carry no bucket; each run buckets them first, so they join their key's queue by id.
+Each loop holds one connection per batch, so the worker's pool holds `worker.concurrency *
+(1 + ingest.drain_shards) + 1` connections (37 at the defaults). Concurrent workers never apply a row twice. The
+scheduler leader enqueues a drain for any workspace whose oldest row has waited more than 2 seconds, which covers an append that lands as a drain finishes. The
 inbox holds the raw item only until it is applied. Metrics: a `serve` process exports
 `zirv_flow_ingest_requests_total{endpoint,status}` and `zirv_flow_ingest_items_total{kind}`;
 a `worker` process exports `zirv_flow_ingest_applied_total{kind,outcome}` (`valid`, `flagged`,

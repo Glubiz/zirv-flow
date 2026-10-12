@@ -561,7 +561,7 @@ mod tests {
     async fn draining_the_inbox_touches_only_its_own_workspaces_rows(pool: PgPool) {
         use zirv_flow_core::{HmacPurpose, MasterKey};
 
-        use crate::{IngestItem, IngestPayload, append_inbox, drain_batch, inbox_heads};
+        use crate::{IngestItem, IngestPayload, Shard, append_inbox, drain_batch, inbox_heads};
 
         let one = workspace(&pool, "one").await;
         let two = workspace(&pool, "two").await;
@@ -588,7 +588,9 @@ mod tests {
         }
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
 
-        let outcome = drain_batch(&pool, one, &key, 100).await.unwrap();
+        let outcome = drain_batch(&pool, one, Shard::ALL, &key, 100)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.rows, 1);
         let heads = inbox_heads(&pool).await.unwrap();

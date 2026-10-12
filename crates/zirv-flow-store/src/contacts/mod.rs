@@ -38,7 +38,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        IngestItem, IngestPayload, NewTraitDefinition, ProfileRecord, append_inbox,
+        IngestItem, IngestPayload, NewTraitDefinition, ProfileRecord, Shard, append_inbox,
         apply_profile_batch, begin, commit, create_trait_definition, create_workspace, drain_batch,
         find_person_by_identifier, set_orphan_policy,
     };
@@ -524,7 +524,9 @@ mod tests {
             .unwrap();
 
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
-        let drained = drain_batch(&pool, bulk, &key, 100).await.unwrap();
+        let drained = drain_batch(&pool, bulk, Shard::ALL, &key, 100)
+            .await
+            .unwrap();
 
         assert_eq!(drained.rows, 3);
         assert_eq!(drained.applied.get(&("contact", "valid")), Some(&3));
@@ -802,7 +804,10 @@ mod tests {
             pool.clone(),
             MasterKey::generate().hmac_key(HmacPurpose::Redaction),
         );
-        let drain = tokio::spawn(async move { drain_batch(&pool, ws, &key, 100).await.unwrap() });
+        let drain =
+            tokio::spawn(
+                async move { drain_batch(&pool, ws, Shard::ALL, &key, 100).await.unwrap() },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             !drain.is_finished(),
@@ -918,7 +923,7 @@ mod tests {
 
         append_bulk(&pool, ws, "c-1", json!({"email": "third@example.test"})).await;
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
-        drain_batch(&pool, ws, &key, 100).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key, 100).await.unwrap();
 
         assert_eq!(person_of_email(&pool, ws, "new@example.test").await, None);
         assert_eq!(
@@ -1057,7 +1062,7 @@ mod tests {
         // A bulk replacement leaves it alone too.
         append_bulk(&pool, ws, "c-1", json!({"email": "a@example.com"})).await;
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
-        let drained = drain_batch(&pool, ws, &key, 100).await.unwrap();
+        let drained = drain_batch(&pool, ws, Shard::ALL, &key, 100).await.unwrap();
         assert_eq!(drained.applied.get(&("contact", "valid")), Some(&1));
         assert_eq!(
             read(&pool, ws, "c-1").await.unwrap().fields,
@@ -1094,9 +1099,9 @@ mod tests {
         .unwrap();
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
 
-        assert!(drain_batch(&pool, ws, &key, 100).await.is_err());
+        assert!(drain_batch(&pool, ws, Shard::ALL, &key, 100).await.is_err());
         assert_eq!(count(&pool, "ingest_inbox").await, 2);
-        let drained = crate::drain_batch_singly(&pool, ws, &key, 100)
+        let drained = crate::drain_batch_singly(&pool, ws, crate::Shard::ALL, &key, 100)
             .await
             .unwrap();
 
@@ -1289,7 +1294,7 @@ mod tests {
         .unwrap();
         append_bulk(&pool, ws, "c-1", json!({"plan": "free"})).await;
         let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
-        drain_batch(&pool, ws, &key, 100).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key, 100).await.unwrap();
 
         assert_eq!(
             read(&pool, ws, "c-1").await.unwrap().fields,

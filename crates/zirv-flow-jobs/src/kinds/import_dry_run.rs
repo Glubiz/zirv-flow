@@ -270,6 +270,7 @@ mod tests {
             pool: pool.clone(),
             redaction_key: None,
             batch_size: 500,
+            shards: 1,
         });
         dry_run_import_probed(&mut ctx, &claimed.payload.clone(), probe).await
     }

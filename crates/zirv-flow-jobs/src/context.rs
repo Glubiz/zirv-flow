@@ -13,13 +13,14 @@ use zirv_flow_store::{
 use crate::JobError;
 
 /// What the ingest drain needs beyond the handler's transaction: a pool for its own
-/// transaction per batch (the job's transaction only holds the lease), the redaction key
-/// and the batch size.
+/// transaction per batch (the job's transaction only holds the lease), the redaction key,
+/// the batch size and the number of concurrent drain shards.
 #[derive(Clone)]
 pub(crate) struct IngestSettings {
     pub(crate) pool: PgPool,
     pub(crate) redaction_key: Option<Arc<HmacKey>>,
     pub(crate) batch_size: u32,
+    pub(crate) shards: u32,
 }
 
 /// The handler's view of one claimed job and the transaction it runs in.
@@ -288,8 +289,10 @@ mod tests {
             pool: pool.clone(),
             redaction_key: None,
             batch_size: 7,
+            shards: 3,
         });
 
         assert_eq!(ctx.ingest().unwrap().batch_size, 7);
+        assert_eq!(ctx.ingest().unwrap().shards, 3);
     }
 }

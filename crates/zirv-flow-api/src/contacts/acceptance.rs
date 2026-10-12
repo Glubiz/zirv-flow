@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(not_yet.status, StatusCode::NOT_FOUND);
 
         let hmac = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
-        zirv_flow_store::drain_batch(&pool, fx.ws, &hmac, 100)
+        zirv_flow_store::drain_batch(&pool, fx.ws, zirv_flow_store::Shard::ALL, &hmac, 100)
             .await
             .unwrap();
 
