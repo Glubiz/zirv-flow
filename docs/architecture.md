@@ -172,6 +172,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-ai` | `zirv-flow-core` |
 | `zirv-flow-identity` | `zirv-flow-core` |
 | `zirv-flow-templates` | `zirv-flow-core` |
+| `zirv-flow-loadgen` (tools/loadgen) | none |
 | `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates` |
 | `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
 
@@ -1491,8 +1492,8 @@ enrollment tables and backup-copy handling of the ledger (OQ-13) are not built y
 
 ## 19. Scalability envelope
 
-Every figure is a **TARGET to validate, not a measurement**; nothing has been
-measured yet. Each milestone measures its slice and M8 validates all of them on
+Every figure is a **TARGET to validate, not a measurement**; measurements are
+recorded in the "As measured" notes below the table. Each milestone measures its slice and M8 validates all of them on
 reference hardware (assumed: PostgreSQL 8 vCPU / 32 GB RAM / NVMe; two
 `zirv-flow` hosts of 4 vCPU). A missed target is fixed or revised in a recorded
 decision, never dropped silently. Beyond the envelope: more workers, a read
@@ -1516,6 +1517,16 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 | Job throughput | 1,000 jobs/s claimed and completed |
 | Send throughput | 300 messages/s per deployment, provider limits permitting |
 | Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message |
+
+**As measured (M2).** The ingestion rows were measured on a development machine, not the reference
+hardware, at three sizes of the zirv-flow stack (2, 4 and 8 vCPU) in
+[docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md). Sustained 2,000 items/s on one workspace
+holds (API p99 11 to 80 ms, inbox to applied p95 35 to 46 ms). Missed there: the decision-log append
+(52.9 ms of added p95 per 500-event drain transaction, 34% throughput loss; #75), the 10-minute burst
+drain (projected at about 19 minutes from a 2-minute run; #74) and the API p99 of 500-item batches
+(125 ms; #76). One workspace's drain applies about 3,400 mixed items per second whatever the vCPU count,
+because its shards share one task (#74). The figures
+are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
 
 ## 20. Key decisions
 
@@ -1598,7 +1609,6 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-1 | Trait storage: `jsonb` + expression indexes for hot traits, or promoted typed columns? | M2, by benchmark |
 | OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark |
 | OQ-4 | Custom object types (accounts, orders, subscriptions as entities, not events): v1 or post-1.0? | M3 |
 | OQ-5 | Is the bounded transform set enough, or is a small expression language needed for mapping? | M3 |
@@ -1628,6 +1638,18 @@ they were ruled as their capabilities were added to the plan.
 | OQ-32 | Consent dimensions and policies: are dimensions a per-workspace catalog with typed values, or topics with categories? How does the policy reuse the M4 condition AST, and how does a recorded-consent read address dimension values? | M6, before the send pipeline ships |
 
 ### 21.1 Decided questions
+
+- **OQ-1:** Hot traits are promoted to typed columns with btree indexes; every other trait stays in the
+  `people.traits` `jsonb`. At 1 million people and 20 mixed-type traits (M2 benchmark, tier M's
+  PostgreSQL, medians of 5), against `jsonb` with expression indexes on the same three traits: segment-style
+  counts are 17 to 21 times faster (1.0 and 1.3 ms against 18.1 and 27.4 ms, because typed columns allow
+  index-only scans), the three-trait AND count and id scan 1.8 times faster (26 ms against 47 ms), an upsert of
+  10,000 trait changes 1.23 times faster (133 ms against 164 ms) and the table 12% smaller; the plain id scans
+  are within 6 to 12% (31 against 28 ms, 19 against 18 ms), the one place `jsonb` is ahead. The difference is
+  outside noise, so the simpler design is not kept. Cost: promoting a trait is a migration with a column and
+  a consistent `jsonb` copy while it moves, and a promoted trait has one fixed type. Which traits are hot, and
+  the promotion process, belong to the segment milestone (M4); until then the `jsonb_path_ops` index stays.
+  Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
   (`worker.max_running_per_workspace`, default unlimited); weighted claiming is

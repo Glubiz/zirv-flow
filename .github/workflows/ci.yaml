@@ -75,6 +75,16 @@ jobs:
       - name: Build Binary
         run: cargo build
 
+      # The benchmark-only `bench-no-decisions` feature cannot compile without the
+      # ZIRV_FLOW_BENCH_BUILD guard variable; this proves it, and that no shipped-build input
+      # (CD, Dockerfile, compose, scripts they run) mentions either. After the build so the
+      # check reuses the target directory.
+      - name: Benchmark feature gate
+        run: bash scripts/check-bench-features.sh
+
+      - name: Benchmark feature gate self-test
+        run: bash scripts/check-bench-features.sh --self-test
+
       # Catches canonical context drift before it ships: a CLAUDE.md/AGENTS.md
       # regenerated from an older `.zirv/context/` than what is on this branch
       # silently injects the canonical layer twice every session. `--check`
@@ -117,6 +127,12 @@ jobs:
 
       - name: Run Clippy Lint
         run: cargo clippy --all-targets -- -D warnings
+
+      # The benchmark-only feature has to keep compiling cleanly.
+      - name: Run Clippy Lint (bench-no-decisions)
+        env:
+          ZIRV_FLOW_BENCH_BUILD: "1"
+        run: cargo clippy -p zirv-flow-store --features bench-no-decisions -- -D warnings
 
       # Development happens on Windows too, so platform-specific code has to
       # keep compiling cleanly for it, tests included.

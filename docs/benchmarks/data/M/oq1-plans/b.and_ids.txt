@@ -1,0 +1,19 @@
+Bitmap Heap Scan on people  (cost=5162.28..21416.61 rows=2716 width=8) (actual time=15.073..25.931 rows=2710 loops=1)
+  Recheck Cond: ((country = 'C07'::text) AND (signup_at >= '2025-01-01 00:00:00+00'::timestamp with time zone))
+  Filter: (ltv >= '500'::numeric)
+  Rows Removed by Filter: 2793
+  Heap Blocks: exact=5275
+  Buffers: shared hit=6030
+  ->  BitmapAnd  (cost=5162.28..5162.28 rows=5439 width=0) (actual time=14.531..14.532 rows=0 loops=1)
+        Buffers: shared hit=755
+        ->  Bitmap Index Scan on people_country_idx  (cost=0.00..225.18 rows=20367 width=0) (actual time=1.702..1.702 rows=20417 loops=1)
+              Index Cond: (country = 'C07'::text)
+              Buffers: shared hit=20
+        ->  Bitmap Index Scan on people_signup_idx  (cost=0.00..4935.49 rows=267076 width=0) (actual time=12.144..12.144 rows=268175 loops=1)
+              Index Cond: (signup_at >= '2025-01-01 00:00:00+00'::timestamp with time zone)
+              Buffers: shared hit=735
+Planning:
+  Buffers: shared hit=151
+Planning Time: 0.362 ms
+Execution Time: 26.069 ms
+Time: 27.019 ms

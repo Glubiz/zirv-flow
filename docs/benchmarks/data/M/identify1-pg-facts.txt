@@ -1,0 +1,5 @@
+deadlocks=0
+ip.postgres=172.19.0.2
+ip.zirv-flow=172.19.0.5
+ip.zirv-flow-worker=172.19.0.3
+ip.zirv-flow-scheduler=172.19.0.4

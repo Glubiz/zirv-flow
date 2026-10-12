@@ -1,0 +1,66 @@
+# Benchmark override for the quickstart stack: separate serve, worker and scheduler processes
+# (the quickstart runs them as one `all`) and PostgreSQL published on 127.0.0.1:55432 for psql
+# and for the native binaries of the decision-overhead run. Use it with the base file:
+#
+#   docker compose -f docker-compose.yml -f scripts/bench/compose.bench.yaml up -d --build --wait
+#
+# BENCH_RATE_PER_KEY and BENCH_BURST_PER_KEY raise the per-key ingestion limit for the burst
+# run; the defaults are the shipped ones. Local use only.
+# The project name is fixed here so `down -v` never touches the quickstart stack's volumes (Compose
+# would otherwise name the project after the checkout directory). Containers are zirv-flow-bench-<service>-1.
+name: zirv-flow-bench
+
+x-bench-env: &bench-env
+  ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
+  ZIRV_FLOW_DATABASE__URL: postgres://${POSTGRES_USER:-zirv}:${POSTGRES_PASSWORD:-zirv-quickstart}@postgres:5432/${POSTGRES_DB:-zirv_flow}
+  ZIRV_FLOW_SERVER__COOKIE_SECURE: "false"
+  ZIRV_FLOW_INGEST__RATE_PER_KEY: ${BENCH_RATE_PER_KEY:-10000}
+  ZIRV_FLOW_INGEST__BURST_PER_KEY: ${BENCH_BURST_PER_KEY:-20000}
+  ZIRV_FLOW_WORKER__CONCURRENCY: ${BENCH_WORKER_CONCURRENCY:-4}
+  ZIRV_FLOW_INGEST__DRAIN_SHARDS: ${BENCH_DRAIN_SHARDS:-8}
+  ZIRV_FLOW_LOG__FILTER: warn
+
+x-bench-role: &bench-role
+  build: .
+  image: ghcr.io/glubiz/zirv-flow:latest
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    zirv-flow-key:
+      condition: service_completed_successfully
+  volumes:
+    - zirv-flow-secrets:/var/lib/zirv-flow/secrets:ro
+  # No HTTP listener on a worker or scheduler: serve its ops endpoints instead (metrics).
+  healthcheck:
+    disable: true
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  # The API. It applies migrations on start, so start it before the others.
+  zirv-flow:
+    command: ["serve"]
+    environment:
+      <<: *bench-env
+      ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "true"
+
+  zirv-flow-worker:
+    <<: *bench-role
+    command: ["worker"]
+    environment:
+      <<: *bench-env
+      ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
+    ports:
+      - "127.0.0.1:9100:9100"
+
+  zirv-flow-scheduler:
+    <<: *bench-role
+    command: ["scheduler"]
+    environment:
+      <<: *bench-env
+      ZIRV_FLOW_OPS__BIND: 0.0.0.0:9101
+    ports:
+      - "127.0.0.1:9101:9101"

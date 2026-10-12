@@ -16,6 +16,19 @@ use crate::StoreError;
 /// Records per statement of [`append_decisions`]: 11 binds each stay far below PostgreSQL's limit.
 const MAX_BATCH: usize = 1000;
 
+/// The `bench-no-decisions` feature, a benchmark-only switch that makes [`append_decision`] and
+/// [`append_decisions`] write nothing. The failed-job records written by the job queue's own SQL
+/// are not affected. Never set in a release build.
+const BENCH_NO_DECISIONS: bool = cfg!(feature = "bench-no-decisions");
+
+// Makes the feature impossible to compile by accident: `--all-features`, an alias in a dependent or
+// a default list all fail here unless the builder deliberately sets the variable.
+#[cfg(feature = "bench-no-decisions")]
+const _: () = assert!(
+    option_env!("ZIRV_FLOW_BENCH_BUILD").is_some(),
+    "bench-no-decisions is for benchmark builds only: set ZIRV_FLOW_BENCH_BUILD=1 to build it",
+);
+
 /// A record to append.
 #[derive(Clone, Debug)]
 pub struct NewDecision {
@@ -87,6 +100,9 @@ pub async fn append_decision<'e>(
     executor: impl PgExecutor<'e>,
     decision: &NewDecision,
 ) -> Result<(), StoreError> {
+    if BENCH_NO_DECISIONS {
+        return Ok(());
+    }
     let subjects: Map<String, Value> = decision
         .subject_ids
         .iter()
@@ -121,6 +137,9 @@ pub async fn append_decisions(
     connection: &mut PgConnection,
     decisions: &[NewDecision],
 ) -> Result<(), StoreError> {
+    if BENCH_NO_DECISIONS {
+        return Ok(());
+    }
     for chunk in decisions.chunks(MAX_BATCH) {
         let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
@@ -276,6 +295,156 @@ mod tests {
         assert_eq!(next_month(date!(2026 - 10 - 01)), date!(2026 - 11 - 01));
         assert_eq!(next_month(date!(2026 - 12 - 01)), date!(2027 - 01 - 01));
         assert_eq!(bound(date!(2027 - 01 - 01)), "2027-01-01 00:00:00+00");
+    }
+
+    /// Nearest-rank percentile (0 to 100) of an ascending slice.
+    #[cfg(not(feature = "bench-no-decisions"))]
+    fn percentile_ms(sorted: &[f64], p: f64) -> f64 {
+        let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+        sorted[rank.clamp(1, sorted.len()) - 1]
+    }
+
+    /// Times the decision appends of one drain batch, the "added transaction time" of
+    /// architecture section 19. Run by hand with `ZIRV_FLOW_BENCH_DECISIONS=<batches>` (at least
+    /// 500 are run; `ZIRV_FLOW_BENCH_DRAIN_BATCH` sets the batch size, default 500, the shipped
+    /// `ingest.drain_batch_size`); without the variable it does nothing. It appends what a drain
+    /// writes, one `append_decision` per decision on the batch's transaction, and prints JSON
+    /// with the p50, p95 and p99 per batch in milliseconds, with and without the commit. Progress goes to
+    /// standard error every 50 batches; `ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S` (default 600) caps the time per
+    /// shape and a capped shape is reported with `partial_time_budget_hit` and the batches it ran.
+    #[cfg(not(feature = "bench-no-decisions"))]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_DECISIONS to measure"]
+    async fn a_drain_batch_of_decisions_records_its_duration(pool: PgPool) {
+        use std::time::Instant;
+
+        fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+        }
+        let Some(batches) = env_number::<usize>("ZIRV_FLOW_BENCH_DECISIONS") else {
+            eprintln!("ZIRV_FLOW_BENCH_DECISIONS is not set: skipping the timing run");
+            return;
+        };
+        let batches = batches.max(500);
+        let size = env_number::<usize>("ZIRV_FLOW_BENCH_DRAIN_BATCH").unwrap_or(500);
+        let budget = std::time::Duration::from_secs(
+            env_number::<u64>("ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S").unwrap_or(600),
+        );
+        let ws = workspace(&pool, "bench").await;
+
+        // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
+        // `event.accepted`, a changed profile one `trait.change`; a new person adds a
+        // `person.created`.
+        type Decision = (&'static str, &'static str, &'static [&'static str]);
+        let shapes: [(&str, &[Decision]); 3] = [
+            (
+                "track",
+                &[("event.accepted", "valid", &["event", "person"])],
+            ),
+            (
+                "identify",
+                &[("trait.change", "changed", &["person", "source_record"])],
+            ),
+            (
+                "track_new_person",
+                &[
+                    ("person.created", "created", &["person", "source_record"]),
+                    ("event.accepted", "valid", &["event", "person"]),
+                ],
+            ),
+        ];
+        let mut report = Vec::new();
+        for (name, per_item) in shapes {
+            let mut inside = Vec::with_capacity(batches);
+            let mut committed = Vec::with_capacity(batches);
+            let shape_started = Instant::now();
+            let mut partial = false;
+            for number in 0..batches {
+                if shape_started.elapsed() > budget {
+                    partial = true;
+                    break;
+                }
+                if number % 50 == 0 {
+                    eprintln!("{name}: batch {number} of {batches}");
+                }
+                let trace = TraceContext::root(Cause::api("bench"));
+                let started = Instant::now();
+                let mut tx = crate::begin(&pool).await.unwrap();
+                for _ in 0..size {
+                    for &(action, outcome, subjects) in per_item {
+                        append_decision(
+                            &mut *tx,
+                            &NewDecision {
+                                workspace_id: ws,
+                                trace: trace.clone(),
+                                action,
+                                outcome,
+                                reason: None,
+                                subject_ids: subjects
+                                    .iter()
+                                    .map(|name| (*name, Uuid::new_v4()))
+                                    .collect(),
+                                job: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                inside.push(started.elapsed().as_secs_f64() * 1000.0);
+                crate::commit(tx).await.unwrap();
+                committed.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let batches_run = inside.len();
+            let summary = |mut values: Vec<f64>| {
+                values.sort_by(f64::total_cmp);
+                serde_json::json!({
+                    "p50_ms": percentile_ms(&values, 50.0),
+                    "p95_ms": percentile_ms(&values, 95.0),
+                    "p99_ms": percentile_ms(&values, 99.0),
+                })
+            };
+            report.push(serde_json::json!({
+                "shape": name,
+                "decisions_per_batch": size * per_item.len(),
+                "batches_planned": batches,
+                "batches_run": batches_run,
+                "partial_time_budget_hit": partial,
+                "inside_transaction": summary(inside),
+                "with_commit": summary(committed),
+            }));
+        }
+        println!(
+            "{}",
+            serde_json::json!({ "benchmark": "decision_append", "drain_batch_size": size, "shapes": report })
+        );
+    }
+
+    #[test]
+    fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
+        #[cfg(not(feature = "bench-no-decisions"))]
+        const {
+            assert!(!BENCH_NO_DECISIONS)
+        };
+    }
+
+    #[cfg(feature = "bench-no-decisions")]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_the_benchmark_feature_appends_write_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        append_decision(&pool, &decision(ws, &trace, "step"))
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        append_decisions(&mut connection, &[decision(ws, &trace, "step")])
+            .await
+            .unwrap();
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        assert!(records.is_empty());
     }
 
     #[sqlx::test]

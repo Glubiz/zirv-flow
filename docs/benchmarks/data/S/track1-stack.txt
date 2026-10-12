@@ -1,0 +1,17 @@
+tier=S app_cpuset=0-1 pg_cpuset=8-31
+image=sha256:d6903f9873edcc05246fda9b609488df2c02b2b2ad2e11485d8b57dc6c495a21 created=2026-10-12T10:16:05.338640849Z
+/bench-postgres-1 cpuset=8-31 mem_limit_bytes=0
+/bench-zirv-flow-1 cpuset=0-1 mem_limit_bytes=1717567488
+/bench-zirv-flow-scheduler-1 cpuset=0-1 mem_limit_bytes=429916160
+/bench-zirv-flow-worker-1 cpuset=0-1 mem_limit_bytes=2147483648
+pg.server_version=16.15 (Debian 16.15-1.pgdg13+2)
+pg.shared_buffers=4GB
+pg.effective_cache_size=16GB
+pg.maintenance_work_mem=1GB
+pg.max_connections=100
+pg.synchronous_commit=on
+pg.wal_level=replica
+pg.fsync=on
+pg.work_mem=4MB
+pg.max_wal_size=8GB
+pg.checkpoint_timeout=15min

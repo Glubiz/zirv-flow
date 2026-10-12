@@ -1,0 +1,22 @@
+[package]
+name = "zirv-flow-loadgen"
+description = "Deterministic ingestion load generator for the zirv-flow benchmarks. Not shipped."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "loadgen"
+path = "src/main.rs"
+
+# Deliberately no zirv-flow crate: it talks to a running instance over HTTP only.
+[dependencies]
+clap.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
