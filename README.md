@@ -941,8 +941,8 @@ transaction, in arrival order, and deletes them in that transaction. Rows are bu
 record key (the strongest identifier) when they are appended, and the job runs
 `ingest.drain_shards` loops at once, one per share of the buckets, so a single workspace is
 not bound by one transaction's round trips; the rows of one record key always land in one
-loop and still apply in arrival order. Each batch takes every owned bucket's oldest rows,
-so a hot bucket cannot starve the others. Rows a pre-0.29 serve appends (during a rolling
+loop and still apply in arrival order. A batch is up to `ingest.drain_batch_size` of the oldest rows of the
+shard's buckets. Rows a pre-0.29 serve appends (during a rolling
 upgrade) carry no bucket; each run buckets them first, so they join their key's queue by id.
 Each loop holds one connection per batch, so the worker's pool holds `worker.concurrency *
 (1 + ingest.drain_shards) + 1` connections. Concurrent workers never apply a row twice. The

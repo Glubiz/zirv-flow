@@ -326,7 +326,7 @@ pub struct DrainOutcome {
     pub applied: BTreeMap<(&'static str, &'static str), u64>,
     /// Accepted events that arrived late.
     pub late: u64,
-    /// Whether the shard may hold more rows: a bucket's quota came back full.
+    /// Whether the shard may hold more rows: the oldest `limit` rows were all taken.
     pub more: bool,
 }
 
@@ -355,7 +355,6 @@ struct InboxRow {
     message_id: String,
     received_at: OffsetDateTime,
     trace_id: Uuid,
-    affinity: Option<i16>,
 }
 
 impl InboxRow {
@@ -435,10 +434,12 @@ fn strongest_identifier(identifiers: &[(String, String)]) -> Option<String> {
         .map(|(_, text)| text)
 }
 
-/// Takes the oldest rows of each bucket `shard` owns, up to `ceil(limit / owned)` per bucket
-/// through the `(workspace_id, affinity, id)` index, then the `limit` oldest of those in id
-/// order. Each bucket's rows are its id-ordered prefix, so a key's order holds. Also returns
-/// whether the shard may hold more: a bucket came back full or the cut dropped rows.
+/// Takes up to `limit` of the oldest rows of the buckets `shard` owns, in id order. Step one
+/// picks the ids without locking, each bucket through `(workspace_id, affinity, id)`, so the
+/// scan is bounded by the owned buckets times `limit` index entries, whatever the backlog. The
+/// rows of a bucket among the `limit` oldest overall are a prefix of its queue, so a key's
+/// order holds. Step two locks and fetches them, skipping locked rows; a row deleted in
+/// between drops out. Also returns whether the shard may hold more: step one filled `limit`.
 async fn take_rows(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -449,37 +450,38 @@ async fn take_rows(
     if owned.is_empty() {
         return Ok((Vec::new(), false));
     }
-    let owned_count = i64::try_from(owned.len()).unwrap_or(1);
-    let per = (limit.max(1) + owned_count - 1) / owned_count;
-    let mut rows: Vec<InboxRow> = sqlx::query_as(
-        "SELECT r.id, r.api_key_id, r.kind, r.item, r.message_id, r.received_at, r.trace_id, \
-                r.affinity \
-         FROM unnest($2::smallint[]) AS o(bucket) \
-         CROSS JOIN LATERAL ( \
-             SELECT id, api_key_id, kind, item, message_id, received_at, trace_id, affinity \
-             FROM ingest_inbox WHERE workspace_id = $1 AND affinity = o.bucket \
-             ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED) r",
+    let limit = limit.max(1);
+    // The buckets are inlined, one branch each: with a bound array the planner estimates
+    // every bucket from the column's average frequency, and under a skewed backlog it walks
+    // the primary key past the hot bucket's rows to find an empty bucket's none.
+    let branches: Vec<String> = owned
+        .iter()
+        .map(|bucket| {
+            format!(
+                "(SELECT id FROM ingest_inbox WHERE workspace_id = $1 AND affinity = {bucket}                  ORDER BY id LIMIT $2)"
+            )
+        })
+        .collect();
+    let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT id FROM ({}) AS oldest ORDER BY id LIMIT $2",
+        branches.join(" UNION ALL ")
+    )))
+    .bind(workspace.as_uuid())
+    .bind(limit)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let more = i64::try_from(ids.len()).is_ok_and(|taken| taken >= limit);
+    let rows = sqlx::query_as(
+        "SELECT id, api_key_id, kind, item, message_id, received_at, trace_id \
+         FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2) \
+         ORDER BY id FOR UPDATE SKIP LOCKED",
     )
     .bind(workspace.as_uuid())
-    .bind(&owned)
-    .bind(per)
+    .bind(&ids)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    let mut more = false;
-    for bucket in &owned {
-        let taken = rows
-            .iter()
-            .filter(|row| row.affinity == Some(*bucket))
-            .count();
-        more |= i64::try_from(taken).is_ok_and(|taken| taken >= per);
-    }
-    rows.sort_unstable_by_key(|row| row.id);
-    let cap = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
-    if rows.len() > cap {
-        rows.truncate(cap);
-        more = true;
-    }
     Ok((rows, more))
 }
 
@@ -822,7 +824,6 @@ mod tests {
             message_id: "m-1".to_owned(),
             received_at: datetime!(2026-02-03 04:05:06 UTC),
             trace_id: Uuid::nil(),
-            affinity: None,
         }
     }
 
@@ -1093,11 +1094,6 @@ mod tests {
             .collect();
         append(&pool, one, &trace, &items).await;
         append(&pool, two, &trace, &items).await;
-        // One bucket each, so the per-bucket quota does not narrow the batch.
-        sqlx::query("UPDATE ingest_inbox SET affinity = id % 64")
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let outcome = drain_batch(&pool, one, Shard::ALL, &key(), 3)
             .await
@@ -1584,23 +1580,58 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_hot_bucket_does_not_starve_the_shards_other_buckets(pool: PgPool) {
+    async fn a_hot_key_fills_a_whole_batch_whatever_the_shard_count(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
         raw_rows(&pool, ws, Some(0), 24, "hot").await;
-        raw_rows(&pool, ws, Some(4), 1, "cold").await;
-        let cold: i64 = sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 4")
-            .fetch_one(&pool)
+        let hot: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
+            .fetch_all(&pool)
             .await
             .unwrap();
 
-        let (ids, more) = taken(&pool, ws, Shard { index: 0, count: 4 }, 8).await;
+        for count in [1, 4] {
+            let (ids, more) = taken(&pool, ws, Shard { index: 0, count }, 8).await;
 
+            assert_eq!(ids, hot[..8], "{count} shards");
+            assert!(more);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cold_buckets_rows_are_not_starved_by_a_hot_one(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        raw_rows(&pool, ws, Some(4), 1, "older").await;
+        raw_rows(&pool, ws, Some(0), 24, "hot").await;
+        raw_rows(&pool, ws, Some(4), 1, "newer").await;
+        let cold: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 4 ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let shard = Shard { index: 0, count: 4 };
+
+        let (first, _) = taken(&pool, ws, shard, 8).await;
         assert!(
-            ids.contains(&cold),
-            "the first batch includes the cold bucket's row"
+            first.contains(&cold[0]),
+            "the older cold row is in the first batch"
         );
-        assert!(ids.len() <= 8);
-        assert!(more, "the hot bucket has more");
+
+        let key = key();
+        let mut batches = 0;
+        while sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_inbox WHERE id = $1")
+            .bind(cold[1])
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            == 1
+        {
+            drain_batch(&pool, ws, shard, &key, 8).await.unwrap();
+            batches += 1;
+            assert!(
+                batches <= 4,
+                "within ceil(3 * limit / limit) batches, plus the first"
+            );
+        }
     }
 
     #[sqlx::test]
