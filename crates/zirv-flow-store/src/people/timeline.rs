@@ -327,7 +327,9 @@ mod tests {
     use time::macros::datetime;
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::events::{EventMode, PropertyType, SchemaProperty};
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
 
     use super::*;
     use crate::events::{
@@ -389,7 +391,7 @@ mod tests {
             message_id: None,
             trace: TraceContext::root(Cause::api("test")),
         };
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         match apply_event_batch(pool, ws, &key, &[record])
             .await
             .unwrap()

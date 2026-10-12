@@ -10,8 +10,8 @@ use tracing::{Instrument, Span, info, info_span, warn};
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
-    ClaimedJob, EventRetention, FailOutcome, HmacKey, PgPool, begin, claim_job, complete_job,
-    fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
+    ClaimedJob, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
+    complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
 use crate::context::{IngestSettings, JobContext};
@@ -45,6 +45,8 @@ pub struct WorkerConfig {
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
     pub identifier_key: Option<Arc<HmacKey>>,
+    /// The master keys that open stored secrets; no job kind opens one yet.
+    pub keyring: Option<Arc<Keyring>>,
     /// Inbox rows `ingest.drain` applies per transaction.
     pub ingest_drain_batch_size: u32,
     /// Concurrent drain loops per workspace in `ingest.drain`.
@@ -65,6 +67,7 @@ impl WorkerConfig {
             event_retention: EventRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
             egress: Arc::default(),
@@ -571,6 +574,7 @@ mod tests {
             event_retention: EventRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,
             egress: Arc::default(),
@@ -703,7 +707,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_worker_with_the_redaction_key_drains_an_appended_inbox(pool: PgPool) {
-        use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+        use zirv_flow_core::{
+            Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+        };
         use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
 
         migrated(&pool).await;
@@ -735,7 +741,7 @@ mod tests {
         .unwrap();
         let mut config = test_config(2);
         config.redaction_key = Some(Arc::new(
-            MasterKey::generate().hmac_key(HmacPurpose::Redaction),
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
         ));
         config.ingest_drain_batch_size = 10;
         let (stop, handle) = start(&pool, config);

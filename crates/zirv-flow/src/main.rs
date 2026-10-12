@@ -102,7 +102,8 @@ async fn run(
                 Ok(pool) => pool,
                 Err(message) => return database_error(stderr, message),
             };
-            return run_replay_erasures(workspace.as_deref(), &key, &pool, stdout, stderr).await;
+            let root = zirv_flow_store::HmacRoot::bootstrap_from(&key);
+            return run_replay_erasures(workspace.as_deref(), &root, &pool, stdout, stderr).await;
         }
         // The password is read first so a missing one fails without touching the database.
         let password = match read_password(stdin) {
@@ -299,6 +300,10 @@ async fn run_roles_reporting(
     shutdown: impl Future<Output = ()> + Send + 'static,
     ops_bound: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> u8 {
+    // Until the root is stored, it is the master key's bytes, which is what every hash so far used.
+    let hmac_root = master_key
+        .as_deref()
+        .map(|key| Arc::new(zirv_flow_store::HmacRoot::bootstrap_from(key)));
     let ops_bind = ops_bind(roles, config);
     // A bad server configuration or a taken ops address stops the process before any role starts.
     let render = if roles.serve || ops_bind.is_some() {
@@ -314,7 +319,7 @@ async fn run_roles_reporting(
             config,
             pool.clone(),
             Arc::clone(render),
-            master_key.as_deref(),
+            hmac_root.as_deref(),
         ) {
             Ok(state) => Some(state),
             Err(code) => return code,
@@ -367,12 +372,12 @@ async fn run_roles_reporting(
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
         worker_config.event_retention = config.events_retention();
-        worker_config.redaction_key = master_key
+        worker_config.redaction_key = hmac_root
             .as_deref()
-            .map(|key| Arc::new(key.hmac_key(zirv_flow_store::HmacPurpose::Redaction)));
-        worker_config.identifier_key = master_key
+            .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Redaction)));
+        worker_config.identifier_key = hmac_root
             .as_deref()
-            .map(|key| Arc::new(key.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
+            .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
         worker_config.egress = config.egress_policy();
@@ -583,7 +588,7 @@ fn http_state(
     config: &Config,
     pool: PgPool,
     render: Render,
-    master_key: Option<&zirv_flow_store::MasterKey>,
+    hmac_root: Option<&zirv_flow_store::HmacRoot>,
 ) -> Result<zirv_flow_api::AppState, u8> {
     let mut state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
@@ -593,8 +598,8 @@ fn http_state(
         .with_import_limits(config.import_limits())
         .with_explorer_limits(config.explorer_limits())
         .with_egress_policy(config.egress_policy());
-    if let Some(key) = master_key {
-        state = state.with_master_key(key);
+    if let Some(root) = hmac_root {
+        state = state.with_hmac_root(root);
     }
 
     match config.oidc() {
@@ -795,13 +800,13 @@ async fn run_admin(
 /// Re-applies the erasure ledger after a restore and prints counts only.
 async fn run_replay_erasures(
     workspace: Option<&str>,
-    key: &zirv_flow_store::MasterKey,
+    root: &zirv_flow_store::HmacRoot,
     pool: &PgPool,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> u8 {
     let context = zirv_flow_api::admin::Context::system();
-    match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, key).await {
+    match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, root).await {
         Ok(report) => {
             let _ = writeln!(
                 stdout,
@@ -1276,6 +1281,7 @@ endpoint = \"http://collector:4318/\""
         .unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let key = zirv_flow_store::HmacRoot::bootstrap_from(&key);
 
         let code = run_replay_erasures(Some("ours"), &key, &pool, &mut stdout, &mut stderr).await;
         let unknown =

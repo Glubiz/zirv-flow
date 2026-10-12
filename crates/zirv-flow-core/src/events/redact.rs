@@ -190,12 +190,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{HmacPurpose, MasterKey};
+    use crate::{HmacPurpose, HmacRoot, MasterKey};
 
     fn key() -> HmacKey {
-        MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
-            .unwrap()
-            .hmac_key(HmacPurpose::Redaction)
+        let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
+        HmacRoot::bootstrap_from(&master).hmac_key(HmacPurpose::Redaction)
     }
 
     fn map(value: Value) -> Map<String, Value> {

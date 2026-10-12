@@ -183,6 +183,7 @@ fn exact(value: &str) -> Result<String, IdentifierError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HmacRoot;
 
     fn value(kind: &str, input: &str) -> Result<String, IdentifierError> {
         Identifier::parse(kind, input).map(|identifier| identifier.value().to_owned())
@@ -191,7 +192,7 @@ mod tests {
     fn hash_of(kind: &str, input: &str) -> [u8; 32] {
         let master =
             crate::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
-        let key = master.hmac_key(crate::HmacPurpose::Identifier);
+        let key = HmacRoot::bootstrap_from(&master).hmac_key(crate::HmacPurpose::Identifier);
         identifier_hash(&key, &Identifier::parse(kind, input).unwrap())
     }
 

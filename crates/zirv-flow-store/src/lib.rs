@@ -133,7 +133,7 @@ pub use workspaces::{
 };
 /// The operator master key and its derived keys, re-exported so the binary reaches them
 /// through the store.
-pub use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
+pub use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring, MasterKey};
 
 #[derive(Debug)]
 pub struct StoreError {

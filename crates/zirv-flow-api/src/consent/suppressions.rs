@@ -767,14 +767,12 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use zirv_flow_core::HmacPurpose;
-    use zirv_flow_core::MasterKey;
+    use zirv_flow_core::{HmacRoot, MasterKey};
 
     use super::*;
 
     fn key() -> HmacKey {
-        MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
-            .unwrap()
-            .hmac_key(HmacPurpose::Identifier)
+        HmacRoot::bootstrap_from(&MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap()).hmac_key(HmacPurpose::Identifier)
     }
 
     fn hash_of(value: &str) -> [u8; 32] {

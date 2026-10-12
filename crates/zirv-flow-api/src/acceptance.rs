@@ -53,8 +53,9 @@ mod tests {
     async fn app(pool: &PgPool) -> Router {
         zirv_flow_store::migrate(pool).await.unwrap();
         router(
-            AppState::new(pool.clone(), Arc::new(String::new))
-                .with_master_key(&zirv_flow_core::MasterKey::generate()),
+            AppState::new(pool.clone(), Arc::new(String::new)).with_hmac_root(
+                &zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate()),
+            ),
         )
     }
 
@@ -3233,7 +3234,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn rejects_list_newest_first_in_pages_with_filters_and_never_the_payload(pool: PgPool) {
-        use zirv_flow_core::{Cause, HmacPurpose, MasterKey, TraceContext};
+        use zirv_flow_core::{Cause, HmacPurpose, HmacRoot, TraceContext};
         use zirv_flow_store::{EventRecord, apply_event_batch};
 
         let router = app(&pool).await;
@@ -3249,7 +3250,8 @@ mod tests {
         )
         .await;
         let workspace_id = ws.parse().unwrap();
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(HmacPurpose::Redaction);
         let received = time::macros::datetime!(2026-06-01 12:00 UTC);
         let events: Vec<EventRecord> = [
             ("order", "order-total-1", 1),
@@ -4212,8 +4214,11 @@ mod tests {
     async fn keyed_app(pool: &PgPool) -> Router {
         zirv_flow_store::migrate(pool).await.unwrap();
         router(
-            AppState::new(pool.clone(), Arc::new(String::new))
-                .with_master_key(&zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap()),
+            AppState::new(pool.clone(), Arc::new(String::new)).with_hmac_root(
+                &zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+                ),
+            ),
         )
     }
 
@@ -4951,9 +4956,10 @@ mod tests {
         let router = keyed_app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
-        let key = zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY)
-            .unwrap()
-            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(
+            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+        )
+        .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
         let identifier =
             zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap();
         zirv_flow_store::add_suppression(
@@ -5451,8 +5457,8 @@ email,b@example.com,
             message_id: None,
             trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
         };
-        let key =
-            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
         zirv_flow_store::apply_event_batch(pool, workspace, &key, &[event])
             .await
             .unwrap();
@@ -6049,9 +6055,10 @@ email,b@example.com,
             &mut tx,
             ws.parse().unwrap(),
             request.parse().unwrap(),
-            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY)
-                .unwrap()
-                .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
+            &zirv_flow_core::HmacRoot::bootstrap_from(
+                &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+            )
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
             &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
         )
         .await
@@ -6407,7 +6414,9 @@ email,b@example.com,
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
-        let key = zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap();
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(
+            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+        );
 
         let none = admin::replay_erasures(&pool, &Context::system(), Some("alpha"), &key)
             .await
@@ -7524,7 +7533,9 @@ email,b@example.com,
         move |pool| {
             router(
                 AppState::new(pool.clone(), Arc::new(String::new))
-                    .with_master_key(&zirv_flow_core::MasterKey::generate())
+                    .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                        &zirv_flow_core::MasterKey::generate(),
+                    ))
                     .with_explorer_limits(limits),
             )
         }
@@ -7595,8 +7606,8 @@ email,b@example.com,
     }
 
     async fn inv_store(pool: &PgPool, ws: &str, records: Vec<zirv_flow_store::EventRecord>) {
-        let key =
-            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
         zirv_flow_store::apply_event_batch(pool, ws.parse().unwrap(), &key, &records)
             .await
             .unwrap();
@@ -8815,7 +8826,9 @@ email,b@example.com,
         zirv_flow_store::migrate(&pool).await.unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let state = AppState::new(pool.clone(), Arc::new(String::new))
-            .with_master_key(&zirv_flow_core::MasterKey::generate())
+            .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                &zirv_flow_core::MasterKey::generate(),
+            ))
             .with_stop(stopped);
         let router = router(state);
         let owner = owner(&pool, &router).await;

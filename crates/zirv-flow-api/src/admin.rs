@@ -11,7 +11,7 @@ use std::fmt;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zirv_flow_core::{
-    ApiKeyId, Cause, Email, HmacPurpose, MasterKey, Role, Scope, Slug, TraceContext, UserId,
+    ApiKeyId, Cause, Email, HmacPurpose, HmacRoot, Role, Scope, Slug, TraceContext, UserId,
     ValidationError, WorkspaceId, WorkspaceName, password,
 };
 use zirv_flow_store::{
@@ -436,7 +436,7 @@ pub async fn replay_erasures(
     pool: &PgPool,
     context: &Context,
     workspace: Option<&str>,
-    key: &MasterKey,
+    root: &HmacRoot,
 ) -> Result<ReplayReport, AdminError> {
     let workspace = match workspace {
         Some(slug) => {
@@ -450,7 +450,7 @@ pub async fn replay_erasures(
         }
         None => None,
     };
-    let key = key.hmac_key(HmacPurpose::Identifier);
+    let key = root.hmac_key(HmacPurpose::Identifier);
     let trace = TraceContext::root(Cause::api("admin.replay-erasures"));
     let report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
     let mut tx = zirv_flow_store::begin(pool).await?;

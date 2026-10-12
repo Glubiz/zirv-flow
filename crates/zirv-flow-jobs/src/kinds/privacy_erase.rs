@@ -51,7 +51,7 @@ mod tests {
     use sqlx::PgPool;
     use time::macros::datetime;
     use zirv_flow_core::{
-        Cause, HmacKey, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName,
+        Cause, HmacKey, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
     };
     use zirv_flow_store::{ErasureStatus, ProfileOutcome, ProfileRecord, apply_profile_batch};
 
@@ -125,7 +125,9 @@ mod tests {
         let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
             panic!("not applied");
         };
-        let key = Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Identifier));
+        let key = Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
+        );
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
         let request = zirv_flow_store::request_erasure(&mut tx, ws, person_id, &key, None, &trace)
             .await
@@ -172,7 +174,9 @@ mod tests {
         job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
         zirv_flow_store::enqueue(&pool, &job).await.unwrap();
 
-        let key = Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Identifier));
+        let key = Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
+        );
         let error = run_claimed(&pool, Some(key.clone())).await.unwrap_err();
 
         assert_eq!(error.message(), "the erasure request does not exist");

@@ -7,7 +7,9 @@ use time::macros::datetime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceName;
 use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
-use zirv_flow_core::{Cause, HmacKey, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceId};
+use zirv_flow_core::{
+    Cause, HmacKey, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceId,
+};
 
 use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_batch};
 use crate::{
@@ -44,7 +46,7 @@ pub(crate) fn master_key() -> MasterKey {
 
 /// The key that hashes identifiers, as the API and the CLI derive it.
 pub(crate) fn identifier_key() -> HmacKey {
-    master_key().hmac_key(HmacPurpose::Identifier)
+    HmacRoot::bootstrap_from(&master_key()).hmac_key(HmacPurpose::Identifier)
 }
 
 pub(crate) fn profile(
@@ -143,7 +145,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     // Events in two months, one with a message id each, then a reject. The debugger watches,
     // so each outcome also leaves a feed row.
     crate::touch_debugger_watch(pool, ws).await.unwrap();
-    let key = master_key().hmac_key(HmacPurpose::Redaction);
+    let key = HmacRoot::bootstrap_from(&master_key()).hmac_key(HmacPurpose::Redaction);
     let now = OffsetDateTime::now_utc();
     let accepted = apply_event_batch(
         pool,

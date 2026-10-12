@@ -69,6 +69,11 @@ id_type!(
     "workspace_id"
 );
 id_type!(
+    /// The id of a stored secret.
+    SecretId,
+    "secret_id"
+);
+id_type!(
     /// The id of an API key; part of the key's public prefix.
     ApiKeyId,
     "api_key_id"

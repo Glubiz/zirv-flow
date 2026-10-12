@@ -208,7 +208,9 @@ mod tests {
 
     use serde_json::json;
     use sqlx::PgPool;
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
     use zirv_flow_store::{IngestItem, IngestPayload, NewJob, append_inbox};
 
     use super::*;
@@ -285,7 +287,7 @@ mod tests {
 
     fn key() -> Option<std::sync::Arc<HmacKey>> {
         Some(std::sync::Arc::new(
-            MasterKey::generate().hmac_key(HmacPurpose::Redaction),
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
         ))
     }
 
