@@ -63,7 +63,7 @@ impl WorkerConfig {
             redaction_key: None,
             identifier_key: None,
             ingest_drain_batch_size: 500,
-            ingest_drain_shards: 4,
+            ingest_drain_shards: 8,
         }
     }
 }
@@ -422,6 +422,7 @@ mod tests {
     #[test]
     fn the_pool_holds_a_job_transaction_and_a_batch_per_shard_for_every_slot_and_one_spare() {
         assert_eq!(pool_size(4, 4), 21);
+        assert_eq!(pool_size(4, 8), 37);
         assert_eq!(pool_size(1, 1), 3);
         assert_eq!(pool_size(8, 16), 137);
         assert_eq!(pool_size(2, 0), 5, "no shards still holds one batch");

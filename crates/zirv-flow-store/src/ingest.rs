@@ -438,8 +438,11 @@ fn strongest_identifier(identifiers: &[(String, String)]) -> Option<String> {
 /// picks the ids without locking, each bucket through `(workspace_id, affinity, id)`, so the
 /// scan is bounded by the owned buckets times `limit` index entries, whatever the backlog. The
 /// rows of a bucket among the `limit` oldest overall are a prefix of its queue, so a key's
-/// order holds. Step two locks and fetches them, skipping locked rows; a row deleted in
-/// between drops out. Also returns whether the shard may hold more: step one filled `limit`.
+/// order holds. Step two locks and fetches them, skipping locked rows. A bucket's rows after
+/// one that is missing (locked by an erasure, or deleted in between) are left out of the
+/// batch, so nothing applies past a skipped row; their locks release at commit and they are
+/// picked again. Also returns whether the shard may hold more: step one filled `limit` and
+/// something was taken, so a batch that takes nothing ends the loop instead of spinning.
 async fn take_rows(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -458,12 +461,12 @@ async fn take_rows(
         .iter()
         .map(|bucket| {
             format!(
-                "(SELECT id FROM ingest_inbox WHERE workspace_id = $1 AND affinity = {bucket}                  ORDER BY id LIMIT $2)"
+                "(SELECT id, affinity FROM ingest_inbox WHERE workspace_id = $1 AND affinity = {bucket}                  ORDER BY id LIMIT $2)"
             )
         })
         .collect();
-    let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT id FROM ({}) AS oldest ORDER BY id LIMIT $2",
+    let picked: Vec<(i64, i16)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, affinity FROM ({}) AS oldest ORDER BY id LIMIT $2",
         branches.join(" UNION ALL ")
     )))
     .bind(workspace.as_uuid())
@@ -471,17 +474,32 @@ async fn take_rows(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let more = i64::try_from(ids.len()).is_ok_and(|taken| taken >= limit);
-    let rows = sqlx::query_as(
-        "SELECT id, api_key_id, kind, item, message_id, received_at, trace_id \
-         FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2) \
-         ORDER BY id FOR UPDATE SKIP LOCKED",
+    let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
+    let fetched: Vec<InboxRow> = sqlx::query_as(
+        "SELECT id, api_key_id, kind, item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
     )
     .bind(workspace.as_uuid())
     .bind(&ids)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
+    let mut blocked = std::collections::BTreeSet::new();
+    let mut keep = std::collections::BTreeSet::new();
+    for (id, bucket) in &picked {
+        if blocked.contains(bucket) {
+            continue;
+        }
+        if fetched.iter().any(|row| row.id == *id) {
+            keep.insert(*id);
+        } else {
+            blocked.insert(*bucket);
+        }
+    }
+    let rows: Vec<InboxRow> = fetched
+        .into_iter()
+        .filter(|row| keep.contains(&row.id))
+        .collect();
+    let more = !rows.is_empty() && i64::try_from(picked.len()).is_ok_and(|n| n >= limit);
     Ok((rows, more))
 }
 
@@ -1646,5 +1664,83 @@ mod tests {
         assert!(!more, "an empty shard is finished after one batch");
         let (ids, more) = taken(&pool, ws, Shard { index: 0, count: 4 }, 8).await;
         assert!(!ids.is_empty() && ids.len() <= 8 && more);
+    }
+
+    async fn plan_of(pool: &PgPool, user: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT p.traits->>'plan' FROM people p JOIN identities i ON i.person_id = p.id \
+             WHERE i.value = $1",
+        )
+        .bind(user)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .flatten()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn nothing_applies_past_a_locked_row_of_its_bucket(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let mut items = vec![identify("k", "k-old", json!({"plan": "old"}))];
+        items.extend((0..5).map(|n| identify(&format!("f{n}"), &format!("f-{n}"), json!({}))));
+        items.push(identify("k", "k-new", json!({"plan": "new"})));
+        append(&pool, ws, &trace, &items).await;
+        sqlx::query("UPDATE ingest_inbox SET affinity = 0 WHERE message_id LIKE 'k-%'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE ingest_inbox SET affinity = 1 + id % 60 WHERE message_id LIKE 'f-%'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut holder = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM ingest_inbox WHERE message_id = 'k-old' FOR UPDATE")
+            .fetch_all(&mut *holder)
+            .await
+            .unwrap();
+
+        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rows, 5, "the other buckets' rows apply");
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT message_id FROM ingest_inbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, ["k-old", "k-new"]);
+        assert_eq!(plan_of(&pool, "k").await, None);
+
+        commit(holder).await.unwrap();
+        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+
+        assert_eq!(inbox_count(&pool).await, 0);
+        assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_whose_picked_rows_are_all_locked_takes_nothing_and_is_not_more(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let items: Vec<IngestItem> = (0..3)
+            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), json!({})))
+            .collect();
+        append(&pool, ws, &trace, &items).await;
+        let mut holder = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM ingest_inbox FOR UPDATE")
+            .fetch_all(&mut *holder)
+            .await
+            .unwrap();
+
+        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 2).await.unwrap();
+
+        assert_eq!((outcome.rows, outcome.more), (0, false));
+        assert_eq!(inbox_count(&pool).await, 3);
     }
 }

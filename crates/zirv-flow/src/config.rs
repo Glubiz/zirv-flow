@@ -439,7 +439,7 @@ impl Config {
             .merge(Serialized::default("ingest.rate_per_key", 10_000_u32))
             .merge(Serialized::default("ingest.burst_per_key", 20_000_u32))
             .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
-            .merge(Serialized::default("ingest.drain_shards", 4_u32))
+            .merge(Serialized::default("ingest.drain_shards", 8_u32))
             .merge(Serialized::default(
                 "imports.max_file_bytes",
                 536_870_912_u64,
@@ -1701,7 +1701,7 @@ endpoint = \"http://collector:4318\"
 
         assert_eq!(limits, zirv_flow_api::IngestLimits::default());
         assert_eq!(config.ingest_drain_batch_size(), 500);
-        assert_eq!(config.ingest_drain_shards(), 4);
+        assert_eq!(config.ingest_drain_shards(), 8);
         assert!(toml::to_string(&config).unwrap().contains("[ingest]"));
     }
 
@@ -1714,7 +1714,7 @@ endpoint = \"http://collector:4318\"
             ("RATE_PER_KEY", "5"),
             ("BURST_PER_KEY", "50"),
             ("DRAIN_BATCH_SIZE", "25"),
-            ("DRAIN_SHARDS", "8"),
+            ("DRAIN_SHARDS", "6"),
         ] {
             env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), value.into()));
         }
@@ -1732,7 +1732,7 @@ endpoint = \"http://collector:4318\"
             (2048, 10, 5, 50)
         );
         assert_eq!(config.ingest_drain_batch_size(), 25);
-        assert_eq!(config.ingest_drain_shards(), 8);
+        assert_eq!(config.ingest_drain_shards(), 6);
     }
 
     #[test]

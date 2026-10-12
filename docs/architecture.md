@@ -401,13 +401,13 @@ modulo 64, fixed forever; rows appended before the column existed, or by a pre-0
 during a rolling upgrade, hold NULL. A drain job first buckets the workspace's NULL rows (a
 blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
 deadlock; the bucket comes from the same function as the append's), then runs
-`ingest.drain_shards` loops concurrently, each owning the buckets with `affinity % shards =
+`ingest.drain_shards` (default 8) loops concurrently, each owning the buckets with `affinity % shards =
 index`, as joined futures so a lost lease drops them all. A batch is up to `ingest.drain_batch_size` of the
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
 deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
-shards) + 1` connections. Each loop is `drain_batch`: in one transaction it selects the
+shards) + 1` connections. A batch never applies past a row it could not lock: the rest of that bucket's picked rows wait for the next batch. Each loop is `drain_batch`: in one transaction it selects the
 those rows with `FOR UPDATE SKIP LOCKED`, applies them in id order through the
 transaction-taking profile and event paths of apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
