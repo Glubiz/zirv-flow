@@ -3,6 +3,7 @@ mod config;
 mod healthcheck;
 mod log;
 mod otlp;
+mod secrets;
 
 use std::ffi::OsString;
 use std::fs;
@@ -21,7 +22,8 @@ use tracing::{error, info, warn};
 use zirv_flow_store::{PgPool, SchemaState};
 
 use crate::cli::{AdminCommand, Cli, Command, ConfigCommand};
-use crate::config::{Config, MasterKeySource};
+use crate::config::Config;
+use crate::secrets::{Secrets, load_hmac_root, load_keyring, load_secrets};
 
 /// Seconds; makes the exporter render request durations as histograms rather than summaries.
 const HTTP_DURATION_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
@@ -90,9 +92,9 @@ async fn run(
 
     if let Command::Admin(admin_command) = &command {
         if let AdminCommand::ReplayErasures { workspace } = admin_command {
-            // Replaying needs the master key to hash identifiers, and no password.
-            let key = match load_master_key(&config) {
-                Ok(key) => key,
+            // Replaying needs the HMAC root to hash identifiers, and no password.
+            let keyring = match load_keyring(&config) {
+                Ok(keyring) => keyring,
                 Err(message) => {
                     let _ = writeln!(stderr, "error: admin: {message}");
                     return 2;
@@ -102,8 +104,29 @@ async fn run(
                 Ok(pool) => pool,
                 Err(message) => return database_error(stderr, message),
             };
-            let root = zirv_flow_store::HmacRoot::bootstrap_from(&key);
+            let root = match load_hmac_root(&pool, &keyring).await {
+                Ok(root) => root,
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: admin: {message}");
+                    return 2;
+                }
+            };
             return run_replay_erasures(workspace.as_deref(), &root, &pool, stdout, stderr).await;
+        }
+        if matches!(admin_command, AdminCommand::RotateMasterKey) {
+            // Rotating needs the keyring and the database, and no password.
+            let keyring = match load_keyring(&config) {
+                Ok(keyring) => keyring,
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: admin: {message}");
+                    return 2;
+                }
+            };
+            let pool = match open_database(&config).await {
+                Ok(pool) => pool,
+                Err(message) => return database_error(stderr, message),
+            };
+            return run_rotate_master_key(&keyring, &pool, stdout, stderr).await;
         }
         // The password is read first so a missing one fails without touching the database.
         let password = match read_password(stdin) {
@@ -122,9 +145,9 @@ async fn run(
 
     if let Some(roles) = Roles::of(&command) {
         // The key is checked before the database is opened or anything is bound or claimed.
-        let master_key = if roles.serve || roles.worker {
-            match load_master_key(&config) {
-                Ok(key) => Some(key),
+        let keyring = if roles.serve || roles.worker {
+            match load_keyring(&config) {
+                Ok(keyring) => Some(keyring),
                 Err(message) => {
                     let _ = writeln!(stderr, "error: {message}");
                     return 2;
@@ -134,8 +157,13 @@ async fn run(
             None
         };
         let export = log::install(&config);
-        if let Some(key) = &master_key {
-            info!(key_id = %key.key_id(), "master key loaded");
+        if let Some(keyring) = &keyring {
+            info!(key_id = %keyring.current().key_id(), "master key loaded");
+            if keyring.has_previous() {
+                info!(
+                    "a previous master key is configured; run `admin rotate-master-key`, then remove it"
+                );
+            }
         }
         let pool = match open_database(&config).await {
             Ok(pool) => pool,
@@ -145,14 +173,19 @@ async fn run(
                 return 1;
             }
         };
-        let code = run_roles(
-            roles,
-            &config,
-            pool,
-            master_key.map(Arc::new),
-            shutdown_signal(),
-        )
-        .await;
+        // The HMAC root lives in the database, so it is loaded once the schema is ready.
+        let secrets = match keyring {
+            Some(keyring) => match load_secrets(&pool, keyring).await {
+                Ok(secrets) => Some(secrets),
+                Err(message) => {
+                    error!(error = %message, "the secrets could not be started");
+                    flush_traces(export).await;
+                    return 2;
+                }
+            },
+            None => None,
+        };
+        let code = run_roles(roles, &config, pool, secrets, shutdown_signal()).await;
         flush_traces(export).await;
         return code;
     }
@@ -163,25 +196,6 @@ async fn run(
         command.name()
     );
     1
-}
-
-/// Reads the operator master key from the configured file or inline value. The error is the
-/// message to report; it names the source but never the key.
-fn load_master_key(config: &Config) -> Result<zirv_flow_store::MasterKey, String> {
-    match config.master_key_source() {
-        MasterKeySource::Unset => Err("the master key is required for serve and worker: set \
-             secrets.master_key_file or ZIRV_FLOW_SECRETS__MASTER_KEY; create one with \
-             zirv-flow admin generate-master-key --out <path>"
-            .into()),
-        MasterKeySource::Inline(text) => zirv_flow_store::MasterKey::parse(text)
-            .map_err(|error| format!("secrets.master_key: {error}")),
-        MasterKeySource::File(path) => {
-            let text = fs::read_to_string(path)
-                .map_err(|_| format!("secrets.master_key_file {}: not readable", path.display()))?;
-            zirv_flow_store::MasterKey::parse(&text)
-                .map_err(|error| format!("secrets.master_key_file {}: {error}", path.display()))
-        }
-    }
 }
 
 /// Creates `out` holding a new master key, never overwriting a file. With `if_missing`, an
@@ -285,10 +299,10 @@ async fn run_roles(
     roles: Roles,
     config: &Config,
     pool: PgPool,
-    master_key: Option<Arc<zirv_flow_store::MasterKey>>,
+    secrets: Option<Secrets>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
-    run_roles_reporting(roles, config, pool, master_key, shutdown, None).await
+    run_roles_reporting(roles, config, pool, secrets, shutdown, None).await
 }
 
 /// [`run_roles`], sending the address the ops listener bound to `ops_bound` when it starts.
@@ -296,14 +310,13 @@ async fn run_roles_reporting(
     roles: Roles,
     config: &Config,
     pool: PgPool,
-    master_key: Option<Arc<zirv_flow_store::MasterKey>>,
+    secrets: Option<Secrets>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     ops_bound: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> u8 {
-    // Until the root is stored, it is the master key's bytes, which is what every hash so far used.
-    let hmac_root = master_key
-        .as_deref()
-        .map(|key| Arc::new(zirv_flow_store::HmacRoot::bootstrap_from(key)));
+    let hmac_root = secrets
+        .as_ref()
+        .map(|secrets| Arc::clone(&secrets.hmac_root));
     let ops_bind = ops_bind(roles, config);
     // A bad server configuration or a taken ops address stops the process before any role starts.
     let render = if roles.serve || ops_bind.is_some() {
@@ -315,15 +328,12 @@ async fn run_roles_reporting(
         None
     };
     let state = match (roles.serve, &render) {
-        (true, Some(render)) => match http_state(
-            config,
-            pool.clone(),
-            Arc::clone(render),
-            hmac_root.as_deref(),
-        ) {
-            Ok(state) => Some(state),
-            Err(code) => return code,
-        },
+        (true, Some(render)) => {
+            match http_state(config, pool.clone(), Arc::clone(render), secrets.as_ref()) {
+                Ok(state) => Some(state),
+                Err(code) => return code,
+            }
+        }
         _ => None,
     };
     if let Some(state) = &state
@@ -378,6 +388,7 @@ async fn run_roles_reporting(
         worker_config.identifier_key = hmac_root
             .as_deref()
             .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
+        worker_config.keyring = secrets.as_ref().map(|secrets| Arc::clone(&secrets.keyring));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
         worker_config.egress = config.egress_policy();
@@ -588,7 +599,7 @@ fn http_state(
     config: &Config,
     pool: PgPool,
     render: Render,
-    hmac_root: Option<&zirv_flow_store::HmacRoot>,
+    secrets: Option<&Secrets>,
 ) -> Result<zirv_flow_api::AppState, u8> {
     let mut state = zirv_flow_api::AppState::new(pool, render)
         .with_cookie_secure(config.server_cookie_secure())
@@ -598,8 +609,10 @@ fn http_state(
         .with_import_limits(config.import_limits())
         .with_explorer_limits(config.explorer_limits())
         .with_egress_policy(config.egress_policy());
-    if let Some(root) = hmac_root {
-        state = state.with_hmac_root(root);
+    if let Some(secrets) = secrets {
+        state = state
+            .with_hmac_root(&secrets.hmac_root)
+            .with_keyring(Arc::clone(&secrets.keyring));
     }
 
     match config.oidc() {
@@ -784,10 +797,37 @@ async fn run_admin(
         AdminCommand::ReplayErasures { .. } => {
             unreachable!("replay-erasures is handled before the password is read")
         }
+        AdminCommand::RotateMasterKey => {
+            unreachable!("rotate-master-key is handled before the password is read")
+        }
     };
     match result {
         Ok(message) => {
             let _ = writeln!(stdout, "{message}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "error: admin: {error}");
+            1
+        }
+    }
+}
+
+/// Re-wraps every data key with the current master key and prints counts only.
+async fn run_rotate_master_key(
+    keyring: &zirv_flow_store::Keyring,
+    pool: &PgPool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let context = zirv_flow_api::admin::Context::system();
+    match zirv_flow_api::admin::rotate_master_key(pool, &context, keyring).await {
+        Ok(report) => {
+            let _ = writeln!(
+                stdout,
+                "re-wrapped {} data key(s) with master key {}",
+                report.rows, report.key_id
+            );
             0
         }
         Err(error) => {
@@ -2126,5 +2166,164 @@ endpoint = \"http://collector:4318/\""
             tokio::net::TcpStream::connect(addr).await.is_err(),
             "the listener stops when the drain ends"
         );
+    }
+
+    fn keyring_of(
+        current: &zirv_flow_store::MasterKey,
+        previous: Option<&zirv_flow_store::MasterKey>,
+    ) -> zirv_flow_store::Keyring {
+        let copy = |key: &zirv_flow_store::MasterKey| {
+            zirv_flow_store::MasterKey::parse(&key.to_base64()).unwrap()
+        };
+        zirv_flow_store::Keyring::new(copy(current), previous.map(copy)).unwrap()
+    }
+
+    fn hashes(root: &zirv_flow_store::HmacRoot) -> [[u8; 32]; 2] {
+        [
+            zirv_flow_store::HmacPurpose::Identifier,
+            zirv_flow_store::HmacPurpose::Redaction,
+        ]
+        .map(|purpose| root.hmac_key(purpose).digest(b"person@example.com"))
+    }
+
+    #[tokio::test]
+    async fn rotate_master_key_needs_the_master_key_and_asks_for_no_password() {
+        let (code, output) =
+            start_without_database(Command::Admin(AdminCommand::RotateMasterKey), None).await;
+
+        assert_eq!(code, 2, "{output}");
+        assert!(
+            output.contains("error: admin: the master key is required"),
+            "{output}"
+        );
+        assert!(!output.contains("no password"), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_keeps_every_secret_and_every_hash(pool: PgPool) {
+        use zirv_flow_store::{
+            MasterKey, SecretBytes, SecretPurpose, open_secret, secret_aad, secrets,
+        };
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let context = zirv_flow_api::admin::Context::system();
+        let workspace = zirv_flow_api::admin::create_workspace(&pool, &context, "ours", None)
+            .await
+            .unwrap()
+            .id;
+
+        // 1. A secret and the hashes, under key A.
+        let before = load_secrets(&pool, keyring_of(&a, None)).await.unwrap();
+        let id = zirv_flow_api::admin::create_secret(
+            &pool,
+            &context,
+            &before.keyring,
+            workspace,
+            SecretPurpose::ConnectorCredential,
+            &SecretBytes::new(b"hunter2".to_vec()),
+        )
+        .await
+        .unwrap();
+        let hashes_before = hashes(&before.hmac_root);
+
+        // 2. B is current and A is previous; rotate.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let rotating = keyring_of(&b, Some(&a));
+        let restarted = load_secrets(&pool, keyring_of(&b, Some(&a))).await.unwrap();
+        let code = run_rotate_master_key(&rotating, &pool, &mut stdout, &mut stderr).await;
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            format!("re-wrapped 2 data key(s) with master key {}\n", b.key_id())
+        );
+
+        // 3. A is dropped; the process restarts with B alone.
+        let after = load_secrets(&pool, keyring_of(&b, None)).await.unwrap();
+
+        // 4. The secret opens, the hashes are identical, and a second rotation does nothing.
+        let stored = secrets::get(&pool, workspace, id).await.unwrap().unwrap();
+        let aad = secret_aad(workspace, id, stored.purpose);
+        let opened = open_secret(&after.keyring, &stored.sealed, &aad).unwrap();
+        assert_eq!(opened.expose(), b"hunter2");
+        assert_eq!(hashes(&after.hmac_root), hashes_before);
+        assert_eq!(hashes(&restarted.hmac_root), hashes_before);
+        let mut stdout = Vec::new();
+        let code = run_rotate_master_key(&rotating, &pool, &mut stdout, &mut Vec::new()).await;
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            format!("re-wrapped 0 data key(s) with master key {}\n", b.key_id())
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_start_with_a_previous_key_and_no_root_is_refused_before_anything_is_stored(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{MasterKey, secrets};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+
+        let error = load_secrets(&pool, keyring_of(&b, Some(&a)))
+            .await
+            .err()
+            .expect("the start is refused");
+
+        assert!(
+            error.contains("no HMAC root exists yet; start once with only the master key"),
+            "{error}"
+        );
+        assert!(secrets::hmac_root(&pool).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_with_a_row_the_keyring_cannot_open_changes_nothing(pool: PgPool) {
+        use zirv_flow_store::{MasterKey, SecretBytes, SecretPurpose, secrets};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (a, b, c) = (
+            MasterKey::generate(),
+            MasterKey::generate(),
+            MasterKey::generate(),
+        );
+        let context = zirv_flow_api::admin::Context::system();
+        let workspace = zirv_flow_api::admin::create_workspace(&pool, &context, "ours", None)
+            .await
+            .unwrap()
+            .id;
+        let under_a = load_secrets(&pool, keyring_of(&a, None)).await.unwrap();
+        let id = zirv_flow_api::admin::create_secret(
+            &pool,
+            &context,
+            &under_a.keyring,
+            workspace,
+            SecretPurpose::OAuthToken,
+            &SecretBytes::new(b"token".to_vec()),
+        )
+        .await
+        .unwrap();
+        let mut stderr = Vec::new();
+
+        // The keyring holds C and B, but the rows are wrapped by A.
+        let code = run_rotate_master_key(
+            &keyring_of(&c, Some(&b)),
+            &pool,
+            &mut Vec::new(),
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(code, 1);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.starts_with("error: admin: "), "{stderr}");
+        assert!(stderr.contains(&a.key_id()), "{stderr}");
+        let stored = secrets::get(&pool, workspace, id).await.unwrap().unwrap();
+        assert_eq!(stored.sealed.key_id, a.key_id());
     }
 }

@@ -85,6 +85,12 @@ pub(crate) enum AdminCommand {
         #[arg(long, value_name = "SLUG")]
         workspace: Option<String>,
     },
+    /// Re-wrap every stored data key, and the HMAC root, with the current master key, in one
+    /// transaction, and print the count. Ciphertexts are untouched, and a second run re-wraps
+    /// nothing. Configure the new key as secrets.master_key_file and the old one as
+    /// secrets.previous_master_key_file, restart, run this, then remove the previous key.
+    /// Needs the master keys and no password.
+    RotateMasterKey,
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,6 +145,21 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["zirv-flow", "admin", "create-owner"]).is_err());
+    }
+
+    #[test]
+    fn rotate_master_key_takes_no_arguments() {
+        let parse = |args: &[&str]| {
+            let mut full = vec!["zirv-flow", "admin", "rotate-master-key"];
+            full.extend(args);
+            Cli::try_parse_from(full)
+        };
+
+        assert!(matches!(
+            parse(&[]).unwrap().command,
+            Some(Command::Admin(AdminCommand::RotateMasterKey))
+        ));
+        assert!(parse(&["--out", "k"]).is_err());
     }
 
     #[test]

@@ -18,7 +18,7 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
-const CONFIG_KEYS: [&str; 37] = [
+const CONFIG_KEYS: [&str; 39] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -31,6 +31,8 @@ const CONFIG_KEYS: [&str; 37] = [
     "auth.oidc.auto_create_users",
     "secrets.master_key_file",
     "secrets.master_key",
+    "secrets.previous_master_key_file",
+    "secrets.previous_master_key",
     "database.url",
     "database.max_connections",
     "database.migrate_on_start",
@@ -205,7 +207,8 @@ impl<'de> Deserialize<'de> for SecretValue {
     }
 }
 
-/// Where the operator master key comes from. At most one of the two is set.
+/// Where the operator master key comes from, and during a rotation the key it replaces. At most
+/// one of each pair is set.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MasterKeyConfig {
@@ -219,11 +222,24 @@ struct MasterKeyConfig {
         serialize_with = "serialize_redacted"
     )]
     master_key: Option<SecretValue>,
+    /// A file holding the base64 key the current one replaces, while a rotation is under way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_master_key_file: Option<PathBuf>,
+    /// The base64 previous key itself.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_redacted"
+    )]
+    previous_master_key: Option<SecretValue>,
 }
 
 impl MasterKeyConfig {
     fn is_unset(&self) -> bool {
-        self.master_key_file.is_none() && self.master_key.is_none()
+        self.master_key_file.is_none()
+            && self.master_key.is_none()
+            && self.previous_master_key_file.is_none()
+            && self.previous_master_key.is_none()
     }
 }
 
@@ -624,6 +640,17 @@ impl Config {
             ));
         }
 
+        if config.master_key.previous_master_key_file.is_some()
+            && config.master_key.previous_master_key.is_some()
+        {
+            let reason = "is set together with secrets.previous_master_key_file; set only one";
+            return Err(ConfigError::new(
+                "secrets.previous_master_key",
+                reason,
+                source_for("secrets.previous_master_key", path, &env_sources),
+            ));
+        }
+
         config.validate_auth(path, &env_sources)?;
         Ok(config)
     }
@@ -778,6 +805,18 @@ impl Config {
         match (
             &self.master_key.master_key_file,
             &self.master_key.master_key,
+        ) {
+            (Some(path), _) => MasterKeySource::File(path),
+            (None, Some(key)) => MasterKeySource::Inline(&key.0),
+            (None, None) => MasterKeySource::Unset,
+        }
+    }
+
+    /// Where the previous master key is read from, while a rotation is under way.
+    pub(crate) fn previous_master_key_source(&self) -> MasterKeySource<'_> {
+        match (
+            &self.master_key.previous_master_key_file,
+            &self.master_key.previous_master_key,
         ) {
             (Some(path), _) => MasterKeySource::File(path),
             (None, Some(key)) => MasterKeySource::Inline(&key.0),
@@ -1107,6 +1146,94 @@ master_key_file = \"/k\"
         );
         assert!(error.contains("ZIRV_FLOW_SECRETS__MASTER_KEY"), "{error}");
         assert!(!error.contains("abc"));
+    }
+
+    #[test]
+    fn the_previous_master_key_is_unset_by_default_and_read_from_the_environment_or_a_file() {
+        let none = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert_eq!(none.previous_master_key_source(), MasterKeySource::Unset);
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY".into(),
+            "abc".into(),
+        ));
+        let inline = Config::load(None, env).unwrap();
+        assert_eq!(
+            inline.previous_master_key_source(),
+            MasterKeySource::Inline("abc")
+        );
+        assert_eq!(inline.master_key_source(), MasterKeySource::Unset);
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY_FILE".into(),
+            "/k/old.key".into(),
+        ));
+        let file = Config::load(None, env).unwrap();
+        assert_eq!(
+            file.previous_master_key_source(),
+            MasterKeySource::File(Path::new("/k/old.key"))
+        );
+    }
+
+    #[test]
+    fn setting_both_previous_master_key_keys_is_an_error_naming_the_key() {
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[secrets]
+previous_master_key_file = \"/k\"
+",
+        );
+        let env = vec![(
+            "ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY".into(),
+            "abc".into(),
+        )];
+
+        let error = Config::load(Some(&file.0), env).unwrap_err().to_string();
+
+        assert!(
+            error.starts_with(
+                "secrets.previous_master_key: is set together with secrets.previous_master_key_file"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY"),
+            "{error}"
+        );
+        assert!(!error.contains("abc"));
+    }
+
+    #[test]
+    fn the_previous_master_key_is_redacted_and_config_check_reports_both_pairs() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY".into(),
+            "old-secret-key".into(),
+        ));
+        env.push((
+            "ZIRV_FLOW_SECRETS__MASTER_KEY_FILE".into(),
+            "/k/master.key".into(),
+        ));
+        let config = Config::load(None, env).unwrap();
+
+        let output = format!(
+            "{config:?}
+{}",
+            toml::to_string(&config).unwrap()
+        );
+
+        assert!(!output.contains("old-secret-key"), "{output}");
+        assert!(
+            output.contains("previous_master_key = \"<redacted>\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("master_key_file = \"/k/master.key\""),
+            "{output}"
+        );
     }
 
     #[test]
