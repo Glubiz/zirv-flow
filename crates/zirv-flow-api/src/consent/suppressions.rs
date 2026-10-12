@@ -772,7 +772,10 @@ mod tests {
     use super::*;
 
     fn key() -> HmacKey {
-        HmacRoot::bootstrap_from(&MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap()).hmac_key(HmacPurpose::Identifier)
+        HmacRoot::bootstrap_from(
+            &MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap(),
+        )
+        .hmac_key(HmacPurpose::Identifier)
     }
 
     fn hash_of(value: &str) -> [u8; 32] {

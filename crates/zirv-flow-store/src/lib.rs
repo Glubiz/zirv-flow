@@ -17,6 +17,7 @@ mod migrations;
 mod people;
 mod pool;
 mod privacy;
+pub mod secrets;
 mod sessions;
 mod suppressions;
 mod workspaces;
@@ -357,13 +358,14 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 7] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 8] = [
         "users",
         "user_identities",
         "oidc_logins",
         "workspaces",
         "sessions",
         "audit_log",
+        "deployment_keys",
         "_sqlx_migrations",
     ];
 

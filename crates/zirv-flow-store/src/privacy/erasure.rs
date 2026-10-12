@@ -806,7 +806,8 @@ mod tests {
 
         // The drain sees only the bystander's row.
         let key = zirv_flow_core::HmacRoot::bootstrap_from(
-            &zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap(),
+            &zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
+                .unwrap(),
         )
         .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
         let drained = crate::drain_batch(&pool, ws, crate::Shard::ALL, &key, 100)
