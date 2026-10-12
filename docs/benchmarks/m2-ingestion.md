@@ -122,7 +122,7 @@ against the forwarded port and therefore pays the 0.33 ms path on every statemen
 
 Ceiling in items/s, last held step; "fails at" is the first failing rung and its reason.
 
-| Tier | vCPU / RAM | Before (0.28 drain, 500 steps) | After: track | identify | track, 4 workspaces | batch ramp (rung 2,000) |
+| Tier | vCPU / RAM | Before (0.28 drain, 500 steps) | After: track | identify | track, 4 workspaces | batch ramp (steps of 2,000) |
 |---|---|---|---|---|---|---|
 | S | 2 / 4 GB | 500 | 2,000 (fails at 2,250: API p99 117.8 ms) | 2,000 (2,250: API p99 137.2 ms) | 1,750 (2,000: API p99 117.5 ms) | 2,000 (4,000: inbox age 22.7 s) |
 | M | 4 / 8 GB | 500 | 2,750 (3,000: API p99 198.2 ms) | 2,500 (2,750: API p99 109.9 ms) | 2,250 (2,500: API p99 128.8 ms) | 2,000 (4,000: inbox age 18.5 s) |
@@ -166,8 +166,13 @@ Peaks at the ceiling step (percent of one core / MiB not shown):
 
 | Doubling | track1 | identify1 | track4 | batch ramp |
 |---|---|---|---|---|
-| S to M | x1.38 | x1.25 | x1.29 | x1.0 |
-| M to L | >= x1.09 | >= x1.10 | >= x1.22 | x1.0 |
+| S to M | x1.38 | x1.25 | x1.29 | not resolved |
+| M to L | >= x1.09 | >= x1.10 | >= x1.22 | not resolved |
+
+The batch ramp has no scaling factor. Its steps are 2,000 items/s (first step 2,000, then 4,000), 2,000 held
+and 4,000 failed in every tier, so each tier's ceiling lies between 2,000 and 4,000 items/s and the ramp
+cannot show whether the three tiers have equal or different batch capacity. The 2,000 is the first step,
+not a measured limit.
 
 Predicting a ceiling for another setup:
 
@@ -213,18 +218,18 @@ Sustained, track at 2,000/s for 10 minutes, one workspace, after (before in brac
 | M | 11.9 / 38.1 / 448.1 / 1,674 ms (402 / 643 / 665 / 670 s) | 0 s (672 s) | 11.0 ms (9.7 ms) | 166 / 89 / 702 (187 / 32 / 201) |
 | L | 12.1 / 35.1 / 119.4 / 2,145 ms (396 / 618 / 638 / 643 s) | 3 s (643 s) | 12.7 ms (10.0 ms) | 243 / 84 / 693 (177 / 33 / 215) |
 
-All six generators were valid (1,200,000 accepted, all 202, `late_dispatch` 0). Deadlocks in the
+All six generators were valid (sustained: 1,200,000 items accepted in S, 1,199,999 in M and 1,199,998 in L; burst: 1,200,000 in each tier; every accepted request answered 202, `late_dispatch` 0). Deadlocks in the
 PostgreSQL log: 0 in every tier's sustained run. S's API p99 of 80.2 ms is close to the limit: tier S has
 no spare CPU at 2,000/s (section 3.1).
 
 Burst, 10,000 items/s for 2 minutes (1.2 million items in batches of 100, mixed identify and track), then
 the time for the inbox to empty; before in brackets:
 
-| Tier | Largest backlog | Drain after the generator stopped | Applied p95 | API p99 | Worker peak CPU | Deadlocks |
+| Tier | Largest backlog | Drain after the generator stopped | Applied p95, per kind (the burst mixes identify and track) | API p99 | Worker peak CPU | Deadlocks |
 |---|---|---|---|---|---|---|
-| S | 814,411 rows | 243 s (1,241 s) | 223.6 s (1,173.8 s) | 23.2 ms | 105% | 1 |
-| M | 794,475 | 237 s (1,285 s) | 220.7 s (1,215.8 s) | 22.4 ms | 103% | 9 |
-| L | 804,822 | 240 s (1,283 s) | 220.9 s (1,214.8 s) | 22.6 ms | 104% | 1 |
+| S | 814,411 rows | 243 s (1,241 s) | identify 225.7 s, track 223.6 s (1,190.5 s, 1,173.8 s) | 23.2 ms | 105% | 1 |
+| M | 796,475 | 237 s (1,285 s) | identify 223.2 s, track 220.7 s (1,232.0 s, 1,215.8 s) | 22.4 ms | 103% | 9 |
+| L | 806,822 | 240 s (1,283 s) | identify 223.0 s, track 220.9 s (1,231.4 s, 1,214.8 s) | 22.6 ms | 104% | 1 |
 
 The drain keeps pace for about 3,300 items/s during the burst and empties the backlog at about 3,400 items/s,
 the same in every tier. The 10-minute burst of the target would offer 6 million items; at that drain rate the
