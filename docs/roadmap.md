@@ -174,7 +174,7 @@ checkpoints, deletion detection and freshness marketers can see.
 **Scope.**
 - **Connector runtime.** `Source` trait (discover, read from checkpoint, capabilities). Auth: API key, basic, bearer, OAuth2 client credentials and authorization code (redirect to `public_url`) with refresh. Retries honouring `Retry-After`, rate limits, pagination drivers, checkpoints committed with each batch.
 - **Secrets encryption at rest** (envelope, operator master key). It lands here because M3 stores the first credential.
-- **Egress policy** (SSRF protection) for all outbound HTTP.
+- **Egress policy** (SSRF protection) for all outbound connections: HTTP, databases, Kafka and AI providers.
 - **Built-in sources.** PostgreSQL and MySQL (tables, or queries with a cursor column); CSV/JSON files over HTTPS.
 - **HTTP manifest v1.** Schema and validation; auth, pagination, incremental cursor, field mapping, delete signal; UI editor and validator; reference manifests tested against a mock server.
 - **Inbound webhooks.** Generic, with signature verification and mapping.
