@@ -1490,6 +1490,8 @@ the wrapped data key and the key id. Decryption happens only in `api` and
 `jobs`: they open a secret right before use and pass a typed plaintext
 credential, zeroized after use, into `connectors` or `ai`, which never decrypt.
 
+As built (M3): `core::secrets` seals a secret with a random 32-byte data key and a random 24-byte nonce (XChaCha20-Poly1305). The associated data is `zirv-flow/secret/v1|<workspace_id>|<secret_id>|<purpose>`, so a ciphertext moved to another row or workspace does not open. The data key is wrapped by a key encryption key (HKDF-SHA256 over the master key bytes, info `zirv-flow/kek/v1`) and stored with the wrapping key id, in `encrypted_secrets` (workspace scope) or `deployment_keys` (deployment scope). `store::secrets` handles sealed values only; `api` and `jobs` open them right before use, into zeroizing values that have no `Display`, `Serialize` or `Clone`. The HMAC keys no longer derive from the master key but from the **HMAC root** in `deployment_keys`: it is created once, atomically, from the master key that produced the existing hashes (`insert ... on conflict do nothing`, then every start reads back the winner), keeps the same HKDF labels, and is re-wrapped, never changed, by `admin rotate-master-key`. A previous key is configured with `secrets.previous_master_key_file` or `secrets.previous_master_key` for the rotation window, and a start with a previous key and no root is refused so a root is never bootstrapped from a rotation's new key. Rotation re-wraps both tables in one transaction and audits key ids and the count.
+
 | Role (proposed, confirmed in M8) | Scope | Can |
 |------|-------|-----|
 | Owner | Organization | Everything: workspaces, users, instance settings, key rotation |

@@ -88,6 +88,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `auth.oidc.auto_create_users` | bool | false | none |
 | `secrets.master_key_file` | path | none | file holding the base64 master key; set at most one of the two `secrets` keys; required by `serve`, `worker` and `all` |
 | `secrets.master_key` | string, secret | none | the base64 master key itself (`ZIRV_FLOW_SECRETS__MASTER_KEY`); 32 bytes; redacted as `<redacted>` |
+| `secrets.previous_master_key_file` | path | none | file holding the base64 key the current one replaces, while a rotation is under way; set at most one of the two `previous_master_key` keys; must differ from the current key |
+| `secrets.previous_master_key` | string, secret | none | the base64 previous key itself (`ZIRV_FLOW_SECRETS__PREVIOUS_MASTER_KEY`); redacted as `<redacted>` |
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
@@ -118,9 +120,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 
 `serve`, `worker` and `all` need the operator master key and refuse to start
 without it (`scheduler`, `migrate`, `config check` and the other `admin`
-commands do not). It is 32 random bytes as base64; per-purpose HMAC keys for
-identifier and redaction hashes are derived from it with HKDF-SHA256. Create it
-once and point `secrets.master_key_file` at it:
+commands do not). It is 32 random bytes as base64. It wraps the keys that
+encrypt stored secrets (see Secrets below). Create it once and point
+`secrets.master_key_file` at it:
 
 ```sh
 zirv-flow admin generate-master-key --out /etc/zirv-flow/master.key
@@ -131,9 +133,40 @@ refuses to overwrite an existing file, prints the key id (the first 8 bytes of
 its SHA-256 as hex, also logged at start as `master key loaded`) and never
 prints the key. `--if-missing` keeps an existing valid key and succeeds.
 Keep the key and back it up separately from your database backups (a dump and
-the key together defeat the point of having a key). Losing or replacing it
-breaks suppression matching against hashes already stored; rotation will be
-an explicit migration, not a config change.
+the key together defeat the point of having a key). Never swap the key in
+place: change it with the rotation below.
+
+### Secrets
+
+Connector credentials, OAuth tokens and AI provider keys are stored encrypted.
+Each secret gets its own random data key (XChaCha20-Poly1305), and the master
+key wraps that data key; the database holds only ciphertext, the wrapped key and
+the id of the wrapping master key. A database dump without the master key
+reveals no credential, and the API never returns one. A lost master key means
+the stored credentials must be entered again.
+
+The identifier, suppression and redaction hashes derive from a stable HMAC root,
+not from the master key. The first `serve` or `worker` start stores that root,
+sealed like any secret, made from the master key it starts with (the key the
+existing hashes were made with), so a rotation never changes a hash. Start once
+with only the current key before rotating.
+
+To rotate the master key:
+
+1. Create a new key with `zirv-flow admin generate-master-key`.
+2. Set it as `secrets.master_key_file`, and set the old key as
+   `secrets.previous_master_key_file`.
+3. Restart every `serve` and `worker` process.
+4. Run `zirv-flow admin rotate-master-key`. It re-wraps every data key, and the
+   HMAC root, in one transaction, leaves the ciphertexts alone, writes an audit
+   entry with the key ids and the count, and prints the count. A second run
+   re-wraps 0. It aborts, changing nothing, if a row is wrapped by a key you
+   have not configured, and names that key id.
+5. Remove the previous key from the configuration and restart.
+
+A start with a previous key configured and no stored HMAC root is refused, as is
+a previous key equal to the current one. The rotation holds every row in one
+transaction, which suits secrets in the thousands.
 
 Run `zirv-flow config check` to validate the effective configuration and print
 it as TOML with the database password, the OIDC client secret and the master key redacted.
