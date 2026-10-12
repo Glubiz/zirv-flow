@@ -1,0 +1,1 @@
+{"batches":600,"decisions_per_batch":500,"p50_ms":44.0,"p95_ms":52.9,"p99_ms":63.6,"max_ms":76.7}

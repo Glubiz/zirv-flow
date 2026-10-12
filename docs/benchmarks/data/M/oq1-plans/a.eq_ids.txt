@@ -1,0 +1,12 @@
+Bitmap Heap Scan on people  (cost=233.36..44438.56 rows=20766 width=8) (actual time=3.147..26.200 rows=20417 loops=1)
+  Recheck Cond: ((traits ->> 'country'::text) = 'C07'::text)
+  Heap Blocks: exact=17733
+  Buffers: shared hit=17753
+  ->  Bitmap Index Scan on people_country_idx  (cost=0.00..228.17 rows=20766 width=0) (actual time=1.668..1.668 rows=20417 loops=1)
+        Index Cond: ((traits ->> 'country'::text) = 'C07'::text)
+        Buffers: shared hit=20
+Planning:
+  Buffers: shared hit=146
+Planning Time: 0.338 ms
+Execution Time: 26.662 ms
+Time: 27.435 ms

@@ -1,0 +1,11 @@
+Aggregate  (cost=479.77..479.78 rows=1 width=8) (actual time=1.283..1.284 rows=1 loops=1)
+  Buffers: shared hit=22
+  ->  Index Only Scan using people_country_idx on people  (cost=0.42..428.85 rows=20367 width=0) (actual time=0.031..0.741 rows=20417 loops=1)
+        Index Cond: (country = 'C07'::text)
+        Heap Fetches: 0
+        Buffers: shared hit=22
+Planning:
+  Buffers: shared hit=127
+Planning Time: 0.311 ms
+Execution Time: 1.312 ms
+Time: 2.011 ms

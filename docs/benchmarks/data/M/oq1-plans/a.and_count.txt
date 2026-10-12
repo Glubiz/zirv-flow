@@ -1,0 +1,22 @@
+Aggregate  (cost=23563.24..23563.25 rows=1 width=8) (actual time=44.911..44.912 rows=1 loops=1)
+  Buffers: shared hit=12212
+  ->  Bitmap Heap Scan on people  (cost=5178.22..23556.32 rows=2768 width=0) (actual time=15.920..44.791 rows=2710 loops=1)
+        Recheck Cond: (((traits ->> 'country'::text) = 'C07'::text) AND (oq1_ts((traits ->> 'signup_at'::text)) >= '2025-01-01 00:00:00+00'::timestamp with time zone))
+        Rows Removed by Index Recheck: 7393
+        Filter: (((traits ->> 'ltv'::text))::numeric >= '500'::numeric)
+        Rows Removed by Filter: 2793
+        Heap Blocks: exact=11457
+        Buffers: shared hit=12212
+        ->  BitmapAnd  (cost=5178.22..5178.22 rows=5560 width=0) (actual time=14.871..14.872 rows=0 loops=1)
+              Buffers: shared hit=755
+              ->  Bitmap Index Scan on people_country_idx  (cost=0.00..228.17 rows=20766 width=0) (actual time=1.664..1.664 rows=20417 loops=1)
+                    Index Cond: ((traits ->> 'country'::text) = 'C07'::text)
+                    Buffers: shared hit=20
+              ->  Bitmap Index Scan on people_signup_idx  (cost=0.00..4948.41 rows=267732 width=0) (actual time=12.558..12.558 rows=268175 loops=1)
+                    Index Cond: (oq1_ts((traits ->> 'signup_at'::text)) >= '2025-01-01 00:00:00+00'::timestamp with time zone)
+                    Buffers: shared hit=735
+Planning:
+  Buffers: shared hit=164
+Planning Time: 0.338 ms
+Execution Time: 44.994 ms
+Time: 46.047 ms

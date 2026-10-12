@@ -1492,8 +1492,8 @@ enrollment tables and backup-copy handling of the ledger (OQ-13) are not built y
 
 ## 19. Scalability envelope
 
-Every figure is a **TARGET to validate, not a measurement**; nothing has been
-measured yet. Each milestone measures its slice and M8 validates all of them on
+Every figure is a **TARGET to validate, not a measurement**; measurements are
+recorded in the "As measured" notes below the table. Each milestone measures its slice and M8 validates all of them on
 reference hardware (assumed: PostgreSQL 8 vCPU / 32 GB RAM / NVMe; two
 `zirv-flow` hosts of 4 vCPU). A missed target is fixed or revised in a recorded
 decision, never dropped silently. Beyond the envelope: more workers, a read
@@ -1522,9 +1522,10 @@ replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
 hardware, at three sizes of the zirv-flow stack (2, 4 and 8 vCPU) in
 [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md). Sustained 2,000 items/s on one workspace
 holds (API p99 11 to 80 ms, inbox to applied p95 35 to 46 ms). Missed there: the decision-log append
-(52.9 ms of added p95 per 500-event drain transaction, 34% throughput loss), the 10-minute burst drain
-(projected at about 19 minutes from a 2-minute run) and the API p99 of 500-item batches (125 ms). The
-drain applies about 3,400 mixed items per second per worker process whatever the vCPU count. The figures
+(52.9 ms of added p95 per 500-event drain transaction, 34% throughput loss; #75), the 10-minute burst
+drain (projected at about 19 minutes from a 2-minute run; #74) and the API p99 of 500-item batches
+(125 ms; #76). One workspace's drain applies about 3,400 mixed items per second whatever the vCPU count,
+because its shards share one task (#74). The figures
 are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
 
 ## 20. Key decisions

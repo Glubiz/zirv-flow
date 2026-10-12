@@ -1,0 +1,12 @@
+Bitmap Heap Scan on people  (cost=182.32..25337.94 rows=9535 width=8) (actual time=1.709..18.171 rows=9906 loops=1)
+  Recheck Cond: (ltv >= '990'::numeric)
+  Heap Blocks: exact=9135
+  Buffers: shared hit=9165
+  ->  Bitmap Index Scan on people_ltv_idx  (cost=0.00..179.94 rows=9535 width=0) (actual time=0.995..0.995 rows=9906 loops=1)
+        Index Cond: (ltv >= '990'::numeric)
+        Buffers: shared hit=30
+Planning:
+  Buffers: shared hit=127
+Planning Time: 0.307 ms
+Execution Time: 18.404 ms
+Time: 19.222 ms

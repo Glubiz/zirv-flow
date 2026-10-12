@@ -1,0 +1,11 @@
+Aggregate  (cost=299.12..299.13 rows=1 width=8) (actual time=1.002..1.002 rows=1 loops=1)
+  Buffers: shared hit=2008
+  ->  Index Only Scan using people_ltv_idx on people  (cost=0.42..275.29 rows=9535 width=0) (actual time=0.024..0.759 rows=9906 loops=1)
+        Index Cond: (ltv >= '990'::numeric)
+        Heap Fetches: 0
+        Buffers: shared hit=2008
+Planning:
+  Buffers: shared hit=130
+Planning Time: 0.319 ms
+Execution Time: 1.020 ms
+Time: 1.844 ms

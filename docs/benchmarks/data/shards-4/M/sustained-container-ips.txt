@@ -1,0 +1,4 @@
+postgres 172.19.0.3
+zirv-flow 172.19.0.5
+zirv-flow-worker 172.19.0.2
+zirv-flow-scheduler 172.19.0.4

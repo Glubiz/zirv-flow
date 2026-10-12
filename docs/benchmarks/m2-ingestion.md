@@ -9,22 +9,20 @@ default 8) and, for the before column, the drain as it was at 0.28.0.
 host with Docker Desktop. The section 19 targets are re-checked on reference hardware before 1.0; nothing
 here changes a target.
 
-Issue links for misses are placeholders (`TBD-...`) until the issues are filed.
-
 ## 1. Summary
 
 | Target (section 19) | Measured | |
 |---|---|---|
 | Sustained ingestion, 2,000 items/s | 2,000/s for 10 min on one workspace in tiers S, M and L, no errors, generator on schedule | HIT |
-| Burst 10,000/s for 10 min, backlog drained within 15 min | measured a 2-minute burst: drained 237 to 243 s after it stopped. The 10-minute case is a projection of about 19 min | MISS, projected (issue: TBD-burst-drain-10min) |
+| Burst 10,000/s for 10 min, backlog drained within 15 min | measured a 2-minute burst: drained 237 to 243 s after it stopped. The 10-minute case is a projection of about 19 min | MISS, projected (issue: #74) |
 | Ingestion API p99 under 100 ms at the sustained rate | 80.2 ms (S), 11.0 ms (M), 12.7 ms (L), judged on the schedule-based latency | HIT |
 | Inbox to applied profile p95 under 5 s at the sustained rate | 45.8 ms (S), 38.1 ms (M), 35.1 ms (L) | HIT |
-| Decision-log append: added transaction time p95 under 5 ms | 52.9 ms per 500-event drain transaction in the container network (184.5 ms from the host); about 0.1 ms per decision | MISS (issue: TBD-decision-append-time) |
-| Decision-log append: throughput loss under 10% | 34.4% (drain 1,065 items/s with decisions, 1,623 without) | MISS (issue: TBD-decision-throughput-loss) |
+| Decision-log append: added transaction time p95 under 5 ms | 52.9 ms per 500-event drain transaction in the container network (184.5 ms from the host); about 0.1 ms per decision | MISS (issue: #75) |
+| Decision-log append: throughput loss under 10% | 34.4% (drain 1,065 items/s with decisions, 1,623 without) | MISS (issue: #75) |
 
 Also missed, outside section 19's rows but against its "API p99 under 100 ms at the sustained rate" for the
 500-item batch endpoint: API p99 124.9 ms at 2,000 items/s in batches of 500 (tier M)
-(issue: TBD-batch500-api-p99).
+(issue: #76).
 
 Before the drain fix one workspace drained about 900 items/s; a 10-minute run at 2,000/s ended with a
 backlog that took about 11 minutes to apply after the generator stopped (inbox-to-applied p95 of 640 s). After it, p95 is below 50 ms and
@@ -156,10 +154,12 @@ Peaks at the ceiling step (percent of one core / MiB not shown):
   182,107 late dispatches with service p99 of 4.2 s, and at L's 3,000/s four-workspace step 37,558
   requests failed as transport errors. L's track ceilings (3,000 and 2,750) are therefore lower bounds set by
   the measuring path, not by the server.
-- **The worker is bound near one core.** Its peak is 100% in the batch ramps (4,000 items/s step), 103 to
-  105% in the 10,000/s burst of every tier and 73 to 97% in the single-workspace ceilings, regardless of
-  tier. The drain does not use extra vCPUs: the burst drain rate (about 3,400 items/s of mixed identify and
-  track) is the same in S, M and L (section 5).
+- **One workspace's drain is bound near one core.** The worker peaks at 100% in the batch ramps (4,000
+  items/s step), 103 to 105% in the 10,000/s burst of every tier and 73 to 97% in the single-workspace
+  ceilings, regardless of tier. The burst drain rate (about 3,400 items/s of mixed identify and track) is
+  the same in S, M and L (section 5). With four workspaces the worker reaches 162% (M) and 233% (L), so
+  the limit is per workspace: one workspace's drain joins its shard loops in one task, which runs on one
+  thread at a time (#74).
 - PostgreSQL peaks at 300 to 700% of the cores it has (24), it is not the limit.
 
 ### 3.2 Scaling and how to predict
@@ -176,9 +176,8 @@ Predicting a ceiling for another setup:
   treat the model as accurate to about 20% for small budgets.
 - Beyond about 4 vCPU the ceiling stops following the CPU budget. Use the smaller of three limits: the CPU
   model above, about 3,000 single-item requests per second from this host path (use batch requests above
-  that), and a drain of about 3,400 mixed items per second per worker process for sustained load (the worker
-  saturates one core; more workers or a drain that uses more cores is what raises it, not more vCPU on the
-  same worker).
+  that), and a drain of about 3,400 mixed items per second per workspace for sustained load (one
+  workspace's drain saturates one core, so more vCPU does not raise it until #74 is fixed).
 - Do not extrapolate beyond about twice the largest tier (16 vCPU): there are only three points, two of them
   are bounded by the measuring path rather than the server, and the drain limit is a property of the code at
   this commit.
@@ -232,13 +231,13 @@ the same in every tier. The 10-minute burst of the target would offer 6 million 
 backlog after 10 minutes is about 4 million and takes about 19 to 20 minutes to empty, above the 15-minute
 target. That is a projection, not a measurement (the burst was run for 2 minutes, per the plan); the number
 has the mixed identify and track workload behind it, and track alone may drain faster
-(issue: TBD-burst-drain-10min).
+(issue: #74).
 
 Batch endpoint (tier M), 500 items per request at 2,000 items/s for 10 minutes (before in brackets): 1.2 million
 items accepted, API p99 124.9 ms (32.5 ms) across 4 requests per second, applied p50 / p95 / p99 / max
 253 ms / 359 ms / 3.7 s / 7.8 s (352 / 710 / 743 / 751 s), drain 3 s (752 s). The API p99 target is missed
 for 500-item requests; a batch is a larger body to parse before it is appended
-(issue: TBD-batch500-api-p99).
+(issue: #76).
 
 ## 6. Decision-log overhead
 
@@ -260,7 +259,7 @@ test `a_drain_batch_of_decisions_records_its_duration` times that, 500 batches p
 
 The container-network row is the deployment-shaped figure: about 0.1 ms per decision, 52.9 ms of added p95
 per 500-item drain transaction. The drain transaction is the unit that commits the decisions, so against
-"under 5 ms of added transaction time" that is a miss by about 10x (issue: TBD-decision-append-time); read per
+"under 5 ms of added transaction time" that is a miss by about 10x (issue: #75); read per
 event it is 0.1 ms. The statements are issued one by one; the code does have a batched
 `append_decisions`, which the drain does not use.
 
@@ -276,11 +275,11 @@ are started and the time to empty is measured. `off` is built with `bench-no-dec
 | off, 2 | 191,551 | 117.9 s | 1,625 | 0 |
 
 Mean 1,065 items/s with decisions against 1,623 without: a **34.4% loss**, a miss against 10%
-(issue: TBD-decision-throughput-loss). Caveats: the backlogs are about 190k rather than the intended 600k
+(issue: #75). Caveats: the backlogs are about 190k rather than the intended 600k
 because the generator, not the server, limited the preload on this host path (it is a drain
 comparison, and the sizes of the sides differ by under 5%); the native worker pays 0.33 ms per statement
 to the forwarded port instead of 35 us in the container network, which inflates the cost of the extra
-statements, so the loss in a containerised deployment is lower than this; I did not measure it. The
+statements, so the loss in a containerised deployment is lower than this; that was not measured. The
 order was on, off, on, off.
 
 ## 7. OQ-1: trait storage

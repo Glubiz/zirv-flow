@@ -1,0 +1,12 @@
+Insert on people  (cost=0.00..500.00 rows=0 width=0) (actual time=180.413..180.413 rows=0 loops=1)
+  Conflict Resolution: UPDATE
+  Conflict Arbiter Indexes: people_pkey
+  Tuples Inserted: 1000
+  Conflicting Tuples: 9000
+  Buffers: shared hit=190767 read=990 dirtied=2630 written=1616
+  ->  Function Scan on generate_series g  (cost=0.00..500.00 rows=10000 width=40) (actual time=0.319..13.569 rows=10000 loops=1)
+Planning:
+  Buffers: shared hit=89
+Planning Time: 0.128 ms
+Execution Time: 180.531 ms
+Time: 181.211 ms
