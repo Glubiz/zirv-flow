@@ -1,0 +1,97 @@
+{
+  "tool": "zirv-flow-loadgen",
+  "mode": "batch",
+  "seed": 1,
+  "run_id": "burst",
+  "started_unix_s": 1791820677,
+  "batch_size": 100,
+  "max_in_flight": 10000,
+  "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+  "people": 1000000,
+  "total": {
+    "name": "total",
+    "target_rate": 10000,
+    "planned_duration_s": 120.0,
+    "elapsed_s": 120.0065122,
+    "requests": 12000,
+    "items_offered": 1200000,
+    "items_accepted": 1200000,
+    "achieved_rate": 9999.457346115589,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 12000,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "latency_from_schedule": {
+      "count": 12000,
+      "p50_ms": 8.846,
+      "p95_ms": 17.656,
+      "p99_ms": 23.507,
+      "max_ms": 43.383
+    },
+    "service_latency": {
+      "count": 12000,
+      "p50_ms": 4.385,
+      "p95_ms": 7.8,
+      "p99_ms": 15.188,
+      "max_ms": 36.572
+    },
+    "dispatch_lag": {
+      "count": 12000,
+      "p50_ms": 4.141,
+      "p95_ms": 11.112,
+      "p99_ms": 15.188,
+      "max_ms": 17.098
+    },
+    "late_dispatch": 0,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0
+  },
+  "phases": [
+    {
+      "name": "burst",
+      "target_rate": 10000,
+      "planned_duration_s": 120.0,
+      "elapsed_s": 120.0065122,
+      "requests": 12000,
+      "items_offered": 1200000,
+      "items_accepted": 1200000,
+      "achieved_rate": 9999.457346115589,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 12000,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 12000,
+        "p50_ms": 8.846,
+        "p95_ms": 17.656,
+        "p99_ms": 23.507,
+        "max_ms": 43.383
+      },
+      "service_latency": {
+        "count": 12000,
+        "p50_ms": 4.385,
+        "p95_ms": 7.8,
+        "p99_ms": 15.188,
+        "max_ms": 36.572
+      },
+      "dispatch_lag": {
+        "count": 12000,
+        "p50_ms": 4.141,
+        "p95_ms": 11.112,
+        "p99_ms": 15.188,
+        "max_ms": 17.098
+      },
+      "late_dispatch": 0,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  ]
+}
