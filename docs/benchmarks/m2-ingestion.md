@@ -295,7 +295,8 @@ then the drain to empty:
 
 All 6,000,000 items were accepted (60,000 requests, all 202, achieved 9,999.7/s, `late_dispatch` 0, no
 errors); 3,001,301 track events and 997,535 people were stored and the inbox ended at 0. The worker averaged
-224% over the drain; from about 350 s in, single samples dip as low as 72%. The margin is 1.1% of the target: the result is a pass on this host, one
+224% over the drain; from about 350 s in, single samples dip as low as 72%, and in the last 5 s, as the
+inbox empties, it falls to 0. The margin is 1.1% of the target: the result is a pass on this host, one
 run, and 4,090 items/s is the measured rate for this workload (mixed identify and track, 1,000,000 people), so
 a run a little slower would miss. It is a development machine, not reference hardware.
 
