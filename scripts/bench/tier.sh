@@ -230,14 +230,18 @@ case "$test_name" in
   decappend)
     [ "$tier" = M ] || { echo "decappend runs on tier M only" >&2; exit 2; }
     stack_up
+    # Build the release test binary first (`cargo test --release -p zirv-flow-store --no-run`) and run
+    # it directly, so no compile happens during the measurement.
+    testbin="$(ls -t "$root"/target/release/deps/zirv_flow_store-*.exe 2>/dev/null | head -n1)"
     DATABASE_URL="postgres://zirv:zirv-quickstart@localhost:55432/postgres" ZIRV_FLOW_BENCH_DECISIONS=500 \
-      cargo test --release -p zirv-flow-store a_drain_batch_of_decisions -- --ignored --nocapture 2>/dev/null \
-      | grep '^{"benchmark":"decision_append"' >"$data/decision-append.json"
+      "$testbin" a_drain_batch_of_decisions --ignored --nocapture 2>/dev/null \
+      | grep '^{"benchmark":"decision_append"' >"$data/decision-append.json"; [ -s "$data/decision-append.json" ] || { log "decision-append produced no output"; exit 1; }
     cat "$data/decision-append.json" ;;
   oq1)
     [ "$tier" = M ] || { echo "oq1 runs on tier M only" >&2; exit 2; }
+    export BENCH_PG_SHM=1gb   # parallel queries over a million rows need more than Docker's 64 MB
     stack_up
     PSQL="docker exec -i $pg psql" DATABASE_URL="postgres://zirv:zirv-quickstart@localhost:5432/zirv_flow" \
-      OQ1_PLAN_DIR="$data/oq1-plans" bash scripts/bench/oq1/run.sh >"$data/oq1.json" ;;
+      OQ1_PLAN_DIR="$data/oq1-plans" bash scripts/bench/oq1/run.sh >"$data/oq1.json" || { log "oq1 failed"; exit 1; } ;;
   *) echo "unknown test $test_name" >&2; exit 2 ;;
 esac

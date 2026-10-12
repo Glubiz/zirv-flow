@@ -188,3 +188,37 @@ table and index sizes of each variant are included.
 
 Variant A needs a wrapper function (`oq1_ts`) around the timestamp cast to index it, because
 `text::timestamptz` is only STABLE; it is part of A's cost and belongs in the OQ-1 record.
+
+## 8. Capacity tiers (S, M, L) and the decision A/B
+
+`scripts/bench/tier.sh <S|M|L> <test>` runs the capacity benchmarks at doubling sizes of the
+zirv-flow stack: S is 2 vCPU / 4 GB, M 4 vCPU / 8 GB, L 8 vCPU / 16 GB. The tier budget covers
+serve, worker and scheduler only (one shared cpuset `0-1`, `0-3` or `0-7`; memory worker 50%, serve
+40%, scheduler 10%; worker concurrency 4 in every tier). PostgreSQL 16 is outside the budget: its
+own cpuset `8-31`, no memory limit and one fixed configuration in every tier (`shared_buffers=4GB`,
+`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `max_wal_size=8GB`, `checkpoint_timeout=15min`),
+all in `compose.tiers.yaml`. The generator runs on the host. Build `loadgen` and the image first
+(sections 1 and 3), then, per tier:
+
+```sh
+export BENCH_LOADGEN=target/release/loadgen BENCH_SCRATCH=/tmp/zirv-bench
+for t in track1 identify1 track4 sustained burst; do scripts/bench/tier.sh M "$t"; done
+scripts/bench/tier.sh M batch; scripts/bench/tier.sh M oq1       # tier M only
+cargo test --release -p zirv-flow-store --no-run                  # once, before decappend
+scripts/bench/tier.sh M decappend                                 # tier M only
+```
+
+- `track1`, `identify1` and `track4` (four workspaces, four generators at rate/4) ramp from 500 items/s
+  in steps of 500 for 90 s, up to 8,000, and stop at the first step that fails: schedule-based API p99
+  under 100 ms, no 5xx or 429, inbox oldest-row age under 5 s and not growing, the generator on
+  schedule (`late_dispatch` 0, achieved at least 98% of the target). A step with `late_dispatch` above 0
+  is generator-bound and invalid. `BENCH_STEP_SECONDS` and `BENCH_RAMP_MAX` shorten a smoke run.
+- `sustained` is track at 2,000/s for 10 minutes; `burst` is 10,000/s for 2 minutes (batch mode, key
+  limit raised to 20,000/40,000) then the drain to empty, capped at 30 minutes; `batch` is 500 per
+  request at 2,000 items/s for 10 minutes.
+- Every test recreates the stack on a fresh volume, samples `docker stats` and the inbox, and writes
+  to `docs/benchmarks/data/<tier>/`. Peak CPU is in percent of one core.
+
+`scripts/bench/ab.sh <on|off> <n> <zirv-flow-binary> <loadgen-binary>` is the decision-log A/B:
+native release builds (the `off` one built as in section 6), unconstrained, against the tier PostgreSQL;
+it preloads a backlog with no worker, then times the drain to empty. Run each side at least twice.

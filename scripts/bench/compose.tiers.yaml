@@ -13,6 +13,9 @@
 services:
   postgres:
     cpuset: ${BENCH_PG_CPUSET:-8-31}
+    # Docker's default (64 MB) is too small for parallel queries over a million rows; the OQ-1
+    # run sets BENCH_PG_SHM=1gb, every other test keeps the default.
+    shm_size: ${BENCH_PG_SHM:-64mb}
     command:
       - postgres
       - -c
