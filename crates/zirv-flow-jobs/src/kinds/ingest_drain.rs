@@ -5,10 +5,10 @@
 //! A run first buckets the workspace's rows that have no bucket yet (appended before the
 //! column existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Then
 //! `shards` loops drain the buckets concurrently, one shard each; the rows of one record key
-//! share a bucket, so each key still applies in id order. Each loop is a tokio task of its own, owned by the
-//! handler in a `JoinSet`, so the shards spread over the runtime threads instead of polling in one
-//! task. Losing the lease drops the handler, which aborts every shard task and rolls back their
-//! transactions.
+//! share a bucket, so each key still applies in id order. Each loop is a tokio task of its own,
+//! owned by the handler in a `JoinSet`, so the shards spread over the runtime threads instead of
+//! polling in one task. Losing the lease drops the handler, which aborts every shard task and
+//! rolls back their transactions.
 //!
 //! A batch that fails with a retryable error is retried with jittered backoff. A batch that
 //! fails otherwise holds a poison row: its rows are applied one at a time, and the row that
@@ -639,16 +639,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_shard_task_that_panics_fails_the_job_after_the_others_ended() {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut tasks = JoinSet::new();
         tasks.spawn(async { panic!("a shard blew up") });
-        tasks.spawn(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Ok(true)
+        tasks.spawn({
+            let finished = Arc::clone(&finished);
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(true)
+            }
         });
 
         let error = join_shards(tasks).await.unwrap_err();
 
         assert_eq!(error.message(), "a drain shard panicked");
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the other task ended first"
+        );
     }
 
     #[tokio::test]
