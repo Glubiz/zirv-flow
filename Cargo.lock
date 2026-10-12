@@ -4518,6 +4518,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zirv-flow-connectors"
+version = "0.31.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "reqwest 0.13.5",
+ "rustls",
+ "tokio",
+ "tracing",
+ "url",
+ "zirv-flow-core",
+]
+
+[[package]]
 name = "zirv-flow-core"
 version = "0.31.0"
 dependencies = [
