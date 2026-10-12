@@ -407,8 +407,10 @@ oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
 deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
-shards) + 1` connections. A batch never applies past a row it could not lock: the rest of that bucket's picked rows wait for the next batch. Each loop is `drain_batch`: in one transaction it selects the
-those rows with `FOR UPDATE SKIP LOCKED`, applies them in id order through the
+shards) + 1` connections. Each loop is `drain_batch`: in one transaction it picks the
+batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
+applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
+batch, and a batch that takes nothing ends the loop), applies them in id order through the
 transaction-taking profile and event paths of apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
