@@ -178,7 +178,7 @@ checkpoints, deletion detection and freshness marketers can see.
 - **Built-in sources.** PostgreSQL and MySQL (tables, or queries with a cursor column); CSV/JSON files over HTTPS.
 - **HTTP manifest v1.** Schema and validation; auth, pagination, incremental cursor, field mapping, delete signal; UI editor and validator; reference manifests tested against a mock server.
 - **Inbound webhooks.** Generic, with signature verification and mapping.
-- **Kafka source.** Consumer-group streams mapped to contacts, events or lists; offsets stored as the checkpoint in the apply-batch transaction; tombstones delete; failed messages become rejects; consumer lag as freshness; SASL/TLS credentials encrypted (architecture 7.6).
+- **Kafka source.** Topic streams mapped to contacts, events or lists; offsets stored as the checkpoint in the apply-batch transaction; tombstones delete; failed messages become rejects; consumer lag as freshness; SASL/TLS credentials encrypted (architecture 7.6).
 - **Sync runs.** Schedules, manual run, cancel; state machine with lease heartbeat and checkpoint resume; full-refresh mark and sweep; reconciliation runs for incremental streams without a delete signal; reject threshold.
 - **Mapping UI.** Stream to people, events or lists; identifier and trait mapping; bounded transforms; preview on sample records.
 - **Freshness.** Per stream: last success, high-water mark, staleness threshold; stale/failing badges and metrics.

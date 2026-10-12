@@ -181,6 +181,13 @@ The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
 I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
 `connectors`, `ai` and `identity` are the outbound-I/O crates.
 
+Two cross-cutting policies add no crate and no edge. The egress policy (16.1) is
+pure code in `core::egress` (address classification, allowlist matching, the
+decision type); `connectors` and `ai` each enforce it at their own connect point.
+Envelope crypto (16.2) is pure code in `core::secrets` next to `MasterKey`;
+`store` holds the ciphertext, and `api` and `jobs` open a secret and pass the
+typed plaintext credential into `connectors` or `ai`, which never decrypt.
+
 ### 5.2 Feature modules inside crates
 
 Each crate is split into vertical feature modules for the domain areas it owns:
@@ -327,8 +334,8 @@ erDiagram
 | Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
 | Brand theme, theme version | One per workspace: colours, fonts, logo asset, default footer snippet. Published versions are immutable; rendering uses the current one. |
 | Asset | Uploaded raster image (bytes, sniffed type, dimensions, content hash), served publicly from `server.public_url`. Retained while any published template, snippet or theme version references it. |
-| AI settings | Per-workspace enablement, provider/model choice, budget, transcript retention and PII opt-in. Deployment configuration declares the permitted providers and models. |
-| AI call log | Audit record for each assistant call: workspace, user, feature, provider, model, tokens, estimated cost, latency, outcome and resulting draft id; transcript content follows the workspace retention setting. |
+| AI settings | Per-workspace enablement, provider/model choice, budget, the opt-in transcript window (off by default) and PII opt-in. Deployment configuration declares the permitted providers and models. |
+| AI call log | Audit record for each assistant call: workspace, user, feature, provider, model, tokens, estimated cost, latency, outcome and resulting draft id; transcript content is kept only inside the workspace's opt-in window (13.4). |
 
 As built (lists): `lists` holds `member_count`, kept exact under a row lock on the list;
 `list_members` is keyed `(list_id, person_id)` and `list_member_changes` is the history.
@@ -379,9 +386,9 @@ As built (consent, topics and suppressions):
 | Sync (pull) | `sync.run` job per stream, resuming from a checkpoint | Ledger content hash; checkpoint committed with the data | Last successful run, cursor high-water mark |
 | Identify / track (push) | `serve` durably appends to `ingest_inbox` before returning `202`; workers drain it in batches | Client `messageId`, else server-assigned | Oldest unprocessed inbox row |
 | CSV import | Upload, map, dry run, then run like a sync | Key column, else file hash + row number | Import completion |
-| Inbound webhook | `/hooks/{id}`, signature check, mapping | Configured dedupe field | Last received |
+| Inbound webhook | `/hooks/{id}`, signature check, then a durable append to `ingest_inbox` like identify; mapping runs in the drain | Configured dedupe field | Last received |
 | Contacts API (push) | Create, update and delete contacts by key, singly or in bulk, through the inbox like identify (7.6) | Idempotency key, else contact key plus payload hash | Oldest unprocessed inbox row |
-| Kafka stream | A long-running consumer per stream; the partition offsets are the stream checkpoint, committed in the apply-batch transaction (7.6) | Topic, partition and offset | Consumer lag per partition |
+| Kafka stream | A long-running consumer job per stream, not a `sync.run` batch (7.6, 14); the partition offsets are the stream checkpoint, committed in the apply-batch transaction (7.6) | Topic, partition and offset | Consumer lag per partition |
 
 Every path ends in **apply-batch**, one transaction per batch (default 500
 records): normalize identifiers; resolve or create the person (merging if
@@ -442,7 +449,9 @@ leader's hourly upkeep deletes the chunks 7 days after an import ends and the re
 A **source** is a connector instance (type, config, encrypted credentials,
 schedule) exposing **streams** (table, query, API resource). Each stream maps to
 `people` (identifiers, traits), `events` (name, timestamp, person identifier,
-properties) or `list_membership`.
+properties) or `list_membership`. Custom object types are post-1.0 (OQ-4): in v1
+order- or account-like data arrives as events with typed properties or as
+traits, and the store model is unchanged.
 
 | Sync mode | Use | Deletion detection |
 |-----------|-----|--------------------|
@@ -469,12 +478,17 @@ re-applies data. Long runs heartbeat their lease. One run per stream at a time
 cancelled run never deletes. A run also fails, without sweeping, when its reject
 rate exceeds the stream threshold (default 5%), so a broken mapping cannot
 cascade into deletions. Rejects (type mismatch, missing identifier, bad
-timestamp) are kept in `sync_rejects` with reason and raw values.
+timestamp) are kept in `ingest_rejects`, the table identify, track and import
+rejects already use, with reason and raw values and a `sync_run_id` that ties
+each to its run. A Kafka stream has no `sync.run`: its consumer job (7.6, 14)
+applies the same reject rule per message.
 
 **Mapping** is declarative: field path to identifier kind, trait, event field or
 list, with a bounded transform set (trim, case, cast, timestamp parse,
-concatenate, constant, value map, split). No scripting in v1 (OQ-5). The UI
-previews a mapping on sample records before saving.
+concatenate, constant, value map, split) and nested JSON path selection for
+field sources, the set already in `core::mapping`. There is no expression
+language or scripting in v1 (OQ-5); a request the set cannot express becomes an
+issue. The UI previews a mapping on sample records before saving.
 
 ### 7.3 Identity resolution and precedence
 
@@ -606,16 +620,25 @@ else's data.
   values; an identical repeat without the header is a no-op through the
   content hash. The UI edits contacts through the same API. A delete removes the
   `native` contributions under the orphan policy (7.4); erasure stays separate.
-- **Writes over Kafka.** A Kafka source consumes one or more topics with a
-  consumer group. Each message is mapped like any other stream to contact
-  upserts, events or list membership; a tombstone deletes the contact. Offsets
-  are stored as the stream checkpoint in the apply-batch transaction, so a
-  crash replays from the last committed batch with no double application. A
+- **Writes over Kafka.** A Kafka source consumes one or more topics with
+  `rskafka` (pure Rust, rustls TLS, SASL PLAIN and SCRAM) and without consumer
+  groups. It runs as a long-running consumer job with a time budget that
+  re-enqueues itself (14), not as a `sync.run` batch. The worker holding the
+  stream's job lease discovers the topic's partitions and fetches each one from
+  its next offset, stored in our database. Each message is mapped like any other
+  stream to contact upserts, events or list membership; a tombstone deletes the
+  contact. The per-partition next offsets are the stream checkpoint, written in
+  the apply-batch transaction with the lease fenced inside it, so a crash
+  replays from the last committed batch with no double application and a
+  worker that lost its lease cannot advance an offset. A
   message that fails mapping or validation becomes an ingest reject and the
-  partition moves on. Freshness is consumer lag. Broker credentials (SASL, TLS
-  client certificates) use secrets encryption (16.1), and connections pass the
-  egress policy. JSON values come first; Avro and Protobuf with a schema
-  registry follow (OQ-31).
+  partition moves on. Freshness is consumer lag: the partition's end offset
+  minus the stored next offset. Broker credentials (SASL, TLS client
+  certificates) use secrets encryption (16.2), are opened by `jobs`, and
+  connections, including every broker address learned from metadata, pass the
+  egress policy (16.1). Values are JSON only in v1; Avro and Protobuf with a
+  schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
+  features are validated on both musl release architectures (amd64, arm64).
 
 As built (native contacts, issue 43): a contact is a live `source_records` row with source
 `native`, stream `contacts` and `record_key` equal to the contact key, which is also the
@@ -1114,6 +1137,8 @@ delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
 action type, outcome, durable domain ids and one typed cause: `event`,
 `trait_change`, `schedule`, `manual`, `api` or `definition_change`, with the
 cause id. It never stores identifier, trait or event-property values.
+A sync writes one decision per record, appended with one multi-row insert per
+batch in the apply-batch transaction.
 
 The `trace_id` and cause cross transactional job enqueue, retries and external
 effects. Retries add attempts under the same logical record rather than hiding
@@ -1192,12 +1217,19 @@ Anthropic API adapters. The compatible adapter accepts a base URL, so local
 model servers use the same path. Deployment configuration allowlists providers,
 models and base URLs. Per-workspace settings choose enablement, provider,
 model, monthly budget and whether personal data may be sent. Provider keys use
-M3 envelope encryption. Every call uses the M3 egress policy; a local server on
-a private network still needs an explicit allowlist entry.
+envelope encryption (16.2); `api` or `jobs` opens the key right before a call and
+passes it to `ai`, which never decrypts. Every call uses the egress policy
+(16.1); a local server on a private network still needs an explicit allowlist
+entry.
 
-Minimum model capabilities are OQ-27. Provider-specific responses are reduced
-to one internal stream of text, usage and structured tool calls, so product
-code does not branch on provider.
+Minimum model capabilities (OQ-27, decided): structured tool calls with a JSON
+Schema subset (object, string, number, integer, boolean, array, enum,
+required), token usage reporting, and a context window of at least 32k tokens.
+Streaming is optional. A capability probe on save checks tool calls and usage;
+the window comes from provider metadata or operator configuration. Enabling a
+model is refused while a requirement is missing. Provider-specific responses
+are reduced to one internal stream of text, usage and structured tool calls, so
+product code does not branch on provider.
 
 ### 13.2 Typed tools and the draft loop
 
@@ -1243,8 +1275,11 @@ providers. Without opt-in, request construction rejects identifier values even
 if a caller attempts to supply them.
 
 Every call records workspace, user, feature, provider, model, input/output
-tokens, estimated cost, latency, outcome and resulting draft id. Transcript
-retention is configurable; its default is OQ-26. Per-workspace budgets stop
+tokens, estimated cost, latency, outcome and resulting draft id. Assistant
+transcripts are not stored by default (OQ-26). A workspace admin can opt in to
+a debugging window of 1 to 30 days (default 7), a retention job purges it, and
+changing the setting is audited. The content-free call audit log is always
+kept. Per-workspace budgets stop
 new calls before dispatch with a clear error, and per-user rate limits bound
 abuse and accidental loops. Audit records never contain prompt or response
 content.
@@ -1269,9 +1304,16 @@ max_attempts, lease_token, lease_expires_at, locked_by, unique_key, last_error)`
 has a partial index `(priority, run_at) WHERE state = 'ready'` and a partial
 unique index on `unique_key WHERE state IN ('ready','running')`. `schedules(kind,
 cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
-`ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
+`kafka.consume`, `ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
 `flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
 `template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
+
+`kafka.consume` is a long-running consumer job per Kafka stream with a time
+budget: it heartbeats its lease, applies batches that each commit the partition
+offsets with the lease fenced inside the transaction, and re-enqueues itself
+when the budget ends. A Kafka stream is therefore not a `sync.run` batch, and a
+lost lease moves the stream to another worker without a skipped or repeated
+offset (7.6).
 
 ```sql
 -- Claim: short transaction, committed before the handler runs.
@@ -1384,7 +1426,7 @@ its impact first, such as how many people would enter a flow now.
 | Browser to `serve` | Session theft, CSRF, XSS | HttpOnly SameSite cookies, CSRF tokens, CSP without inline scripts |
 | Ingestion, webhooks | Floods, forged data | Write-only keys or signatures, size and rate limits, schema validation |
 | Tracking, unsubscribe | Enumeration, forged unsubscribes, open redirect | HMAC tokens, no personal data in URLs, recorded-link allowlist |
-| Outbound HTTP | SSRF into internal networks or cloud metadata | Egress policy checked after DNS resolution: deny loopback, private, link-local, metadata ranges unless allowlisted |
+| Outbound HTTP | SSRF into internal networks or cloud metadata | Egress policy checked after DNS resolution and bound to the connection: deny loopback, private, link-local, metadata ranges unless allowlisted |
 | Templates | Injection, resource exhaustion | MiniJinja sandbox, fuel and output limits |
 | Rich text in blocks | Script or markup injection into emails and the builder | Allowlist sanitizer (tags, attributes, URL schemes) on save and on render |
 | Preview of marketer HTML | Raw HTML block or code mode running script in the app | Shown only in a sandboxed iframe without `allow-scripts` or same-origin, with its own CSP; never rendered unsandboxed in the app. It is the marketer's own content, so it is not sanitized for the email itself. |
@@ -1395,18 +1437,36 @@ its impact first, such as how many people would enter a flow now.
 | Assistant context and output | Prompt injection in stored or pasted data; structurally valid unsafe output | Treat context as data, fixed read/draft tool registry, per-call RBAC and workspace checks, deterministic semantic validators, bounded repair |
 | Stored credentials | Database dump exposes secrets | Envelope encryption (16.2) |
 | Database sources | Over-privileged credentials | Documented read-only roles; connectors open read-only transactions |
+| Kafka brokers | SSRF through broker metadata | Bootstrap and every broker address from metadata pass the egress policy; connect by the checked IP |
 | Logs | Personal data leakage | Log person ids, not identifier values; secrets redacted |
+
+**Egress policy.** The pure policy lives in `core::egress`: address
+classification, allowlist matching and the decision type. Each outbound crate
+enforces it at its own connect point. `connectors` and `ai` install a reqwest
+DNS-resolver hook that classifies every resolved address. For database and
+Kafka drivers, which resolve names themselves, the caller resolves, checks, then
+connects by IP. The checked address is bound to the actual connection, so a
+second lookup cannot swap it. Redirects, retries and endpoints a driver
+discovers (Kafka broker metadata) are checked again. No new crate or edge is
+needed (5.1).
 
 ### 16.2 Secrets, RBAC, audit
 
 Connector credentials, OAuth tokens and AI provider keys use **envelope encryption**: a random
 data key per secret (XChaCha20-Poly1305), wrapped by an operator-held master
 key (`secrets.master_key_file` or env, identified by key id).
-`zirv-flow admin rotate-master-key` re-wraps data keys without touching
-ciphertexts. The API never returns plaintext. A lost master key means
+`zirv-flow admin rotate-master-key` re-wraps data keys in one transaction
+without decrypting payloads. The API never returns plaintext. A lost master key means
 credentials must be re-entered (documented).
 
 As built (M2): the master key arrives in M2 as `secrets.master_key_file` or `secrets.master_key`, with per-purpose HMAC keys derived by HKDF-SHA256 (identifier and redaction hashes); M3 reuses it for the envelope encryption above.
+
+Where it lives (M3): envelope crypto (seal and open, wrap and unwrap, key id)
+is pure code in `core::secrets` next to `MasterKey`, adding `chacha20poly1305`.
+One `encrypted_secrets` table and repository in `store` holds the ciphertext,
+the wrapped data key and the key id. Decryption happens only in `api` and
+`jobs`: they open a secret right before use and pass a typed plaintext
+credential, zeroized after use, into `connectors` or `ai`, which never decrypt.
 
 | Role (proposed, confirmed in M8) | Scope | Can |
 |------|-------|-----|
@@ -1432,7 +1492,7 @@ history, enrollments, messages) behind an expiring link. **Erasure**
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
 segment memberships, enrollments, step executions, messages, test-send log entries,
-sync rejects, person-scoped decision records, assistant transcripts, pending
+person-scoped decision records, stored assistant transcripts, pending
 and dead forwarding payloads and pending exports, and clear saved preview-person
 references; (4) call `erase` on forwarding and delivery destinations that
 declare it and record results; (5) delete the person; (6) write an audit entry
@@ -1444,9 +1504,10 @@ after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
 defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
 per-name workspace overrides (drop monthly partitions; batched deletes where
-an override is shorter), messages 13 months, ingest, sync and import rejects 30 days, import files 7 days after the import ends,
-job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28
-and assistant transcript retention is OQ-26.
+an override is shorter), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
+job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28.
+Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
+day window (default 7), which a retention job purges (13.4, OQ-26).
 
 As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
 status, requester, trace); it is the one table the erasure scan skips on purpose.
@@ -1613,8 +1674,6 @@ they were ruled as their capabilities were added to the plan.
 | ID | Question | Decide by |
 |----|----------|-----------|
 | OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark |
-| OQ-4 | Custom object types (accounts, orders, subscriptions as entities, not events): v1 or post-1.0? | M3 |
-| OQ-5 | Is the bounded transform set enough, or is a small expression language needed for mapping? | M3 |
 | OQ-6 | Do membership changes from a definition edit trigger flows? (Proposed: no.) | M4 |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
@@ -1632,15 +1691,36 @@ they were ruled as their capabilities were added to the plan.
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
 | OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
 | OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M7, before the block set is frozen |
-| OQ-26 | What is the default assistant transcript retention: none, a short debugging window, or the workspace's audit horizon? | M3, before the first provider ships |
-| OQ-27 | What minimum model capabilities are supported: structured tool calls, JSON Schema subset, streaming, context window and usage reporting? | M3, before provider compatibility is frozen |
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
-| OQ-31 | Which Kafka client fits the static, multi-arch release build (a librdkafka binding or a pure-Rust client with consumer groups), and when do Avro and Protobuf values with a schema registry join JSON? | M3, before the Kafka source ships |
 | OQ-32 | Consent dimensions and policies: are dimensions a per-workspace catalog with typed values, or topics with categories? How does the policy reuse the M4 condition AST, and how does a recorded-consent read address dimension values? | M6, before the send pipeline ships |
 
 ### 21.1 Decided questions
+
+- **OQ-4:** Custom object types are post-1.0. v1 sources map to people, events
+  and list membership (7.2); order- or account-like data arrives as events with
+  typed properties or as traits. The store model is unchanged.
+- **OQ-5:** The bounded transform set already in `core::mapping` is the v1
+  mapping language, plus nested JSON path selection for field sources. There is
+  no expression language; a request outside the set becomes an issue (7.2).
+- **OQ-31:** Kafka uses `rskafka` (pure Rust, rustls TLS, SASL PLAIN and SCRAM)
+  without consumer groups. The worker holding the stream's job lease discovers
+  the partitions and fetches each from per-partition next offsets stored in our
+  database, written in the apply-batch transaction with the lease fenced inside
+  it. JSON values only in v1; Avro and Protobuf with a schema registry come
+  post-1.0. The TLS and compression features are validated on both musl
+  architectures (amd64, arm64). Sections 7.6 and 14.
+- **OQ-26:** Assistant transcripts are not stored by default. A workspace admin
+  can opt in to a debugging window of 1 to 30 days (default 7), purged by a
+  retention job; changing the setting is audited. The content-free call audit
+  log is always kept (13.4, 16.3).
+- **OQ-27:** A model needs structured tool calls with a JSON Schema subset
+  (object, string, number, integer, boolean, array, enum, required), token usage
+  reporting and a context window of at least 32k tokens. Streaming is optional.
+  A capability probe on save checks tool calls and usage; the window comes from
+  provider metadata or operator configuration; enablement is refused when a
+  requirement is missing (13.1).
 
 - **OQ-1:** Hot traits are promoted to typed columns with btree indexes; every other trait stays in the
   `people.traits` `jsonb`. At 1 million people and 20 mixed-type traits (M2 benchmark, tier M's
