@@ -29,6 +29,8 @@ host="${BENCH_HOST:-127.0.0.1}"          # the generator's target; "localhost" c
 ramp_min="${BENCH_RAMP_MIN:-250}"   # first ramp step, items/s
 ramp_step="${BENCH_RAMP_STEP:-250}" # rung size, items/s
 burst_s="${BENCH_BURST_SECONDS:-120}"  # burst test: seconds at 10,000 items/s (the section 19 case is 600); the drain cap stays 1800 s
+# Output files are prefixed with run_name; a burst of a non-default length is kept apart from the 2-minute run
+run_name="$test_name"; [ "$test_name" != burst ] || [ "$burst_s" = 120 ] || run_name="burst$burst_s"
 
 # Tier budget for zirv-flow only (serve, worker, scheduler): cpuset, then memory in MB for the
 # worker (50%), serve (40%) and scheduler (10%). PostgreSQL is outside the budget (compose.tiers.yaml).
@@ -71,7 +73,7 @@ stack_up() {
       echo "pg.$s=$(q -Atc "show $s")"
     done
     $c exec -T zirv-flow printenv | grep '^ZIRV_FLOW_' | grep -v -E 'URL|SECRET|MASTER' | sort
-  } >"$data/$test_name-stack.txt"
+  } >"$data/$run_name-stack.txt"
 }
 
 # mkkey <n>: creates workspace <n> and an ingest key in $scratch/key-<n>.
@@ -85,7 +87,7 @@ mkkey() {
 # Background samplers: docker stats of the four containers and the inbox, every ~5 s.
 statsfile="" inboxfile="" samplers=()
 start_samplers() {
-  statsfile="$data/$test_name-docker-stats.csv"; inboxfile="$data/$test_name-inbox-samples.csv"
+  statsfile="$data/$run_name-docker-stats.csv"; inboxfile="$data/$run_name-inbox-samples.csv"
   echo "epoch_s,container,cpu_pct,mem_usage_limit" >"$statsfile"
   echo "epoch_s,inbox_rows,oldest_age_s" >"$inboxfile"
   # One sample now, so a prefix that matches no container fails the run instead of leaving an empty file.
@@ -98,7 +100,7 @@ start_samplers() {
         | grep "^$cprefix" | sed "s/^/$ts,/" >>"$statsfile"
       sleep 2
     done ) & samplers+=($!)
-  connfile="$data/$test_name-pg-connections.csv"
+  connfile="$data/$run_name-pg-connections.csv"
   echo "epoch_s,client_addr,connections" >"$connfile"
   ( while true; do
       q -Atc "select extract(epoch from now())::int||','||coalesce(client_addr::text,'local')||','||count(*) from pg_stat_activity where datname='zirv_flow' group by client_addr"         2>/dev/null >>"$connfile"
@@ -258,8 +260,7 @@ case "$test_name" in
   sustained) single sustained 1800 --mode track --rate 2000 --duration 600 --people 100000 ;;
   burst)
     export BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000
-    name=burst; [ "$burst_s" = 120 ] || name="burst$burst_s"  # keep a longer run from overwriting the default one
-    single "$name" 1800 --mode batch --batch-size 100 --burst-rate 10000 --burst-duration "$burst_s" --people 1000000 ;;
+    single "$run_name" 1800 --mode batch --batch-size 100 --burst-rate 10000 --burst-duration "$burst_s" --people 1000000 ;;
   batch)
     [ "$tier" = M ] || { echo "batch runs on tier M only" >&2; exit 2; }
     single batch 1800 --mode batch --batch-size 500 --rate 2000 --duration 600 --people 1000000 ;;
