@@ -1,5 +1,6 @@
 //! The guarded client: the egress policy applied to every request and every redirect hop.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,10 +105,18 @@ impl GuardedClient {
 /// A response whose body can only be read under the client's `max_body_bytes`.
 ///
 /// The underlying `reqwest::Response` is not exposed, so no caller can read the body unbounded.
-#[derive(Debug)]
 pub struct GuardedResponse {
     inner: reqwest::Response,
     max_body_bytes: u64,
+}
+
+/// Prints the status only: the URL can carry a query or user info with credentials.
+impl fmt::Debug for GuardedResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuardedResponse")
+            .field("status", &self.inner.status())
+            .finish_non_exhaustive()
+    }
 }
 
 impl GuardedResponse {
@@ -300,6 +309,18 @@ mod tests {
             assert_eq!(response.body().await.unwrap(), "hello");
         }
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_response_debug_print_leaves_out_the_url() {
+        let (port, _) = serve().await;
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+        let response = get_url(&guarded, &format!("http://127.0.0.1:{port}/?token=hunter2"))
+            .await
+            .unwrap();
+        let printed = format!("{response:?}");
+        assert!(printed.contains("200"), "{printed}");
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 
     #[tokio::test]
