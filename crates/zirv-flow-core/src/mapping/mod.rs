@@ -6,6 +6,7 @@
 //! rule it broke, never the cell.
 
 mod apply;
+mod json_record;
 mod model;
 mod transform;
 mod validate;
@@ -13,5 +14,6 @@ mod validate;
 pub use apply::{
     Cells, CsvRow, Header, HeaderError, MAX_KEY_CHARS, Mapped, RowError, RowErrorReason, apply,
 };
+pub use json_record::JsonRecord;
 pub use model::{ColumnRule, Mapping, Target, Transform};
 pub use validate::{MappingError, TraitCatalog, TraitState, validate};
