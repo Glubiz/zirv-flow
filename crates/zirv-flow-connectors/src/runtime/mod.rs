@@ -11,11 +11,11 @@ mod send;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub(crate) use auth::TokenSlot;
 pub use auth::{
     AccessToken, ApiKeyPlacement, Auth, ClientAuth, CodeExchange, RefreshFuture, TokenStore,
     exchange_code,
 };
+pub(crate) use auth::{TokenSlot, binding_of};
 pub use error::RuntimeError;
 pub use paginate::{Page, Pager, Pagination, paginate};
 pub use rate_limit::{RateLimit, RateLimits};

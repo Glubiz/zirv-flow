@@ -81,6 +81,9 @@ pub enum Auth<'a> {
         client_id: &'a str,
         client_secret: Option<&'a SecretString>,
         refresh_token: &'a SecretString,
+        /// The binding `refresh_token` was issued for, when known. A refresh token issued for
+        /// another binding is never sent to this configuration's token endpoint.
+        refresh_binding: Option<&'a str>,
         scopes: &'a [String],
         client_auth: ClientAuth,
     },
@@ -235,7 +238,7 @@ pub(crate) struct TokenSlot {
 
 /// The binding of a token fetched with this configuration: a truncated SHA-256 over the token
 /// URL, the client id and the scopes, each length-prefixed. The client secret is not in it.
-fn binding_of(token_url: &Url, client_id: &str, scopes: &[String]) -> String {
+pub(crate) fn binding_of(token_url: &Url, client_id: &str, scopes: &[String]) -> String {
     let mut hash = Sha256::new();
     let mut field = |text: &str| {
         hash.update((text.len() as u64).to_be_bytes());
@@ -297,11 +300,20 @@ pub(crate) async fn ensure_token(
         return Ok((token, true));
     }
     let (token, handed_back) = match auth {
-        Auth::OAuth2AuthorizationCode { refresh_token, .. } => {
-            // The newest refresh token wins: a rotated one in the slot, else the credential's.
-            let held = ctx
-                .held_refresh_token(&binding)
-                .unwrap_or_else(|| Arc::new(SecretString::new(refresh_token.expose().to_owned())));
+        Auth::OAuth2AuthorizationCode {
+            refresh_token,
+            refresh_binding,
+            ..
+        } => {
+            // The newest refresh token wins: a rotated one in the slot, else the credential's,
+            // which only counts when it was issued for this very token endpoint and client.
+            let held = match ctx.held_refresh_token(&binding) {
+                Some(held) => held,
+                None if refresh_binding.is_some_and(|issued| issued != binding) => {
+                    return Err(RuntimeError::ReconnectRequired);
+                }
+                None => Arc::new(SecretString::new(refresh_token.expose().to_owned())),
+            };
             // With a store, the store has already persisted it: the caller has nothing to save.
             (
                 refresh_code_grant(ctx, auth, &held).await?,
@@ -1285,6 +1297,7 @@ mod tests {
             client_id: "the-client",
             client_secret,
             refresh_token,
+            refresh_binding: None,
             scopes,
             client_auth,
         }
@@ -1316,6 +1329,32 @@ mod tests {
         assert_eq!(form["client_id"], "the-client");
         assert_eq!(form["client_secret"], "client-secret");
         assert!(idp.authorization.lock().unwrap()[0].is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_token_issued_for_another_binding_is_never_sent_to_the_token_endpoint() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let (refresh, secret) = (
+            SecretString::new("rt-0".into()),
+            SecretString::new("client-secret".into()),
+        );
+        let auth = Auth::OAuth2AuthorizationCode {
+            token_url: idp.mock.url("/token"),
+            client_id: "the-client",
+            client_secret: Some(&secret),
+            refresh_token: &refresh,
+            refresh_binding: Some("issued-for-another-token-url"),
+            scopes: &[],
+            client_auth: ClientAuth::Body,
+        };
+
+        let error = call(&context("oauth", "m"), &api, &auth).await.unwrap_err();
+
+        assert_eq!(error, RuntimeError::ReconnectRequired);
+        assert!(idp.forms.lock().unwrap().is_empty());
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

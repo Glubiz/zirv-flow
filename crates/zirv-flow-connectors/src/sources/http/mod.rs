@@ -31,7 +31,7 @@ use super::validate::FieldError;
 use crate::manifest::{Manifest, StreamSpec, validate};
 use crate::runtime::{Pager, RateLimit};
 
-pub use self::auth::REFRESH_TOKEN_KEY;
+pub use self::auth::{REFRESH_TOKEN_KEY, seed_refresh_token};
 
 pub(crate) struct Http;
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_connectors::runtime::{AccessToken, RefreshFuture, RuntimeError, TokenStore};
-use zirv_flow_connectors::sources::{Credential, REFRESH_TOKEN_KEY, SourceContext};
+use zirv_flow_connectors::sources::{Credential, SourceContext, seed_refresh_token};
 use zirv_flow_core::{Keyring, SecretString, WorkspaceId};
 use zirv_flow_store::{
     PgPool, RefreshError, Source, StoredTokens, load_tokens, refresh_serialized,
@@ -97,10 +97,16 @@ pub(super) async fn prepare(
     let Some(stored) = stored else {
         return Ok(context);
     };
-    credential.insert(
-        REFRESH_TOKEN_KEY,
-        SecretString::new(stored.refresh_token.expose().to_owned()),
-    );
+    // Tokens issued for another token endpoint, client or scopes stay unused: the source reads as
+    // not connected until the account is connected again.
+    if !seed_refresh_token(
+        credential,
+        &source.config,
+        &stored.refresh_token,
+        &stored.binding,
+    ) {
+        return Ok(context);
+    }
     Ok(context
         .with_access_token(from_stored(stored))
         .with_token_store(Arc::new(StoredRefresh {
