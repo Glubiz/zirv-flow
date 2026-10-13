@@ -13,12 +13,14 @@ use zirv_flow_connectors::sources::{
     StreamDescriptor, StreamSettingsInput, SyncMode, validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
 use zirv_flow_store::{Stream, StreamSettings};
 
 use super::problems;
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -76,6 +78,8 @@ pub(crate) struct StreamBody {
     primary_key: Vec<String>,
     /// How long without new data before the stream counts as stale, in seconds.
     staleness_threshold_seconds: Option<i32>,
+    /// How a record of the stream becomes a person; null until one is set.
+    mapping: Option<MappingBody>,
     discovered: DescriptorBody,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
@@ -95,6 +99,11 @@ impl TryFrom<&Stream> for StreamBody {
             cursor_field: stream.cursor_field.clone(),
             primary_key: stream.primary_key.clone(),
             staleness_threshold_seconds: stream.staleness_threshold_seconds,
+            mapping: stream.mapping.as_ref().and_then(|value| {
+                serde_json::from_value::<Mapping>(value.clone())
+                    .ok()
+                    .and_then(|mapping| MappingBody::from_core(&mapping))
+            }),
             discovered: DescriptorBody::from(&descriptor),
             updated_at: stream.updated_at,
         })
@@ -122,6 +131,10 @@ pub(crate) struct StreamSettingsRequest {
     primary_key: Vec<String>,
     /// A positive number of seconds.
     staleness_threshold_seconds: Option<i32>,
+    /// How a record of the stream becomes a person. Absent leaves the stream's mapping as it is.
+    /// Columns are the stream's field names (top level); trait keys must be in the registry.
+    #[serde(default)]
+    mapping: Option<MappingBody>,
 }
 
 /// Checks the settings against the descriptor. Returns the sync mode on success.
@@ -148,6 +161,59 @@ fn check_settings(
     })
 }
 
+/// The mapping problem as one line: its code, and the column when it is on one.
+fn mapping_problem(error: &MappingError) -> ApiError {
+    let detail = match error.column() {
+        Some(column) => format!("mapping: {} (column \"{column}\")", error.code()),
+        None => format!("mapping: {}", error.code()),
+    };
+    ApiError::unprocessable(detail)
+}
+
+/// Checks a mapping against the stream's field names and the trait registry. A sync run does
+/// not add people to lists, so a list target is refused rather than silently ignored.
+async fn checked_mapping(
+    state: &AppState,
+    workspace: WorkspaceId,
+    descriptor: &StreamDescriptor,
+    body: &MappingBody,
+) -> Result<Mapping, ApiError> {
+    let mapping = body.to_core()?;
+    let header = Header::new(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
+    )
+    .map_err(|_| ApiError::internal())?;
+    let catalog: std::collections::HashMap<String, TraitState> =
+        zirv_flow_store::list_trait_definitions(&state.pool, workspace)
+            .await?
+            .into_iter()
+            .map(|definition| {
+                let trait_state = if definition.archived {
+                    TraitState::Archived
+                } else {
+                    TraitState::Active(definition.trait_type)
+                };
+                (definition.key, trait_state)
+            })
+            .collect();
+    mapping::validate(&mapping, &header, &catalog).map_err(|error| mapping_problem(&error))?;
+    if let Some(rule) = mapping
+        .columns
+        .iter()
+        .find(|rule| matches!(rule.target, mapping::Target::List { .. }))
+    {
+        return Err(ApiError::unprocessable(format!(
+            "mapping: unsupported_list_target (column \"{}\")",
+            rule.column
+        )));
+    }
+    Ok(mapping)
+}
+
 /// Stores the settings of a stream and audits `stream.configured`.
 pub(crate) async fn configure(
     state: &AppState,
@@ -160,7 +226,12 @@ pub(crate) async fn configure(
     let existing = zirv_flow_store::find_stream(&state.pool, workspace, source_id, name)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let mode = check_settings(&descriptor_of(&existing)?, request)?;
+    let descriptor = descriptor_of(&existing)?;
+    let mode = check_settings(&descriptor, request)?;
+    let mapping = match &request.mapping {
+        Some(body) => Some(checked_mapping(state, workspace, &descriptor, body).await?),
+        None => None,
+    };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let stream = zirv_flow_store::configure_stream(
         &mut *tx,
@@ -177,6 +248,15 @@ pub(crate) async fn configure(
     )
     .await?
     .ok_or_else(ApiError::not_found)?;
+    let stream = match &mapping {
+        Some(mapping) => {
+            let value = serde_json::to_value(mapping).map_err(|_| ApiError::internal())?;
+            zirv_flow_store::set_stream_mapping(&mut *tx, workspace, source_id, name, &value)
+                .await?
+                .ok_or_else(ApiError::not_found)?
+        }
+        None => stream,
+    };
     admin::audit(
         &mut tx,
         context,
@@ -188,6 +268,7 @@ pub(crate) async fn configure(
             "name": stream.name,
             "enabled": stream.enabled,
             "sync_mode": stream.sync_mode,
+            "mapping_set": mapping.is_some(),
         }),
     )
     .await?;
@@ -245,7 +326,7 @@ pub(crate) async fn list(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Settings the stream cannot serve, such as incremental without a cursor field", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -298,6 +379,7 @@ mod tests {
             cursor_field: cursor.map(str::to_owned),
             primary_key: vec!["id".into()],
             staleness_threshold_seconds: Some(60),
+            mapping: None,
         }
     }
 

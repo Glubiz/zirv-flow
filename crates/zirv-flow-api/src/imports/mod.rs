@@ -170,7 +170,7 @@ pub(crate) struct MappingBody {
 }
 
 impl MappingBody {
-    fn from_core(mapping: &Mapping) -> Option<Self> {
+    pub(crate) fn from_core(mapping: &Mapping) -> Option<Self> {
         serde_json::from_value(serde_json::to_value(mapping).ok()?).ok()
     }
 

@@ -7,6 +7,7 @@ pub(crate) mod actions;
 pub(crate) mod credential;
 pub(crate) mod crud;
 pub(crate) mod kinds;
+pub(crate) mod runs;
 pub(crate) mod streams;
 
 #[cfg(test)]

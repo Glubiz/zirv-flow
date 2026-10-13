@@ -8697,6 +8697,430 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/sources/{id}/runs": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "The runs of a source, newest first. Members of the workspace may read them.",
+        "operationId": "list_sync_runs",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "description": "Only runs of the stream with this name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Runs per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The next_cursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range or cursor is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Starts a sync run of one stream of the source, or of every enabled stream that has a\nmapping. A run is queued and read by a worker; poll it with `GET .../runs/{run_id}`.\nWorkspace admins only. Audited as `sync_run.started`.",
+        "operationId": "start_sync_runs",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The queued runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or stream, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The stream already has an active run (`code` is `sync_run_active`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "One run with its counters, state, attempt, error code and trace id, and its first 100\nrejects. Members of the workspace may read it.",
+        "operationId": "get_sync_run",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or run, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Cancels a queued or running run. A running run stops at its next batch: the batch in flight\nis not applied and the checkpoint stays at the last committed one. Workspace admins only.\nAudited as `sync_run.cancelled`.",
+        "operationId": "cancel_sync_run",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancelled run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or run, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The run is not active",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/sources/{id}/streams": {
       "get": {
         "tags": [
@@ -8871,7 +9295,7 @@
             }
           },
           "422": {
-            "description": "Settings the stream cannot serve, such as incremental without a cursor field",
+            "description": "Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10682,7 +11106,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`.",
+            "description": "`event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.",
             "example": "api"
           }
         }
@@ -11713,7 +12137,7 @@
           },
           "cause_kind": {
             "type": "string",
-            "description": "`event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`."
+            "description": "`event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`."
           },
           "id": {
             "type": "string",
@@ -14077,6 +14501,224 @@
           }
         }
       },
+      "RunBody": {
+        "type": "object",
+        "description": "One sync run: a read of one stream.",
+        "required": [
+          "id",
+          "source_id",
+          "stream_id",
+          "stream",
+          "state",
+          "trigger",
+          "sync_mode",
+          "records_read",
+          "records_applied",
+          "records_unchanged",
+          "records_rejected",
+          "records_deleted",
+          "reject_threshold",
+          "attempt",
+          "trace_id",
+          "created_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times a worker started the run; more than 1 means an earlier attempt was lost\nand the run resumed from its checkpoint."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a failed run failed, such as `reject_threshold`, `stream_not_mapped`,\n`stream_settings_invalid`, `source_error` or `job_failed`; never a value."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "records_applied": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "records_deleted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "records_read": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records the source delivered and the run has committed."
+          },
+          "records_rejected": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "records_unchanged": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records that repeated what is stored already."
+          },
+          "reject_threshold": {
+            "type": "number",
+            "format": "double",
+            "description": "The rejected share above which the run stops, once at least 100 records are read."
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "description": "`queued`, `running`, `succeeded`, `failed` or `cancelled`."
+          },
+          "stream": {
+            "type": "string",
+            "description": "The name of the stream."
+          },
+          "stream_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sync_mode": {
+            "type": "string",
+            "description": "The stream's sync mode when the run was queued: `full_refresh` or `incremental`."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace of the run: 32 lowercase hex characters. Every change the run made is under it."
+          },
+          "trigger": {
+            "type": "string",
+            "description": "`manual` or `schedule`."
+          }
+        }
+      },
+      "RunDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RunBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "rejects"
+            ],
+            "properties": {
+              "rejects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RunRejectBody"
+                },
+                "description": "Oldest first, at most 100; `records_rejected` is the total."
+              }
+            }
+          }
+        ],
+        "description": "A run with its first 100 rejects."
+      },
+      "RunRejectBody": {
+        "type": "object",
+        "description": "A record the run refused.",
+        "required": [
+          "id",
+          "received_at",
+          "reason",
+          "reasons",
+          "sample"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The first reason code."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunRejectReasonBody"
+            }
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sample": {
+            "type": "object",
+            "description": "`{properties, masked}`: a value stays only when the stream's mapping sends its field to\na trait the field registry marks non-PII. Every other value is null and its field is\nlisted in `masked`."
+          }
+        }
+      },
+      "RunRejectReasonBody": {
+        "type": "object",
+        "description": "A field of a refused record and why it was refused.",
+        "required": [
+          "property",
+          "reason"
+        ],
+        "properties": {
+          "property": {
+            "type": "string",
+            "description": "The field of the record; empty when no one field is at fault. Never its value."
+          },
+          "reason": {
+            "type": "string",
+            "description": "A static code such as `invalid_identifier`, `wrong_type` or `missing_identifier`."
+          }
+        }
+      },
+      "RunsBody": {
+        "type": "object",
+        "description": "A page of runs, newest first.",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null when there is none."
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunBody"
+            }
+          }
+        }
+      },
       "SaveDraftRequest": {
         "type": "object",
         "required": [
@@ -14455,6 +15097,20 @@
           }
         }
       },
+      "StartRunRequest": {
+        "type": "object",
+        "description": "Which stream to run.",
+        "properties": {
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of one stream. Without it every enabled stream with a mapping is run."
+          }
+        },
+        "additionalProperties": false
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -14495,6 +15151,17 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "mapping": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MappingBody",
+                "description": "How a record of the stream becomes a person; null until one is set."
+              }
+            ]
           },
           "name": {
             "type": "string"
@@ -14539,6 +15206,17 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "mapping": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MappingBody",
+                "description": "How a record of the stream becomes a person. Absent leaves the stream's mapping as it is.\nColumns are the stream's field names (top level); trait keys must be in the registry."
+              }
+            ]
           },
           "primary_key": {
             "type": "array",
