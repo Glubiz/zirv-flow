@@ -15,7 +15,7 @@ pub use batch::{
     BatchOutcome, BatchProgress, Counts, DELETE_BY_SIGNAL, DELETE_BY_SOURCE, EventCounts,
     SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncEvent, SyncReject, SyncUpsert, commit_sync_batch,
 };
-pub(crate) use batch::{Unfenced, fence_run};
+pub(crate) use batch::{Unfenced, fence_run, write_offsets};
 pub use job::{CONSUME_JOB_KIND, RUN_JOB_KIND, consume_unique_key, run_trace};
 pub use model::{
     CancelOutcome, FanOut, Lease, ReconcileQueued, Rotated, RunCursor, RunEnd, RunKind, RunReject,

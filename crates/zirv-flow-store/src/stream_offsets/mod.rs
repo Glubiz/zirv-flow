@@ -6,5 +6,6 @@
 mod offsets;
 
 pub use offsets::{
-    LagReport, PartitionLag, PartitionOffset, load_offsets, report_stream_lag, stream_lag,
+    LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
+    report_stream_lag, stream_lag,
 };

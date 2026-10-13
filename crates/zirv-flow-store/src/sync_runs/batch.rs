@@ -218,7 +218,7 @@ pub async fn commit_sync_batch(
         Some(Unfenced::Cancelled) => return Ok(BatchOutcome::Cancelled),
         None => {}
     }
-    write_offsets(&mut tx, batch).await?;
+    write_offsets(&mut tx, batch.workspace, batch.stream_id, batch.offsets).await?;
 
     let results = apply_upserts(&mut tx, batch).await?;
     // Every record the run read that still exists in the source is marked as seen: the applied
@@ -438,17 +438,18 @@ fn decision(
 
 /// Writes the batch's offsets. A consumer is the only writer of its stream's rows while it holds
 /// the lease, so the value is exact, not a maximum.
-async fn write_offsets(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<(), StoreError> {
-    if batch.offsets.is_empty() {
+pub(crate) async fn write_offsets(
+    tx: &mut crate::Tx,
+    workspace: WorkspaceId,
+    stream_id: Uuid,
+    offsets: &[PartitionOffset],
+) -> Result<(), StoreError> {
+    if offsets.is_empty() {
         return Ok(());
     }
-    let partitions: Vec<i32> = batch
-        .offsets
-        .iter()
-        .map(|offset| offset.partition)
-        .collect();
-    let nexts: Vec<i64> = batch.offsets.iter().map(|offset| offset.next).collect();
-    let ends: Vec<Option<i64>> = batch.offsets.iter().map(|offset| offset.end).collect();
+    let partitions: Vec<i32> = offsets.iter().map(|offset| offset.partition).collect();
+    let nexts: Vec<i64> = offsets.iter().map(|offset| offset.next).collect();
+    let ends: Vec<Option<i64>> = offsets.iter().map(|offset| offset.end).collect();
     sqlx::query(
         "INSERT INTO stream_offsets \
             (workspace_id, stream_id, partition, next_offset, high_watermark, observed_at) \
@@ -463,8 +464,8 @@ async fn write_offsets(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<(), 
                                THEN stream_offsets.observed_at ELSE now() END, \
             updated_at = now()",
     )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.stream_id)
+    .bind(workspace.as_uuid())
+    .bind(stream_id)
     .bind(&partitions)
     .bind(&nexts)
     .bind(&ends)

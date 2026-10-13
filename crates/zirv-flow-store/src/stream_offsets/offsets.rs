@@ -7,7 +7,7 @@ use sqlx::prelude::FromRow;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
-use crate::sync_runs::{Lease, Unfenced, fence_run};
+use crate::sync_runs::{Lease, Unfenced, fence_run, write_offsets};
 use crate::{
     PgPool, StoreError, StreamOutcome, begin, commit, database_now, record_stream_outcome,
 };
@@ -147,6 +147,37 @@ pub async fn report_stream_lag(
     .await?;
     commit(tx).await?;
     Ok(LagReport::Reported { lag, within_bound })
+}
+
+/// What an offsets-only commit did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OffsetsStored {
+    Stored,
+    /// The job's lease is gone. Nothing was written.
+    LeaseLost,
+    /// The run is no longer running. Nothing was written.
+    Cancelled,
+}
+
+/// Sets the offsets of partitions the reader moved without a message to apply (retention took
+/// the offset it was at), under the same fence as a batch commit.
+pub async fn commit_stream_offsets(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    stream_id: Uuid,
+    run_id: Uuid,
+    lease: Lease,
+    offsets: &[PartitionOffset],
+) -> Result<OffsetsStored, StoreError> {
+    let mut tx = begin(pool).await?;
+    match fence_run(&mut tx, workspace, run_id, lease.job_id, lease.token).await? {
+        Some(Unfenced::LeaseLost) => return Ok(OffsetsStored::LeaseLost),
+        Some(Unfenced::Cancelled) => return Ok(OffsetsStored::Cancelled),
+        None => {}
+    }
+    write_offsets(&mut tx, workspace, stream_id, offsets).await?;
+    commit(tx).await?;
+    Ok(OffsetsStored::Stored)
 }
 
 /// The lag per partition of every stream of a source of the workspace that has seen a watermark,
@@ -296,6 +327,52 @@ mod tests {
             }
         ));
         assert_eq!(stream_state(&pool, &fx).await, (true, false));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn offsets_alone_are_stored_under_the_fence_and_a_lost_lease_writes_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let wrong = Lease {
+            job_id: fx.job.id,
+            token: Uuid::now_v7(),
+        };
+
+        let lost = commit_stream_offsets(
+            &pool,
+            fx.ws,
+            fx.stream_id,
+            fx.run.id,
+            wrong,
+            &[offset(0, 40, Some(40))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(lost, OffsetsStored::LeaseLost);
+        assert!(
+            load_offsets(&pool, fx.ws, fx.stream_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let stored = commit_stream_offsets(
+            &pool,
+            fx.ws,
+            fx.stream_id,
+            fx.run.id,
+            lease(&fx),
+            &[offset(0, 40, Some(40))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored, OffsetsStored::Stored);
+        assert_eq!(
+            load_offsets(&pool, fx.ws, fx.stream_id).await.unwrap(),
+            [offset(0, 40, Some(40))]
+        );
     }
 
     #[sqlx::test]

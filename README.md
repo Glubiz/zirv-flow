@@ -1658,7 +1658,8 @@ log's end for each partition. **Lag** is the end minus the next offset to read. 
 (counts, which members may read), and the streams table shows `Lag 1,204` next to the badge. Lag
 within `max_lag` counts as a success and lag above it as a failure, so a stream that falls behind
 turns **failing**, and a consumer that stops turns **stale** by the usual time rule, which needs a
-staleness threshold on the stream or a schedule on the source. The gauge
+staleness threshold on the stream or a schedule on the source. The lag of a transactional topic can
+include its trailing commit marker, which is never delivered, so `max_lag` should not be 0 for one. The gauge
 `zirv_flow_stream_lag_messages{workspace,stream}` follows it, and `zirv_flow_kafka_fetches_total{outcome}`
 counts fetches.
 

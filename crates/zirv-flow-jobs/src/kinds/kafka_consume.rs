@@ -26,9 +26,9 @@ use zirv_flow_connectors::sources::{
     SyncMode,
 };
 use zirv_flow_store::{
-    LagReport, NewJob, PartitionOffset, PgPool, RunEnd, SYNC_CONSUME_JOB_KIND, SyncRotated,
-    fail_run, load_offsets, report_stream_lag, rotate_stream_run, run_trace, start_stream_run,
-    sync_consume_unique_key,
+    LagReport, NewJob, OffsetsStored, PartitionOffset, PgPool, RunEnd, SYNC_CONSUME_JOB_KIND,
+    SyncRotated, commit_stream_offsets, fail_run, load_offsets, report_stream_lag,
+    rotate_stream_run, run_trace, start_stream_run, sync_consume_unique_key,
 };
 
 use super::import_rows::Probe;
@@ -267,7 +267,11 @@ impl Consumer<'_> {
     /// resumes after its last message in the unit.
     async fn flush(&mut self, whole: bool) -> Result<Unit, Failure> {
         if self.items.is_empty() {
-            return Ok(Unit::Continue);
+            return if whole {
+                self.store_moved().await
+            } else {
+                Ok(Unit::Continue)
+            };
         }
         let mut offsets: BTreeMap<i32, PartitionOffset> = BTreeMap::new();
         if whole {
@@ -322,6 +326,50 @@ impl Consumer<'_> {
             }
         }
         Ok(unit)
+    }
+
+    /// Stores the positions that moved with no message to apply, such as a jump to the earliest
+    /// offset when retention removed the one the read was at, so the stored lag does not stay
+    /// at its old value until a message arrives.
+    async fn store_moved(&mut self) -> Result<Unit, Failure> {
+        let moved: Vec<PartitionOffset> = self
+            .latest
+            .partitions
+            .iter()
+            .filter_map(|(partition, position)| {
+                let partition = partition.parse::<i32>().ok()?;
+                (self.committed.get(&partition) != Some(&position.next)).then_some(
+                    PartitionOffset {
+                        partition,
+                        next: position.next,
+                        end: position.end,
+                    },
+                )
+            })
+            .collect();
+        if moved.is_empty() {
+            return Ok(Unit::Continue);
+        }
+        let ids = self.pass.ids;
+        match commit_stream_offsets(
+            self.pass.pool,
+            ids.workspace,
+            ids.stream,
+            ids.run,
+            ids.lease,
+            &moved,
+        )
+        .await?
+        {
+            OffsetsStored::Stored => {
+                for offset in moved {
+                    self.committed.insert(offset.partition, offset.next);
+                }
+                Ok(Unit::Continue)
+            }
+            OffsetsStored::LeaseLost => Err(Failure::job(LEASE_LOST)),
+            OffsetsStored::Cancelled => Ok(Unit::Stop),
+        }
     }
 
     /// The committed offsets with the watermarks last seen: what lag is measured from.

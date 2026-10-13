@@ -144,7 +144,8 @@ pub use stream_freshness::{
     StreamFreshness, StreamOutcome, record_stream_outcome, stream_freshness,
 };
 pub use stream_offsets::{
-    LagReport, PartitionLag, PartitionOffset, load_offsets, report_stream_lag, stream_lag,
+    LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
+    report_stream_lag, stream_lag,
 };
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
