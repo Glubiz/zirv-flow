@@ -158,12 +158,15 @@ pub async fn update_source(
 ) -> Result<Option<Source>, StoreError> {
     let mut tx = connection.begin().await.map_err(StoreError::query)?;
     if let Some(config) = update.config {
-        sqlx::query("SELECT id FROM streams WHERE workspace_id = $1 AND source_id = $2 FOR UPDATE")
-            .bind(workspace.as_uuid())
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(StoreError::query)?;
+        sqlx::query(
+            "SELECT id FROM streams WHERE workspace_id = $1 AND source_id = $2 \
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(workspace.as_uuid())
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
         let blocked: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM sync_runs \
                             WHERE workspace_id = $1 AND source_id = $2 \

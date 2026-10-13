@@ -135,6 +135,15 @@ pub async fn queue_run(
     trigger: RunTrigger,
     created_by: Option<UserId>,
 ) -> Result<Option<SyncRun>, StoreError> {
+    // The source before the stream, whatever order the foreign-key checks run in: a writer
+    // holding the source `FOR UPDATE` that then locks its streams (`update_source`, a cascading
+    // delete) must not find a stream key-share held here.
+    sqlx::query("SELECT 1 FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE")
+        .bind(workspace.as_uuid())
+        .bind(source_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let run: Option<SyncRun> = sqlx::query_as(concat!(
         "WITH r AS ( \
             INSERT INTO sync_runs \
@@ -185,13 +194,14 @@ pub async fn queue_runs_for_source(
     created_by: Option<UserId>,
     only_enabled: bool,
 ) -> Result<Option<FanOut>, StoreError> {
-    let enabled: Option<bool> =
-        sqlx::query_scalar("SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace.as_uuid())
-            .bind(source_id)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
+    let enabled: Option<bool> = sqlx::query_scalar(
+        "SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     match enabled {
         None => return Ok(None),
         Some(false) if only_enabled => return Ok(None),
