@@ -2345,6 +2345,13 @@ mod tests {
                 Some(json!({"limit": 20, "mapping": {"columns": [email_rule()]}})),
             )
             .await;
+        // A role belongs to the cluster, not the test database: drop it before any assertion.
+        for statement in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
 
         assert_eq!(
             saved_preview.status,
@@ -2360,9 +2367,9 @@ mod tests {
         assert_eq!(first["identifiers"][0]["value"], "user1@example.com");
         assert_eq!(first["traits"]["plan"], "User 1");
         assert_eq!(first["event"]["properties"]["who"], "User 1");
-        assert_eq!(first["event"]["occurred_at"], "2024-01-01T00:01:00Z");
         // PostgreSQL hands the bare timestamptz over as text ("2024-01-01 00:01:00+00"); the mapping
         // reads it as the event time with no transform.
+        assert_eq!(first["event"]["occurred_at"], "2024-01-01T00:01:00Z");
         assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
         assert_eq!(draft.body["read"], 20);
         assert_eq!(draft.body["truncated"], true, "30 rows, 20 shown");
