@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, and native contacts, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay,, native contacts, and sources with their streams, but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1165,6 +1165,42 @@ audit entry holds a cell, an identifier or a trait value.
 To time a large file, run the ignored test against a PostgreSQL instance with
 `ZIRV_FLOW_BENCH_ROWS=1000000 cargo nextest run -p zirv-flow-jobs a_big_file --run-ignored all --no-capture`;
 it prints the duration and the rows per second.
+
+## Sources
+
+A source is a configured external system that records are read from. Each source has a
+type (a source type is one module plus one line in the source registry of
+`zirv-flow-connectors`), a name that is unique in the workspace, its settings, an optional
+cron schedule in UTC, and an enabled flag. It offers **streams**, such as a table or an
+endpoint; a stream is read only when you turn it on, and you choose its sync mode (full
+refresh, or incremental with a cursor field), its primary key and a staleness threshold.
+Running a sync comes with a later change; this one stores and tests the configuration.
+
+Open **Sources** in the web UI. The setup wizard walks through choosing a type, filling in its
+settings, saving and testing the connection, and discovering and setting up the streams. The
+form is rendered from the type's field specs, listed by `GET /api/v1/source-kinds`. Discovering
+again refreshes what a source reports and never changes the settings you chose.
+
+**Who can do what.** Any member or `read` key can list and read sources and streams. Creating,
+changing, deleting, testing and discovering a source and setting up its streams need a
+workspace admin, the owner, or an `admin` key. Every such change is audited (`source.created`,
+`source.updated`, `source.deleted`, `source.tested`, `source.discovered`, `stream.configured`)
+with ids, names and field names, never a value.
+
+**Credentials.** A source's credential fields (a token or a password) are sealed as a secret
+in the same transaction that stores the source, and are never returned: a source shows only
+the names of the credential fields that are set. To change a credential, send the whole
+credential again with `PATCH .../sources/{id}`; the web UI does this with **Replace the
+credential**. Deleting a source deletes its streams and its secret together. A server started
+without a master key answers 503 where a credential has to be sealed or opened. A source that
+calls out does so through the guarded HTTP client and the egress policy (see Egress).
+
+**API.** Under `/api/v1/workspaces/{ws}/sources`: `GET` and `POST`; `GET`, `PATCH` and `DELETE`
+on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `POST
+/{id}/discover`; `GET /{id}/streams`; and `PUT /{id}/streams/{name}` with `enabled`,
+`sync_mode`, `cursor_field`, `primary_key` and `staleness_threshold_seconds`. Settings are
+checked against the type and, for streams, against what discovery reported; a refusal is a 422
+that names each field, for example `incremental` without a `cursor_field`.
 
 ## Web UI
 

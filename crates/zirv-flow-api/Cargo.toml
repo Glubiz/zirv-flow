@@ -22,6 +22,7 @@ tracing-opentelemetry.workspace = true
 url.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
+zirv-flow-connectors.workspace = true
 zirv-flow-core.workspace = true
 zirv-flow-identity.workspace = true
 zirv-flow-store.workspace = true
@@ -34,5 +35,6 @@ metrics-exporter-prometheus.workspace = true
 sqlx.workspace = true
 tower.workspace = true
 tracing-subscriber.workspace = true
+zirv-flow-connectors = { workspace = true, features = ["test-support"] }
 zirv-flow-identity = { workspace = true, features = ["test-support"] }
 zirv-flow-store = { workspace = true, features = ["test-support"] }

@@ -16,6 +16,7 @@ use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -323,7 +324,8 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
-/// Plaintext text that is wiped on drop. No `Display`, `Serialize` or `Clone`; read it with
+/// Plaintext text that is wiped on drop. No `Display`, `Serialize` or `Clone`; it can be
+/// deserialized, so a request body lands in it directly. Read it with
 /// [`SecretString::expose`].
 pub struct SecretString(Zeroizing<String>);
 
@@ -334,6 +336,18 @@ impl SecretString {
 
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
+impl AsRef<str> for SecretString {
+    fn as_ref(&self) -> &str {
+        self.expose()
     }
 }
 

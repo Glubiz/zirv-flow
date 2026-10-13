@@ -5,3 +5,4 @@
 //! `reqwest::Client`, so a call site cannot skip the guard by accident.
 
 pub mod http;
+pub mod sources;

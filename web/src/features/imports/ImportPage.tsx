@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
-import { formatDateTime, PageHeader, Panel, Pill, ResourceView } from "../../ui";
+import { formatDateTime, PageHeader, Panel, Pill, ResourceView, Stepper } from "../../ui";
 import { useImportAccess } from "./access";
 import { DryRunStep } from "./DryRunStep";
 import { type CsvImport, isActive, plural, statusLabel, statusTone } from "./labels";
 import { MappingStep } from "./MappingStep";
 import { RunStep } from "./RunStep";
-import { Stepper, type Step } from "./Stepper";
+import { STEPS, type Step } from "./steps";
 
 const POLL_MS = 1000;
 
@@ -73,7 +73,7 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
                 lede={`${item.file_name}: ${plural(item.rows_total, "row", "rows")}, ${plural(item.header.length, "column", "columns")}.`}
                 actions={<Pill tone={statusTone(item.status)}>{statusLabel(item.status)}</Pill>}
               />
-              <Stepper current={step} />
+              <Stepper steps={STEPS} current={step} label="Import steps" />
               <Panel>
                 {step === "map" ? (
                   <MappingStep

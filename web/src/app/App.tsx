@@ -7,6 +7,7 @@ import { HealthPage } from "../features/health";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
+import { NewSourcePage, SourcePage, SourcesPage } from "../features/sources";
 import { MembersPage } from "../features/members";
 import { SuppressionsPage, TopicsPage } from "../features/consent";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
@@ -122,6 +123,9 @@ export function AppRoutes() {
           <Route path="w/:ws/people" element={<PeoplePage />} />
           <Route path="w/:ws/people/conflicts" element={<ConflictsPage />} />
           <Route path="w/:ws/people/:id" element={<ProfilePage />} />
+          <Route path="w/:ws/sources" element={<SourcesPage />} />
+          <Route path="w/:ws/sources/new" element={<NewSourcePage />} />
+          <Route path="w/:ws/sources/:sourceId" element={<SourcePage />} />
           <Route path="w/:ws/imports" element={<ImportsPage />} />
           <Route path="w/:ws/imports/new" element={<NewImportPage />} />
           <Route path="w/:ws/imports/:importId" element={<ImportPage />} />
