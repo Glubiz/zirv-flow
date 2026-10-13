@@ -144,7 +144,7 @@ const MAX_STREAM_NAME_CHARS: usize = 256;
 /// Checks what discovery reported before anything is stored: a name of 1 to 256 characters and
 /// no name twice. A source that reports otherwise has failed, whatever its streams are.
 fn check_discovered(found: &[StreamDescriptor]) -> Result<(), ApiError> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = hashbrown::HashSet::new();
     for stream in found {
         let length = stream.name.chars().count();
         if length == 0 || length > MAX_STREAM_NAME_CHARS {

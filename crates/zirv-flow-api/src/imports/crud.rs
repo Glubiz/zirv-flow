@@ -197,7 +197,7 @@ pub(crate) async fn put_mapping(
         return Err(ApiError::unprocessable("mapping: event_not_supported"));
     }
     let header = Header::new(import.header.clone()).map_err(|_| ApiError::internal())?;
-    let catalog: std::collections::HashMap<String, TraitState> =
+    let catalog: hashbrown::HashMap<String, TraitState> =
         list_trait_definitions(&state.pool, workspace.id)
             .await?
             .into_iter()

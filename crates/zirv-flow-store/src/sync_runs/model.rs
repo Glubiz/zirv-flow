@@ -1209,7 +1209,7 @@ pub(super) mod tests {
             .unwrap()
             .unwrap();
         crate::commit(tx).await.unwrap();
-        let mut runs = std::collections::HashMap::new();
+        let mut runs = hashbrown::HashMap::new();
         for name in names {
             let stream = found.iter().find(|stream| stream.name == name).unwrap();
             runs.insert(name, queue(&pool, ws, source, stream.id).await.unwrap());

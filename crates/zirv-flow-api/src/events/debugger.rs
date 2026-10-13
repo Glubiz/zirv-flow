@@ -23,7 +23,8 @@
 //! The feed holds redacted values only; `reveal` shows them as stored, never as received.
 //! Nothing here logs a name, an identifier or a value.
 
-use std::collections::{BTreeSet, HashMap};
+use hashbrown::HashMap;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};

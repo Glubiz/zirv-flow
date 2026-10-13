@@ -181,7 +181,7 @@ fn redirect_policy(policy: Arc<EgressPolicy>, max_redirects: usize) -> Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
     use std::future::Future;
     use std::io;
     use std::pin::Pin;

@@ -1,6 +1,6 @@
 //! The freshness of every enabled stream, computed on read.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use serde_json::Value;
 use sqlx::PgExecutor;

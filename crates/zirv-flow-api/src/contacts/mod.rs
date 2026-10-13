@@ -15,7 +15,7 @@ pub(crate) mod crud;
 pub(crate) mod definition;
 pub(crate) mod search;
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use serde::Serialize;

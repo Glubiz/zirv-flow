@@ -5,7 +5,7 @@
 //! keyed hashes of their identifiers, never a value. Nothing here logs, labels or audits an
 //! identifier, a trait or an event value.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use serde_json::{Value, json};
 use sqlx::PgConnection;

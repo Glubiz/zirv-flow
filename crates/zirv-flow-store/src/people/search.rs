@@ -2,8 +2,8 @@
 //! by one trait with an operator that fits the trait's registry type. Both run under a
 //! statement timeout, and neither puts a searched value in an error.
 
+use hashbrown::HashMap;
 use std::cmp::Reverse;
-use std::collections::HashMap;
 use std::fmt;
 
 use serde_json::Value;

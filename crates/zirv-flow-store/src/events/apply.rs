@@ -6,7 +6,7 @@
 //! Decision records carry static strings and ids only: never an event name, a property or a
 //! value.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 use sqlx::types::Json;

@@ -3,7 +3,7 @@
 //! `member_count` exact in its own transaction and leaves one history row and one
 //! `list.membership` decision per real change. Decisions carry ids only.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::fmt;
 
 use sqlx::prelude::FromRow;
