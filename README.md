@@ -1356,7 +1356,8 @@ because the answer holds values) reads the first records of the stream from the 
 fields, lists and event, or the `{field, reason}` codes that refused it. The body may carry a
 draft `mapping`, checked exactly as a save is; otherwise the saved one is used. It writes
 nothing, is not audited, and runs the same `core::mapping` function as a sync run. In the web UI
-open **Map** on a stream.
+open **Map** on a stream. A save or a preview against a stream whose source reported a blank or
+repeated field name answers 422 with `code` `blank_header` or `duplicate_header`.
 
 ### Sync runs
 

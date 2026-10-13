@@ -10810,7 +10810,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have */
+            /** @description Settings the stream cannot serve, such as incremental without a cursor field, a mapping that names a column the stream does not have, or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10886,7 +10886,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, or no mapping to preview (`stream_not_mapped`) */
+            /** @description An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, no mapping to preview (`stream_not_mapped`), or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`) */
             422: {
                 headers: {
                     [name: string]: unknown;

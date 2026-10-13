@@ -163,7 +163,7 @@ fn preview_record(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The source type is not in this build", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, or no mapping to preview (`stream_not_mapped`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, no mapping to preview (`stream_not_mapped`), or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`)", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The source refused or failed the request", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the credential", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "The source did not answer in time", body = Problem, content_type = "application/problem+json")

@@ -131,7 +131,14 @@ fn check_range(
     window: u64,
     body_len: u64,
 ) -> Result<(), SourceError> {
-    let span = range.last - range.first + 1;
+    // `0-18446744073709551615` has no length a u64 can hold; it must not wrap to an empty span.
+    let Some(span) = range
+        .last
+        .checked_sub(range.first)
+        .and_then(|gap| gap.checked_add(1))
+    else {
+        return Err(error::file_range_invalid());
+    };
     let inside = range.total.is_none_or(|total| range.last < total);
     if range.first != offset || !inside || span > window || body_len != span {
         return Err(error::file_range_invalid());
@@ -210,6 +217,11 @@ mod tests {
         assert_eq!(check_range(&range(40, 50, Some(50)), 40, 20, 11), invalid);
         // Longer than the window asked for.
         assert_eq!(check_range(&range(0, 19, Some(50)), 0, 10, 20), invalid);
+        // A span no u64 can count must not wrap to an empty one that ends the read.
+        assert_eq!(
+            check_range(&range(0, u64::MAX, None), 0, u64::MAX, 0),
+            invalid
+        );
         // The body is shorter or longer than the span.
         assert_eq!(check_range(&range(0, 9, Some(10)), 0, 10, 4), invalid);
         assert_eq!(check_range(&range(0, 9, Some(50)), 0, 10, 11), invalid);
