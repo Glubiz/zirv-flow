@@ -34,17 +34,21 @@ pub struct ChatResponse {
     pub model: String,
 }
 
+/// The text parts, joined.
+pub(crate) fn joined_text(parts: &[Part]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text { text } => Some(text.as_str()),
+            Part::ToolCall { .. } => None,
+        })
+        .collect()
+}
+
 impl ChatResponse {
     /// The text parts, joined.
     pub fn text(&self) -> String {
-        self.parts
-            .iter()
-            .filter_map(|part| match part {
-                Part::Text { text } => Some(text.as_str()),
-                Part::ToolCall { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
+        joined_text(&self.parts)
     }
 
     /// The tool calls as `(id, name, arguments)`.

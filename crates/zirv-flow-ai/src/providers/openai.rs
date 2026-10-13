@@ -9,7 +9,7 @@ use crate::error::AiError;
 use crate::http::{AiHttp, Auth, endpoint_url};
 use crate::provider::{BoxFuture, Endpoint, Provider, ProviderKind};
 use crate::request::{ChatRequest, Message};
-use crate::response::{ChatResponse, Part, Usage};
+use crate::response::{ChatResponse, Part, Usage, joined_text};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenAiCompatibleProvider;
@@ -72,13 +72,7 @@ fn build_body(model: &str, request: &ChatRequest) -> Value {
 }
 
 fn assistant_message(parts: &[Part]) -> Value {
-    let text: String = parts
-        .iter()
-        .filter_map(|part| match part {
-            Part::Text { text } => Some(text.as_str()),
-            Part::ToolCall { .. } => None,
-        })
-        .collect();
+    let text = joined_text(parts);
     let calls: Vec<Value> = parts
         .iter()
         .filter_map(|part| match part {
