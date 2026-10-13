@@ -12,7 +12,7 @@ use zirv_flow_ai::{
 };
 use zirv_flow_core::mapping::Header;
 
-use super::{DraftTarget, ToolContext, authorize_again};
+use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::prompt::sample_fields;
 use crate::assistant::schema::tool_parameters;
 use crate::imports::MappingBody;
@@ -21,24 +21,20 @@ use crate::sources::{MappingCheck, load_mapping_check};
 
 pub(crate) struct DraftMapping;
 
-/// The feedback line for arguments that do not read as a mapping. A serde failure can echo a
-/// value, so it is never shown: this fixed line stands in.
-const ARGUMENTS_INVALID: &str = "arguments_invalid";
-
 /// The pure part of the tool: the arguments against the schema and then the rules of `check`.
 /// It returns the normalized mapping, or the feedback lines. The golden-prompt harness runs it
 /// without a database.
 pub(crate) fn check_draft(check: &MappingCheck, arguments: &Value) -> Result<Value, Vec<String>> {
-    let schema = DraftMapping::parameters().map_err(|_| vec![ARGUMENTS_INVALID.to_owned()])?;
+    let schema = DraftMapping::parameters().map_err(|_| arguments_invalid_lines())?;
     schema.validate_value(arguments)?;
-    let body: MappingBody = serde_json::from_value(arguments.clone())
-        .map_err(|_| vec![ARGUMENTS_INVALID.to_owned()])?;
+    let body: MappingBody =
+        serde_json::from_value(arguments.clone()).map_err(|_| arguments_invalid_lines())?;
     let mapping = check
         .check(&body)
         .map_err(|issue| vec![issue.to_string()])?;
     MappingBody::from_core(&mapping)
         .and_then(|body| serde_json::to_value(body).ok())
-        .ok_or_else(|| vec![ARGUMENTS_INVALID.to_owned()])
+        .ok_or_else(arguments_invalid_lines)
 }
 
 impl DraftMapping {

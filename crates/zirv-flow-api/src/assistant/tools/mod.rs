@@ -81,9 +81,15 @@ pub(super) fn check_arguments(
     schema.validate_value(arguments).map_err(ToolError::Invalid)
 }
 
-/// The text of a refused argument, fixed so that it never echoes what the model sent.
+/// The lines of a refusal of arguments that do not read as the artifact. A serde failure can
+/// echo a value, so it is never shown: this fixed line stands in.
+pub(super) fn arguments_invalid_lines() -> Vec<String> {
+    vec!["arguments_invalid".to_owned()]
+}
+
+/// [`arguments_invalid_lines`] as a tool refusal.
 pub(super) fn arguments_invalid() -> ToolError<ApiError> {
-    ToolError::Invalid(vec!["arguments_invalid".to_owned()])
+    ToolError::Invalid(arguments_invalid_lines())
 }
 
 #[cfg(test)]

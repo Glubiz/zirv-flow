@@ -341,16 +341,11 @@ fn grade(
     let checked = match (case.kind, check) {
         (CaseKind::Mapping, Some(check)) => draft_mapping::check_draft(check, arguments),
         (CaseKind::Manifest, _) => draft_manifest::check_draft(arguments),
-        (CaseKind::Mapping, None) => Err(vec!["arguments_invalid".to_owned()]),
+        (CaseKind::Mapping, None) => Err(tools::arguments_invalid_lines()),
     };
     match checked {
         Ok(draft) => Verdict::Valid(draft),
-        Err(lines) => Verdict::Invalid(
-            lines
-                .iter()
-                .map(|line| DraftIssue::from_line(line))
-                .collect(),
-        ),
+        Err(lines) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
     }
 }
 

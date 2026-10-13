@@ -9,7 +9,7 @@ use zirv_flow_ai::{
 };
 use zirv_flow_connectors::manifest;
 
-use super::{ToolContext, authorize_again};
+use super::{ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::problem::ApiError;
 use crate::sources::ValidateRequest;
@@ -20,7 +20,7 @@ pub(crate) struct DraftManifest;
 /// save runs. It returns the manifest, or the feedback lines. The golden-prompt harness runs it
 /// without a database.
 pub(crate) fn check_draft(arguments: &Value) -> Result<Value, Vec<String>> {
-    let schema = DraftManifest::parameters().map_err(|_| vec!["arguments_invalid".to_owned()])?;
+    let schema = DraftManifest::parameters().map_err(|_| arguments_invalid_lines())?;
     schema.validate_value(arguments)?;
     let Some(draft) = arguments.get("manifest") else {
         return Err(vec![line("required", "/manifest")]);

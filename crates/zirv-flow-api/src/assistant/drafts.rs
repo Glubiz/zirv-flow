@@ -174,6 +174,11 @@ impl DraftIssue {
             line: line.to_owned(),
         }
     }
+
+    /// [`Self::from_line`] for each line of a refusal.
+    pub(crate) fn from_lines(lines: &[String]) -> Vec<Self> {
+        lines.iter().map(|line| Self::from_line(line)).collect()
+    }
 }
 
 /// The line the model is shown.
@@ -317,12 +322,7 @@ async fn validate_turn(
     match tool.call(context, arguments).await {
         Ok(ToolOutput::Draft(draft)) => Verdict::Valid(draft),
         Ok(ToolOutput::Context(_)) => feedback(),
-        Err(ToolError::Invalid(lines)) => Verdict::Invalid(
-            lines
-                .iter()
-                .map(|line| DraftIssue::from_line(line))
-                .collect(),
-        ),
+        Err(ToolError::Invalid(lines)) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
         Err(ToolError::Failed(error)) => Verdict::Abort(error),
     }
 }
