@@ -2551,7 +2551,7 @@ export interface components {
             default_cursor_field?: string | null;
             default_primary_key: string[];
             fields: components["schemas"]["FieldBody"][];
-            /** @description The sync modes the stream supports: `full_refresh`, `incremental`. */
+            /** @description The sync modes the stream supports: `full_refresh`, `incremental`, `stream`. */
             sync_modes: string[];
         };
         /**
@@ -2866,7 +2866,7 @@ export interface components {
             help: string;
             /** @example token */
             key: string;
-            /** @description One of `text`, `url`, `number`, `bool`, `select`. */
+            /** @description One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `long_text`, `queries`. */
             kind: string;
             label: string;
             /** @description The allowed values of a `select` field; empty for the other kinds. */
@@ -2883,6 +2883,7 @@ export interface components {
              *     batch.
              */
             high_water_mark?: unknown;
+            lag?: null | components["schemas"]["LagBody"];
             /**
              * Format: date-time
              * @description When the stream last succeeded; null if it never has.
@@ -3144,6 +3145,15 @@ export interface components {
             /** Format: int64 */
             running: number;
         };
+        /** @description How many messages a consumer is behind. */
+        LagBody: {
+            partitions: components["schemas"]["PartitionLagBody"][];
+            /**
+             * Format: int64
+             * @description Over all partitions.
+             */
+            total: number;
+        };
         ListBody: {
             /** Format: date-time */
             created_at: string;
@@ -3290,6 +3300,12 @@ export interface components {
             index: number;
             /** @example not_found */
             reason: string;
+        };
+        PartitionLagBody: {
+            /** Format: int64 */
+            lag: number;
+            /** Format: int32 */
+            partition: number;
         };
         PersonHitBody: {
             display?: null | components["schemas"]["DisplayBody"];
@@ -3965,7 +3981,7 @@ export interface components {
              *     and fails with `sweep_limit`. 1 turns the guard off.
              */
             sweep_limit: number;
-            /** @description `full_refresh` or `incremental`. */
+            /** @description `full_refresh`, `incremental` or `stream`. */
             sync_mode: string;
             /** Format: date-time */
             updated_at: string;
@@ -3992,7 +4008,7 @@ export interface components {
              */
             sweep_limit?: number | null;
             /**
-             * @description `full_refresh` or `incremental`; one the stream supports.
+             * @description `full_refresh`, `incremental` or `stream`; one the stream supports.
              * @example incremental
              */
             sync_mode: string;

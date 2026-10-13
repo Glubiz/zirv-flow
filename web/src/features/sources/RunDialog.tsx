@@ -7,6 +7,7 @@ import { traceHref } from "../traces";
 import {
   isActiveRun,
   plural,
+  rejectReasonText,
   runErrorText,
   runKindLabel,
   runStateLabel,
@@ -121,8 +122,14 @@ export function RunDialog({ workspaceId, sourceId, runId, pollMs, onClose }: Run
             </p>
             {run.attempt > 1 ? (
               <p className="muted">
-                An earlier attempt was lost, so this run picked up from its last saved point without applying anything
-                twice.
+                An earlier attempt was lost, so this run picked up from its last saved{" "}
+                {run.sync_mode === "stream" ? "positions" : "point"} without applying anything twice.
+              </p>
+            ) : null}
+            {run.sync_mode === "stream" ? (
+              <p className="muted">
+                A streaming run goes on until it is cancelled or fails, and counts what it has read so far. A day after
+                it started, a new run takes over.
               </p>
             ) : null}
             {run.error_code ? (
@@ -157,7 +164,9 @@ export function RunDialog({ workspaceId, sourceId, runId, pollMs, onClose }: Run
                           <td>
                             {reject.reasons.map((reason, index) => (
                               <div key={index} className="mono">
-                                {reason.property ? `${reason.property}: ${reason.reason}` : reason.reason}
+                                {reason.property
+                                  ? `${reason.property}: ${rejectReasonText(reason.reason)}`
+                                  : rejectReasonText(reason.reason)}
                               </div>
                             ))}
                           </td>

@@ -4,7 +4,7 @@ import { Button, EmptyState, formatDateTime, Pill } from "../../ui";
 import { MappingDialog } from "./MappingDialog";
 import { StreamDialog } from "./StreamDialog";
 import { FreshnessBadge } from "./FreshnessBadge";
-import { lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
+import { lagLabel, lagTitle, lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
 
 interface StreamsPanelProps {
   workspaceId: string;
@@ -17,6 +17,21 @@ interface StreamsPanelProps {
   /** Starts a reconciliation of one incremental stream; without it the table offers none. */
   onReconcile?: (stream: Stream) => void;
   busy?: boolean;
+}
+
+/** The lag of a streaming stream next to its freshness: a number once the consumer has fetched, else a wait. */
+function Lag({ stream }: { stream: Stream }) {
+  if (stream.sync_mode !== "stream" || !stream.enabled) return null;
+  const label = lagLabel(stream.freshness);
+  if (label === null) {
+    return <span className="faint"> Waiting for the first fetch</span>;
+  }
+  return (
+    <span className="mono" title={lagTitle(stream.freshness)}>
+      {" "}
+      {label}
+    </span>
+  );
 }
 
 /** The threshold in force, in seconds, marked when it is the default; the stream's own setting while it is not read. */
@@ -73,6 +88,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                 </td>
                 <td>
                   <FreshnessBadge state={stream.freshness?.state} />
+                  <Lag stream={stream} />
                 </td>
                 <td title={stream.freshness?.last_success_at ? formatDateTime(stream.freshness.last_success_at) : undefined}>
                   {stream.freshness ? lastSuccessLabel(stream.freshness) : "—"}
