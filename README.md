@@ -1542,7 +1542,8 @@ The credential fields are fixed by the type: `api_key` reads `api_key`; `basic` 
 for authorization code, since a PKCE client may have none). A missing one fails the test or the run
 naming `credential.<name>`. Auth headers cannot be set in `headers`: `Authorization`,
 `Proxy-Authorization`, `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
-`Range` and `If-*` are refused. Changing the `auth` section of a manifest disconnects an account
+`Range` and `If-*` are refused. An `api_key` header name follows the same rule, except that it may
+be `Authorization`. Changing the `auth` section of a manifest disconnects an account
 connected earlier, because a refresh token belongs to one client and scope set.
 
 **Pagination.** `none`; `cursor` (`param`, `next`: a JSON pointer in the response); `offset`

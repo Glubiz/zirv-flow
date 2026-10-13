@@ -394,7 +394,11 @@ fn auth(walk: &mut Walk, value: &Value, path: String) -> Option<Auth> {
                     } else {
                         KeyLocation::Query
                     };
-                    if location == KeyLocation::Header && is_forbidden_header(name) {
+                    // The key itself is the credential, so it may be the `Authorization` header.
+                    if location == KeyLocation::Header
+                        && !name.eq_ignore_ascii_case("authorization")
+                        && is_forbidden_header(name)
+                    {
                         walk.add(code::FORBIDDEN_HEADER, obj.at("name"));
                         None
                     } else if location == KeyLocation::Header && !is_token(name) {
@@ -1288,9 +1292,11 @@ mod tests {
                 "/auth/name",
             );
         }
-        assert_valid(&with(|v| {
-            v["auth"] = json!({"type": "api_key", "in": "header", "name": "X-Api-Key"});
-        }));
+        for name in ["X-Api-Key", "Authorization"] {
+            assert_valid(&with(|v| {
+                v["auth"] = json!({"type": "api_key", "in": "header", "name": name});
+            }));
+        }
         assert_valid(&with(|v| {
             v["auth"] = json!({"type": "api_key", "in": "query", "name": "host"});
         }));
