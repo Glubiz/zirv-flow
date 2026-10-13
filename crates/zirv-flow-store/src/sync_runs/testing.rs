@@ -128,10 +128,16 @@ pub(crate) async fn started_run(
     .unwrap()
     .unwrap();
     drop(connection);
-    let job = claim_job(pool, "w", &["sync.run"], Duration::from_secs(30), None)
-        .await
-        .unwrap()
-        .unwrap();
+    let job = claim_job(
+        pool,
+        "w",
+        &["sync.run", "kafka.consume"],
+        Duration::from_secs(30),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let run = start_run(pool, ws, queued.id).await.unwrap().unwrap();
     let trace = run_trace(&run);
     Fixture {
@@ -146,10 +152,16 @@ pub(crate) async fn started_run(
 
 /// Claims the next `sync.run` job and returns the lease it gives.
 pub(crate) async fn claim_lease(pool: &PgPool) -> Lease {
-    let job = claim_job(pool, "w", &["sync.run"], Duration::from_secs(30), None)
-        .await
-        .unwrap()
-        .unwrap();
+    let job = claim_job(
+        pool,
+        "w",
+        &["sync.run", "kafka.consume"],
+        Duration::from_secs(30),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     Lease {
         job_id: job.id,
         token: job.lease_token,
@@ -176,6 +188,7 @@ pub(crate) fn upsert(fixture: &Fixture, key: &str, email: &str) -> SyncUpsert {
         sample: json!({"properties": {}, "masked": []}),
         lists: Vec::new(),
         event: None,
+        occurrence: None,
     }
 }
 
@@ -203,6 +216,7 @@ pub(crate) fn batch<'a>(
         seen: &[],
         rejected: &[],
         duplicates: 0,
+        offsets: &[],
         checkpoint,
         incremental: false,
         singly: false,

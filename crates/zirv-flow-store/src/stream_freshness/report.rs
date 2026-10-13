@@ -30,6 +30,9 @@ pub struct StreamFreshness {
     pub threshold_is_default: bool,
     /// The stream's checkpoint, opaque and possibly personal: the API shows it to admins only.
     pub high_water_mark: Option<Value>,
+    /// For a stream-mode stream: how many messages it is behind over all partitions, from the
+    /// watermarks its consumer last saw. `None` for the other modes and before the first fetch.
+    pub lag: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -43,6 +46,7 @@ struct Row {
     staleness_threshold_seconds: Option<i32>,
     checkpoint: Option<Value>,
     schedule: Option<String>,
+    lag: Option<i64>,
 }
 
 /// The state of the enabled streams of enabled sources, ordered by workspace, source and stream
@@ -57,7 +61,11 @@ pub async fn stream_freshness<'e>(
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT s.workspace_id, s.source_id, s.id AS stream_id, \
                 COALESCE(s.enabled_at, s.created_at) AS enabled_at, s.last_success_at, \
-                s.last_run_failed, s.staleness_threshold_seconds, s.checkpoint, src.schedule \
+                s.last_run_failed, s.staleness_threshold_seconds, s.checkpoint, src.schedule, \
+                CASE WHEN s.sync_mode = 'stream' THEN \
+                    (SELECT sum(GREATEST(o.high_watermark - o.next_offset, 0))::int8 \
+                     FROM stream_offsets o \
+                     WHERE o.stream_id = s.id AND o.high_watermark IS NOT NULL) END AS lag \
          FROM streams s JOIN sources src ON src.id = s.source_id \
          WHERE s.enabled AND src.enabled \
            AND ($1::uuid IS NULL OR s.workspace_id = $1) \
@@ -98,6 +106,7 @@ pub async fn stream_freshness<'e>(
                 threshold_seconds: threshold.map(|threshold| threshold.duration.whole_seconds()),
                 threshold_is_default: threshold.is_some_and(|threshold| threshold.is_default),
                 high_water_mark: row.checkpoint,
+                lag: row.lag,
             }
         })
         .collect())

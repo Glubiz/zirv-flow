@@ -467,6 +467,7 @@ mod tests {
             threshold_seconds: None,
             threshold_is_default: false,
             high_water_mark: None,
+            lag: None,
         }
     }
 

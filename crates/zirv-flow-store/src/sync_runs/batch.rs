@@ -23,6 +23,7 @@ use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
 };
+use crate::stream_offsets::PartitionOffset;
 use crate::{
     NewDecision, PgPool, StoreError, StreamOutcome, append_decisions, begin, commit, database_now,
     lock_lease, record_stream_outcome,
@@ -48,6 +49,10 @@ pub struct SyncUpsert {
     pub lists: Vec<Uuid>,
     /// The event the record yields, when the mapping describes one.
     pub event: Option<SyncEvent>,
+    /// What tells this message from another with the same key (Kafka: `partition/offset`). The
+    /// event's idempotency key hashes it in place of the record key, so a later message with
+    /// the same key is not taken for a duplicate; a replayed batch reproduces the same value.
+    pub occurrence: Option<String>,
 }
 
 /// The event of a record: its person is the record's, its time the run's unless it brings one.
@@ -99,6 +104,9 @@ pub struct SyncBatch<'a> {
     /// Records the unit read and dropped as an earlier occurrence of a key it carries again. They
     /// count as read, and as nothing else.
     pub duplicates: usize,
+    /// The per-partition offsets a consumer resumes at after this batch; empty for a pull run.
+    /// Written in this transaction, after the fence, so a batch that is not applied moves none.
+    pub offsets: &'a [PartitionOffset],
     /// Where the source resumes after this batch.
     pub checkpoint: &'a Value,
     /// Also write the checkpoint to the stream, for the next run.
@@ -160,7 +168,7 @@ struct Refusal {
 }
 
 /// Why a unit of work on a run may not proceed.
-pub(super) enum Unfenced {
+pub(crate) enum Unfenced {
     /// The job's lease is gone.
     LeaseLost,
     /// The run is no longer running.
@@ -169,7 +177,7 @@ pub(super) enum Unfenced {
 
 /// Fences a unit of work on a run: locks the job's lease, then the run, which must be running.
 /// Nothing has been written when it refuses.
-pub(super) async fn fence_run(
+pub(crate) async fn fence_run(
     tx: &mut PgConnection,
     workspace: WorkspaceId,
     run_id: Uuid,
@@ -209,6 +217,7 @@ pub async fn commit_sync_batch(
         Some(Unfenced::Cancelled) => return Ok(BatchOutcome::Cancelled),
         None => {}
     }
+    write_offsets(&mut tx, batch).await?;
 
     let results = apply_upserts(&mut tx, batch).await?;
     // Every record the run read that still exists in the source is marked as seen: the applied
@@ -426,6 +435,44 @@ fn decision(
     }
 }
 
+/// Writes the batch's offsets. A consumer is the only writer of its stream's rows while it holds
+/// the lease, so the value is exact, not a maximum.
+async fn write_offsets(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<(), StoreError> {
+    if batch.offsets.is_empty() {
+        return Ok(());
+    }
+    let partitions: Vec<i32> = batch
+        .offsets
+        .iter()
+        .map(|offset| offset.partition)
+        .collect();
+    let nexts: Vec<i64> = batch.offsets.iter().map(|offset| offset.next).collect();
+    let ends: Vec<Option<i64>> = batch.offsets.iter().map(|offset| offset.end).collect();
+    sqlx::query(
+        "INSERT INTO stream_offsets \
+            (workspace_id, stream_id, partition, next_offset, high_watermark, observed_at) \
+         SELECT $1, $2, t.partition, t.next_offset, t.high_watermark, \
+                CASE WHEN t.high_watermark IS NULL THEN NULL ELSE now() END \
+         FROM unnest($3::int4[], $4::int8[], $5::int8[]) \
+              AS t(partition, next_offset, high_watermark) \
+         ON CONFLICT (stream_id, partition) DO UPDATE SET \
+            next_offset = EXCLUDED.next_offset, \
+            high_watermark = COALESCE(EXCLUDED.high_watermark, stream_offsets.high_watermark), \
+            observed_at = CASE WHEN EXCLUDED.high_watermark IS NULL \
+                               THEN stream_offsets.observed_at ELSE now() END, \
+            updated_at = now()",
+    )
+    .bind(batch.workspace.as_uuid())
+    .bind(batch.stream_id)
+    .bind(&partitions)
+    .bind(&nexts)
+    .bind(&ends)
+    .execute(&mut **tx)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Applies the accepted records, all together or, with `singly`, each in a savepoint. A record
 /// the store cannot apply is `None`.
 async fn apply_upserts(
@@ -467,9 +514,14 @@ struct EventsApplied {
 /// The idempotency key of a record's event: the same record, stream, source and event name give
 /// the same key, so a re-read of the record never duplicates its event, and a record that
 /// changed does not rewrite its past.
-fn event_message_id(batch: &SyncBatch<'_>, record_key: &str, name: &str) -> String {
+fn event_message_id(batch: &SyncBatch<'_>, upsert: &SyncUpsert, name: &str) -> String {
+    // A message is told from the next with the same key by where it sits in the log.
+    let identity = upsert
+        .occurrence
+        .as_deref()
+        .unwrap_or(upsert.record.record_key.as_str());
     let mut hash = Sha256::new();
-    for (position, part) in [batch.source, batch.stream, record_key, name]
+    for (position, part) in [batch.source, batch.stream, identity, name]
         .into_iter()
         .enumerate()
     {
@@ -513,7 +565,7 @@ async fn apply_events(
             applied.per_upsert.push(None);
             continue;
         };
-        let message_id = event_message_id(batch, &upsert.record.record_key, &event.name);
+        let message_id = event_message_id(batch, upsert, &event.name);
         let record = EventRecord {
             source: batch.source.to_owned(),
             identifiers: upsert.record.identifiers.clone(),
@@ -1484,26 +1536,58 @@ mod tests {
             seen: &[],
             rejected: &[],
             duplicates: 0,
+            offsets: &[],
             checkpoint: &checkpoint,
             incremental: false,
             singly: false,
         };
+        let up = |key: &str, occurrence: Option<&str>| SyncUpsert {
+            record: ProfileRecord {
+                source: "x".into(),
+                stream: "t".into(),
+                record_key: key.into(),
+                identifiers: Vec::new(),
+                traits: Map::new(),
+                observed_at: at,
+                trace: trace.clone(),
+            },
+            sample: json!({}),
+            lists: Vec::new(),
+            event: None,
+            occurrence: occurrence.map(str::to_owned),
+        };
+        let id = |batch: &SyncBatch<'_>, key: &str, name: &str| {
+            event_message_id(batch, &up(key, None), name)
+        };
 
-        let base = event_message_id(&make("s", "t"), "k", "e");
+        let base = id(&make("s", "t"), "k", "e");
 
         assert_eq!(base.len(), 69);
         assert!(base.starts_with("sync:"));
-        assert_eq!(base, event_message_id(&make("s", "t"), "k", "e"));
+        assert_eq!(base, id(&make("s", "t"), "k", "e"));
         for other in [
-            event_message_id(&make("s2", "t"), "k", "e"),
-            event_message_id(&make("s", "t2"), "k", "e"),
-            event_message_id(&make("s", "t"), "k2", "e"),
-            event_message_id(&make("s", "t"), "k", "e2"),
+            id(&make("s2", "t"), "k", "e"),
+            id(&make("s", "t2"), "k", "e"),
+            id(&make("s", "t"), "k2", "e"),
+            id(&make("s", "t"), "k", "e2"),
             // The parts are separated, not concatenated.
-            event_message_id(&make("s", "t"), "ke", ""),
+            id(&make("s", "t"), "ke", ""),
+            // A message is told apart by its place in the log, not by its key.
+            event_message_id(&make("s", "t"), &up("k", Some("0/5")), "e"),
         ] {
             assert_ne!(base, other);
         }
+        let batch = make("s", "t");
+        assert_ne!(
+            event_message_id(&batch, &up("k", Some("0/5")), "e"),
+            event_message_id(&batch, &up("k", Some("0/6")), "e"),
+            "two messages with one key are two events"
+        );
+        assert_eq!(
+            event_message_id(&batch, &up("k", Some("0/5")), "e"),
+            event_message_id(&batch, &up("other", Some("0/5")), "e"),
+            "a replay of the same offset is the same event"
+        );
     }
 
     #[sqlx::test]
@@ -2068,5 +2152,250 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
+    }
+
+    // The offsets of a consumer (Kafka).
+
+    fn at(partition: i32, next: i64, end: i64) -> PartitionOffset {
+        PartitionOffset {
+            partition,
+            next,
+            end: Some(end),
+        }
+    }
+
+    async fn stored_offsets(pool: &PgPool) -> Vec<(i32, i64, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT partition, next_offset, high_watermark FROM stream_offsets ORDER BY partition",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_offsets_commit_with_the_batch_and_each_batch_sets_them_exactly(pool: PgPool) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let first = many(&fx, 0, 3);
+        let offsets = [at(0, 2, 9), at(1, 1, 4)];
+        let cp = json!({});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &offsets,
+                ..batch(&fx, &source, &first, &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.read, progress.batch.applied), (3, 3));
+        assert_eq!(
+            stored_offsets(&pool).await,
+            [(0, 2, Some(9)), (1, 1, Some(4))]
+        );
+        // The next batch sets the position exactly: the lease holder is the only writer.
+        let again = [at(0, 5, 9)];
+        commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &again,
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_offsets(&pool).await,
+            [(0, 5, Some(9)), (1, 1, Some(4))]
+        );
+        // The cursor of the stream is never written for a stream-mode run.
+        let cursor: Option<Value> =
+            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                .bind(fx.stream_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cursor, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_that_is_not_committed_writes_no_offset(pool: PgPool) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let upserts = [upsert(&fx, "k0", "a0@example.com")];
+        let offsets = [at(0, 1, 1)];
+        let cp = json!({});
+
+        // 1. A failure after the offsets were written rolls them back with the batch.
+        let poison = [SyncReject {
+            record_key: "poison".into(),
+            reasons: vec![("\u{0}".into(), "invalid_identifier")],
+            sample: json!({}),
+        }];
+        let failed = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &offsets,
+                rejected: &poison,
+                ..batch(&fx, &source, &upserts, &cp)
+            },
+        )
+        .await;
+        assert!(failed.is_err());
+        assert!(stored_offsets(&pool).await.is_empty(), "rolled back");
+
+        // 2. A missing list refuses the batch after the offsets were written.
+        let key = key();
+        let listed = [with_event(
+            &fx,
+            "k1",
+            "a1@example.com",
+            json!(1),
+            &[Uuid::now_v7()],
+        )];
+        let missing = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &offsets,
+                ..keyed(&fx, &source, &listed, &cp, &key)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(missing, BatchOutcome::ListMissing));
+        assert!(stored_offsets(&pool).await.is_empty());
+
+        // 3. A cancelled run is fenced before anything is written.
+        cancel_run(
+            &mut pool.acquire().await.unwrap(),
+            fx.ws,
+            fx.source_id,
+            fx.run.id,
+        )
+        .await
+        .unwrap();
+        let cancelled = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &offsets,
+                ..batch(&fx, &source, &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(cancelled, BatchOutcome::Cancelled));
+        assert!(stored_offsets(&pool).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_from_a_lost_lease_writes_no_offset(pool: PgPool) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let upserts = [upsert(&fx, "k0", "a0@example.com")];
+        let offsets = [at(0, 1, 1)];
+        let cp = json!({});
+        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+            .bind(fx.job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &offsets,
+                ..batch(&fx, &source, &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, BatchOutcome::LeaseLost));
+        assert!(stored_offsets(&pool).await.is_empty());
+        nothing_written(&pool, &fx).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_messages_with_one_key_are_two_events_and_a_replayed_offset_is_a_duplicate(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        let cp = json!({});
+        let commit = |occurrence: &'static str, total: i64| {
+            let mut item = with_event(&fx, "same-key", "a@example.com", json!(total), &[]);
+            item.occurrence = Some(occurrence.to_owned());
+            let (pool, source, key, fx, cp) = (&pool, &source, &key, &fx, &cp);
+            async move {
+                let upserts = [item];
+                let outcome = commit_sync_batch(pool, &keyed(fx, source, &upserts, cp, key))
+                    .await
+                    .unwrap();
+                let BatchOutcome::Committed(progress) = outcome else {
+                    panic!("{outcome:?}");
+                };
+                progress.events
+            }
+        };
+
+        let first = commit("0/1", 10).await;
+        let second = commit("0/2", 20).await;
+        let replay = commit("0/1", 10).await;
+
+        assert_eq!(first.accepted, 1);
+        assert_eq!(second.accepted, 1, "the later message is a new event");
+        assert_eq!((replay.accepted, replay.duplicate), (0, 1));
+        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_tombstone_removes_the_record_and_its_events_and_one_never_seen_is_unchanged(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        let mut item = with_event(&fx, "gone", "a@example.com", json!(1), &[]);
+        item.occurrence = Some("0/0".into());
+        let cp = json!({});
+        commit_sync_batch(&pool, &keyed(&fx, &source, &[item], &cp, &key))
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
+
+        let deleted = [
+            ("gone".to_owned(), DELETE_BY_SOURCE),
+            ("never".to_owned(), DELETE_BY_SOURCE),
+        ];
+        let offsets = [at(0, 3, 3)];
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                deleted: &deleted,
+                offsets: &offsets,
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.deleted, progress.batch.unchanged), (1, 1));
+        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
+        assert_eq!(stored_offsets(&pool).await, [(0, 3, Some(3))]);
     }
 }

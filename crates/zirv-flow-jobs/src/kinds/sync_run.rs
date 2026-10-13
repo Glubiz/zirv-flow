@@ -367,6 +367,7 @@ impl Planner<'_> {
             match mapped {
                 Ok(mapped) => planned.upserts.push(SyncUpsert {
                     sample: sample(),
+                    occurrence: record.occurrence.clone(),
                     lists: mapped.lists,
                     event: mapped.event.map(|event| SyncEvent {
                         name: event.name,
@@ -514,6 +515,7 @@ impl Pass<'_> {
             checkpoint: &checkpoint.0,
             // A reconciliation never moves the stream's cursor.
             incremental: !self.reconcile && self.stream.sync_mode == SyncMode::Incremental.as_str(),
+            offsets: &[],
             singly: false,
         };
         self.probe.before_commit().await;
