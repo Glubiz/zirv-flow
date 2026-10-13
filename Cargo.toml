@@ -73,6 +73,7 @@ zirv-flow-connectors = { path = "crates/zirv-flow-connectors" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
+zirv-flow-segments = { path = "crates/zirv-flow-segments" }
 zirv-flow-store = { path = "crates/zirv-flow-store" }
 
 # No `panic = "abort"`: this will be a long-running server, where a panic in

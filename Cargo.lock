@@ -5375,6 +5375,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zirv-flow-segments"
+version = "0.47.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "serde_json",
+ "time",
+ "uuid",
+ "zirv-flow-core",
+]
+
+[[package]]
 name = "zirv-flow-store"
 version = "0.47.0"
 dependencies = [
