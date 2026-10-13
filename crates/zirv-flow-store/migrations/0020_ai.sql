@@ -64,3 +64,16 @@ CREATE TABLE ai_transcripts (
 CREATE INDEX ai_transcripts_expires_idx ON ai_transcripts (expires_at);
 CREATE INDEX ai_transcripts_call_idx ON ai_transcripts (call_id);
 CREATE INDEX ai_transcripts_workspace_idx ON ai_transcripts (workspace_id);
+
+-- The hourly transcript sweep, as an instance-level schedule at minute 23, first at the next one.
+INSERT INTO schedules (id, workspace_id, kind, cron, timezone, next_run_at, payload, enabled)
+SELECT gen_random_uuid(), NULL, 'maintenance.ai_transcripts', '23 * * * *', 'UTC',
+       CASE
+           WHEN date_trunc('hour', now()) + interval '23 minutes' > now()
+               THEN date_trunc('hour', now()) + interval '23 minutes'
+           ELSE date_trunc('hour', now()) + interval '1 hour 23 minutes'
+       END,
+       '{}'::jsonb, true
+WHERE NOT EXISTS (
+    SELECT 1 FROM schedules WHERE kind = 'maintenance.ai_transcripts' AND workspace_id IS NULL
+);
