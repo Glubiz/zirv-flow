@@ -925,6 +925,7 @@ mod tests {
         let source = fx.source_id.to_string();
         let mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),
                 target: Target::Trait { key: "plan".into() },

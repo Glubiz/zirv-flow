@@ -3,12 +3,14 @@
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::model::{ColumnRule, Mapping, Target};
+use super::json_record::JsonRecord;
+use super::model::{EventRule, Mapping, Target, Transform};
 use super::transform::{apply_transform, cast, into_json, parse_flag};
 use super::validate::{TraitCatalog, TraitState};
-use crate::people::{Identifier, TraitType, coerce};
+use crate::people::{Identifier, TraitType, TraitValue, coerce};
 
 /// The longest record key a row may bring.
 pub const MAX_KEY_CHARS: usize = 512;
@@ -61,6 +63,18 @@ pub struct Mapped {
     pub lists: Vec<Uuid>,
     /// The key column's value, when the mapping names one and the cell holds a value.
     pub key: Option<String>,
+    /// The event the row yields, when the mapping describes one.
+    pub event: Option<MappedEvent>,
+}
+
+/// The event a row yields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MappedEvent {
+    pub name: String,
+    /// When the event happened, when the mapping says; otherwise the caller decides.
+    pub occurred_at: Option<OffsetDateTime>,
+    /// Property name to value. A cell that is empty leaves its property out.
+    pub properties: Map<String, Value>,
 }
 
 /// A row, seen by column name.
@@ -168,7 +182,7 @@ pub fn apply(
         if let Target::Identifier { .. } = rule.target {
             first_identifier_column.get_or_insert(&rule.column);
         }
-        let value = match run_chain(rule, cell, row) {
+        let value = match run_chain(&rule.column, &rule.transforms, cell, row) {
             Ok(value) => value,
             Err(error) => {
                 errors.push(error);
@@ -209,6 +223,10 @@ pub fn apply(
         }
     }
 
+    if let Some(rule) = &mapping.event {
+        mapped.event = event(rule, row, &mut errors);
+    }
+
     if mapped.identifiers.is_empty() && errors.is_empty() {
         errors.push(RowError {
             column: first_identifier_column.unwrap_or_default().to_owned(),
@@ -222,14 +240,95 @@ pub fn apply(
     }
 }
 
+/// Maps one JSON record of a stream: reads it as cells (dotted paths included) and applies
+/// `mapping`. This is the one function a sync run and the preview both call, so what the
+/// preview shows is what the run stores. `declared` names the fields the stream's descriptor
+/// lists.
+pub fn map_json<'a>(
+    mapping: &Mapping,
+    data: &Value,
+    declared: impl IntoIterator<Item = &'a str>,
+    catalog: &dyn TraitCatalog,
+) -> Result<Mapped, Vec<RowError>> {
+    let record = JsonRecord::from_value_for_mapping(data, mapping, declared);
+    apply(mapping, &record, catalog)
+}
+
 /// A cell after the transforms of its rule.
-fn run_chain(rule: &ColumnRule, cell: &str, row: &dyn Cells) -> Result<Value, RowError> {
+fn run_chain(
+    column: &str,
+    transforms: &[Transform],
+    cell: &str,
+    row: &dyn Cells,
+) -> Result<Value, RowError> {
     let mut value = Value::String(cell.to_owned());
-    for transform in &rule.transforms {
-        value = apply_transform(transform, value, row, &rule.column)
+    for transform in transforms {
+        value = apply_transform(transform, value, row, column)
             .map_err(|(column, reason)| RowError { column, reason })?;
     }
     Ok(value)
+}
+
+/// The most properties an event rule may name.
+pub const MAX_EVENT_PROPERTIES: usize = 50;
+
+/// The event of one row: its timestamp and properties, or the errors added to `errors`.
+fn event(rule: &EventRule, row: &dyn Cells, errors: &mut Vec<RowError>) -> Option<MappedEvent> {
+    let before = errors.len();
+    let mut occurred_at = None;
+    if let Some(timestamp) = &rule.timestamp {
+        match chain_of(&timestamp.column, &timestamp.transforms, row) {
+            Ok(value) => match present(&value) {
+                None => {}
+                Some(_) => match instant(&value) {
+                    Some(at) => occurred_at = Some(at),
+                    None => errors.push(RowError {
+                        column: timestamp.column.clone(),
+                        reason: RowErrorReason::BadTimestamp,
+                    }),
+                },
+            },
+            Err(error) => errors.push(error),
+        }
+    }
+    let mut properties = Map::new();
+    for property in &rule.properties {
+        match chain_of(&property.column, &property.transforms, row) {
+            Ok(value) => {
+                if present(&value).is_some() {
+                    properties.insert(property.property.clone(), value);
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    (errors.len() == before).then(|| MappedEvent {
+        name: rule.name.clone(),
+        occurred_at,
+        properties,
+    })
+}
+
+/// The value of `column` after `transforms`; the column must exist.
+fn chain_of(column: &str, transforms: &[Transform], row: &dyn Cells) -> Result<Value, RowError> {
+    let Some(cell) = row.cell(column) else {
+        return Err(RowError {
+            column: column.to_owned(),
+            reason: RowErrorReason::UnknownColumn,
+        });
+    };
+    run_chain(column, transforms, cell, row)
+}
+
+/// A value read as an instant: RFC 3339 text.
+fn instant(value: &Value) -> Option<OffsetDateTime> {
+    let TraitValue::Timestamp(text) = coerce(TraitType::Timestamp, value).ok()? else {
+        return None;
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(&text).ok()?;
+    let nanos = i128::from(parsed.timestamp()) * 1_000_000_000
+        + i128::from(parsed.timestamp_subsec_nanos());
+    OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()
 }
 
 fn identifier(kind: &str, value: &Value, mapped: &mut Mapped) -> Result<(), RowErrorReason> {
@@ -297,7 +396,7 @@ fn list_flag(list: Uuid, value: &Value, mapped: &mut Mapped) -> Result<(), RowEr
 mod tests {
     use serde_json::json;
 
-    use super::super::model::{ColumnRule, Transform};
+    use super::super::model::{ColumnRule, EventRule, PropertyRule, Transform, ValueRule};
     use super::*;
 
     fn header(names: &[&str]) -> Header {
@@ -366,6 +465,7 @@ mod tests {
     fn mapping(columns: Vec<ColumnRule>) -> Mapping {
         Mapping {
             key_column: None,
+            event: None,
             columns,
         }
     }
@@ -375,6 +475,7 @@ mod tests {
         let list = Uuid::now_v7();
         let mapping = Mapping {
             key_column: Some("id".into()),
+            event: None,
             columns: vec![
                 email("Email"),
                 rule("Plan", Target::Trait { key: "plan".into() }, vec![]),
@@ -644,6 +745,268 @@ mod tests {
         );
     }
 
+    fn order_event(timestamp: Option<ValueRule>, properties: Vec<PropertyRule>) -> EventRule {
+        EventRule {
+            name: "order_placed".into(),
+            timestamp,
+            properties,
+        }
+    }
+
+    fn property(name: &str, column: &str, transforms: Vec<Transform>) -> PropertyRule {
+        PropertyRule {
+            property: name.into(),
+            column: column.into(),
+            transforms,
+        }
+    }
+
+    fn with_event(event: EventRule) -> Mapping {
+        Mapping {
+            event: Some(event),
+            ..mapping(vec![email("Email")])
+        }
+    }
+
+    #[test]
+    fn a_row_yields_one_event_with_its_timestamp_and_non_empty_properties() {
+        let mapping = with_event(order_event(
+            Some(ValueRule {
+                column: "When".into(),
+                transforms: vec![Transform::Timestamp {
+                    format: "%d/%m/%Y %H:%M".into(),
+                }],
+            }),
+            vec![
+                property(
+                    "total",
+                    "Total",
+                    vec![Transform::Cast {
+                        to: TraitType::Number,
+                    }],
+                ),
+                property("note", "Note", vec![]),
+                property(
+                    "tags",
+                    "Tags",
+                    vec![Transform::Split {
+                        separator: ";".into(),
+                    }],
+                ),
+            ],
+        ));
+
+        let mapped = run(
+            &mapping,
+            &["Email", "When", "Total", "Note", "Tags"],
+            &["a@example.com", "02/03/2026 10:30", "12.5", "  ", "x; y"],
+        )
+        .unwrap();
+
+        let event = mapped.event.unwrap();
+        assert_eq!(event.name, "order_placed");
+        assert_eq!(
+            event.occurred_at,
+            Some(time::macros::datetime!(2026-03-02 10:30 UTC))
+        );
+        assert_eq!(
+            Value::Object(event.properties),
+            json!({"total": 12.5, "tags": ["x", "y"]})
+        );
+    }
+
+    #[test]
+    fn an_event_without_a_timestamp_or_with_an_empty_one_has_no_occurred_at() {
+        let without = with_event(order_event(None, vec![]));
+        let empty = with_event(order_event(
+            Some(ValueRule {
+                column: "When".into(),
+                transforms: vec![],
+            }),
+            vec![],
+        ));
+
+        let a = run(&without, &["Email"], &["a@example.com"]).unwrap();
+        let b = run(&empty, &["Email", "When"], &["a@example.com", ""]).unwrap();
+
+        assert_eq!(a.event.unwrap().occurred_at, None);
+        assert_eq!(b.event.unwrap().occurred_at, None);
+        assert!(
+            run(
+                &mapping(vec![email("Email")]),
+                &["Email"],
+                &["a@example.com"]
+            )
+            .unwrap()
+            .event
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_event_that_cannot_be_read_gives_codes_for_its_columns() {
+        let mapping = with_event(order_event(
+            Some(ValueRule {
+                column: "When".into(),
+                transforms: vec![],
+            }),
+            vec![
+                property(
+                    "total",
+                    "Total",
+                    vec![Transform::Cast {
+                        to: TraitType::Number,
+                    }],
+                ),
+                property("ghost", "Ghost", vec![]),
+            ],
+        ));
+
+        let errors = run(
+            &mapping,
+            &["Email", "When", "Total"],
+            &["a@example.com", "secret-when", "secret-total"],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            errors,
+            [
+                ("When".to_owned(), "bad_timestamp"),
+                ("Total".to_owned(), "wrong_type"),
+                ("Ghost".to_owned(), "unknown_column"),
+            ]
+        );
+        assert!(!format!("{errors:?}").contains("secret"));
+    }
+
+    #[test]
+    fn a_row_error_never_holds_a_cell_value_for_any_target_or_the_event() {
+        let list = Uuid::now_v7();
+        let mut mapping = mapping(vec![
+            email("Email"),
+            rule("Age", Target::Trait { key: "age".into() }, vec![]),
+            rule("L", Target::List { list_id: list }, vec![]),
+        ]);
+        mapping.event = Some(order_event(
+            Some(ValueRule {
+                column: "When".into(),
+                transforms: vec![],
+            }),
+            vec![],
+        ));
+        let header = header(&["Email", "Age", "L", "When"]);
+        let cells = cells(&[
+            "secret-email",
+            "secret-age",
+            "secret-flag",
+            "secret-instant",
+        ]);
+
+        let errors = apply(
+            &mapping,
+            &CsvRow {
+                header: &header,
+                cells: &cells,
+            },
+            &catalog(),
+        )
+        .unwrap_err();
+
+        assert_eq!(errors.len(), 4);
+        assert!(!format!("{errors:?}").contains("secret"));
+    }
+
+    #[test]
+    fn map_json_reads_nested_paths_and_equals_apply_over_the_record() {
+        let list = Uuid::now_v7();
+        let mut mapping = Mapping {
+            key_column: Some("ids.0".into()),
+            ..mapping(vec![
+                email("profile.email"),
+                rule(
+                    "profile.age",
+                    Target::Trait { key: "age".into() },
+                    vec![Transform::Cast {
+                        to: TraitType::Number,
+                    }],
+                ),
+                rule("flags.news", Target::List { list_id: list }, vec![]),
+            ])
+        };
+        mapping.event = Some(order_event(
+            None,
+            vec![property("sku", "orders.0.sku", vec![])],
+        ));
+        let data = json!({
+            "ids": ["k-1"],
+            "profile": {"email": " Ada@Example.com ", "age": 36},
+            "flags": {"news": true},
+            "orders": [{"sku": "A-1"}]
+        });
+        let declared = ["ids", "profile", "flags", "orders"];
+
+        let mapped = map_json(&mapping, &data, declared, &catalog()).unwrap();
+
+        assert_eq!(
+            mapped.identifiers,
+            [("email".to_owned(), "ada@example.com".to_owned())]
+        );
+        assert_eq!(mapped.key.as_deref(), Some("k-1"));
+        assert_eq!(mapped.traits.get("age"), Some(&json!(36)));
+        assert_eq!(mapped.lists, [list]);
+        assert_eq!(
+            mapped.event.as_ref().unwrap().properties.get("sku"),
+            Some(&json!("A-1"))
+        );
+        let record = JsonRecord::from_value_for_mapping(&data, &mapping, declared);
+        assert_eq!(apply(&mapping, &record, &catalog()), Ok(mapped));
+    }
+
+    #[test]
+    fn map_json_reports_an_undeclared_path_as_unknown_and_a_declared_one_as_empty() {
+        let mapping = Mapping {
+            event: Some(order_event(
+                None,
+                vec![property("p", "orders.0.sku", vec![])],
+            )),
+            ..mapping(vec![email("profile.email")])
+        };
+        let data = json!({"profile": {"email": "a@example.com"}});
+
+        let undeclared = map_json(&mapping, &data, ["profile"], &catalog()).unwrap_err();
+        let declared = map_json(&mapping, &data, ["profile", "orders"], &catalog()).unwrap();
+
+        assert_eq!(undeclared[0].column, "orders.0.sku");
+        assert_eq!(undeclared[0].reason, RowErrorReason::UnknownColumn);
+        assert!(declared.event.unwrap().properties.is_empty());
+    }
+
+    #[test]
+    fn a_mapping_saved_before_events_serializes_back_to_the_same_json_and_applies_the_same() {
+        let old = json!({
+            "key_column": "id",
+            "columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"},
+                 "transforms": [{"op": "trim"}, {"op": "lower"}]},
+                {"column": "Plan", "target": {"type": "trait", "key": "plan"}, "transforms": []}
+            ]
+        });
+
+        let mapping: Mapping = serde_json::from_value(old.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(&mapping).unwrap(), old);
+        assert!(!mapping.has_event());
+        let mapped = run(
+            &mapping,
+            &["id", "Email", "Plan"],
+            &["u1", " A@Example.com ", "pro"],
+        )
+        .unwrap();
+        assert_eq!(mapped.identifiers[0].1, "a@example.com");
+        assert_eq!(mapped.event, None);
+        assert_eq!(mapped.key.as_deref(), Some("u1"));
+    }
     #[test]
     fn a_header_must_have_unique_non_blank_names() {
         assert_eq!(

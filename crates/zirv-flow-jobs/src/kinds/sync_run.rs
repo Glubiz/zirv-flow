@@ -609,6 +609,7 @@ mod tests {
         };
         serde_json::to_value(Mapping {
             key_column: None,
+            event: None,
             columns: vec![
                 rule(
                     "email",
