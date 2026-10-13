@@ -887,6 +887,48 @@
         ]
       }
     },
+    "/api/v1/source-kinds": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "The source types this build ships, with their field specs. Any signed-in user or API key.",
+        "operationId": "list_source_kinds",
+        "responses": {
+          "200": {
+            "description": "The source types",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SourceKindBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -8398,6 +8440,890 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/sources": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "The sources of a workspace, ordered by name.",
+        "operationId": "list_sources",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SourceBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Creates a source and seals its credential. Workspace admins only. Audited as\n`source.created`.",
+        "operationId": "create_source",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A source with that name exists, or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, kind, setting, credential field or schedule",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "One source.",
+        "operationId": "get_source",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Deletes a source with its streams and its stored credential. Workspace admins only. Audited\nas `source.deleted`.",
+        "operationId": "delete_source",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Changes a source: name, settings, schedule, enabled, or the credential. Workspace admins\nonly. Audited as `source.updated`.",
+        "operationId": "update_source",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another source has that name, or the type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/discover": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Asks the source for its streams and stores them. New streams start disabled; known ones keep\nthe user's settings. Workspace admins only. Audited as `source.discovered`.",
+        "operationId": "discover_source_streams",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every stream of the source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StreamBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The source type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The source refused or failed the request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The source did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/streams": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "The streams of a source, ordered by name.",
+        "operationId": "list_source_streams",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The streams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StreamBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}": {
+      "put": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Sets whether a stream is read and how: sync mode, cursor field, primary key and staleness\nthreshold. Workspace admins only. Audited as `stream.configured`.",
+        "operationId": "configure_source_stream",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Stream name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stream with its new settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or stream, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Settings the stream cannot serve, such as incremental without a cursor field",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/test": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Tests the connection to the source with its stored credential. A failed test is a 200 with\n`ok` false and the reason. Workspace admins only. Audited as `source.tested`.",
+        "operationId": "test_source",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The outcome of the test",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The source type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The source did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/suppressions": {
       "get": {
         "tags": [
@@ -10241,6 +11167,25 @@
           }
         }
       },
+      "CapabilitiesBody": {
+        "type": "object",
+        "required": [
+          "incremental",
+          "full_refresh",
+          "emits_deletes"
+        ],
+        "properties": {
+          "emits_deletes": {
+            "type": "boolean"
+          },
+          "full_refresh": {
+            "type": "boolean"
+          },
+          "incremental": {
+            "type": "boolean"
+          }
+        }
+      },
       "CauseBody": {
         "type": "object",
         "required": [
@@ -10714,6 +11659,51 @@
             "type": "string",
             "description": "1 to 128 characters after trimming; unique in the workspace, ignoring case.",
             "example": "Newsletter"
+          }
+        }
+      },
+      "CreateSourceRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "object",
+            "description": "The plain settings, checked against the type's field specs.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "credential": {
+            "type": "object",
+            "description": "The credential fields by name. Sealed on arrival and never returned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "description": "A source type from `GET /api/v1/source-kinds`.",
+            "example": "fake"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 128 characters after trimming; unique in the workspace.",
+            "example": "CRM"
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A cron expression in UTC."
           }
         }
       },
@@ -11279,6 +12269,42 @@
               "$ref": "#/components/schemas/KindDepthBody"
             },
             "description": "Sorted by kind."
+          }
+        }
+      },
+      "DescriptorBody": {
+        "type": "object",
+        "description": "What discovery last reported about a stream.",
+        "required": [
+          "fields",
+          "sync_modes",
+          "default_primary_key"
+        ],
+        "properties": {
+          "default_cursor_field": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_primary_key": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldBody"
+            }
+          },
+          "sync_modes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sync modes the stream supports: `full_refresh`, `incremental`."
           }
         }
       },
@@ -11932,6 +12958,64 @@
           "output_tokens": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "FieldBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "field_type"
+        ],
+        "properties": {
+          "field_type": {
+            "type": "string",
+            "description": "One of `string`, `number`, `boolean`, `timestamp`, `json`, `unknown`."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "FieldSpecBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "help",
+          "kind",
+          "options",
+          "required",
+          "secret"
+        ],
+        "properties": {
+          "help": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "example": "token"
+          },
+          "kind": {
+            "type": "string",
+            "description": "One of `text`, `url`, `number`, `bool`, `select`."
+          },
+          "label": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The allowed values of a `select` field; empty for the other kinds."
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "boolean",
+            "description": "True for a credential field: render a password input and never prefill it."
           }
         }
       },
@@ -13965,6 +15049,116 @@
           }
         }
       },
+      "SourceBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "config",
+          "credential_fields_set",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "config": {
+            "type": "object",
+            "description": "The plain settings. Never holds a credential.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "credential_fields_set": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the credential fields that are set. Their values are never returned."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The source type, one of `GET /api/v1/source-kinds`.",
+            "example": "fake"
+          },
+          "name": {
+            "type": "string",
+            "example": "CRM"
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A cron expression in UTC, or null."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SourceKindBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "label",
+          "description",
+          "config_fields",
+          "credential_fields",
+          "capabilities"
+        ],
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CapabilitiesBody"
+          },
+          "config_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSpecBody"
+            },
+            "description": "Plain settings, stored as the source's configuration."
+          },
+          "credential_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSpecBody"
+            },
+            "description": "Settings stored only in the encrypted credential."
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The stable id to send as `kind` when creating a source.",
+            "example": "fake"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -13974,6 +15168,101 @@
           "status": {
             "type": "string",
             "example": "ok"
+          }
+        }
+      },
+      "StreamBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "sync_mode",
+          "primary_key",
+          "discovered",
+          "updated_at"
+        ],
+        "properties": {
+          "cursor_field": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discovered": {
+            "$ref": "#/components/schemas/DescriptorBody"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether runs read this stream. New streams start disabled."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "primary_key": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "staleness_threshold_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long without new data before the stream counts as stale, in seconds."
+          },
+          "sync_mode": {
+            "type": "string",
+            "description": "`full_refresh` or `incremental`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "StreamSettingsRequest": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "sync_mode"
+        ],
+        "properties": {
+          "cursor_field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A field of the stream. Required for `incremental`."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "primary_key": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Fields of the stream that identify a record."
+          },
+          "staleness_threshold_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A positive number of seconds."
+          },
+          "sync_mode": {
+            "type": "string",
+            "description": "`full_refresh` or `incremental`; one the stream supports.",
+            "example": "incremental"
           }
         }
       },
@@ -14165,6 +15454,25 @@
           "value": {
             "type": "string",
             "description": "The identifier value. It is looked up and not stored."
+          }
+        }
+      },
+      "TestBody": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it does not. Never holds a credential or a URL."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the connection works."
           }
         }
       },
@@ -14744,6 +16052,53 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateSourceRequest": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "credential": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Replaces the whole credential: every required credential field must be given.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A cron expression in UTC; an empty string clears the schedule."
           }
         }
       },

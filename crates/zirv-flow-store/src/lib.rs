@@ -20,6 +20,7 @@ mod pool;
 mod privacy;
 pub mod secrets;
 mod sessions;
+mod sources;
 mod suppressions;
 mod workspaces;
 
@@ -128,6 +129,11 @@ pub use privacy::{
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,
+};
+pub use sources::{
+    DiscoveredStream, NewSource, Source, SourceUpdate, Stream, StreamSettings, configure_stream,
+    create_source, delete_source, find_source, find_source_for_update, find_stream, list_sources,
+    list_streams, update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{

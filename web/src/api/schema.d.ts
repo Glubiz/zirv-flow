@@ -219,6 +219,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/source-kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The source types this build ships, with their field specs. Any signed-in user or API key. */
+        get: operations["list_source_kinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users": {
         parameters: {
             query?: never;
@@ -1395,6 +1412,129 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sources of a workspace, ordered by name. */
+        get: operations["list_sources"];
+        put?: never;
+        /**
+         * Creates a source and seals its credential. Workspace admins only. Audited as
+         *     `source.created`.
+         */
+        post: operations["create_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One source. */
+        get: operations["get_source"];
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a source with its streams and its stored credential. Workspace admins only. Audited
+         *     as `source.deleted`.
+         */
+        delete: operations["delete_source"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes a source: name, settings, schedule, enabled, or the credential. Workspace admins
+         *     only. Audited as `source.updated`.
+         */
+        patch: operations["update_source"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Asks the source for its streams and stores them. New streams start disabled; known ones keep
+         *     the user's settings. Workspace admins only. Audited as `source.discovered`.
+         */
+        post: operations["discover_source_streams"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/streams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The streams of a source, ordered by name. */
+        get: operations["list_source_streams"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Sets whether a stream is read and how: sync mode, cursor field, primary key and staleness
+         *     threshold. Workspace admins only. Audited as `stream.configured`.
+         */
+        put: operations["configure_source_stream"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tests the connection to the source with its stored credential. A failed test is a 200 with
+         *     `ok` false and the reason. Workspace admins only. Audited as `source.tested`.
+         */
+        post: operations["test_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/suppressions": {
         parameters: {
             query?: never;
@@ -1811,6 +1951,11 @@ export interface components {
              */
             contacts: components["schemas"]["BulkContactItem"][];
         };
+        CapabilitiesBody: {
+            emits_deletes: boolean;
+            full_refresh: boolean;
+            incremental: boolean;
+        };
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
             id: string;
@@ -2035,6 +2180,28 @@ export interface components {
              * @example Newsletter
              */
             name: string;
+        };
+        CreateSourceRequest: {
+            /** @description The plain settings, checked against the type's field specs. */
+            config: {
+                [key: string]: unknown;
+            };
+            /** @description The credential fields by name. Sealed on arrival and never returned. */
+            credential?: {
+                [key: string]: string;
+            };
+            /**
+             * @description A source type from `GET /api/v1/source-kinds`.
+             * @example fake
+             */
+            kind: string;
+            /**
+             * @description 1 to 128 characters after trimming; unique in the workspace.
+             * @example CRM
+             */
+            name: string;
+            /** @description A cron expression in UTC. */
+            schedule?: string | null;
         };
         CreateTopicRequest: {
             /**
@@ -2278,6 +2445,14 @@ export interface components {
         DepthBody: {
             /** @description Sorted by kind. */
             kinds: components["schemas"]["KindDepthBody"][];
+        };
+        /** @description What discovery last reported about a stream. */
+        DescriptorBody: {
+            default_cursor_field?: string | null;
+            default_primary_key: string[];
+            fields: components["schemas"]["FieldBody"][];
+            /** @description The sync modes the stream supports: `full_refresh`, `incremental`. */
+            sync_modes: string[];
         };
         /**
          * @description An identifier shown for a person. The value is null when `masked`: only workspace admins,
@@ -2573,6 +2748,24 @@ export interface components {
             input_tokens: number;
             /** Format: int64 */
             output_tokens: number;
+        };
+        FieldBody: {
+            /** @description One of `string`, `number`, `boolean`, `timestamp`, `json`, `unknown`. */
+            field_type: string;
+            name: string;
+        };
+        FieldSpecBody: {
+            help: string;
+            /** @example token */
+            key: string;
+            /** @description One of `text`, `url`, `number`, `bool`, `select`. */
+            kind: string;
+            label: string;
+            /** @description The allowed values of a `select` field; empty for the other kinds. */
+            options: string[];
+            required: boolean;
+            /** @description True for a credential field: render a password input and never prefill it. */
+            secret: boolean;
         };
         HistoryBody: {
             /** @description Newest first. */
@@ -3378,9 +3571,88 @@ export interface components {
             email: string;
             password: string;
         };
+        SourceBody: {
+            /** @description The plain settings. Never holds a credential. */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /** @description The names of the credential fields that are set. Their values are never returned. */
+            credential_fields_set: string[];
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description The source type, one of `GET /api/v1/source-kinds`.
+             * @example fake
+             */
+            kind: string;
+            /** @example CRM */
+            name: string;
+            /** @description A cron expression in UTC, or null. */
+            schedule?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        SourceKindBody: {
+            capabilities: components["schemas"]["CapabilitiesBody"];
+            /** @description Plain settings, stored as the source's configuration. */
+            config_fields: components["schemas"]["FieldSpecBody"][];
+            /** @description Settings stored only in the encrypted credential. */
+            credential_fields: components["schemas"]["FieldSpecBody"][];
+            description: string;
+            /**
+             * @description The stable id to send as `kind` when creating a source.
+             * @example fake
+             */
+            kind: string;
+            label: string;
+        };
         StatusBody: {
             /** @example ok */
             status: string;
+        };
+        StreamBody: {
+            cursor_field?: string | null;
+            discovered: components["schemas"]["DescriptorBody"];
+            /** @description Whether runs read this stream. New streams start disabled. */
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            primary_key: string[];
+            /**
+             * Format: int32
+             * @description How long without new data before the stream counts as stale, in seconds.
+             */
+            staleness_threshold_seconds?: number | null;
+            /** @description `full_refresh` or `incremental`. */
+            sync_mode: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        StreamSettingsRequest: {
+            /** @description A field of the stream. Required for `incremental`. */
+            cursor_field?: string | null;
+            enabled: boolean;
+            /** @description Fields of the stream that identify a record. */
+            primary_key?: string[];
+            /**
+             * Format: int32
+             * @description A positive number of seconds.
+             */
+            staleness_threshold_seconds?: number | null;
+            /**
+             * @description `full_refresh` or `incremental`; one the stream supports.
+             * @example incremental
+             */
+            sync_mode: string;
         };
         SuppressionBody: {
             /** Format: date-time */
@@ -3449,6 +3721,12 @@ export interface components {
             kind: string;
             /** @description The identifier value. It is looked up and not stored. */
             value: string;
+        };
+        TestBody: {
+            /** @description Why it does not. Never holds a credential or a URL. */
+            error?: string | null;
+            /** @description Whether the connection works. */
+            ok: boolean;
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -3638,6 +3916,19 @@ export interface components {
         UpdateListRequest: {
             description?: string | null;
             name?: string | null;
+        };
+        UpdateSourceRequest: {
+            config?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Replaces the whole credential: every required credential field must be given. */
+            credential?: {
+                [key: string]: string;
+            } | null;
+            enabled?: boolean | null;
+            name?: string | null;
+            /** @description A cron expression in UTC; an empty string clears the schedule. */
+            schedule?: string | null;
         };
         UpdateTopicRequest: {
             archived?: boolean | null;
@@ -4364,6 +4655,35 @@ export interface operations {
             };
             /** @description Malformed email or weak password */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_source_kinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The source types */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceKindBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9405,6 +9725,608 @@ export interface operations {
             };
             /** @description The policy is not keep or delete */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_sources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sources */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description The new source */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A source with that name exists, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, kind, setting, credential field or schedule */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another source has that name, or the type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    discover_source_streams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every stream of the source */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StreamBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source refused or failed the request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source did not answer in time */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_source_streams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The streams */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StreamBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    configure_source_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+                /** @description Stream name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StreamSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description The stream with its new settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StreamBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or stream, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Settings the stream cannot serve, such as incremental without a cursor field */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The outcome of the test */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source did not answer in time */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -24,6 +24,7 @@ use crate::privacy::{self, erasures, exports};
 use crate::problem::{ItemProblem, Problem};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
+use crate::sources;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
@@ -109,6 +110,16 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::import::import,
         lists::person::lists,
         lists::person::history,
+        sources::kinds::list,
+        sources::crud::list,
+        sources::crud::create,
+        sources::crud::get,
+        sources::crud::update,
+        sources::crud::remove,
+        sources::actions::test,
+        sources::actions::discover,
+        sources::streams::list,
+        sources::streams::put,
         imports::upload::upload,
         imports::crud::list,
         imports::crud::get,
@@ -266,6 +277,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::person::PersonListBody,
         lists::person::MembershipHistoryBody,
         lists::person::MembershipChangeBody,
+        sources::kinds::SourceKindBody,
+        sources::kinds::FieldSpecBody,
+        sources::kinds::CapabilitiesBody,
+        sources::crud::SourceBody,
+        sources::crud::CreateSourceRequest,
+        sources::crud::UpdateSourceRequest,
+        sources::actions::TestBody,
+        sources::streams::StreamBody,
+        sources::streams::DescriptorBody,
+        sources::streams::FieldBody,
+        sources::streams::StreamSettingsRequest,
         imports::CsvImportBody,
         imports::CsvImportDetailBody,
         imports::crud::CsvImportsBody,
