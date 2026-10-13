@@ -1,8 +1,21 @@
 //! The metrics of the database sources. Labels are the source type and a fixed reason, never a
 //! source, stream or workspace.
 
+use std::future::Future;
+
 use super::error::reason_of;
 use crate::sources::SourceError;
+
+pub(crate) async fn metered<T>(
+    source_type: &'static str,
+    call: impl Future<Output = Result<T, SourceError>>,
+) -> Result<T, SourceError> {
+    let result = call.await;
+    if let Err(failure) = &result {
+        error(source_type, failure);
+    }
+    result
+}
 
 pub(crate) fn batch(source_type: &'static str) {
     metrics::counter!("zirv_flow_source_db_batches_total", "source_type" => source_type)

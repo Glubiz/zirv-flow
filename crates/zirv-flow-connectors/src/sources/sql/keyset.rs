@@ -52,15 +52,6 @@ impl KeySpec {
         })
     }
 
-    /// The key columns in comparison order: the cursor, then the primary key.
-    pub(crate) fn columns(&self) -> Vec<&str> {
-        self.cursor
-            .iter()
-            .chain(&self.primary_key)
-            .map(String::as_str)
-            .collect()
-    }
-
     pub(crate) fn width(&self) -> usize {
         usize::from(self.cursor.is_some()) + self.primary_key.len()
     }
@@ -290,7 +281,6 @@ mod tests {
 
         assert_eq!(full.unwrap(), spec(None, &["a"]));
         let incremental = incremental.unwrap();
-        assert_eq!(incremental.columns(), ["u", "a", "b"]);
         assert_eq!(incremental.width(), 3);
     }
 

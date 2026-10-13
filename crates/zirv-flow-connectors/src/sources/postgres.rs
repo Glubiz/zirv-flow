@@ -19,19 +19,17 @@ use super::error::SourceError;
 use super::source::Source;
 use super::spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 use super::sql::connect::{CONNECT_TIMEOUT, backstop, resolve, within};
+use super::sql::discover::{MAX_TABLES, default_cursor, descriptor, from_clause};
 use super::sql::error::{from_postgres, query};
 use super::sql::keyset::{BATCH_ROWS, KeySpec, Paged, Pager, Row, batches, parse_checkpoint};
+use super::sql::metrics::metered;
 use super::sql::settings::{Flavor, Login, QUERY_PREFIX, Settings, TlsMode, config_error};
-use super::sql::{metrics, tls};
-use super::types::{
-    Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor, SyncMode,
-};
+use super::sql::tls;
+use super::types::{Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor};
 
 const TYPE: &str = "postgres";
 /// A transaction that stalls between statements is ended by the server after this long.
 const IDLE_IN_TRANSACTION_MS: u64 = 60_000;
-/// More tables than this in the schema is refused: grant the role fewer.
-const MAX_TABLES: usize = 1000;
 
 pub(crate) struct Postgres;
 
@@ -140,7 +138,7 @@ impl Source for Postgres {
         config: &Value,
         credential: &Credential,
     ) -> Result<(), SourceError> {
-        metered(async {
+        metered(TYPE, async {
             let (settings, mut conn) = connect(ctx, config, credential).await?;
             within(backstop(settings.statement_timeout), async {
                 let tx = begin_batch(&mut conn.client, settings.statement_timeout)
@@ -160,7 +158,7 @@ impl Source for Postgres {
         config: &Value,
         credential: &Credential,
     ) -> Result<Vec<StreamDescriptor>, SourceError> {
-        metered(async {
+        metered(TYPE, async {
             let (settings, mut conn) = connect(ctx, config, credential).await?;
             within(
                 backstop(settings.statement_timeout) * 2,
@@ -184,14 +182,6 @@ impl Source for Postgres {
             open_paged(ctx, config, credential, stream, checkpoint),
         )
     }
-}
-
-async fn metered<T>(call: impl Future<Output = Result<T, SourceError>>) -> Result<T, SourceError> {
-    let result = call.await;
-    if let Err(error) = &result {
-        metrics::error(TYPE, error);
-    }
-    result
 }
 
 fn failed(error: tokio_postgres::Error) -> SourceError {
@@ -446,15 +436,10 @@ fn page_sql(
 }
 
 /// What a stream reads from: a table of the configured schema or a configured query.
-fn from_clause(settings: &Settings, stream: &str) -> Result<String, SourceError> {
-    if stream.starts_with(QUERY_PREFIX) {
-        let query = settings
-            .query_for(stream)
-            .ok_or_else(|| config_error("queries", "has no query for this stream"))?;
-        // Newlines keep a trailing line comment from swallowing the closing parenthesis.
-        return Ok(format!("(\n{}\n)", query.sql));
-    }
-    Ok(format!("{}.{}", quote(&settings.schema), quote(stream)))
+fn from_stream(settings: &Settings, stream: &str) -> Result<String, SourceError> {
+    from_clause(settings, stream, |table| {
+        format!("{}.{}", quote(&settings.schema), quote(table))
+    })
 }
 
 /// Prepares `SELECT * FROM <from>` (parsed and planned, not run) to learn the columns.
@@ -526,7 +511,7 @@ async fn open_paged(
     let login = Login::from_credential(credential)?;
     let spec = KeySpec::from_stream(stream)?;
     let after = parse_checkpoint(checkpoint.as_ref(), &spec)?;
-    let from = from_clause(&settings, &stream.name)?;
+    let from = from_stream(&settings, &stream.name)?;
     let mut conn = open(ctx, &settings, &login).await?;
     let columns = within(
         backstop(settings.statement_timeout),
@@ -648,9 +633,10 @@ async fn discover_streams(
     }
     for query_stream in &settings.queries {
         let name = format!("{QUERY_PREFIX}{}", query_stream.name);
-        let from = format!("(\n{}\n)", query_stream.sql);
+        // Prepared as written, so the columns are the query's own and a second statement is the
+        // driver's error.
         let statement = tx
-            .prepare(&format!("SELECT * FROM {from} AS s"))
+            .prepare(&query_stream.sql)
             .await
             .map_err(|error| rejected_query(&error))?;
         let mut stream = descriptor(name);
@@ -684,27 +670,10 @@ fn rejected_query(error: &tokio_postgres::Error) -> SourceError {
     }
 }
 
-fn descriptor(name: String) -> StreamDescriptor {
-    StreamDescriptor {
-        name,
-        fields: Vec::new(),
-        sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
-        default_cursor_field: None,
-        default_primary_key: Vec::new(),
-    }
-}
-
-/// `updated_at` when the stream has a timestamp column of that name.
-fn default_cursor(fields: &[FieldDescriptor]) -> Option<String> {
-    fields
-        .iter()
-        .find(|field| field.name == "updated_at" && field.field_type == FieldType::Timestamp)
-        .map(|field| field.name.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::SyncMode;
 
     fn column(name: &str, ty: Type) -> Column {
         Column {
@@ -838,19 +807,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            from_clause(&settings, "query:vip").unwrap(),
+            from_stream(&settings, "query:vip").unwrap(),
             "(\nSELECT 1 -- note\n)"
         );
         assert_eq!(
-            from_clause(&settings, "contacts").unwrap(),
+            from_stream(&settings, "contacts").unwrap(),
             r#""shop"."contacts""#
         );
         assert_eq!(
-            from_clause(&settings, "query:other").unwrap_err(),
+            from_stream(&settings, "query:other").unwrap_err(),
             config_error("queries", "has no query for this stream")
         );
         settings.schema = r#"a"b"#.to_owned();
-        assert_eq!(from_clause(&settings, "t").unwrap(), r#""a""b"."t""#);
+        assert_eq!(from_stream(&settings, "t").unwrap(), r#""a""b"."t""#);
     }
 
     #[test]
@@ -910,26 +879,6 @@ mod tests {
         assert_eq!(field_type("uuid"), FieldType::String);
         assert_eq!(field_type("varchar"), FieldType::String);
         assert_eq!(field_type("bytea"), FieldType::Unknown);
-    }
-
-    #[test]
-    fn updated_at_is_the_default_cursor_only_when_it_is_a_timestamp() {
-        let field = |name: &str, field_type| FieldDescriptor {
-            name: name.into(),
-            field_type,
-        };
-        assert_eq!(
-            default_cursor(&[field("updated_at", FieldType::Timestamp)]),
-            Some("updated_at".into())
-        );
-        assert_eq!(
-            default_cursor(&[field("updated_at", FieldType::String)]),
-            None
-        );
-        assert_eq!(
-            default_cursor(&[field("created_at", FieldType::Timestamp)]),
-            None
-        );
     }
 
     fn login() -> Login<'static> {

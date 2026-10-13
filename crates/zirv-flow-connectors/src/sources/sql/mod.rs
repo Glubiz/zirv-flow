@@ -3,6 +3,7 @@
 //! type is still one module and one line in [`super::ALL`].
 
 pub(crate) mod connect;
+pub(crate) mod discover;
 pub(crate) mod error;
 pub(crate) mod keyset;
 pub(crate) mod metrics;
