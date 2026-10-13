@@ -49,7 +49,10 @@ You help a marketer describe an HTTP API as a manifest for a data source. Answer
 draft_manifest tool exactly once, and by nothing else. Base the manifest on the API \
 documentation the user pastes, and on their request. Use only what the documentation says: \
 never invent a path, a field or a pagination style. The manifest holds no secret; credentials \
-are entered separately, so name only the kind of authentication.
+are entered separately, so name only the kind of authentication. In the saved manifest every \
+static header value and every static query value is shown as \"(kept)\": keep a value as \
+\"(kept)\" to leave it as it is, and write a real value only for a header or parameter you add \
+or change.
 
 If your answer is refused, the problems are listed with their JSON pointers: fix exactly those \
 and call the tool again.";
@@ -100,6 +103,68 @@ Example:
 {\"name\":\"updated_at\",\"type\":\"timestamp\"}],\"primary_key\":[\"id\"],\
 \"incremental\":{\"cursor_field\":\"updated_at\",\"request_param\":\"since\",\
 \"cursor_type\":\"timestamp\"}}]}";
+
+/// What the model sees in place of a static header or query value of the saved manifest. A value
+/// may be a secret, so it never leaves, whatever the workspace allows for personal data.
+pub(crate) const KEPT_VALUE: &str = "(kept)";
+
+/// The manifest with every static header value and every static stream query value replaced by
+/// [`KEPT_VALUE`]. The keys stay, so the model can see what is sent.
+pub(crate) fn mask_manifest(manifest: &Value) -> Value {
+    let mut masked = manifest.clone();
+    let values = |map: Option<&mut Value>| {
+        if let Some(map) = map.and_then(Value::as_object_mut) {
+            for value in map.values_mut() {
+                *value = Value::from(KEPT_VALUE);
+            }
+        }
+    };
+    values(masked.get_mut("headers"));
+    for stream in masked
+        .get_mut("streams")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        values(stream.get_mut("query"));
+    }
+    masked
+}
+
+/// Puts the saved value back wherever the draft keeps a saved header or stream query key at
+/// [`KEPT_VALUE`]. A key the draft adds, and a value it changes, stay the model's.
+pub(crate) fn restore_kept(draft: &mut Value, saved: &Value) {
+    let restore = |draft: Option<&mut Value>, saved: Option<&Value>| {
+        let (Some(draft), Some(saved)) = (draft.and_then(Value::as_object_mut), saved) else {
+            return;
+        };
+        for (key, value) in draft {
+            if value.as_str() == Some(KEPT_VALUE)
+                && let Some(original) = saved.get(key)
+            {
+                *value = original.clone();
+            }
+        }
+    };
+    restore(draft.get_mut("headers"), saved.get("headers"));
+    let saved_streams = saved.get("streams").and_then(Value::as_array);
+    for stream in draft
+        .get_mut("streams")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let original = saved_streams.and_then(|streams| {
+            streams
+                .iter()
+                .find(|saved| saved.get("name") == stream.get("name"))
+        });
+        restore(
+            stream.get_mut("query"),
+            original.and_then(|stream| stream.get("query")),
+        );
+    }
+}
 
 /// A trait of the registry, as the model sees it.
 #[derive(Clone, Debug)]
@@ -253,7 +318,10 @@ pub(crate) fn render_manifest_context(context: &ManifestContext) -> Vec<Content>
         text.push_str(&format!("The source is named {name}.\n"));
     }
     match &context.saved_manifest {
-        Some(manifest) => text.push_str(&format!("Saved manifest: {manifest}\n")),
+        Some(manifest) => {
+            let masked = mask_manifest(manifest);
+            text.push_str(&format!("Saved manifest: {masked}\n"));
+        }
         None => text.push_str("No manifest is saved yet.\n"),
     }
     vec![Content::Schema(text)]
@@ -429,6 +497,44 @@ mod tests {
                 .filter(|part| !matches!(part, Content::Untrusted(_)))
                 .all(|part| !part.render().contains("ignore previous"))
         );
+    }
+
+    #[test]
+    fn a_masked_manifest_keeps_its_keys_and_hides_every_header_and_query_value() {
+        let saved = json!({
+            "version": "v1",
+            "headers": {"X-Api-Key": "SECRET", "X-A": "b"},
+            "streams": [
+                {"name": "a", "query": {"token": "SECRET", "limit": 10}},
+                {"name": "b"}
+            ]
+        });
+
+        let masked = mask_manifest(&saved);
+
+        assert_eq!(
+            masked,
+            json!({
+                "version": "v1",
+                "headers": {"X-Api-Key": "(kept)", "X-A": "(kept)"},
+                "streams": [
+                    {"name": "a", "query": {"token": "(kept)", "limit": "(kept)"}},
+                    {"name": "b"}
+                ]
+            })
+        );
+        let mut draft = masked.clone();
+        draft["headers"]["X-New"] = json!("fresh");
+        draft["headers"]["X-A"] = json!("changed");
+        draft["streams"][0]["query"]["extra"] = json!("(kept)");
+        restore_kept(&mut draft, &saved);
+        assert_eq!(draft["headers"]["X-Api-Key"], "SECRET");
+        assert_eq!(draft["headers"]["X-A"], "changed");
+        assert_eq!(draft["headers"]["X-New"], "fresh");
+        assert_eq!(draft["streams"][0]["query"]["token"], "SECRET");
+        assert_eq!(draft["streams"][0]["query"]["limit"], 10);
+        // A key the saved manifest never had has nothing to come back to.
+        assert_eq!(draft["streams"][0]["query"]["extra"], "(kept)");
     }
 
     #[test]

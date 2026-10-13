@@ -306,9 +306,14 @@ pub(crate) fn expected_call<'r>(response: &'r ChatResponse, want: &str) -> Optio
 /// call runs through the registry, as the signed-in user. Anything else, such as a call of a tool
 /// the model made up, is feedback and executes nothing. A refusal (403, 404, an outage) ends the
 /// run instead of becoming feedback.
+///
+/// A manifest draft gets the saved header and query values back first, wherever it kept the
+/// placeholder the model was shown in their place, so the validator, the diff and the stored
+/// draft all see the real manifest.
 async fn validate_turn(
     context: &ToolContext,
     kind: DraftKind,
+    saved: Option<&Value>,
     response: &ChatResponse,
 ) -> Verdict<Value, DraftIssue, ApiError> {
     let want = tool_name(kind);
@@ -319,7 +324,11 @@ async fn validate_turn(
     let Some(tool) = tools::find(want) else {
         return feedback();
     };
-    match tool.call(context, arguments).await {
+    let mut restored = arguments.clone();
+    if let (Some(saved), Some(draft)) = (saved, restored.get_mut("manifest")) {
+        prompt::restore_kept(draft, saved);
+    }
+    match tool.call(context, &restored).await {
         Ok(ToolOutput::Draft(draft)) => Verdict::Valid(draft),
         Ok(ToolOutput::Context(_)) => feedback(),
         Err(ToolError::Invalid(lines)) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
@@ -331,10 +340,11 @@ async fn validate_turn(
 fn turn<'a>(
     context: Arc<ToolContext>,
     kind: DraftKind,
+    saved: Arc<Option<Value>>,
     response: &'a ChatResponse,
 ) -> BoxFuture<'a, Verdict<Value, DraftIssue, ApiError>> {
     // The future owns the context: it may not borrow what lives shorter than the response.
-    Box::pin(async move { validate_turn(&context, kind, response).await })
+    Box::pin(async move { validate_turn(&context, kind, saved.as_ref().as_ref(), response).await })
 }
 
 /// The SHA-256 of a saved artifact's JSON.
@@ -589,11 +599,14 @@ pub(crate) async fn create(
     let id = Uuid::now_v7();
     let dispatcher = dispatcher.for_draft(id);
     let owned = Arc::clone(&context);
+    // Only a manifest has placeholders to restore.
+    let saved = saved_artifact(kind, stream.as_ref(), source.as_ref());
+    let restorable = Arc::new(saved.clone().filter(|_| kind == DraftKind::Manifest));
     let outcome = zirv_flow_ai::repair(
         state.ai.config.max_repair_attempts,
         &chat,
         &dispatcher,
-        move |response| turn(Arc::clone(&owned), kind, response),
+        move |response| turn(Arc::clone(&owned), kind, Arc::clone(&restorable), response),
     )
     .await;
 
@@ -602,7 +615,6 @@ pub(crate) async fn create(
     let (source_id, stream_name) = (request.source_id, request.stream.as_deref());
     let body = match outcome {
         Ok(RepairOutcome::Valid(content, attempts)) => {
-            let saved = saved_artifact(kind, stream.as_ref(), source.as_ref());
             let changes = diff::changes(saved.as_ref(), &content, keys(kind));
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
             zirv_flow_store::insert_ai_draft(

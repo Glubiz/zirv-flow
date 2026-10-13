@@ -636,6 +636,89 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_saved_header_and_query_value_never_reach_the_provider_and_come_back_in_the_draft(
+        pool: PgPool,
+    ) {
+        // The opt-in is on: a header value may be a secret, so it is not a matter of personal data.
+        let fx = setup(&pool, true, 100_000_000).await;
+        let port = serve_api().await;
+        let mut saved = manifest(port, &["id", "email"]);
+        saved["headers"] = json!({"X-Api-Key": "SECRET-HEADER-VALUE"});
+        saved["streams"][0]["query"] = json!({"token": "SECRET-QUERY-VALUE", "limit": 10});
+        let created = fx
+            .as_key(
+                "POST",
+                "/sources",
+                Some(
+                    json!({"kind": "http", "name": "API", "config": {"manifest": saved},
+                    "credential": {"token": "tok"}}),
+                ),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let source = created.body["id"].as_str().unwrap().to_owned();
+        // The model keeps the placeholders it was shown, adds a field and a new header.
+        let mut answer_manifest = saved.clone();
+        answer_manifest["headers"] = json!({"X-Api-Key": "(kept)", "X-Region": "eu"});
+        answer_manifest["streams"][0]["query"] = json!({"token": "(kept)", "limit": "(kept)"});
+        answer_manifest["streams"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "name", "type": "string"}));
+        let sent = fx.fake.call_count();
+        fx.fake.push(answer(
+            "draft_manifest",
+            json!({"manifest": answer_manifest}),
+        ));
+
+        let reply = fx
+            .draft(json!({"kind": "manifest", "source_id": source, "prompt": "Add the name field"}))
+            .await;
+
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        let requests = fx.requests_after(sent);
+        for request in &requests {
+            let text = everything(request);
+            assert!(!text.contains("SECRET-HEADER-VALUE"), "{text}");
+            assert!(!text.contains("SECRET-QUERY-VALUE"), "{text}");
+            assert!(text.contains("X-Api-Key"), "the key still shows");
+        }
+        let content = &reply.body["content"];
+        assert_eq!(content["headers"]["X-Api-Key"], "SECRET-HEADER-VALUE");
+        assert_eq!(content["headers"]["X-Region"], "eu");
+        assert_eq!(
+            content["streams"][0]["query"]["token"],
+            "SECRET-QUERY-VALUE"
+        );
+        assert_eq!(content["streams"][0]["query"]["limit"], 10);
+        let paths: Vec<&str> = reply.body["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["path"].as_str().unwrap())
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.contains("X-Api-Key") && !path.contains("query")),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"/streams/contacts/fields/name"),
+            "{paths:?}"
+        );
+        let id = reply.body["id"].as_str().unwrap().to_owned();
+        let accepted = fx.accept(&fx.admin, &id).await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(
+            accepted.body["content"]["headers"]["X-Api-Key"],
+            "SECRET-HEADER-VALUE"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_exhausted_draft_returns_its_issues_and_cannot_be_accepted(pool: PgPool) {
         let fx = setup(&pool, false, 100_000_000).await;
         let source = fx.pulled_source(json!({})).await;
