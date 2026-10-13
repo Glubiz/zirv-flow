@@ -1,14 +1,21 @@
 //! `sync.run`: reads one stream of a source and applies it to people (architecture sections
 //! 7.1, 7.2 and 14).
 //!
-//! The job has two shapes. A payload with only a `source_id` is a schedule firing: it queues a
+//! The job has three shapes. A payload with only a `source_id` is a schedule firing: it queues a
 //! run for every enabled, mapped stream of the source that has no active run. A payload with a
-//! `run_id` works one run: it reads the stream from the checkpoint, gathers the source's batches
+//! `stream_id` and no `run_id` is the firing of a stream's reconciliation schedule: it queues a
+//! reconciliation run of that stream if it is still eligible. A payload with a `run_id` works one
+//! run: it reads the stream from the checkpoint, gathers the source's batches
 //! into units of at least 500 records and commits each unit in ONE transaction of its own that
 //! applies the records, writes the rejects and the decisions and advances the checkpoint, fenced
 //! on the job's lease and on the run's state. The job's own transaction only holds the lease.
 //! A crash or a lost lease resumes from the run's checkpoint when the job is retried; cancelling
 //! the run stops it at the next unit.
+//!
+//! A full-refresh run and a reconciliation run end with the sweep: once the whole stream is read
+//! and committed, the live records of the stream that the run did not see are removed in bounded,
+//! fenced units (architecture 7.2), unless that would remove more than the stream's sweep limit.
+//! A reconciliation reads the stream from the beginning for its keys only and applies nothing.
 //!
 //! The credential is opened right before the source is read and dropped with it.
 //!
@@ -29,14 +36,18 @@ use zirv_flow_connectors::sources::{
     StreamSettingsInput, SyncMode, validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::mapping::{self, Header, Mapping, TraitState, reject_sample, validate_paths};
+use zirv_flow_core::mapping::{
+    self, Header, JsonRecord, Mapping, TraitState, reject_sample, validate_paths,
+};
 use zirv_flow_store::HmacKey;
 use zirv_flow_store::secrets::{self, OpenError};
 use zirv_flow_store::{
-    PgPool, ProfileRecord, RunEnd, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
-    SyncBatch, SyncBatchOutcome, SyncEvent, SyncLease, SyncReject, SyncUpsert, commit_sync_batch,
-    fail_run, find_source, find_stream_by_id, finish_run, list_trait_definitions,
-    queue_runs_for_source, run_trace, start_run,
+    PgPool, ProfileRecord, ReconcileQueued, RunEnd, SYNC_DELETE_BY_SIGNAL, SYNC_DELETE_BY_SOURCE,
+    SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream, SweepOutcome, SweepUnit,
+    SyncBatch, SyncBatchOutcome, SyncCounts, SyncEvent, SyncLease, SyncReject, SyncUpsert,
+    commit_sync_batch, fail_run, find_source, find_stream_by_id, finish_run,
+    list_trait_definitions, queue_reconcile_run, queue_runs_for_source, run_trace, start_run,
+    sweep_exceeds_limit, sweep_unreached,
 };
 
 use super::import_rows::Probe;
@@ -117,7 +128,10 @@ pub(super) async fn run_sync(
         .workspace_id()
         .ok_or(JobError::new("the sync job has no workspace"))?;
     if payload.get("run_id").is_none() {
-        return fan_out(ctx, workspace, source_id).await;
+        return match id_in(payload, "stream_id") {
+            Some(stream_id) => reconcile_firing(ctx, workspace, source_id, stream_id).await,
+            None => fan_out(ctx, workspace, source_id).await,
+        };
     }
     let run_id = id_in(payload, "run_id").ok_or(JobError::new("the payload has a bad run_id"))?;
     let stream_id =
@@ -186,6 +200,41 @@ async fn fan_out(
     Ok(())
 }
 
+/// A stream's reconciliation schedule fired: queues a reconciliation run of the stream. It
+/// re-checks that the source and the stream are still enabled and mapped and that the stream is
+/// incremental, since they may have changed since the slot was enqueued, and skips the firing
+/// when the stream has an active run. The run and its job commit with this job, so a retried
+/// firing queues one run.
+async fn reconcile_firing(
+    ctx: &mut JobContext<'_>,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream_id: Uuid,
+) -> Result<(), JobError> {
+    let queued = queue_reconcile_run(
+        ctx.conn(),
+        workspace,
+        source_id,
+        stream_id,
+        zirv_flow_store::RunTrigger::Schedule,
+        None,
+        true,
+    )
+    .await?;
+    match queued {
+        ReconcileQueued::Queued(run) => {
+            info!(run_id = %run.id, "reconciliation schedule fired");
+        }
+        ReconcileQueued::SkippedActive => {
+            info!(source_id = %source_id, "reconciliation schedule skipped: the stream has an active run");
+        }
+        ReconcileQueued::Ineligible => {
+            info!(source_id = %source_id, "reconciliation schedule fired for a stream that cannot reconcile");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct Ids {
     workspace: WorkspaceId,
@@ -222,18 +271,89 @@ struct Planner<'a> {
 #[derive(Default)]
 struct Planned {
     upserts: Vec<SyncUpsert>,
-    deleted: Vec<String>,
+    /// The keys to retract, each with why: the source said so, or the mapped delete field did.
+    deleted: Vec<(String, &'static str)>,
+    /// The keys of records that were read and still exist but are not applied: a
+    /// reconciliation's.
+    seen: Vec<String>,
     rejected: Vec<SyncReject>,
+    /// Records read in the unit that a later occurrence of the same key replaced.
+    duplicates: usize,
+}
+
+/// Keeps the last occurrence of each key, in source order: a unit may carry one key twice (a
+/// soft-deleted row and a live one), and the later state is the source's current answer, so a key
+/// is never both applied or seen and deleted, and never applied twice.
+fn last_occurrence_wins(records: Vec<Record>) -> (Vec<Record>, usize) {
+    let read = records.len();
+    let mut last: HashMap<&str, usize> = HashMap::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        last.insert(record.key.as_str(), index);
+    }
+    let keep: Vec<bool> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| last[record.key.as_str()] == index)
+        .collect();
+    drop(last);
+    let kept: Vec<Record> = records
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(record, keep)| keep.then_some(record))
+        .collect();
+    let dropped = read - kept.len();
+    (kept, dropped)
 }
 
 impl Planner<'_> {
+    /// Why `record` is deleted: the connector reported it, or the mapping's delete signal fires
+    /// on its cells. The signal is checked before the mapping runs, so a soft-deleted row is
+    /// never validated or rejected.
+    fn deletion(&self, record: &Record, cells: &JsonRecord) -> Option<&'static str> {
+        mapping::deletion(self.mapping, cells, record.deleted).map(|why| match why {
+            mapping::Deletion::Source => SYNC_DELETE_BY_SOURCE,
+            mapping::Deletion::Signal => SYNC_DELETE_BY_SIGNAL,
+        })
+    }
+
+    /// Reads `records` for a reconciliation: only which are deleted and which still exist. The
+    /// records are not mapped to profile records and nothing is rejected.
+    fn plan_keys(&self, records: Vec<Record>) -> Planned {
+        let (records, duplicates) = last_occurrence_wins(records);
+        let mut planned = Planned {
+            duplicates,
+            ..Planned::default()
+        };
+        for record in records {
+            let cells = JsonRecord::from_value_for_mapping(
+                &record.data,
+                self.mapping,
+                self.declared.iter().copied(),
+            );
+            match self.deletion(&record, &cells) {
+                Some(why) => planned.deleted.push((record.key, why)),
+                None => planned.seen.push(record.key),
+            }
+        }
+        planned
+    }
+
     /// Maps `records`: the accepted ones become profile records, the deleted ones keys to
     /// retract, and the others rejects with a masked sample.
     fn plan(&self, records: Vec<Record>) -> Planned {
-        let mut planned = Planned::default();
+        let (records, duplicates) = last_occurrence_wins(records);
+        let mut planned = Planned {
+            duplicates,
+            ..Planned::default()
+        };
         for record in records {
-            if record.deleted {
-                planned.deleted.push(record.key);
+            let cells = JsonRecord::from_value_for_mapping(
+                &record.data,
+                self.mapping,
+                self.declared.iter().copied(),
+            );
+            if let Some(why) = self.deletion(&record, &cells) {
+                planned.deleted.push((record.key, why));
                 continue;
             }
             let sample = || {
@@ -241,12 +361,9 @@ impl Planner<'_> {
                     reject_sample(self.mapping, &record.data, |key| self.plain.contains(key));
                 serde_json::json!({"properties": sample.properties, "masked": sample.masked})
             };
-            let mapped = mapping::map_json(
-                self.mapping,
-                &record.data,
-                self.declared.iter().copied(),
-                self.catalog,
-            );
+            // The cells read for the delete signal are the ones the mapping applies to: the
+            // same result as `map_json`, without reading the record twice.
+            let mapped = mapping::apply(self.mapping, &cells, self.catalog);
             match mapped {
                 Ok(mapped) => planned.upserts.push(SyncUpsert {
                     sample: sample(),
@@ -267,6 +384,7 @@ impl Planner<'_> {
                     },
                 }),
                 Err(errors) => planned.rejected.push(SyncReject {
+                    record_key: record.key,
                     reasons: errors
                         .into_iter()
                         .map(|error| (error.column, error.reason.as_str()))
@@ -357,6 +475,8 @@ struct Pass<'a> {
     started: Option<OffsetDateTime>,
     probe: &'a Probe,
     committed: usize,
+    /// The run is a reconciliation: it reads keys only and applies nothing.
+    reconcile: bool,
     /// Redacts the events' properties.
     redaction_key: Option<Arc<HmacKey>>,
 }
@@ -368,7 +488,11 @@ impl Pass<'_> {
         records: Vec<Record>,
         checkpoint: &Checkpoint,
     ) -> Result<Unit, Failure> {
-        let planned = self.planner.plan(records);
+        let planned = if self.reconcile {
+            self.planner.plan_keys(records)
+        } else {
+            self.planner.plan(records)
+        };
         let source = self.ids.source.to_string();
         let batch = SyncBatch {
             workspace: self.ids.workspace,
@@ -384,9 +508,12 @@ impl Pass<'_> {
             redaction_key: self.redaction_key.as_deref(),
             upserts: &planned.upserts,
             deleted: &planned.deleted,
+            seen: &planned.seen,
             rejected: &planned.rejected,
+            duplicates: planned.duplicates,
             checkpoint: &checkpoint.0,
-            incremental: self.stream.sync_mode == SyncMode::Incremental.as_str(),
+            // A reconciliation never moves the stream's cursor.
+            incremental: !self.reconcile && self.stream.sync_mode == SyncMode::Incremental.as_str(),
             singly: false,
         };
         self.probe.before_commit().await;
@@ -416,6 +543,66 @@ impl Pass<'_> {
                 info!(run_id = %self.ids.run, "sync run stopped: it is no longer running");
                 record_sync_run(RunOutcome::Cancelled, self.seconds());
                 Ok(Unit::Stop)
+            }
+        }
+    }
+
+    /// The sweep phase: refuses it when it would remove more than the stream's sweep limit,
+    /// then removes the unseen live records in bounded units until one comes back short.
+    async fn sweep(&mut self, source: &str, stream: &Stream) -> Result<Unit, Failure> {
+        if sweep_exceeds_limit(
+            self.pool,
+            self.ids.workspace,
+            self.ids.run,
+            source,
+            &stream.name,
+            stream.sweep_limit,
+        )
+        .await?
+        {
+            info!(run_id = %self.ids.run, "sync run refused to sweep: over the stream's sweep limit");
+            end_failed(self.pool, self.ids, "sweep_limit").await?;
+            return Ok(Unit::Stop);
+        }
+        let mut after = None;
+        loop {
+            self.probe.before_commit().await;
+            let unit = SweepUnit {
+                workspace: self.ids.workspace,
+                run_id: self.ids.run,
+                source,
+                stream: &stream.name,
+                job_id: self.job.0,
+                lease_token: self.job.1,
+                attempt: self.job.2,
+                trace: self.planner.trace,
+                after,
+            };
+            match sweep_unreached(self.pool, &unit).await? {
+                SweepOutcome::Swept {
+                    removed,
+                    last,
+                    more,
+                } => {
+                    record_sync_records(&SyncCounts {
+                        deleted: removed,
+                        ..SyncCounts::default()
+                    });
+                    self.committed += 1;
+                    if self.probe.stop_after == Some(self.committed) {
+                        return Err(Failure::job(JobError::new("stopped for a test")));
+                    }
+                    if !more {
+                        return Ok(Unit::Continue);
+                    }
+                    after = last;
+                }
+                SweepOutcome::LeaseLost => return Err(Failure::job(LEASE_LOST)),
+                SweepOutcome::Cancelled => {
+                    info!(run_id = %self.ids.run, "sync run stopped: it is no longer running");
+                    record_sync_run(RunOutcome::Cancelled, self.seconds());
+                    return Ok(Unit::Stop);
+                }
             }
         }
     }
@@ -519,12 +706,13 @@ async fn run_pass(
     };
 
     // A run resumes from its own checkpoint; an incremental stream starts from the cursor of
-    // the last run; a full refresh starts from the beginning.
+    // the last run; a full refresh and a reconciliation start from the beginning.
+    let reconcile = run.is_reconcile();
     let start = run
         .checkpoint
         .clone()
         .or_else(|| {
-            (mode == SyncMode::Incremental)
+            (mode == SyncMode::Incremental && !reconcile)
                 .then(|| stream.checkpoint.clone())
                 .flatten()
         })
@@ -554,6 +742,7 @@ async fn run_pass(
         started: run.started_at,
         probe,
         committed: 0,
+        reconcile,
         redaction_key,
     };
 
@@ -593,6 +782,14 @@ async fn run_pass(
     {
         return Ok(());
     }
+    // The read is complete and committed: a full refresh and a reconciliation now remove what
+    // the source no longer lists. Every other way out of the pass returned above, so a failed,
+    // cancelled or threshold-stopped run sweeps nothing.
+    if (reconcile || mode == SyncMode::FullRefresh)
+        && let Unit::Stop = pass.sweep(&source_text, &stream).await?
+    {
+        return Ok(());
+    }
     let seconds = pass.seconds();
     match finish_run(pool, ids.workspace, ids.run, ids.lease).await? {
         RunEnd::Ended => {
@@ -626,8 +823,8 @@ mod tests {
         Cause, Keyring, MasterKey, Slug, TraceContext, WorkspaceName, seal, secret_aad,
     };
     use zirv_flow_store::{
-        CancelOutcome, ClaimedJob, DiscoveredStream, NewSource, NewTraitDefinition, RunTrigger,
-        StreamSettings, apply_profile_batch, begin, cancel_run, claim_job, commit,
+        CancelOutcome, ClaimedJob, DiscoveredStream, NewSource, NewTraitDefinition, RunKind,
+        RunTrigger, StreamSettings, apply_profile_batch, begin, cancel_run, claim_job, commit,
         configure_stream, create_source, create_trait_definition, create_workspace, find_run,
         queue_run, set_stream_mapping, upsert_discovered_streams,
     };
@@ -659,6 +856,7 @@ mod tests {
             transforms: Vec::new(),
         };
         serde_json::to_value(Mapping {
+            delete_when: None,
             key_column: None,
             event: None,
             columns: vec![
@@ -773,6 +971,8 @@ mod tests {
                     cursor_field: cursor,
                     primary_key: &key,
                     staleness_threshold_seconds: None,
+                    reconcile_schedule: None,
+                    sweep_limit: 0.5,
                 },
             )
             .await
@@ -798,6 +998,7 @@ mod tests {
                 self.ws,
                 self.source,
                 self.stream,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 None,
             )
@@ -939,7 +1140,7 @@ mod tests {
             )
             .await
             .unwrap();
-            // A record the source no longer lists stays: nothing sweeps.
+            // A record the source no longer lists is swept when the read is complete.
             apply_profile_batch(
                 &pool,
                 env.ws,
@@ -955,6 +1156,9 @@ mod tests {
             )
             .await
             .unwrap();
+            // Both earlier records are gone after the run, which the default limit would refuse; this
+            // test is about the trail of a sweep, not the guard.
+            env.limit(1.0).await;
             env.queue().await
         };
 
@@ -973,7 +1177,7 @@ mod tests {
                 done.records_rejected,
                 done.records_deleted
             ),
-            (7, 5, 0, 1, 1)
+            (7, 5, 0, 1, 2)
         );
         assert!(done.finished_at.is_some());
         // One trace: every decision of the run carries it, the sync_run cause and no value.
@@ -997,7 +1201,18 @@ mod tests {
         };
         assert_eq!(count("sync.record", "applied"), 5);
         assert_eq!(count("sync.record", "rejected"), 1);
-        assert_eq!(count("contribution.removed", "removed"), 1);
+        assert_eq!(count("contribution.removed", "removed"), 2);
+        assert_eq!(count("sync.record", "deleted"), 2);
+        let reasons: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT reason FROM decision_records WHERE outcome = 'deleted' ORDER BY reason",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons,
+            [Some("source".to_owned()), Some("swept".to_owned())]
+        );
         let others: i64 = env
             .count("SELECT count(*) FROM decision_records WHERE cause_kind <> 'sync_run' AND cause_id <> 'seed'")
             .await;
@@ -1035,8 +1250,8 @@ mod tests {
                 .unwrap()
                 .contains(&json!("email"))
         );
-        // Seen records carry the run; the retracted one is gone from the live set; the stale
-        // one is untouched.
+        // Seen records carry the run; the retracted one and the stale one are gone from the live
+        // set.
         let seen: Vec<(String, Option<Uuid>)> = sqlx::query_as(
             "SELECT record_key, last_seen_run FROM source_records WHERE deleted_at IS NULL \
              ORDER BY record_key",
@@ -1048,7 +1263,6 @@ mod tests {
         assert_eq!(
             live,
             [
-                "stale",
                 "stream_1-0",
                 "stream_1-3",
                 "stream_1-4",
@@ -1057,7 +1271,7 @@ mod tests {
             ]
         );
         for (key, last_seen) in &seen {
-            assert_eq!(*last_seen == Some(run.id), key != "stale", "{key}");
+            assert_eq!(*last_seen, Some(run.id), "{key}");
         }
         // The job queue holds nothing back: the run finished in one attempt.
         assert_eq!(done.checkpoint, Some(json!({"offset": 7})));
@@ -1420,6 +1634,7 @@ mod tests {
                 env.ws,
                 env.source,
                 env.stream,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 None,
             )
@@ -1451,6 +1666,7 @@ mod tests {
             env.ws,
             env.source,
             streams[1].id,
+            RunKind::Sync,
             RunTrigger::Manual,
             None,
         )
@@ -1640,6 +1856,146 @@ mod tests {
         assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
         let (next, _) = env.queue().await;
         assert_ne!(next.id, run.id, "the stream takes a new run");
+    }
+
+    fn duplicate_planner<'a>(
+        mapping: &'a Mapping,
+        catalog: &'a HashMap<String, TraitState>,
+        plain: &'a HashSet<String>,
+        trace: &'a TraceContext,
+    ) -> Planner<'a> {
+        Planner {
+            mapping,
+            catalog,
+            plain,
+            declared: vec!["email", "name"],
+            source: "s",
+            stream: "stream_1",
+            observed_at: OffsetDateTime::now_utc(),
+            trace,
+        }
+    }
+
+    fn row(key: &str, email: &str, deleted: bool) -> Record {
+        Record {
+            key: key.into(),
+            data: json!({"email": email, "name": "n"}),
+            deleted,
+        }
+    }
+
+    /// The keys of a plan: (applied, deleted, rejected, seen).
+    fn shape(planned: &Planned) -> (Vec<&str>, Vec<&str>, Vec<&str>, Vec<&str>) {
+        (
+            planned
+                .upserts
+                .iter()
+                .map(|u| u.record.record_key.as_str())
+                .collect(),
+            planned.deleted.iter().map(|(k, _)| k.as_str()).collect(),
+            planned
+                .rejected
+                .iter()
+                .map(|r| r.record_key.as_str())
+                .collect(),
+            planned.seen.iter().map(String::as_str).collect(),
+        )
+    }
+
+    #[test]
+    fn the_last_occurrence_of_a_key_in_a_unit_wins() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
+
+        // Deleted, then live: the key stays live and is applied once.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", true),
+            row("b", "b@example.com", false),
+            row("a", "a@example.com", false),
+        ]);
+        assert_eq!(shape(&planned), (vec!["b", "a"], vec![], vec![], vec![]));
+        assert_eq!(planned.duplicates, 1, "a dropped duplicate was still read");
+
+        // Live, then deleted: the key is removed and not applied.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", false),
+            row("a", "a@example.com", false),
+            row("a", "a@example.com", true),
+        ]);
+        assert_eq!(shape(&planned), (vec![], vec!["a"], vec![], vec![]));
+
+        // Deleted, then rejected: the rejected key is kept and counted as seen, not deleted.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", true),
+            row("a", "not-an-email", false),
+        ]);
+        assert_eq!(shape(&planned), (vec![], vec![], vec!["a"], vec![]));
+
+        // Rejected, then live: the key is applied and not rejected.
+        let planned = planner.plan(vec![
+            row("a", "not-an-email", false),
+            row("a", "a@example.com", false),
+        ]);
+        assert_eq!(shape(&planned), (vec!["a"], vec![], vec![], vec![]));
+    }
+
+    #[test]
+    fn a_reconciliation_unit_keeps_the_last_occurrence_of_a_key_too() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
+
+        let planned = planner.plan_keys(vec![
+            row("a", "a@example.com", true),
+            row("a", "a@example.com", false),
+            row("b", "b@example.com", false),
+            row("b", "b@example.com", true),
+        ]);
+
+        assert_eq!(shape(&planned), (vec![], vec!["b"], vec![], vec!["a"]));
+        assert_eq!(planned.duplicates, 2);
+    }
+
+    #[test]
+    fn a_delete_signal_at_a_json_path_removes_the_record_instead_of_applying_it() {
+        let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        mapping.delete_when = Some(zirv_flow_core::mapping::DeleteWhen {
+            column: "meta.deleted".into(),
+            rule: zirv_flow_core::mapping::DeleteRule::Truthy,
+        });
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = Planner {
+            mapping: &mapping,
+            catalog: &catalog,
+            plain: &plain,
+            declared: vec!["email", "name", "meta"],
+            source: "s",
+            stream: "stream_1",
+            observed_at: OffsetDateTime::now_utc(),
+            trace: &trace,
+        };
+        let record = |key: &str, deleted: bool| Record {
+            key: key.into(),
+            data: json!({"email": "a@example.com", "meta": {"deleted": deleted}}),
+            deleted: false,
+        };
+
+        let planned = planner.plan(vec![record("gone", true), record("kept", false)]);
+
+        assert_eq!(
+            planned.deleted,
+            vec![("gone".to_owned(), SYNC_DELETE_BY_SIGNAL)]
+        );
+        assert_eq!(planned.upserts.len(), 1);
+        assert_eq!(planned.upserts[0].record.record_key, "kept");
+        assert!(planned.rejected.is_empty());
     }
 
     #[test]
@@ -1874,6 +2230,8 @@ mod tests {
                         cursor_field: cursor,
                         primary_key: &key,
                         staleness_threshold_seconds: None,
+                        reconcile_schedule: None,
+                        sweep_limit: 0.5,
                     },
                 )
                 .await
@@ -2161,6 +2519,837 @@ mod tests {
         }
     }
 
+    // ---- deletion: the sweep, the delete signal and reconciliation ----
+
+    impl Env {
+        /// Replaces the fake source's config.
+        async fn config(&self, config: Value) {
+            sqlx::query("UPDATE sources SET config = $1")
+                .bind(config)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+
+        async fn delete_signal(&self, column: &str, rule: zirv_flow_core::mapping::DeleteRule) {
+            let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+            mapping.delete_when = Some(zirv_flow_core::mapping::DeleteWhen {
+                column: column.into(),
+                rule,
+            });
+            set_stream_mapping(
+                &self.pool,
+                self.ws,
+                self.source,
+                "stream_1",
+                &serde_json::to_value(mapping).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn limit(&self, limit: f64) {
+            sqlx::query("UPDATE streams SET sweep_limit = $1")
+                .bind(limit)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+
+        /// Queues a run of `kind` and claims its job.
+        async fn queue_kind(&self, kind: RunKind) -> (zirv_flow_store::SyncRun, ClaimedJob) {
+            let mut connection = self.pool.acquire().await.unwrap();
+            let run = queue_run(
+                &mut connection,
+                self.ws,
+                self.source,
+                self.stream,
+                kind,
+                RunTrigger::Manual,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            drop(connection);
+            (run, self.claim().await)
+        }
+
+        /// Runs a whole run of `kind` in one attempt and returns it as it ended.
+        async fn finish(&self, kind: RunKind) -> zirv_flow_store::SyncRun {
+            let (run, job) = self.queue_kind(kind).await;
+            attempt(self, &job, &Probe::default()).await.unwrap();
+            self.run(run.id).await
+        }
+
+        async fn count_dyn(&self, sql: String) -> i64 {
+            sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+
+        async fn live_keys(&self) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT record_key FROM source_records WHERE deleted_at IS NULL ORDER BY record_key",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// An event of the record's person, linked to the record when `linked`.
+        async fn event_of(&self, key: &str, linked: bool) {
+            let (record, person): (Uuid, Uuid) =
+                sqlx::query_as("SELECT id, person_id FROM source_records WHERE record_key = $1")
+                    .bind(key)
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap();
+            sqlx::query(
+                "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                    source, trace_id, validation_state, source_record_id) \
+                 VALUES ($1, $2, $3, 'seen', now(), now(), 'web', $4, 'valid', $5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(self.ws.as_uuid())
+            .bind(person)
+            .bind(Uuid::now_v7())
+            .bind(linked.then_some(record))
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        async fn deletions(&self, run: &zirv_flow_store::SyncRun) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT reason FROM decision_records \
+                 WHERE outcome = 'deleted' AND cause_id = $1 ORDER BY reason, id",
+            )
+            .bind(run.id.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+    }
+
+    fn keys(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|n| format!("stream_1-{n}")).collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_refresh_sweeps_the_records_the_source_dropped_with_their_events(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        let first = env.finish(RunKind::Sync).await;
+        assert_eq!(first.state, "succeeded");
+        // Two records will be dropped, each with a linked event; a first-party event of a
+        // dropped record's person and a linked event of a kept record stay.
+        env.event_of("stream_1-3", true).await;
+        env.event_of("stream_1-4", true).await;
+        env.event_of("stream_1-4", false).await;
+        env.event_of("stream_1-0", true).await;
+        env.config(json!({"records": 3})).await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(
+            (
+                second.records_read,
+                second.records_applied,
+                second.records_unchanged,
+                second.records_deleted
+            ),
+            (3, 0, 3, 2)
+        );
+        assert_eq!(env.live_keys().await, keys(0..3));
+        let tombstoned: Vec<String> = sqlx::query_scalar(
+            "SELECT record_key FROM source_records WHERE deleted_at IS NOT NULL ORDER BY record_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstoned, keys(3..5));
+        // The kept records were seen by the second run, so the sweep left them alone.
+        let seen: i64 = env
+            .count_dyn(format!(
+                "SELECT count(*) FROM source_records WHERE deleted_at IS NULL AND last_seen_run = '{}'",
+                second.id
+            ))
+            .await;
+        assert_eq!(seen, 3);
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 2);
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE source_record_id IS NULL")
+                .await,
+            1
+        );
+        // Both removals are decisions of the run's trace and cause, next to the store's own.
+        let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+            "SELECT trace_id, cause_kind, cause_id, reason FROM decision_records \
+             WHERE outcome = 'deleted' AND cause_id = $1",
+        )
+        .bind(second.id.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| { row.0 == second.trace_id && row.1 == "sync_run" && row.3 == "swept" })
+        );
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+            )
+            .await,
+            2
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_removes_the_sync_written_event_of_a_dropped_record_and_no_other(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        mapping.event = Some(zirv_flow_core::mapping::EventRule {
+            name: "synced".into(),
+            timestamp: None,
+            properties: Vec::new(),
+        });
+        set_stream_mapping(
+            &pool,
+            env.ws,
+            env.source,
+            "stream_1",
+            &serde_json::to_value(mapping).unwrap(),
+        )
+        .await
+        .unwrap();
+        let key = redaction_key();
+        let (first, job) = env.queue_kind(RunKind::Sync).await;
+        attempt_file(&env, &job, &Probe::default(), false, Some(Arc::clone(&key)))
+            .await
+            .unwrap();
+        assert_eq!(env.run(first.id).await.state, "succeeded");
+        // Every sync-written event names the ledger row of its record.
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
+                 WHERE e.person_id = r.person_id"
+            )
+            .await,
+            5
+        );
+        // A first-party event of the person of the record that will be dropped.
+        env.event_of("stream_1-4", false).await;
+        env.config(json!({"records": 4})).await;
+
+        let (second, job) = env.queue_kind(RunKind::Sync).await;
+        attempt_file(&env, &job, &Probe::default(), false, Some(key))
+            .await
+            .unwrap();
+
+        let second = env.run(second.id).await;
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(second.records_deleted, 1);
+        assert_eq!(env.live_keys().await, keys(0..4));
+        // The dropped record's own event went; the other four and the first-party one stay.
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE source_record_id IS NULL")
+                .await,
+            1
+        );
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
+                 WHERE r.deleted_at IS NOT NULL"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_that_fails_on_the_source_sweeps_nothing(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        // The second read fails after its first batch, before anything is committed.
+        env.config(json!({"records": 5, "batch": 2, "fail_after_batches": 1}))
+            .await;
+        let (run, job) = env.queue_kind(RunKind::Sync).await;
+        let last = ClaimedJob {
+            attempts: job.max_attempts,
+            ..job
+        };
+
+        let result = attempt(&env, &last, &Probe::default()).await;
+
+        assert!(result.is_err());
+        let failed = env.run(run.id).await;
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        assert_eq!(env.live_keys().await, keys(0..5));
+        assert_eq!(failed.records_deleted, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_cancelled_mid_stream_sweeps_nothing(pool: PgPool) {
+        let env = setup(
+            &pool,
+            json!({"records": 1000, "batch": 100}),
+            "full_refresh",
+        )
+        .await;
+        env.finish(RunKind::Sync).await;
+        // The second run is cancelled after its first unit: the 500 records it did not reach are
+        // unseen, and stay live because the run never sweeps.
+        let (run, job) = env.queue_kind(RunKind::Sync).await;
+        let cancelling = hook({
+            let pool = pool.clone();
+            let (ws, source, run_id) = (env.ws, env.source, run.id);
+            move |call| {
+                let pool = pool.clone();
+                Box::pin(async move {
+                    if call == 2 {
+                        let mut connection = pool.acquire().await.unwrap();
+                        cancel_run(&mut connection, ws, source, run_id)
+                            .await
+                            .unwrap();
+                    }
+                })
+            }
+        });
+
+        attempt(&env, &job, &cancelling).await.unwrap();
+
+        let done = env.run(run.id).await;
+        assert_eq!(done.state, "cancelled");
+        assert_eq!(done.records_deleted, 0);
+        assert_eq!(env.live_keys().await.len(), 1000);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_stopped_by_the_reject_threshold_sweeps_nothing(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 600, "batch": 100}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        let invalid: Vec<usize> = (0..60).collect();
+        env.config(json!({"records": 600, "batch": 100, "invalid": ids(&invalid)}))
+            .await;
+
+        let failed = env.finish(RunKind::Sync).await;
+
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("reject_threshold"));
+        // The run stopped after the first unit, so 100 records were never reached; all 600 are
+        // live, rejected ones included.
+        assert_eq!(env.live_keys().await.len(), 600);
+        assert_eq!(failed.records_deleted, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_the_mapping_rejects_keeps_its_earlier_contribution(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        // Records 1 and 2 now come with a bad email: the mapping rejects them, but they still
+        // exist in the source.
+        env.config(json!({"records": 5, "invalid": "1,2"})).await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(second.records_rejected, 2);
+        assert_eq!(second.records_deleted, 0);
+        assert_eq!(env.live_keys().await, keys(0..5));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_incremental_run_never_sweeps(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        // The source now lists fewer records and the cursor sits past them: an incremental
+        // stream cannot tell dropped from unchanged.
+        env.config(json!({"records": 3})).await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.state, "succeeded");
+        assert_eq!((second.records_read, second.records_deleted), (0, 0));
+        assert_eq!(env.live_keys().await, keys(0..5));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_truthy_delete_signal_removes_a_flagged_record_even_if_it_is_malformed(
+        pool: PgPool,
+    ) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
+            .await;
+        // Records 1 and 3 are soft-deleted, and 1 also has a bad email: it is removed, not
+        // rejected, because the signal is read before the mapping runs.
+        env.config(json!({"records": 5, "soft_deleted": "1,3", "invalid": "1"}))
+            .await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(
+            (
+                second.records_read,
+                second.records_unchanged,
+                second.records_rejected,
+                second.records_deleted
+            ),
+            (5, 3, 0, 2)
+        );
+        let mut expected = keys(0..5);
+        expected.retain(|key| key != "stream_1-1" && key != "stream_1-3");
+        assert_eq!(env.live_keys().await, expected);
+        assert_eq!(env.deletions(&second).await, ["signal", "signal"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_present_delete_signal_removes_a_record_with_a_deleted_at_value(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 4}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        env.delete_signal("deleted_at", zirv_flow_core::mapping::DeleteRule::Present)
+            .await;
+        // An incremental stream re-reads from its cursor, which the fake ignores here: reset it
+        // so the run reads everything, and soft-delete record 2.
+        sqlx::query("UPDATE streams SET checkpoint = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        env.config(json!({"records": 4, "soft_deleted": "2"})).await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.records_deleted, 1);
+        let mut expected = keys(0..4);
+        expected.retain(|key| key != "stream_1-2");
+        assert_eq!(env.live_keys().await, expected);
+        assert_eq!(env.deletions(&second).await, ["signal"]);
+        // A soft-deleted record that was never synced is simply not applied.
+        env.config(json!({"records": 4, "soft_deleted": "2"})).await;
+        sqlx::query("UPDATE streams SET checkpoint = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let third = env.finish(RunKind::Sync).await;
+        assert_eq!((third.records_deleted, third.records_unchanged), (0, 4));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_connector_delete_flag_still_removes_with_the_reason_source(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 3}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        env.config(json!({"records": 3, "deleted": "0"})).await;
+
+        let second = env.finish(RunKind::Sync).await;
+
+        assert_eq!(second.records_deleted, 1);
+        assert_eq!(env.deletions(&second).await, ["source"]);
+        assert_eq!(env.live_keys().await, keys(1..3));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconciliation_removes_the_missing_record_applies_nothing_and_keeps_the_cursor(
+        pool: PgPool,
+    ) {
+        let env = setup(&pool, json!({"records": 5}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        let cursor: Option<Value> = sqlx::query_scalar("SELECT checkpoint FROM streams")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cursor, Some(json!({"offset": 5})));
+        // The source lost two records: a reconciliation lists keys only and applies nothing.
+        env.config(json!({"records": 3, "batch": 2})).await;
+
+        let reconcile = env.finish(RunKind::Reconcile).await;
+
+        assert_eq!(reconcile.state, "succeeded");
+        assert_eq!(reconcile.run_kind, "reconcile");
+        // It read from the beginning although the stream's cursor is at the end.
+        assert_eq!(reconcile.records_read, 3);
+        assert_eq!(
+            (reconcile.records_applied, reconcile.records_rejected),
+            (0, 0)
+        );
+        assert_eq!(reconcile.records_deleted, 2);
+        assert_eq!(env.live_keys().await, keys(0..3));
+        let seen = env
+            .count_dyn(format!(
+                "SELECT count(*) FROM source_records WHERE deleted_at IS NULL AND last_seen_run = '{}'",
+                reconcile.id
+            ))
+            .await;
+        assert_eq!(seen, 3, "the keys it listed are marked seen");
+        let after: Option<Value> = sqlx::query_scalar("SELECT checkpoint FROM streams")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, cursor, "a reconciliation never moves the cursor");
+        assert_eq!(env.deletions(&reconcile).await, ["swept", "swept"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconciliation_honours_the_delete_signal_and_the_connector_flag(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
+            .await;
+        env.config(json!({"records": 5, "soft_deleted": "1", "deleted": "2"}))
+            .await;
+
+        let reconcile = env.finish(RunKind::Reconcile).await;
+
+        assert_eq!(reconcile.records_deleted, 2);
+        assert_eq!(env.deletions(&reconcile).await, ["signal", "source"]);
+        let mut expected = keys(0..5);
+        expected.retain(|key| key != "stream_1-1" && key != "stream_1-2");
+        assert_eq!(env.live_keys().await, expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_crash_mid_sweep_resumes_and_removes_each_record_once(pool: PgPool) {
+        let env = setup(
+            &pool,
+            json!({"records": 450, "batch": 1000}),
+            "full_refresh",
+        )
+        .await;
+        env.finish(RunKind::Sync).await;
+        // 350 of 450 are dropped, which only a raised limit allows.
+        env.limit(1.0).await;
+        env.config(json!({"records": 100, "batch": 1000})).await;
+        let (run, job) = env.queue_kind(RunKind::Sync).await;
+
+        // The attempt dies after the read unit and the first sweep unit of 200.
+        let first = attempt(
+            &env,
+            &job,
+            &Probe {
+                stop_after: Some(2),
+                before_commit: None,
+            },
+        )
+        .await;
+        assert!(first.is_err());
+        let mid = env.run(run.id).await;
+        assert_eq!((mid.state.as_str(), mid.records_deleted), ("running", 200));
+
+        attempt(&env, &job, &Probe::default()).await.unwrap();
+
+        let done = env.run(run.id).await;
+        assert_eq!(done.state, "succeeded");
+        assert_eq!(done.records_deleted, 350);
+        assert_eq!(env.live_keys().await.len(), 100);
+        assert_eq!(env.deletions(&done).await.len(), 350);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+            )
+            .await,
+            350
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cancel_arriving_before_a_sweep_unit_removes_nothing(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 10}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        env.config(json!({"records": 6})).await;
+        let (run, job) = env.queue_kind(RunKind::Sync).await;
+        let cancelling = hook({
+            let pool = pool.clone();
+            let (ws, source, run_id) = (env.ws, env.source, run.id);
+            move |call| {
+                let pool = pool.clone();
+                Box::pin(async move {
+                    // Call 1 is the read unit; call 2 is just before the first sweep unit.
+                    if call == 2 {
+                        let mut connection = pool.acquire().await.unwrap();
+                        cancel_run(&mut connection, ws, source, run_id)
+                            .await
+                            .unwrap();
+                    }
+                })
+            }
+        });
+
+        attempt(&env, &job, &cancelling).await.unwrap();
+
+        let done = env.run(run.id).await;
+        assert_eq!(done.state, "cancelled");
+        assert_eq!(done.records_deleted, 0);
+        assert_eq!(env.live_keys().await.len(), 10);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_over_the_streams_limit_removes_nothing_and_fails_the_run(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        // Three of four records are gone: 75% is over the default 50%.
+        env.config(json!({"records": 1})).await;
+
+        let refused = env.finish(RunKind::Sync).await;
+
+        assert_eq!(refused.state, "failed");
+        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+        assert_eq!(refused.records_deleted, 0);
+        assert!(refused.finished_at.is_some());
+        assert_eq!(env.live_keys().await, keys(0..4));
+
+        // An admin who raises the limit to 1 authorizes it, and the next run removes them.
+        env.limit(1.0).await;
+        let allowed = env.finish(RunKind::Sync).await;
+        assert_eq!(allowed.state, "succeeded");
+        assert_eq!(allowed.records_deleted, 3);
+        assert_eq!(env.live_keys().await, keys(0..1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_primary_key_is_refused_by_the_limit_and_removes_nothing(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        // The source now names the same four records by new keys: the ledger's old keys stay
+        // behind as four unseen rows next to the four the run inserts and sees.
+        sqlx::query("UPDATE source_records SET record_key = 'old-' || record_key")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let refused = env.finish(RunKind::Sync).await;
+
+        assert_eq!(refused.state, "failed");
+        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+        assert_eq!(refused.records_deleted, 0);
+        assert_eq!(env.live_keys().await.len(), 8);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_read_of_nothing_over_live_records_is_refused_and_a_drop_at_the_limit_sweeps(
+        pool: PgPool,
+    ) {
+        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        env.config(json!({"records": 0})).await;
+
+        let empty = env.finish(RunKind::Sync).await;
+
+        assert_eq!(empty.state, "failed");
+        assert_eq!(empty.error_code.as_deref(), Some("sweep_limit"));
+        assert_eq!(env.live_keys().await, keys(0..4));
+
+        // Exactly at the limit (2 of 4 at 50%) sweeps.
+        env.config(json!({"records": 2})).await;
+        let at_limit = env.finish(RunKind::Sync).await;
+        assert_eq!(at_limit.state, "succeeded");
+        assert_eq!(at_limit.records_deleted, 2);
+        assert_eq!(env.live_keys().await, keys(0..2));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconciliation_over_the_limit_removes_nothing_either(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 4}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        env.config(json!({"records": 1})).await;
+
+        let refused = env.finish(RunKind::Reconcile).await;
+
+        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+        assert_eq!(env.live_keys().await, keys(0..4));
+    }
+
+    /// The payload the scheduler enqueues for a stream's reconciliation schedule.
+    async fn fire_reconcile(env: &Env, slot: i64) -> ClaimedJob {
+        let mut job = zirv_flow_store::NewJob::new(
+            SYNC_RUN_JOB_KIND,
+            TraceContext::root(Cause::schedule(Uuid::now_v7())),
+        );
+        job.workspace_id = Some(env.ws);
+        job.payload = json!({"source_id": env.source, "stream_id": env.stream, "reconcile": true});
+        job.unique_key = Some(format!("reconcile:test:{slot}"));
+        zirv_flow_store::enqueue(&env.pool, &job).await.unwrap();
+        loop {
+            let claimed = env.claim().await;
+            if claimed.payload.get("run_id").is_none() {
+                return claimed;
+            }
+            sqlx::query("UPDATE jobs SET state = 'ready', lease_token = NULL, lease_expires_at = NULL, locked_by = NULL, run_at = now() + interval '1 hour' WHERE id = $1")
+                .bind(claimed.id)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconcile_schedule_firing_queues_one_run_and_skips_an_active_one(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "incremental").await;
+        let fired = fire_reconcile(&env, 1).await;
+
+        attempt_as(&env, &fired, &Probe::default(), None, true)
+            .await
+            .unwrap();
+
+        let runs: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT run_kind, trigger, state FROM sync_runs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            runs,
+            [(
+                "reconcile".to_owned(),
+                "schedule".to_owned(),
+                "queued".to_owned()
+            )]
+        );
+        // The queued run has its own job under the run's trace; the next firing skips it.
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind = 'sync.run' AND payload ? 'run_id'")
+                .await,
+            1
+        );
+        let again = fire_reconcile(&env, 2).await;
+        attempt_as(&env, &again, &Probe::default(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconcile_schedule_firing_queues_nothing_for_what_cannot_reconcile(pool: PgPool) {
+        // A full-refresh stream, a disabled stream and a disabled source are all left alone.
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        let fired = fire_reconcile(&env, 1).await;
+        attempt_as(&env, &fired, &Probe::default(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+
+        sqlx::query("UPDATE streams SET sync_mode = 'incremental', cursor_field = 'updated_at'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fired = fire_reconcile(&env, 2).await;
+        attempt_as(&env, &fired, &Probe::default(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+
+        sqlx::query("UPDATE streams SET enabled = true")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sources SET enabled = false")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fired = fire_reconcile(&env, 3).await;
+        attempt_as(&env, &fired, &Probe::default(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_fires_a_streams_reconcile_schedule_and_the_worker_reconciles(pool: PgPool) {
+        use crate::{Scheduler, SchedulerConfig, Worker, WorkerConfig};
+
+        let env = setup(&pool, json!({"records": 5}), "incremental").await;
+        env.finish(RunKind::Sync).await;
+        env.config(json!({"records": 3})).await;
+        let mut tx = begin(&pool).await.unwrap();
+        zirv_flow_store::sync_reconcile_schedule(
+            &mut tx,
+            env.ws,
+            env.source,
+            env.stream,
+            Some("* * * * *"),
+            true,
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        // The first run's job is claimed and abandoned; free the stream's slot is not needed as
+        // it succeeded. Make the slot due.
+        sqlx::query("UPDATE schedules SET next_run_at = now() - interval '1 minute'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
+        leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
+
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let worker = Worker::new(
+            pool.clone(),
+            crate::Registry::built_in(),
+            WorkerConfig::new(2),
+        );
+        let handle = tokio::spawn(worker.run(stopped));
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let states: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT run_kind, trigger, state FROM sync_runs WHERE trigger = 'schedule'",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if states
+                == [(
+                    "reconcile".to_owned(),
+                    "schedule".to_owned(),
+                    "succeeded".to_owned(),
+                )]
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out: {states:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        stop.send(true).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(env.live_keys().await, keys(0..3));
+    }
+
     // The file source end to end: a real `file` source against a local server.
 
     use std::collections::HashMap;
@@ -2386,6 +3575,8 @@ mod tests {
                 cursor_field: None,
                 primary_key: &key,
                 staleness_threshold_seconds: None,
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
             },
         )
         .await

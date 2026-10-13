@@ -14,6 +14,8 @@ interface StreamsPanelProps {
   onChanged: (stream: Stream) => void;
   /** Starts a run of one stream; without it the table offers no run. */
   onRun?: (stream: Stream) => void;
+  /** Starts a reconciliation of one incremental stream; without it the table offers none. */
+  onReconcile?: (stream: Stream) => void;
   busy?: boolean;
 }
 
@@ -25,7 +27,7 @@ function stalenessCell(stream: Stream): string {
 }
 
 /** The streams of a source with their settings; admins set each one up in a dialog. */
-export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, busy }: StreamsPanelProps) {
+export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, busy }: StreamsPanelProps) {
   const [editing, setEditing] = useState<Stream | null>(null);
   const [mapping, setMapping] = useState<Stream | null>(null);
 
@@ -84,6 +86,15 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                     {onRun && stream.enabled && stream.mapping ? (
                       <Button onClick={() => onRun(stream)} disabled={busy === true} aria-label={`Run ${stream.name} now`}>
                         Run now
+                      </Button>
+                    ) : null}
+                    {onReconcile && stream.enabled && stream.mapping && stream.sync_mode === "incremental" ? (
+                      <Button
+                        onClick={() => onReconcile(stream)}
+                        disabled={busy === true}
+                        aria-label={`Reconcile ${stream.name} now`}
+                      >
+                        Reconcile now
                       </Button>
                     ) : null}
                     <Button onClick={() => setMapping(stream)} aria-label={`Map ${stream.name}`}>

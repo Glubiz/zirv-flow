@@ -81,15 +81,19 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
     });
 
   /** Starts a run of one stream, or of every enabled stream that has a mapping. */
-  const startRuns = (stream: string | null) =>
+  const startRuns = (stream: string | null, kind: "sync" | "reconcile" = "sync") =>
     run(async () => {
       const started = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/sources/{id}/runs", {
           params: { path: { ws: workspaceId, id: sourceId } },
-          body: stream === null ? {} : { stream },
+          body: stream === null ? {} : kind === "reconcile" ? { stream, kind } : { stream },
         }),
       );
-      setNotice(`Started ${plural(started.length, "run", "runs")}.`);
+      setNotice(
+        kind === "reconcile"
+          ? "Started a reconciliation."
+          : `Started ${plural(started.length, "run", "runs")}.`,
+      );
       setRunsVersion((value) => value + 1);
     });
 
@@ -179,6 +183,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                         canManage={canManage}
                         onChanged={streamChanged}
                         onRun={(stream) => void startRuns(stream.name)}
+                        onReconcile={(stream) => void startRuns(stream.name, "reconcile")}
                         busy={busy}
                       />
                       {canManage ? (

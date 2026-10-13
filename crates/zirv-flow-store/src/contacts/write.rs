@@ -401,7 +401,10 @@ pub async fn delete_contact(
     if let Some(replay) = begin_write(&mut savepoint, workspace, key, idempotency).await? {
         return Ok(replay);
     }
-    if !remove_contribution_in(&mut savepoint, workspace, SOURCE, STREAM, key, trace).await? {
+    if remove_contribution_in(&mut savepoint, workspace, SOURCE, STREAM, key, trace)
+        .await?
+        .is_none()
+    {
         return Err(WriteError::NotFound);
     }
     remember(&mut savepoint, workspace, idempotency, 204).await?;

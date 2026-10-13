@@ -170,11 +170,43 @@ pub(crate) struct MappingBody {
     /// The one event each record yields. Sync runs only: a CSV import refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) event: Option<EventRuleBody>,
+    /// The column that marks a record as deleted in its source. Only a synced stream takes it; a
+    /// CSV import refuses a mapping with one. A record whose cell satisfies the rule is removed
+    /// instead of applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delete_when: Option<DeleteWhenBody>,
+}
+
+/// The delete signal of a synced stream: a column and how its cell is read.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteWhenBody {
+    /// A field of the stream.
+    column: String,
+    /// How the cell is read; `truthy` when absent.
+    #[serde(default)]
+    rule: DeleteRuleBody,
+}
+
+/// How a delete column's cell is read.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeleteRuleBody {
+    /// A flag: `true`, `1`, `yes`, `x` and so on. A cell that is not a flag is not a delete.
+    #[default]
+    Truthy,
+    /// A timestamp or any other value: a non-empty cell is a delete.
+    Present,
 }
 
 impl MappingBody {
     pub(crate) fn from_core(mapping: &Mapping) -> Option<Self> {
         serde_json::from_value(serde_json::to_value(mapping).ok()?).ok()
+    }
+
+    /// Whether the mapping names a delete signal.
+    pub(crate) fn has_delete_signal(&self) -> bool {
+        self.delete_when.is_some()
     }
 
     pub(crate) fn to_core(&self) -> Result<Mapping, ApiError> {
@@ -424,6 +456,34 @@ mod tests {
         assert_eq!(
             transition_error(TransitionError::NotFound).status(),
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn a_delete_signal_round_trips_defaults_to_truthy_and_is_reported() {
+        let value = json!({
+            "columns": [{"column": "a", "target": {"type": "ignore"}, "transforms": []}],
+            "delete_when": {"column": "gone", "rule": "truthy"}
+        });
+        let body: MappingBody = serde_json::from_value(json!({
+            "columns": [{"column": "a", "target": {"type": "ignore"}}],
+            "delete_when": {"column": "gone"}
+        }))
+        .unwrap();
+
+        let core = body.to_core().unwrap();
+        let back = MappingBody::from_core(&core).unwrap();
+
+        assert!(body.has_delete_signal());
+        assert_eq!(
+            serde_json::to_value(&back).unwrap()["delete_when"],
+            value["delete_when"]
+        );
+        assert!(
+            serde_json::from_value::<MappingBody>(json!({
+                "columns": [], "delete_when": {"column": "x", "rule": "regex"}
+            }))
+            .is_err()
         );
     }
 

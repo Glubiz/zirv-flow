@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::json_record::JsonRecord;
-use super::model::{EventRule, Mapping, Target, Transform};
+use super::model::{DeleteRule, EventRule, Mapping, Target, Transform};
 use super::transform::{apply_transform, cast, into_json, parse_flag, sql_timestamp};
 use super::validate::{TraitCatalog, TraitState};
 use crate::people::{Identifier, TraitType, TraitValue, coerce};
@@ -237,6 +237,43 @@ pub fn apply(
         Ok(mapped)
     } else {
         Err(errors)
+    }
+}
+
+/// Whether the mapping's delete signal marks `row` as deleted. False without a signal, for a
+/// column the row lacks and for an empty cell. Never returns the cell.
+pub fn is_deleted(mapping: &Mapping, row: &dyn Cells) -> bool {
+    let Some(signal) = &mapping.delete_when else {
+        return false;
+    };
+    let Some(cell) = row.cell(&signal.column) else {
+        return false;
+    };
+    match signal.rule {
+        DeleteRule::Truthy => parse_flag(cell) == Some(true),
+        DeleteRule::Present => !cell.trim().is_empty(),
+    }
+}
+
+/// Why a record of a stream is removed instead of applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Deletion {
+    /// The connector reported it deleted.
+    Source,
+    /// The mapping's delete signal fires on its cells.
+    Signal,
+}
+
+/// Whether a record is deleted: the connector said so, or the mapping's delete signal fires on
+/// `cells`. A sync run and the preview both ask this before they map, so a soft-deleted row is
+/// never validated or rejected.
+pub fn deletion(mapping: &Mapping, cells: &dyn Cells, source_deleted: bool) -> Option<Deletion> {
+    if source_deleted {
+        Some(Deletion::Source)
+    } else if is_deleted(mapping, cells) {
+        Some(Deletion::Signal)
+    } else {
+        None
     }
 }
 
@@ -479,6 +516,7 @@ mod tests {
             key_column: None,
             event: None,
             columns,
+            delete_when: None,
         }
     }
 
@@ -486,6 +524,7 @@ mod tests {
     fn a_row_becomes_identifiers_traits_and_lists() {
         let list = Uuid::now_v7();
         let mapping = Mapping {
+            delete_when: None,
             key_column: Some("id".into()),
             event: None,
             columns: vec![
@@ -1030,5 +1069,109 @@ mod tests {
             Err(HeaderError::Blank)
         );
         assert!(Header::new(vec!["a".into(), "A".into()]).is_ok());
+    }
+
+    fn signalled(rule: DeleteRule) -> Mapping {
+        Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "gone".into(),
+                rule,
+            }),
+            ..mapping(vec![email("Email")])
+        }
+    }
+
+    fn deleted(mapping: &Mapping, names: &[&str], values: &[&str]) -> bool {
+        let header = header(names);
+        let values = cells(values);
+        is_deleted(
+            mapping,
+            &CsvRow {
+                header: &header,
+                cells: &values,
+            },
+        )
+    }
+
+    #[test]
+    fn the_truthy_rule_deletes_on_a_flag_and_on_nothing_else() {
+        let mapping = signalled(DeleteRule::Truthy);
+        for yes in ["true", "1", "yes", " X "] {
+            assert!(deleted(&mapping, &["Email", "gone"], &["a", yes]), "{yes}");
+        }
+        for no in ["false", "0", "", "maybe", "2026-01-01"] {
+            assert!(!deleted(&mapping, &["Email", "gone"], &["a", no]), "{no}");
+        }
+    }
+
+    #[test]
+    fn the_present_rule_deletes_on_any_non_empty_cell() {
+        let mapping = signalled(DeleteRule::Present);
+        assert!(deleted(
+            &mapping,
+            &["Email", "gone"],
+            &["a", "2026-01-01T00:00:00Z"]
+        ));
+        assert!(deleted(&mapping, &["Email", "gone"], &["a", "false"]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a", ""]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a", "  "]));
+    }
+
+    #[test]
+    fn without_a_signal_or_a_column_nothing_is_deleted() {
+        assert!(!deleted(
+            &mapping(vec![email("Email")]),
+            &["Email", "gone"],
+            &["a", "true"]
+        ));
+        let mapping = signalled(DeleteRule::Truthy);
+        assert!(!deleted(&mapping, &["Email"], &["a"]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a"]));
+    }
+
+    #[test]
+    fn a_delete_signal_may_be_a_path_into_a_json_record() {
+        let mapping = Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "meta.deleted".into(),
+                rule: DeleteRule::Truthy,
+            }),
+            ..mapping(vec![email("email")])
+        };
+        let read = |data: Value| {
+            let object = data.as_object().unwrap().clone();
+            let record = JsonRecord::for_mapping(&object, &mapping, ["email", "meta"]);
+            is_deleted(&mapping, &record)
+        };
+
+        assert!(read(
+            json!({"email": "a@example.com", "meta": {"deleted": true}})
+        ));
+        assert!(!read(
+            json!({"email": "a@example.com", "meta": {"deleted": false}})
+        ));
+        assert!(!read(json!({"email": "a@example.com", "meta": {}})));
+        assert!(!read(json!({"email": "a@example.com", "meta": null})));
+    }
+
+    #[test]
+    fn deletion_names_the_source_before_the_signal_and_reads_a_nested_path() {
+        let mapping = Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "meta.deleted".into(),
+                rule: DeleteRule::Truthy,
+            }),
+            ..mapping(vec![email("email")])
+        };
+        let cells = |data: Value| {
+            JsonRecord::for_mapping(data.as_object().unwrap(), &mapping, ["email", "meta"])
+        };
+        let gone = cells(json!({"meta": {"deleted": true}}));
+        let live = cells(json!({"email": "a@example.com", "meta": {"deleted": false}}));
+
+        assert_eq!(deletion(&mapping, &gone, false), Some(Deletion::Signal));
+        assert_eq!(deletion(&mapping, &gone, true), Some(Deletion::Source));
+        assert_eq!(deletion(&mapping, &live, false), None);
+        assert_eq!(deletion(&mapping, &live, true), Some(Deletion::Source));
     }
 }

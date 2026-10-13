@@ -407,6 +407,7 @@ fn map_row(row: &InboxRow) -> Option<Mapped> {
             trace,
         })),
         "track" => Some(Mapped::Event(EventRecord {
+            source_record_id: None,
             source: SOURCE.to_owned(),
             identifiers: stored.identifiers,
             name: stored.event?,

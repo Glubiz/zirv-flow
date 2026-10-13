@@ -45,6 +45,9 @@ pub struct EventRecord {
     /// The client's retry key.
     pub message_id: Option<String>,
     pub trace: TraceContext,
+    /// The ledger row of the synced record whose mapping produced the event. The event is
+    /// deleted with the row; every other event leaves it `None`.
+    pub source_record_id: Option<Uuid>,
 }
 
 /// What happened to one event.
@@ -418,6 +421,7 @@ async fn judge_event_record(
             reasons: &reasons,
             flags: &flags,
             late: timing.is_late(),
+            source_record_id: record.source_record_id,
         },
     )
     .await?;
@@ -457,6 +461,9 @@ pub(crate) struct NewEvent<'a> {
     pub(crate) flags: &'a [&'a str],
     /// The event is late: the person's traits are recomputed from its time.
     pub(crate) late: bool,
+    /// The ledger record the event came from; removing the record removes the event. None for
+    /// a first-party event.
+    pub(crate) source_record_id: Option<Uuid>,
 }
 
 /// Inserts the event and marks its person changed.
@@ -466,7 +473,7 @@ pub(crate) async fn insert_event(
     event: &NewEvent<'_>,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO events             (id, workspace_id, person_id, name, schema_version, occurred_at, received_at,              properties, source, message_id, trace_id, validation_state, validation_reasons,              flags)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        "INSERT INTO events             (id, workspace_id, person_id, name, schema_version, occurred_at, received_at,              properties, source, message_id, trace_id, validation_state, validation_reasons,              flags, source_record_id)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(event.id)
     .bind(workspace.as_uuid())
@@ -482,6 +489,7 @@ pub(crate) async fn insert_event(
     .bind(event.state.as_str())
     .bind(Json(event.reasons))
     .bind(event.flags)
+    .bind(event.source_record_id)
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -798,6 +806,7 @@ mod tests {
 
     fn event(name: &str, properties: Value) -> EventRecord {
         EventRecord {
+            source_record_id: None,
             source: "web".to_owned(),
             identifiers: vec![("email".to_owned(), "ada@example.com".to_owned())],
             name: name.to_owned(),

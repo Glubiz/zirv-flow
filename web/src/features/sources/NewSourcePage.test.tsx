@@ -73,6 +73,8 @@ describe("the source wizard", () => {
       cursor_field: "updated_at",
       primary_key: ["id"],
       staleness_threshold_seconds: null,
+      reconcile_schedule: null,
+      sweep_limit: 0.5,
     });
     expect(screen.getByRole("link", { name: "Finish" })).toHaveAttribute("href", "/w/ws1/sources/src-1");
   });

@@ -25,6 +25,11 @@ pub struct Stream {
     /// Where the next incremental run resumes; none for a full refresh or before any batch.
     pub checkpoint: Option<Value>,
     pub staleness_threshold_seconds: Option<i32>,
+    /// The UTC cron of the stream's reconciliation; none for no schedule. Incremental only.
+    pub reconcile_schedule: Option<String>,
+    /// The largest share of the stream's live records one sweep may remove, above 0 and at
+    /// most 1. A sweep over it removes nothing and fails the run.
+    pub sweep_limit: f64,
     /// The descriptor discovery last reported.
     pub discovered: Value,
     /// When the stream was last enabled; none while it is disabled.
@@ -41,8 +46,8 @@ pub struct Stream {
 macro_rules! stream_columns {
     () => {
         "id, source_id, name, enabled, sync_mode, cursor_field, primary_key, mapping, \
-         checkpoint, staleness_threshold_seconds, discovered, enabled_at, last_success_at, \
-         last_run_failed, created_at, updated_at"
+         checkpoint, staleness_threshold_seconds, reconcile_schedule, sweep_limit, discovered, \
+         enabled_at, last_success_at, last_run_failed, created_at, updated_at"
     };
 }
 
@@ -65,6 +70,8 @@ pub struct StreamSettings<'a> {
     pub cursor_field: Option<&'a str>,
     pub primary_key: &'a [String],
     pub staleness_threshold_seconds: Option<i32>,
+    pub reconcile_schedule: Option<&'a str>,
+    pub sweep_limit: f64,
 }
 
 /// Stores what discovery reported for a source of the workspace: new names are inserted
@@ -211,7 +218,8 @@ pub async fn configure_stream(
     }
     let stream = sqlx::query_as(concat!(
         "UPDATE streams SET enabled = $4, sync_mode = $5, cursor_field = $6, primary_key = $7, \
-            staleness_threshold_seconds = $8, updated_at = now(), \
+            staleness_threshold_seconds = $8, reconcile_schedule = $9, sweep_limit = $10, \
+            updated_at = now(), \
             enabled_at = CASE WHEN $4 AND NOT enabled THEN now() \
                               WHEN NOT $4 THEN NULL ELSE enabled_at END, \
             last_run_failed = CASE WHEN $4 AND NOT enabled THEN false ELSE last_run_failed END, \
@@ -230,6 +238,8 @@ pub async fn configure_stream(
     .bind(settings.cursor_field)
     .bind(settings.primary_key)
     .bind(settings.staleness_threshold_seconds)
+    .bind(settings.reconcile_schedule)
+    .bind(settings.sweep_limit)
     .fetch_optional(&mut *tx)
     .await
     .map_err(StoreError::query)?;
@@ -350,6 +360,8 @@ mod tests {
             source_id,
             "a",
             &StreamSettings {
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
                 enabled: true,
                 sync_mode: "incremental",
                 cursor_field: Some("updated_at"),
@@ -401,6 +413,8 @@ mod tests {
             .unwrap();
         commit(tx).await.unwrap();
         let settings = |sync_mode, cursor_field, staleness| StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: true,
             sync_mode,
             cursor_field,
@@ -533,6 +547,8 @@ mod tests {
         let (source_id, _) = source_with_stream(&pool, ws, "crm", "incremental").await;
         let key = vec!["id".to_owned()];
         let settings = |mode, cursor, primary_key, staleness| StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: true,
             sync_mode: mode,
             cursor_field: cursor,
@@ -610,6 +626,8 @@ mod tests {
         set_checkpoint(&pool).await;
         let key = vec!["id".to_owned()];
         let new_cursor = StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: true,
             sync_mode: "incremental",
             cursor_field: Some("id"),
@@ -617,6 +635,8 @@ mod tests {
             staleness_threshold_seconds: None,
         };
         let same_cursor = StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: false,
             sync_mode: "incremental",
             cursor_field: Some("updated_at"),
@@ -677,6 +697,8 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let (source_id, stream_id) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
         let settings = |enabled, staleness| StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled,
             sync_mode: "full_refresh",
             cursor_field: None,
@@ -720,5 +742,71 @@ mod tests {
         let enabled = read().await;
         assert!(enabled.enabled_at > Some(first));
         assert!(!enabled.last_run_failed);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reconcile_schedule_and_the_sweep_limit_are_stored_replaced_and_checked(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let source_id = source(&pool, ws).await;
+        let pk = vec![];
+        let descriptor = json!({});
+        let mut tx = begin(&pool).await.unwrap();
+        upsert_discovered_streams(&mut tx, ws, source_id, &[found("a", &descriptor, &pk)])
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        let fresh = find_stream(&pool, ws, source_id, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (fresh.reconcile_schedule.clone(), fresh.sweep_limit),
+            (None, 0.5)
+        );
+        let settings = |schedule, limit| StreamSettings {
+            reconcile_schedule: schedule,
+            sweep_limit: limit,
+            enabled: true,
+            sync_mode: "incremental",
+            cursor_field: Some("updated_at"),
+            primary_key: &[],
+            staleness_threshold_seconds: None,
+        };
+        let configure = |schedule, limit| {
+            let pool = pool.clone();
+            async move {
+                configure_stream(
+                    &mut pool.acquire().await.unwrap(),
+                    ws,
+                    source_id,
+                    "a",
+                    &settings(schedule, limit),
+                )
+                .await
+            }
+        };
+
+        let set = configure(Some("0 3 * * *"), 0.25).await.unwrap().unwrap();
+        assert_eq!(
+            (set.reconcile_schedule.as_deref(), set.sweep_limit),
+            (Some("0 3 * * *"), 0.25)
+        );
+        let cleared = configure(None, 1.0).await.unwrap().unwrap();
+        assert_eq!(
+            (cleared.reconcile_schedule, cleared.sweep_limit),
+            (None, 1.0)
+        );
+
+        for bad in [0.0, -0.1, 1.5, f64::NAN] {
+            assert!(configure(None, bad).await.is_err(), "{bad}");
+        }
+        let stored = find_stream(&pool, ws, source_id, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.sweep_limit, 1.0);
     }
 }

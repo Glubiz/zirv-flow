@@ -53,6 +53,22 @@ describe("a stream mapping draft", () => {
     expect(draft.rules[3]?.target).toEqual({ kind: "identifier", identifier: "external", namespace: "crm" });
   });
 
+  it("round trips what the editor does not show: the key, an ignored column and the delete signal", () => {
+    const saved: Mapping = {
+      ...SAVED,
+      key_column: "id",
+      columns: [...SAVED.columns, { column: "legacy", target: { type: "ignore" }, transforms: [] }],
+      delete_when: { column: "meta.deleted", rule: "present" },
+    };
+
+    const draft = mappingToDraft(["meta"], saved);
+
+    expect(draft.deleteColumn).toBe("meta.deleted");
+    expect(draftToMapping(draft)).toEqual(saved);
+    draft.deleteColumn = "  ";
+    expect(draftToMapping(draft)).not.toHaveProperty("delete_when");
+  });
+
   it("leaves the event out when it is switched off and leaves out unfinished rows and steps", () => {
     const draft = mappingToDraft([], SAVED);
     draft.event = { ...draft.event, enabled: false };
@@ -72,6 +88,7 @@ describe("a stream mapping draft", () => {
     expect(draftProblems(ok, true)).toEqual([]);
 
     const bad: MappingDraft = {
+      ...startingDraft([]),
       rules: [
         { ...newRule("a"), target: { kind: "trait", key: "plan" } },
         { ...newRule("b"), target: { kind: "trait", key: "plan" } },

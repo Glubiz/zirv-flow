@@ -9,6 +9,7 @@ import {
   InlineError,
   LoadingState,
   Pill,
+  SelectField,
   TextField,
   TransformEditor,
   type TransformDraft,
@@ -20,6 +21,7 @@ import {
   MAX_EVENT_PROPERTIES,
   newProperty,
   newRule,
+  type DeleteRule,
   type EventDraft,
   type IdentifierChoice,
   type MappingDraft,
@@ -179,6 +181,9 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
             cursor_field: stream.cursor_field,
             primary_key: stream.primary_key,
             staleness_threshold_seconds: stream.staleness_threshold_seconds,
+            // A request without these clears the cron and resets the limit.
+            reconcile_schedule: stream.reconcile_schedule,
+            sweep_limit: stream.sweep_limit,
             mapping: draftToMapping(draft),
           },
         }),
@@ -434,6 +439,29 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
               </Button>
             </div>
           </div>
+        ) : null}
+      </section>
+
+      <section className="stack-tight" aria-label="Deleted records">
+        <h3>Deleted records</h3>
+        <TextField
+          label="Deleted column"
+          hint="Optional. A field that marks a record as deleted in the source, such as a soft-delete flag or a deleted-at time. Name a field of the stream, or reach into a nested one with dots."
+          list={fieldsId}
+          value={draft.deleteColumn}
+          disabled={busy}
+          onChange={(event) => edit({ ...draft, deleteColumn: event.target.value })}
+        />
+        {draft.deleteColumn.trim() !== "" ? (
+          <SelectField
+            label="A record is deleted when the column"
+            value={draft.deleteRule}
+            disabled={busy}
+            onChange={(event) => edit({ ...draft, deleteRule: event.target.value as DeleteRule })}
+          >
+            <option value="truthy">is true</option>
+            <option value="present">has a value</option>
+          </SelectField>
         ) : null}
       </section>
 

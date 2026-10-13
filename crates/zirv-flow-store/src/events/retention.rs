@@ -250,6 +250,7 @@ mod tests {
         message_id: Option<&str>,
     ) {
         let record = EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "ada@example.com".into())],
             name: name.into(),

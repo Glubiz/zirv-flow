@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, ResourceView } from "../../ui";
-import { isActiveRun, runStateLabel, runStateTone, triggerLabel, type Run } from "./labels";
+import { isActiveRun, runKindLabel, runStateLabel, runStateTone, triggerLabel, type Run } from "./labels";
 import { RunDialog } from "./RunDialog";
 
 export const RUNS_POLL_MS = 3000;
@@ -110,6 +110,7 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
                     <tr>
                       <th scope="col">Stream</th>
                       <th scope="col">State</th>
+                      <th scope="col">Kind</th>
                       <th scope="col">Started by</th>
                       <th scope="col" className="num">
                         Attempt
@@ -140,6 +141,7 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
                         <td>
                           <Pill tone={runStateTone(run.state)}>{runStateLabel(run.state)}</Pill>
                         </td>
+                        <td>{runKindLabel(run.kind)}</td>
                         <td>{triggerLabel(run.trigger)}</td>
                         <td className="num">{run.attempt}</td>
                         <td>{run.started_at ? formatDateTime(run.started_at) : "Not yet"}</td>

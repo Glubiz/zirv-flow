@@ -62,6 +62,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         for days in [1_i64, 400] {
             let record = EventRecord {
+                source_record_id: None,
                 source: "web".into(),
                 identifiers: vec![("email".into(), "a@example.com".into())],
                 name: "seen".into(),
