@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, sync runs with events and lists (including PostgreSQL and MySQL sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1380,6 +1380,13 @@ import's, see the Mapping reference, with the stream's field names or dotted pat
 columns; a trait must be in the registry and a list must exist), or use **Map** on the stream
 in the web UI, which previews the mapping on the first records before it is saved.
 
+**Streaming runs.** A stream in the `stream` sync mode (a Kafka topic) is not read to an end. Its
+run goes on for up to a day, worked by a chain of `kafka.consume` jobs, and ends `cancelled` when
+you cancel it or turn the stream off, and `failed` with a code on an error that retrying cannot
+fix or on the reject threshold. Its counters are cumulative; its `attempt` counts only a lost
+worker, not each slice. Reconciliation and the sweep do not apply to it, so `reconcile_schedule`
+and a `sweep_limit` other than the default are refused for it. See Kafka sources.
+
 **How a run goes.** The `sync.run` job reads the source in batches, maps each record, and
 commits a unit of at least 500 records (a source batch is never split) in one transaction: the
 profile changes, the retracted records, the rejects, one decision per record, the counters and
@@ -1581,6 +1588,95 @@ workspace label): `zirv_flow_source_db_batches_total{source_type}` and
 `zirv_flow_source_db_errors_total{source_type,reason}` with `reason` one of `auth`, `unreachable`,
 `egress`, `timeout`, `tls`, `read_only`, `config` or `query`.
 
+### Kafka sources
+
+The `kafka` source type reads JSON messages from Apache Kafka topics (or a Kafka-compatible
+broker such as Redpanda). A **stream is a topic**, and its sync mode is **streaming**: instead of
+reading to an end, a consumer follows the topic for as long as the stream is on. Add one in the
+setup wizard like any source.
+
+| Setting | Meaning |
+| --- | --- |
+| `brokers` | One to ten `host:port` pairs, comma-separated, without a scheme. IPv6 addresses are not supported. |
+| `topics` | One to twenty topic names, comma-separated. Each is a stream. |
+| `security` | `tls` (default) or `plaintext`. |
+| `sasl` | `none` (default), `plain`, `scram_sha_256` or `scram_sha_512`. |
+| `tls_ca` | A PEM bundle to trust instead of the system roots, for a private authority. |
+| `max_lag` | How many messages, over all partitions, the stream may be behind and still count as fresh. Default 10,000. |
+
+The credential fields are `username` and `password` (needed with `sasl`) and `tls_client_cert`
+and `tls_client_key` (a client certificate and its key, both or neither). All four are secret:
+sealed like any credential and never returned. OAUTHBEARER is not supported.
+
+**Messages.** The **message key** is the record key, as UTF-8 text of 1 to 512 characters, and the
+stream's primary key is the virtual field `_key`. The value must be a JSON object of at most 1 MiB;
+its top-level fields are the stream's fields, plus two virtual ones: `_key` and `_timestamp` (the
+message time, RFC 3339). Those two names win over fields of the same name in the value. Map them
+like any field. Discovery reads up to 50 messages from the start of each topic to list the fields;
+an empty topic reports only the two virtual ones, so discover again once producers write.
+
+**Deleting.** A message with a **null value** (a tombstone) removes the record with that key and
+its linked events, through the same path as a source that reports a deletion. A tombstone for a
+key the stream never saw does nothing. A delete signal in the mapping works as for any stream.
+There is no sweep and no reconciliation: they cannot tell a dropped record from a quiet one.
+
+**Refused messages.** A message that is not a record is a **reject** of the run, with its place
+(`partition 3 offset 1042`) and a code, and never its content: `kafka_key_missing`,
+`kafka_key_not_text`, `kafka_value_not_json` (an empty value counts), `kafka_value_not_object`,
+`kafka_message_too_large`. The partition goes on. A run over the reject threshold stops like any.
+
+**Delivery.** Offsets are kept in the database, one row per partition, never in Kafka: the consumer
+joins no consumer group and commits nothing to the broker. They are written in the same
+transaction that applies the messages they cover, fenced on the job's lease and on the run, so
+**each committed batch applies once and an uncommitted batch is read again** after a crash, a lost
+lease or a restart. A partition with no stored offset starts at its earliest offset, and new
+partitions are found at the start of every slice. Order is kept within a partition; a key that
+appears in several partitions has no defined order. Two messages with one key are never merged:
+each is its own unit of work, so each yields its own event, and a message replayed after a crash
+yields the same event again, which is dropped as a duplicate. Offsets that hold no record
+(transaction markers, compacted-away batches) are skipped, so compacted topics and transactional
+producers do not stall a partition. Messages of aborted transactions are **delivered** (the client
+cannot filter them), so a topic written by aborting transactional producers is not supported. If
+retention removed the stored offset, the consumer jumps to the earliest one and counts it in
+`zirv_flow_kafka_offset_resets_total`. If the stored offset is past the end (the topic was
+deleted and created again) the run fails with `kafka_offset_out_of_range`; stored offsets cannot
+be reset from the app yet.
+
+**Starting and stopping.** Turning on a streaming stream that has a mapping starts its consumer.
+**Run now** and the source's cron schedule start one when none is running, so the schedule is also
+the restart path after a failure; `*/5 * * * *` is a sensible choice. Turning the stream or the
+source off cancels the consumer. The run stays `running` for up to a day and is worked by a chain
+of `kafka.consume` jobs of 60 seconds each; each slice enqueues the next, in the transaction that
+completes it. A day after it started, the run ends `succeeded` and a new run takes over, so its
+trace, counters and reject ratio stay small. A consumer holds one worker slot during its slice: with
+more streaming streams than `worker.concurrency - 1`, other jobs starve. Watch
+`zirv_flow_worker_busy`.
+
+**Lag and freshness.** After each slice (and every 10 seconds within one) the consumer stores the
+log's end for each partition. **Lag** is the end minus the next offset to read. `GET
+.../sources/{id}/streams` carries `freshness.lag` with the `total` and each partition's `lag`
+(counts, which members may read), and the streams table shows `Lag 1,204` next to the badge. Lag
+within `max_lag` counts as a success and lag above it as a failure, so a stream that falls behind
+turns **failing**, and a consumer that stops turns **stale** by the usual time rule, which needs a
+staleness threshold on the stream or a schedule on the source. The gauge
+`zirv_flow_stream_lag_messages{workspace,stream}` follows it, and `zirv_flow_kafka_fetches_total{outcome}`
+counts fetches.
+
+**Network.** The client has no resolver hook, so every connection goes through a loopback SOCKS5
+relay that resolves the host, checks every address against the egress policy (see Egress), dials
+the checked address and leaves TLS to verify the host name. This covers the bootstrap hosts and
+every broker the cluster names, on every reconnect. A broker whose address is refused fails the
+read with `source_error`, counted in `zirv_flow_egress_denied_total`. While a read runs, another
+process on the same machine could use the relay to reach any destination the policy allows. A broker
+that is private needs an `egress.allow` entry like any private destination. Errors are static
+codes (`kafka_connect_failed`, `kafka_tls_failed`, `kafka_auth_failed`, `kafka_topic_missing`,
+`kafka_timeout`) and never a broker's own text. The client logs host names, never messages. The
+SASL password lives in plain memory inside the client while it runs and cannot be wiped there.
+
+**Limits.** JSON only (no Avro, Protobuf or schema registry), no consumer groups, no producing,
+no topic patterns. At most 1 MiB is fetched per partition per request. Messages are checked after
+decompression only for the 1 MiB record limit.
+
 ### Source freshness
 
 Marketers can see whether the data behind a segment is current. Every enabled stream of an
@@ -1619,8 +1715,9 @@ labels: `zirv_flow_stream_freshness_seconds{workspace,stream}` (age of the data)
 is disabled or deleted is set to 0, and an instance that stops leading zeroes what it published.
 
 **Other source types.** A pull run reports when it ends. A webhook source (#90) and a stream
-consumer such as Kafka (#91) report through the same call, `record_stream_outcome`: a success at
-a time, or a failure, written to the same columns. Only the pull path exists today.
+consumer report through the same call, `record_stream_outcome`: a success at a time, or a failure,
+written to the same columns. The Kafka consumer reports within its lag bound as a success and
+above it as a failure (see Kafka sources); a webhook source is not built yet.
 
 **Not done:** stale or failing inputs do not pause sends. That is a later decision (OQ-14, M5);
 for now freshness is shown and exported, nothing acts on it.
