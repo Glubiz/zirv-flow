@@ -19,7 +19,7 @@ use zirv_flow_connectors::sources::{
     SyncMode,
 };
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_store::{DiscoveredStream, Source};
+use zirv_flow_store::{DiscoveredStream, Source, Stream};
 
 use super::streams::{StreamBody, bodies, checked_mapping};
 use super::{credential, kind_unavailable, registry, tokens};
@@ -303,6 +303,39 @@ pub(super) async fn read_sample(
     let truncated = records.len() > limit;
     records.truncate(limit);
     Ok((records, truncated))
+}
+
+/// Reads the first `limit` records of a stored stream from its start, with the source's stored
+/// credential and tokens, and writes nothing. The flag says the stream has more. The credential is
+/// opened right before the read and dropped with it.
+pub(super) async fn read_stream(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream: &Stream,
+    limit: usize,
+) -> Result<(Vec<Record>, bool), ApiError> {
+    let call = prepare(state, workspace, source_id).await?;
+    let config = StreamConfig {
+        name: stream.name.clone(),
+        sync_mode: SyncMode::parse(&stream.sync_mode).unwrap_or(SyncMode::FullRefresh),
+        cursor_field: None,
+        primary_key: stream.primary_key.clone(),
+    };
+    read_sample(&call, &call.source.config, &config, limit).await
+}
+
+/// As [`read_stream`], without the flag.
+pub(crate) async fn read_stream_records(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream: &Stream,
+    limit: usize,
+) -> Result<Vec<Record>, ApiError> {
+    Ok(read_stream(state, workspace, source_id, stream, limit)
+        .await?
+        .0)
 }
 
 /// A failed call to the source, shown as the source's own failure.

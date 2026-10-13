@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SourcePage } from "./SourcePage";
-import { aSource, aStream, FAKE_KIND } from "./testData";
+import { aiSettings, aSource, aStream, FAKE_KIND } from "./testData";
 
 const LIST_ID = "22222222-2222-7222-8222-222222222222";
 
@@ -61,6 +61,7 @@ const PREVIEW = {
 };
 
 const ROUTES = {
+  "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(false)),
   "GET /api/v1/session": () => json(session(OWNER, "csrf-map")),
   "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
   "GET /api/v1/source-kinds": () => json([FAKE_KIND]),
@@ -346,5 +347,31 @@ describe("the mapping dialog", () => {
 
     expect(await screen.findByText("You can look at this source but not change it.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Map stream_1" })).not.toBeInTheDocument();
+  });
+
+  it("loads an accepted draft into the rows and sends no save until Save is pressed", async () => {
+    const content = {
+      key_column: null,
+      columns: [{ column: "email", target: { type: "identifier", kind: "email" }, transforms: [] }],
+    };
+    const calls = mockApi({
+      ...ROUTES,
+      "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(true)),
+      "POST /api/v1/workspaces/ws1/ai/drafts": () =>
+        json({ id: "d1", kind: "mapping", status: "valid", attempts: 1, content, issues: [], changes: [], dry_run: null }),
+      "POST /api/v1/workspaces/ws1/ai/drafts/d1/accept": () =>
+        json({ id: "d1", kind: "mapping", source_id: "src-1", stream: "stream_1", content }),
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+
+    await user.type(await dialog.findByLabelText("What do you want?"), "Map the email");
+    await user.click(dialog.getByRole("button", { name: "Draft" }));
+    await user.click(await dialog.findByRole("button", { name: "Accept" }));
+
+    expect(await dialog.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
+    expect(dialog.getByLabelText("Field of row 1")).toHaveValue("email");
+    expect(calls.some((call) => call.method === "PUT")).toBe(false);
   });
 });

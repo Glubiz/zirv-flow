@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer and the mapping and manifest assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1181,8 +1181,7 @@ it prints the duration and the rows per second.
 ## AI assistant
 
 Zirv Flow can use a language model to help draft its own artifacts. Everything the assistant
-does goes through a provider layer with gates in front of it; the assistant features themselves
-arrive later. The assistant is off until the operator lists a provider and an admin turns it on
+does goes through a provider layer with gates in front of it. The assistant is off until the operator lists a provider and an admin turns it on
 for a workspace.
 
 **Deployment configuration.** The operator allowlists the providers, models and base URLs a
@@ -1245,6 +1244,46 @@ provider, model, token counts, estimated cost, latency and outcome, and never a 
 answer or an error body. The metrics are `zirv_flow_ai_calls_total{feature,outcome}` and
 `zirv_flow_ai_refusals_total{reason}`. The tests never call a real model: they use a fake
 provider and local mock servers.
+
+
+### Mapping and manifest assistant
+
+Open **Map** on a stream (in the setup wizard or later) or the manifest editor of an `http` source,
+say what you want and, for a manifest, paste the API documentation. The panel is empty while the
+assistant is off. The server asks the model to call one draft tool, checks each answer with the
+same rules a save applies, and feeds the problems back at most `ai.max_repair_attempts` times. You
+get either the problems of the last attempt (no draft, nothing to accept) or a validated draft with
+its field-by-field difference from the saved version and a dry run: the mapping preview on five
+records (or on your pasted sample, for a webhook stream), or a five-record sample of the
+manifest's first stream. A manifest dry run needs a saved source whose base URL and `auth` the draft
+keeps; otherwise the panel says why it did not run.
+
+- **Privacy.** With the personal-data opt-in off, only field names, types, trait keys, list names
+  and your prompt are sent, and the source is not read for the model. With it on, up to 5 sample
+  records (8 KiB) are added. Field names, pasted documentation and records are sent as fenced data
+  that the model is told never to follow. Do not paste personal data into the prompt.
+- **Accept loads, Save publishes.** Accept checks the draft again and loads it into the editor as
+  the ordinary unsaved draft. Saving it stays the existing Save, with its permission and audit. A
+  draft expires after 7 days, is yours alone, and goes with its source.
+- **Routes.** `POST /api/v1/workspaces/{ws}/ai/drafts` (`kind`, `source_id`, `stream`, `prompt`,
+  `documentation`, `sample`) answers 201 with `status` `valid` or `invalid`. It needs an admin and a
+  signed-in user (an API key is 403 `ai_user_required`). Problems: 409 `ai_disabled`, 402
+  `ai_budget_exceeded`, 429 `ai_rate_limited`, 502 `ai_provider_error`, 422 naming the field
+  (`sample_required`, `sample_not_supported`). `POST .../ai/drafts/{id}/accept` answers 200 with the
+  content, 409 `ai_draft_invalid` or `ai_draft_outdated` (the saved version changed), 422 when it no
+  longer passes a save's rules, 404 for another user's or an expired draft. Accept is audited as
+  `ai.draft.accepted`.
+- **Metrics.** `zirv_flow_ai_draft_runs_total{kind,outcome}` (`valid`, `invalid`, `failed`),
+  `zirv_flow_ai_drafts_accepted_total{kind}`, and the existing `zirv_flow_ai_calls_total` under the
+  features `mapping`, `manifest` and `evaluation`.
+- **Timeouts.** A run is one synchronous request of up to (1 + `ai.max_repair_attempts`) calls. A
+  reverse proxy needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s for
+  `POST /api/v1/workspaces/{ws}/ai/drafts`.
+- **Evaluation.** `zirv-flow admin evaluate-assistant --workspace <slug> [--case <name>]` runs the
+  golden prompts against the workspace's model through the gated dispatcher (every prompt counts
+  against the budget) and prints one JSON line per case with the properties that held, the ones
+  that did not, attempts, tokens, cost and model. It exits 0 whatever the score. CI runs the same
+  cases on a fake provider and never calls a model.
 
 ## Sources
 
@@ -1369,7 +1408,7 @@ because the answer holds values) reads the first records of the stream from the 
 fields, lists and event, or the `{field, reason}` codes that refused it. The body may carry a
 draft `mapping`, checked exactly as a save is; otherwise the saved one is used. It writes
 nothing, is not audited, and runs the same `core::mapping` function as a sync run. In the web UI
-open **Map** on a stream. A save or a preview against a stream whose source reported a blank or
+open **Map** on a stream; the Map dialog also has an assistant that drafts a mapping for you (see Mapping and manifest assistant). A save or a preview against a stream whose source reported a blank or
 repeated field name answers 422 with `code` `blank_header` or `duplicate_header`.
 
 ### Sync runs
@@ -1512,7 +1551,7 @@ scripting. A manifest holds no secret; the credential fields below hold those.
 Add one in the setup wizard like any source. The **Manifest** field is an editor that checks the text
 as you type and shows every problem as a sentence with its place in the manifest (click it to jump
 to the line), offers a starter manifest for each kind of authentication, and, once the source is
-saved, a **Test with sample** button that reads a few raw records with the stored credential.
+saved, a **Test with sample** button that reads a few raw records with the stored credential. An assistant panel drafts a manifest from pasted API documentation (see Mapping and manifest assistant).
 
 **A manifest, annotated.**
 

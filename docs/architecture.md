@@ -1460,6 +1460,21 @@ the validated diff and applicable counts, renders or dry-run results. Accepting
 copies it into an ordinary product draft; publishing remains a separate human
 action under its existing permission.
 
+As built (M3, #93): `zirv-flow-ai` defines the `AiTool` trait (`ToolEffect` has two variants,
+`Read` and `Draft`, so a publishing, sending, deleting or consent tool cannot be added without
+touching every exhaustive match) and the async three-way `repair` (`Verdict`: valid, invalid
+with typed issues, or abort). `api::assistant::tools` holds the registry, one module and one line
+per tool: `read_source`, `draft_mapping` and `draft_manifest`. Their parameter schemas are lowered
+from the API types (`MappingBody`, the manifest validate request) into the provider subset by
+`assistant::schema`. `POST .../ai/drafts` runs one synchronous draft: the server reads the context
+through `read_source`, offers the model only the kind's draft tool, checks each attempt with the
+validator a save runs, repairs at most `ai.max_repair_attempts` times, and answers with the draft,
+its field-by-field diff against the saved artifact and a dry run (the mapping preview, or the
+manifest sample). Only a validated draft keeps content, in `ai_drafts` (seven days; an invalid
+run stores a row with no content). `POST .../ai/drafts/{id}/accept` re-checks the stored draft,
+audits `ai.draft.accepted` and returns it; the editor holds it as its unsaved draft, and saving
+stays `PUT .../streams/{name}` or `PATCH .../sources/{id}`.
+
 ### 13.3 Authorization and untrusted input
 
 The server authenticates every tool call as the requesting user, rechecks its
@@ -1473,6 +1488,14 @@ and pasted API documentation as data, never instructions. Tool arguments may
 only select registered fields and typed ids; retrieved content cannot add tools
 or loosen policy. Prompt-injection tests cover indirect instructions in each
 context source.
+
+As built (M3, #93): both routes need an admin and a signed-in user (an API key is 403
+`ai_user_required`), and every tool call authorizes that user again, so a user demoted mid-run is
+refused at the next call. The draft tools take only the artifact: the target comes from the
+authorized request, and a list id or source of another workspace is refused. A field name a source
+reports, the keys of a pasted webhook sample and pasted documentation are `Untrusted`; record
+values are `Personal`, now fenced like `Untrusted` and bringing the same notice. The keys of a
+webhook sample that parse as an email or phone are left out of the context.
 
 ### 13.4 Context, audit and limits
 
@@ -1519,6 +1542,12 @@ repair sends each attempt through the same gates. `ai_calls` has no column that 
 Erasing a person deletes the workspace's transcripts whose text contains their ids or identifier
 values, ignoring case, in the erase transaction.
 
+As built (M3, #93): the two dispatch residuals are closed. The reservation now runs in the same
+spawned task as the provider call, so a dropped handler cannot leave a reserved row without a
+flight, and a provider panic is caught inside that task and finishes the row `abandoned` at its
+worst-case cost. `Dispatcher::for_draft` sets `ai_calls.draft_id`; the features are `mapping`,
+`manifest` and `evaluation`.
+
 ### 13.5 Evaluation and later MCP exposure
 
 A provider-independent evaluation harness holds golden natural-language prompts
@@ -1531,6 +1560,15 @@ calls an LLM.
 After 1.0, an MCP server may expose the same read-and-draft tool registry. It
 uses the same workspace scoping, RBAC, audit and draft-only constraints; its
 authentication model is OQ-30.
+
+As built (M3, #93): the corpus is `api/src/assistant/golden.json`, compiled in. Each case holds a
+prompt, optional documentation, fixture fields and traits, expected properties (JSON pointer
+checks `equals`, `contains` and `absent`, with `*` for any element) and a replay of the tool-call
+arguments a good model gave. CI runs every case on the fake provider through the same prompt
+builder, repair loop and pure validators, with no database. `zirv-flow admin evaluate-assistant
+--workspace <slug> [--case <name>]` runs it against the workspace's model through the gated
+dispatcher (feature `evaluation`; budget and rate limit apply) and prints one JSON line per case.
+It exits 0 whatever the score. `ai/evaluations` (stored scores, an API) is not built.
 
 ## 14. Queue and scheduler
 
@@ -1654,6 +1692,10 @@ its impact first, such as how many people would enter a flow now.
 | Templates | templates, versions, publish, where-used, snippets, brand theme, assets, preview, test-sends | Email block builder with code mode, merge-tag picker, visibility conditions, desktop/mobile preview, test sends; webhook payload editor; snippets, theme, asset library; version history and where-used |
 | Assistant | ai/settings, ai/models, ai/drafts, ai/evaluations, ai/usage | Provider/model and privacy settings; authoring panel with validated diff and previews; usage, budget and call audit |
 | Settings | workspaces, members, users, api-keys, audit, privacy/exports, privacy/erasures, jobs, health | Workspaces, members and roles, API keys, audit log, retention, privacy requests, jobs admin |
+
+As built (M3, #93): `ai/drafts` is `POST /api/v1/workspaces/{ws}/ai/drafts` (run) and
+`POST .../ai/drafts/{id}/accept`; there is no list or read route for drafts. The assistant panel is
+shown in the Map dialog and the manifest editor.
 
 ## 16. Security, privacy and compliance
 

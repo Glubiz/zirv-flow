@@ -328,6 +328,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/ai/drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Drafts a mapping or a manifest with the assistant: the model is asked, its answer validated
+         *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
+         *     repairs. The answer is the validated draft with its diff against the saved version and a dry
+         *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
+         *     signed in; an API key is refused. Every attempt is a gated model call: it counts against the
+         *     budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
+         *     proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
+         */
+        post: operations["create_ai_draft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not
+         *     changed since and that it still passes the rules a save applies, then returns it for the
+         *     editor to load as its unsaved draft. Nothing is written to the stream or the source; saving
+         *     stays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.
+         */
+        post: operations["accept_ai_draft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/ai/models": {
         parameters: {
             query?: never;
@@ -2033,6 +2080,16 @@ export interface components {
             /** @description Items appended to the inbox. They are durable, not yet applied. */
             accepted: number;
         };
+        /** @description An accepted draft, for the editor to load. */
+        AcceptedDraftBody: {
+            content: Record<string, never>;
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["DraftKindBody"];
+            /** Format: uuid */
+            source_id?: string | null;
+            stream?: string | null;
+        };
         AddMembersBody: {
             /** @description People newly added. */
             added: number;
@@ -2227,6 +2284,24 @@ export interface components {
              */
             kind: string;
         };
+        /** @description One difference. */
+        Change: {
+            /** @description The drafted value; absent for a removed field. */
+            after?: Record<string, never> | null;
+            /** @description The saved value; absent for an added field. */
+            before?: Record<string, never> | null;
+            change: components["schemas"]["ChangeKind"];
+            /**
+             * @description A JSON pointer into the artifact, with the key of a rule in place of its position. A
+             *     repeated key reads `key#2`.
+             */
+            path: string;
+        };
+        /**
+         * @description What happened to a field.
+         * @enum {string}
+         */
+        ChangeKind: "added" | "removed" | "changed";
         CheckBody: {
             /** @description The reason it is suppressed. */
             reason?: string | null;
@@ -2778,6 +2853,93 @@ export interface components {
             kind: string;
             masked: boolean;
             value?: string | null;
+        };
+        /** @description The result of a draft run. */
+        DraftBody: {
+            /**
+             * Format: int32
+             * @description How many times the model was asked.
+             */
+            attempts: number;
+            /** @description The draft against the saved mapping or manifest, field by field. */
+            changes: components["schemas"]["Change"][];
+            /** @description The validated draft, in the form the editor takes. */
+            content?: Record<string, never> | null;
+            dry_run?: null | components["schemas"]["DryRunBody"];
+            /** Format: uuid */
+            id: string;
+            /** @description For an invalid draft, the problems of the last attempt. */
+            issues: components["schemas"]["DraftIssue"][];
+            kind: components["schemas"]["DraftKindBody"];
+            /**
+             * @description `valid`, or `invalid` when no attempt passed validation: then there is no `content` and
+             *     the draft cannot be accepted.
+             */
+            status: string;
+        };
+        /**
+         * @description One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
+         *     a manifest. It never holds a value.
+         */
+        DraftIssue: {
+            /** @description A column name or a JSON pointer; absent when the problem is on the whole draft. */
+            at?: string | null;
+            /** @description A stable code such as `unknown_column`, `unknown_list` or `path_invalid`. */
+            code: string;
+        };
+        /**
+         * @description What a draft is of.
+         * @enum {string}
+         */
+        DraftKindBody: "mapping" | "manifest";
+        /** @description What to draft. */
+        DraftRequest: {
+            /**
+             * @description For a manifest: the API documentation to base it on, at most 32 KiB. It is sent to the
+             *     model as data, never as instructions.
+             */
+            documentation?: string | null;
+            kind: components["schemas"]["DraftKindBody"];
+            /**
+             * @description What the user wants, 1 to 2000 characters. It is sent as written: do not paste personal
+             *     data into it.
+             */
+            prompt: string;
+            /**
+             * @description For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all).
+             *     Its top-level keys are the stream's fields for this draft. Required for a webhook stream
+             *     and refused for any other.
+             */
+            sample?: {
+                [key: string]: unknown;
+            }[] | null;
+            /**
+             * Format: uuid
+             * @description The source. Required for a mapping. For a manifest it is the `http` source being edited;
+             *     absent for a source not yet saved.
+             */
+            source_id?: string | null;
+            /** @description The stream whose mapping is drafted. Required for a mapping, refused for a manifest. */
+            stream?: string | null;
+        };
+        /** @description What the draft does on real data: the #87 preview of a mapping, or the sample of a manifest. */
+        DryRunBody: {
+            preview?: null | components["schemas"]["PreviewBody"];
+            problem?: null | components["schemas"]["DryRunProblem"];
+            /** @description For `unavailable`: `source_not_saved` or `connection_changed`. */
+            reason?: string | null;
+            sample?: null | components["schemas"]["SampleBody"];
+            /** @description `ok`, `unavailable` (it cannot run, see `reason`) or `failed` (see `problem`). */
+            status: string;
+            /** @description The stream the manifest sample read. */
+            stream?: string | null;
+        };
+        /** @description Why a dry run did not show records. */
+        DryRunProblem: {
+            code?: string | null;
+            /** Format: int32 */
+            status: number;
+            title: string;
         };
         ErasureBody: {
             /** Format: date-time */
@@ -5698,6 +5860,193 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_ai_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The draft run: a validated draft with its changes and dry run, or the problems of the last attempt */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or stream, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The assistant is off (`ai_disabled`), or the source does not use a manifest */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over 160 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported` */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many AI calls (`ai_rate_limited`); try again in a minute */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model provider failed (`ai_provider_error`), or the source did */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the provider key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    accept_ai_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Draft id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The draft, to load into the editor */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedDraftBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such draft of this user in this workspace, or it expired */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft never validated (`ai_draft_invalid`), or the saved version changed since (`ai_draft_outdated`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save) */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

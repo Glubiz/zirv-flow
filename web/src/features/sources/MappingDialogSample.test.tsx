@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { json, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SourcePage } from "./SourcePage";
-import { aSource, aStream, aWebhook, FAKE_KIND, WEBHOOK_KIND } from "./testData";
+import { aiSettings, aSource, aStream, aWebhook, FAKE_KIND, WEBHOOK_KIND } from "./testData";
 
 const TRAITS = [
   {
@@ -60,6 +60,7 @@ const STREAM = aStream({
 });
 
 const ROUTES = {
+  "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(false)),
   "GET /api/v1/session": () => json(session(OWNER, "csrf-sample")),
   "GET /api/v1/workspaces/ws1/members": () =>
     json([{ user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-01T09:00:00Z" }]),

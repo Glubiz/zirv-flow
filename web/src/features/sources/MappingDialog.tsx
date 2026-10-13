@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 
 import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
+import { AssistantPanel } from "../assistant";
 import {
   Button,
   Dialog,
@@ -27,6 +28,7 @@ import {
   type DeleteRule,
   type EventDraft,
   type IdentifierChoice,
+  type Mapping,
   type MappingDraft,
   type PropertyDraft,
   type RuleDraft,
@@ -128,6 +130,8 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
   const fieldsId = useId();
   const [draft, setDraft] = useState<MappingDraft>(() => mappingToDraft(stream.discovered.fields.map((field) => field.name), stream.mapping));
   const [busy, setBusy] = useState(false);
+  const [initialJson] = useState(() => JSON.stringify(draftToMapping(draft)));
+  const dirty = JSON.stringify(draftToMapping(draft)) !== initialJson;
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewFailure, setPreviewFailure] = useState<ErrorSummary | null>(null);
@@ -156,6 +160,12 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
     changeEvent({
       properties: draft.event.properties.map((property) => (property.id === id ? { ...property, ...change } : property)),
     });
+  }
+
+  /** Loads an accepted draft as the unsaved mapping; saving stays the person's own action. */
+  function acceptDraft(content: unknown) {
+    setDraft(mappingToDraft(fieldNames, content as Mapping));
+    setPreview(null);
   }
 
   async function runPreview() {
@@ -213,7 +223,20 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
     </datalist>
   );
 
+  const assistant = (
+    <AssistantPanel
+      workspaceId={workspaceId}
+      kind="mapping"
+      sourceId={sourceId}
+      stream={stream.name}
+      sample={push ? (sample?.ok ? sample.sample : null) : undefined}
+      onAccept={acceptDraft}
+      confirmAccept={() => !dirty || window.confirm("Replace the rows you have edited with the assistant's draft?")}
+    />
+  );
+
   return (
+    <div className="split">
     <div className="stack">
       {fieldsList}
       {push ? (
@@ -540,6 +563,8 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
           {busy ? "Saving" : "Save mapping"}
         </Button>
       </div>
+    </div>
+    <aside aria-label="Assistant">{assistant}</aside>
     </div>
   );
 }

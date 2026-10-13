@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::manifest;
 use zirv_flow_connectors::sources::{StreamConfig, SyncMode, validate_config};
+use zirv_flow_core::WorkspaceId;
 
 use super::actions::{prepare, read_sample};
 use super::{field_problems, invalid};
@@ -33,7 +34,7 @@ pub(crate) struct ValidateRequest {
     /// The draft manifest: any JSON value. Whether it is a valid manifest v1 is the answer.
     #[serde(default)]
     #[schema(value_type = Object)]
-    manifest: Value,
+    pub(crate) manifest: Value,
 }
 
 /// One problem of a manifest: a code and the JSON pointer of the key it concerns. Never a value.
@@ -167,7 +168,7 @@ pub(crate) struct SampleBody {
 }
 
 /// Whether a draft keeps the saved manifest's base URL and `auth` section as they are.
-fn keeps_connection(saved: &Value, draft: &Value) -> bool {
+pub(crate) fn keeps_connection(saved: &Value, draft: &Value) -> bool {
     let saved = saved.get("manifest").unwrap_or(&Value::Null);
     ["base_url", "auth"]
         .iter()
@@ -213,17 +214,41 @@ pub(crate) async fn sample(
         return Err(invalid("limit", "must be 1 to 20"));
     }
     let id = path_id::<Uuid>(&id)?;
+    let body = sample_manifest(
+        &state,
+        workspace.id,
+        id,
+        request.manifest.as_ref(),
+        &request.stream,
+        limit,
+    )
+    .await?;
+    Ok(Json(body))
+}
+
+/// Reads the first `limit` records of a manifest stream of source `id`, with `draft` or, when
+/// none is given, the saved manifest. A draft is checked as a save is and may not move the base
+/// URL or the authentication; the source's stored credential and tokens are opened only after
+/// both checks. Reads from the start, never from a checkpoint, and writes nothing.
+pub(crate) async fn sample_manifest(
+    state: &AppState,
+    workspace: WorkspaceId,
+    id: Uuid,
+    draft: Option<&Value>,
+    stream: &str,
+    limit: u32,
+) -> Result<SampleBody, ApiError> {
     // Checked before the credential or the account tokens are opened: a draft that moves the base
     // URL or the authentication would send them to an endpoint they were not set up for.
-    if let Some(draft) = &request.manifest {
-        let saved = zirv_flow_store::find_source(&state.pool, workspace.id, id)
+    if let Some(draft) = draft {
+        let saved = zirv_flow_store::find_source(&state.pool, workspace, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
         if saved.kind == "http" && !keeps_connection(&saved.config, draft) {
             return Err(ApiError::manifest_draft_auth_changed());
         }
     }
-    let call = prepare(&state, workspace.id, id).await?;
+    let call = prepare(state, workspace, id).await?;
     if call.driver.spec().kind != "http" {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -231,7 +256,7 @@ pub(crate) async fn sample(
         ));
     }
     // A draft is checked exactly as a save is; the saved settings were checked when saved.
-    let config = match request.manifest {
+    let config = match draft {
         Some(draft) => {
             let config = json!({ "manifest": draft });
             validate_config(call.driver.spec(), &config)
@@ -247,7 +272,7 @@ pub(crate) async fn sample(
             manifest
                 .streams
                 .into_iter()
-                .find(|stream| stream.name == request.stream)
+                .find(|known| known.name == stream)
         })
         .ok_or_else(|| invalid("stream", "is not in the manifest"))?;
     let stream = StreamConfig {
@@ -264,11 +289,11 @@ pub(crate) async fn sample(
             _ => None,
         })
         .collect();
-    Ok(Json(SampleBody {
+    Ok(SampleBody {
         read: u32::try_from(records.len()).unwrap_or(u32::MAX),
         records,
         truncated,
-    }))
+    })
 }
 
 #[cfg(test)]

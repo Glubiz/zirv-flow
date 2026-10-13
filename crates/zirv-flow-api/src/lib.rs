@@ -50,7 +50,8 @@ use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
 pub use assistant::{
-    AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, DispatchError, Dispatcher, dispatch,
+    AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, CaseReport, DispatchError,
+    Dispatcher, EvaluationError, dispatch, evaluate_assistant,
 };
 pub use events::ExplorerLimits;
 pub use imports::ImportLimits;
@@ -139,6 +140,16 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/ai/usage",
             get(assistant::settings::usage),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/drafts",
+            post(assistant::drafts::create).layer(DefaultBodyLimit::max(
+                assistant::drafts::MAX_DRAFT_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept",
+            post(assistant::drafts::accept),
         )
         .route(
             "/api/v1/workspaces/{ws}/traits",
