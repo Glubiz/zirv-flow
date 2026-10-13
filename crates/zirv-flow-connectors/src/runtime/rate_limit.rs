@@ -74,12 +74,34 @@ impl RateLimits {
 
     /// Waits for a token of `source`'s bucket and returns how long it waited. A rate that
     /// differs from the bucket's replaces the bucket, so a changed setting takes effect.
+    ///
+    /// Cancelling the wait (a timeout, a dropped request) gives the token back, so a call that
+    /// never made its request does not leave a debt for the calls behind it.
     pub(crate) async fn acquire(&self, source: &str, rate: RateLimit) -> Duration {
         let wait = self.reserve(source, rate, Instant::now());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
+        if wait.is_zero() {
+            return wait;
         }
+        let mut reservation = Reservation {
+            limits: self,
+            source,
+            rate,
+            used: false,
+        };
+        tokio::time::sleep(wait).await;
+        reservation.used = true;
         wait
+    }
+
+    /// Gives back a token that was taken and not used.
+    fn refund(&self, source: &str, rate: RateLimit) {
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(bucket) = buckets.get_mut(source).filter(|bucket| bucket.rate == rate) {
+            bucket.tokens = (bucket.tokens + 1.0).min(capacity(rate));
+        }
     }
 
     fn reserve(&self, source: &str, rate: RateLimit, now: Instant) -> Duration {
@@ -94,6 +116,22 @@ impl RateLimits {
             *bucket = Bucket::new(rate, now);
         }
         bucket.take(now)
+    }
+}
+
+/// A token taken for a wait in progress. Dropped before the wait ended, it is refunded.
+struct Reservation<'a> {
+    limits: &'a RateLimits,
+    source: &'a str,
+    rate: RateLimit,
+    used: bool,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if !self.used {
+            self.limits.refund(self.source, self.rate);
+        }
     }
 }
 
@@ -193,5 +231,29 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(1450), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
         assert!(waited >= Duration::from_millis(1400), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_waits_give_their_tokens_back() {
+        let one_per_second = RateLimit {
+            requests: 1,
+            per: Duration::from_secs(1),
+        };
+        let limits = RateLimits::new();
+        assert_eq!(limits.acquire("a", one_per_second).await, Duration::ZERO);
+
+        // Five callers queue behind it and give up, as a request timeout does.
+        for _ in 0..5 {
+            let queued = tokio::time::timeout(
+                Duration::from_millis(10),
+                limits.acquire("a", one_per_second),
+            )
+            .await;
+            assert!(queued.is_err());
+        }
+
+        // The wait is computed from the bucket, never longer than for a bucket nobody queued on.
+        let wait = limits.reserve("a", one_per_second, Instant::now());
+        assert!(wait <= Duration::from_secs(1), "{wait:?}");
     }
 }
