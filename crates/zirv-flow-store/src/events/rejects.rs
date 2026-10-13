@@ -1,14 +1,14 @@
 //! Reads of ingest rejects (architecture section 12.1). The stored payload is kept for
 //! replay and is never selected here: a reject shows its masked sample only.
 
-use serde_json::Value;
-use sqlx::PgExecutor;
+use serde_json::{Value, json};
 use sqlx::prelude::FromRow;
 use sqlx::types::Json;
+use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::events::Reason;
+use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::StoreError;
 
@@ -108,6 +108,80 @@ pub async fn list_ingest_rejects<'e>(
         })
         .collect();
     Ok((rejects, truncated))
+}
+
+/// A mapping refusal to store, with the codes that explain it.
+pub(crate) struct Refusal {
+    pub(crate) id: Uuid,
+    /// `(field, code)` pairs; the field is empty when no one field is at fault.
+    pub(crate) reasons: Vec<(String, &'static str)>,
+    /// `{properties, masked}`: never a value outside the non-PII traits.
+    pub(crate) sample: Value,
+}
+
+/// Keeps records the mapping or the store refused, as `record` rejects of the stream. A sync
+/// run ties them to the run (`sync_run_id`); a webhook payload has no run. The payload is not
+/// kept, only the masked sample.
+pub(crate) async fn insert_record_rejects(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source: &str,
+    stream: &str,
+    trace: &TraceContext,
+    sync_run_id: Option<Uuid>,
+    refusals: &[Refusal],
+) -> Result<(), StoreError> {
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = refusals.iter().map(|refusal| refusal.id).collect();
+    let codes: Vec<&str> = refusals
+        .iter()
+        .map(|refusal| {
+            refusal
+                .reasons
+                .first()
+                .map_or("rejected", |(_, code)| *code)
+        })
+        .collect();
+    let reasons: Vec<Value> = refusals
+        .iter()
+        .map(|refusal| {
+            Value::Array(
+                refusal
+                    .reasons
+                    .iter()
+                    .map(|(field, code)| json!({"property": field, "reason": code}))
+                    .collect(),
+            )
+        })
+        .collect();
+    let samples: Vec<Value> = refusals
+        .iter()
+        .map(|refusal| refusal.sample.clone())
+        .collect();
+    sqlx::query(
+        "INSERT INTO ingest_rejects \
+            (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, \
+             payload, trace_id, sync_run_id) \
+         SELECT t.id, $1, now(), $2, 'record', $3, t.reason, t.reasons, t.sample, \
+                '{}'::jsonb, $4, $5 \
+         FROM unnest($6::uuid[], $7::text[], $8::jsonb[], $9::jsonb[]) \
+              AS t(id, reason, reasons, sample)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source)
+    .bind(stream)
+    .bind(trace.trace_id.as_uuid())
+    .bind(sync_run_id)
+    .bind(ids)
+    .bind(codes)
+    .bind(reasons)
+    .bind(samples)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
 }
 
 #[cfg(test)]

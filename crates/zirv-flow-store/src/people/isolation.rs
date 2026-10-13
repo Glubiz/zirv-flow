@@ -1124,4 +1124,52 @@ mod tests {
             [(fx.ws.as_uuid(), 0, 0), (two.as_uuid(), 3, 3)]
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn webhooks_are_read_changed_and_received_only_in_their_own_workspace(pool: PgPool) {
+        use crate::webhooks::fixtures::{hook, mapping};
+        use crate::{
+            SecretId, WebhookUpdate, delete_source, find_for_receive, find_webhook, list_webhooks,
+            replace_webhook_secret, update_webhook,
+        };
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let mine = hook(&pool, one, "orders", Some(&mapping(&[]))).await;
+        let theirs = hook(&pool, two, "orders", Some(&mapping(&[]))).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let listed = list_webhooks(&pool, one).await.unwrap();
+        assert_eq!(listed.iter().map(|h| h.id).collect::<Vec<_>>(), [mine.id]);
+        assert!(find_webhook(&pool, one, theirs.id).await.unwrap().is_none());
+        let update = WebhookUpdate {
+            dedupe_field: Some("x"),
+            ..WebhookUpdate::default()
+        };
+        assert!(
+            update_webhook(&mut connection, one, theirs.id, &update)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            replace_webhook_secret(&mut connection, one, theirs.id, SecretId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            delete_source(&mut connection, one, theirs.source_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The receive path locates a hook by id and carries its own workspace, so a payload
+        // for the other workspace's hook is queued there and nowhere else.
+        let received = find_for_receive(&pool, theirs.id).await.unwrap().unwrap();
+        assert_eq!(received.workspace(), two);
+        let untouched = find_webhook(&pool, two, theirs.id).await.unwrap().unwrap();
+        assert_eq!(untouched.dedupe_field, "id");
+        assert_eq!(untouched.secret_id, theirs.secret_id);
+    }
 }
