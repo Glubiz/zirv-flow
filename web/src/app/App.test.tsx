@@ -207,11 +207,11 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(13);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(14);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Lists", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "API keys", "Traces"]) {
+    for (const name of ["Members", "Fields", "Lists", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "API keys", "Traces"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");

@@ -18,7 +18,7 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
-const CONFIG_KEYS: [&str; 39] = [
+const CONFIG_KEYS: [&str; 42] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -55,6 +55,9 @@ const CONFIG_KEYS: [&str; 39] = [
     "explorer.interactive_row_limit",
     "explorer.export_row_limit",
     "egress.allow",
+    "ai.providers",
+    "ai.rate_limit_per_user_per_minute",
+    "ai.max_repair_attempts",
     "log.filter",
     "log.format",
     "log.otlp.endpoint",
@@ -82,6 +85,9 @@ pub(crate) struct Config {
     explorer: ExplorerConfig,
     #[serde(default)]
     egress: EgressConfig,
+    /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
+    #[serde(default)]
+    ai: zirv_flow_api::AiConfig,
     log: LogConfig,
 }
 
@@ -598,6 +604,16 @@ impl Config {
             ));
         }
 
+        if let Err(error) = config.ai.validate() {
+            let top = if error.key.starts_with("ai.providers") {
+                "ai.providers"
+            } else {
+                error.key.as_str()
+            };
+            let source = source_for(top, path, &env_sources);
+            return Err(ConfigError::new(error.key, error.reason, source));
+        }
+
         config.validate_events(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
         if config.imports.max_file_bytes == 0 {
@@ -915,6 +931,11 @@ impl Config {
         let policy = zirv_flow_api::EgressPolicy::parse(&self.egress.allow)
             .expect("egress.allow is validated when the configuration loads");
         Arc::new(policy)
+    }
+
+    /// The AI assistant's allowlist and limits, which `load` has validated.
+    pub(crate) fn ai_config(&self) -> zirv_flow_api::AiConfig {
+        self.ai.clone()
     }
 
     /// The most jobs of one workspace that run at once; none means unlimited.
@@ -1972,6 +1993,104 @@ allow = [\"10.0.5.7/32\", \"192.168.0.0/16\"]
             assert!(error.contains(reason), "{error}");
             assert!(error.contains("ZIRV_FLOW_EGRESS__ALLOW"), "{error}");
         }
+    }
+
+    const AI_FILE: &str = "[database]
+url = \"postgres://localhost/database\"
+[ai]
+rate_limit_per_user_per_minute = 5
+[[ai.providers]]
+id = \"openai\"
+kind = \"openai_compatible\"
+base_url = \"https://api.openai.com/v1\"
+[[ai.providers.models]]
+name = \"gpt-x\"
+context_window_tokens = 128000
+input_price_per_mtok = 2500000
+output_price_per_mtok = 10000000
+";
+
+    #[test]
+    fn the_ai_section_is_empty_by_default_and_read_from_a_file() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert!(defaults.ai_config().providers.is_empty());
+        assert_eq!(defaults.ai_config().rate_limit_per_user_per_minute, 20);
+        assert_eq!(defaults.ai_config().max_repair_attempts, 2);
+        assert!(toml::to_string(&defaults).unwrap().contains("[ai]"));
+
+        let file = TestFile::new(AI_FILE);
+        let loaded = Config::load(Some(&file.0), []).unwrap();
+        let ai = loaded.ai_config();
+        assert_eq!(ai.rate_limit_per_user_per_minute, 5);
+        assert_eq!(ai.providers.len(), 1);
+        let (provider, model) = ai.model("openai", "gpt-x").unwrap();
+        assert_eq!(provider.base_url, "https://api.openai.com/v1");
+        assert_eq!(model.context_window_tokens, 128_000);
+        // The shown configuration round-trips, so `config check` prints what is in force.
+        let shown = toml::to_string(&loaded).unwrap();
+        assert!(shown.contains("gpt-x"), "{shown}");
+    }
+
+    #[test]
+    fn the_ai_limits_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_AI__RATE_LIMIT_PER_USER_PER_MINUTE".into(),
+            "7".into(),
+        ));
+        env.push(("ZIRV_FLOW_AI__MAX_REPAIR_ATTEMPTS".into(), "0".into()));
+
+        let ai = Config::load(None, env).unwrap().ai_config();
+
+        assert_eq!(ai.rate_limit_per_user_per_minute, 7);
+        assert_eq!(ai.max_repair_attempts, 0);
+    }
+
+    #[test]
+    fn an_invalid_ai_setting_fails_naming_the_key_and_where_it_came_from() {
+        let duplicate = AI_FILE.to_owned()
+            + "[[ai.providers]]
+id = \"openai\"
+kind = \"anthropic\"
+base_url = \"https://api.anthropic.com\"
+[[ai.providers.models]]
+name = \"claude-x\"
+context_window_tokens = 200000
+input_price_per_mtok = 3000000
+output_price_per_mtok = 15000000
+";
+        let file = TestFile::new(&duplicate);
+        let error = Config::load(Some(&file.0), []).unwrap_err().to_string();
+        assert!(error.starts_with("ai.providers[1].id: "), "{error}");
+        assert!(error.contains("used by another provider"), "{error}");
+        assert!(error.contains(&file.0.display().to_string()), "{error}");
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_AI__RATE_LIMIT_PER_USER_PER_MINUTE".into(),
+            "0".into(),
+        ));
+        let error = Config::load(None, env).unwrap_err().to_string();
+        assert!(
+            error.contains("ai.rate_limit_per_user_per_minute"),
+            "{error}"
+        );
+        assert!(error.contains("must be at least 1"), "{error}");
+        assert!(
+            error.contains("ZIRV_FLOW_AI__RATE_LIMIT_PER_USER_PER_MINUTE"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_ai_key_or_provider_field_is_refused() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_AI__API_KEY".into(), "sk-nope".into()));
+        let error = Config::load(None, env).unwrap_err().to_string();
+        assert!(error.contains("unknown key"), "{error}");
+
+        let file = TestFile::new(&AI_FILE.replace("gpt-x", "gpt-x\\\"\napi_key = \\\"sk-oops"));
+        assert!(Config::load(Some(&file.0), []).is_err());
     }
 
     #[test]

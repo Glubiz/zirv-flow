@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay,, native contacts, and sources with their streams, and a connector runtime (auth, retries, rate limits and pagination), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1165,6 +1165,74 @@ audit entry holds a cell, an identifier or a trait value.
 To time a large file, run the ignored test against a PostgreSQL instance with
 `ZIRV_FLOW_BENCH_ROWS=1000000 cargo nextest run -p zirv-flow-jobs a_big_file --run-ignored all --no-capture`;
 it prints the duration and the rows per second.
+
+## AI assistant
+
+Zirv Flow can use a language model to help draft its own artifacts. Everything the assistant
+does goes through a provider layer with gates in front of it; the assistant features themselves
+arrive later. The assistant is off until the operator lists a provider and an admin turns it on
+for a workspace.
+
+**Deployment configuration.** The operator allowlists the providers, models and base URLs a
+workspace can choose from, with each model's context window and prices (in micro-units of your
+currency per million tokens, so `3000000` is 3.00). With no providers the assistant is
+unavailable and the UI says so.
+
+```toml
+[ai]
+rate_limit_per_user_per_minute = 20  # default
+max_repair_attempts = 2              # default; each repair is a separate, gated call
+
+[[ai.providers]]
+id = "openai"
+kind = "openai_compatible"           # or "anthropic"
+base_url = "https://api.openai.com/v1"
+[[ai.providers.models]]
+name = "a-model-name"
+context_window_tokens = 128000
+input_price_per_mtok = 2500000
+output_price_per_mtok = 10000000
+```
+
+Provider ids and the model names within one provider must be unique, and a base URL is an
+http(s) URL without credentials, a query or a fragment. A mistake fails startup and
+`zirv-flow config check` with the key and the reason. The OpenAI-compatible adapter also serves
+local model servers: point `base_url` at the server. **A local server on a private address is
+blocked until its address is in `egress.allow`** (see Egress); the model client never follows
+redirects and ignores proxy environment variables.
+
+**Per workspace.** Open **AI** in the web UI (workspace admins and the owner). An admin chooses
+the provider and model, stores the provider key, sets a monthly budget and turns the assistant
+on. The key is stored encrypted like any other secret (see Secrets) and is never shown again;
+this needs the master key. Turning the assistant on, or changing its provider, model or key while
+it is on, runs a short check: the model must call a tool with valid arguments and report token
+usage, and its configured context window must be at least 32,768 tokens. A model that fails is
+refused with the missing capabilities and their reasons. The settings are
+`GET` and `PUT /api/v1/workspaces/{ws}/ai/settings`; `GET .../ai/models` lists the allowlist and
+`GET .../ai/usage` the month's spend. All three are admin-only, and a settings change is audited
+as `ai.settings.updated` with the changed fields and their new values, never the key.
+
+**Privacy.** By default a request carries only field names, types, descriptions and counts. A
+request that holds the values of people is refused unless an admin turns on *Allow personal data
+in requests*. Pasted documents and samples are fenced and labelled as data, never instructions.
+No transcript of a prompt or an answer is stored by default. An admin can opt in to keeping them
+for 1 to 30 days (7 is suggested); an hourly job, `maintenance.ai_transcripts`, deletes expired
+ones, and erasing a person also deletes the transcripts that name them.
+
+**Budget and rate limit.** Before any request the dispatch checks the assistant is enabled, the
+user is under `ai.rate_limit_per_user_per_minute` and the workspace is under its monthly budget
+(a calendar month in UTC; a budget of 0 allows no calls). A refused call sends nothing, records
+nothing and answers `402` (budget), `429` with `Retry-After` (rate limit), `409` (not enabled) or
+`422` (personal data without opt-in). Both counts are read from the call log in the database, so
+they hold across instances; a burst of simultaneous calls can overshoot either by the calls
+already in flight. The cost of a call is estimated from the reported tokens and the configured
+prices.
+
+**The call log.** Every dispatched call writes a row with the workspace, user, feature,
+provider, model, token counts, estimated cost, latency and outcome, and never a prompt, an
+answer or an error body. The metrics are `zirv_flow_ai_calls_total{feature,outcome}` and
+`zirv_flow_ai_refusals_total{reason}`. The tests never call a real model: they use a fake
+provider and local mock servers.
 
 ## Sources
 

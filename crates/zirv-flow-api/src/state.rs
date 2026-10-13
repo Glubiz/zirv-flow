@@ -8,6 +8,7 @@ use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::assistant::{AiConfig, runtime::AiRuntime};
 use crate::events::ExplorerLimits;
 use crate::events::debugger::DebuggerHub;
 use crate::imports::ImportLimits;
@@ -53,6 +54,8 @@ pub struct AppState {
     /// The request-rate buckets of this process's sources, shared by every call that reaches
     /// them. Per process: see `zirv_flow_connectors::runtime::RateLimits`.
     rate_limits: Arc<RateLimits>,
+    /// The deployment's model allowlist and the guarded client for model calls.
+    pub(crate) ai: AiRuntime,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -88,6 +91,7 @@ impl AppState {
             stop: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            ai: AiRuntime::default(),
         }
     }
 
@@ -132,6 +136,17 @@ impl AppState {
     /// The egress policy outbound connections are checked against.
     pub fn egress_policy(&self) -> &Arc<EgressPolicy> {
         &self.egress
+    }
+
+    /// The deployment's AI allowlist; with none the assistant is unavailable.
+    pub fn with_ai_config(mut self, config: AiConfig) -> Self {
+        self.ai = AiRuntime::new(config);
+        self
+    }
+
+    /// The deployment's AI allowlist.
+    pub fn ai_config(&self) -> &AiConfig {
+        &self.ai.config
     }
 
     /// The explorer's query timeouts and row limits.
@@ -283,6 +298,23 @@ mod tests {
         assert_eq!(
             with.identifier_key.unwrap().digest(b"x"),
             derived.digest(b"x")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ai_allowlist_is_empty_until_given() {
+        let config = AiConfig {
+            max_repair_attempts: 4,
+            ..AiConfig::default()
+        };
+
+        assert!(state().ai_config().providers.is_empty());
+        assert_eq!(
+            state()
+                .with_ai_config(config)
+                .ai_config()
+                .max_repair_attempts,
+            4
         );
     }
 

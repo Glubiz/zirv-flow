@@ -608,7 +608,8 @@ fn http_state(
         .with_ingest_limits(config.ingest_limits())
         .with_import_limits(config.import_limits())
         .with_explorer_limits(config.explorer_limits())
-        .with_egress_policy(config.egress_policy());
+        .with_egress_policy(config.egress_policy())
+        .with_ai_config(config.ai_config());
     if let Some(secrets) = secrets {
         state = state
             .with_hmac_root(&secrets.hmac_root)
