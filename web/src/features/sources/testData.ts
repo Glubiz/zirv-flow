@@ -173,8 +173,54 @@ export function aFreshness(change: Partial<Freshness> = {}): Freshness {
     high_water_mark: null,
     threshold_seconds: null,
     threshold_is_default: false,
+    lag: null,
     ...change,
   };
+}
+
+/** The Kafka source type as `GET /api/v1/source-kinds` lists it. */
+export const KAFKA_KIND: SourceKind = {
+  kind: "kafka",
+  label: "Kafka",
+  description: "JSON messages from Apache Kafka topics.",
+  config_fields: [
+    setting("brokers", "Brokers", "hosts", { required: true, help: "Comma-separated host:port pairs." }),
+    setting("topics", "Topics", "text", { required: true }),
+    setting("security", "Connection security", "select", { options: ["plaintext", "tls"] }),
+    setting("sasl", "Authentication", "select", { options: ["none", "plain", "scram_sha_256", "scram_sha_512"] }),
+    setting("tls_ca", "Certificate authority", "long_text", { help: "PEM of the authority." }),
+    setting("max_lag", "Highest healthy lag", "number"),
+  ],
+  credential_fields: [
+    setting("username", "User name", "text", { secret: true }),
+    setting("password", "Password", "text", { secret: true }),
+    setting("tls_client_cert", "Client certificate", "text", { secret: true }),
+    setting("tls_client_key", "Client key", "text", { secret: true }),
+  ],
+  capabilities: { push: false, incremental: false, full_refresh: false, emits_deletes: true },
+};
+
+/** A stream of a Kafka topic: streaming only, keyed by the message key. */
+export function aStreamingStream(change: Partial<Stream> = {}): Stream {
+  return aStream({
+    id: "str-k",
+    name: "orders",
+    enabled: true,
+    sync_mode: "stream",
+    cursor_field: null,
+    primary_key: ["_key"],
+    discovered: {
+      fields: [
+        { name: "_key", field_type: "string" },
+        { name: "_timestamp", field_type: "timestamp" },
+        { name: "email", field_type: "string" },
+      ],
+      sync_modes: ["stream"],
+      default_cursor_field: null,
+      default_primary_key: ["_key"],
+    },
+    ...change,
+  });
 }
 
 /** The webhook source type as `GET /api/v1/source-kinds` lists it. */

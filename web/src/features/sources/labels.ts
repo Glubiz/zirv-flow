@@ -13,7 +13,8 @@ export function plural(count: number, one: string, many: string): string {
 }
 
 export function syncModeLabel(mode: string): string {
-  return mode === "incremental" ? "Incremental" : mode === "full_refresh" ? "Full refresh" : mode;
+  const labels: Record<string, string> = { incremental: "Incremental", full_refresh: "Full refresh", stream: "Streaming" };
+  return labels[mode] ?? mode;
 }
 
 /** The label of a source type, or the type's own id when this build does not list it. */
@@ -139,6 +140,14 @@ export function runErrorText(code: string, threshold: number): string {
     sweep_limit:
       "This run would have removed more records than the stream allows, so it removed none. Raise the limit on the stream to allow it.",
     source_kind_unavailable: "This build of the server does not include this type of source.",
+    kafka_offset_out_of_range:
+      "The topic no longer has the position this stream was at, so it may have been deleted and created again. Nothing was read. Stored positions cannot be reset from the app yet, so this needs an operator.",
+    kafka_auth_failed: "The brokers refused the user name and password. Check the credential, then run the stream again.",
+    kafka_tls_failed:
+      "The secure connection to the brokers failed. Check the certificate authority and the client certificate, then run the stream again.",
+    kafka_topic_missing: "A topic of this stream does not exist on the brokers. Check the topic names, then run the stream again.",
+    kafka_connect_failed:
+      "The brokers could not be reached after several tries. Test the connection, then run the stream again.",
   };
   return texts[code] ?? `The run failed (${code}).`;
 }
@@ -152,6 +161,31 @@ export function shapesValid(fields: FieldSpec[], values: Values): boolean {
 }
 
 export type Freshness = components["schemas"]["FreshnessBody"];
+
+/** How far behind a streaming stream is: "Lag 1,204" once its consumer has looked at the log, else null. */
+export function lagLabel(freshness: Pick<Freshness, "lag"> | null | undefined): string | null {
+  const lag = freshness?.lag;
+  return lag ? `Lag ${lag.total.toLocaleString("en-US")}` : null;
+}
+
+/** The lag of each partition, for a tooltip. */
+export function lagTitle(freshness: Pick<Freshness, "lag"> | null | undefined): string | undefined {
+  const lag = freshness?.lag;
+  if (!lag) return undefined;
+  return lag.partitions.map((entry) => `Partition ${entry.partition}: ${entry.lag.toLocaleString("en-US")}`).join("\n");
+}
+
+/** Why a message was refused, in words; the place (partition and offset) is shown beside it. */
+export function rejectReasonText(code: string): string {
+  const texts: Record<string, string> = {
+    kafka_key_missing: "The message has no key, or an empty one.",
+    kafka_key_not_text: "The message key is not text of up to 512 characters.",
+    kafka_value_not_json: "The message is not JSON.",
+    kafka_value_not_object: "The message is JSON but not an object.",
+    kafka_message_too_large: "The message is over 1 MiB.",
+  };
+  return texts[code] ?? code;
+}
 
 /** The state of a stream or a source in words. Anything the server adds later shows as it is. */
 export function freshnessLabel(state: string): string {

@@ -62,6 +62,8 @@ pub enum FieldKind {
     Bool,
     /// One of the listed values.
     Select(&'static [&'static str]),
+    /// Comma-separated `host:port` pairs, one to ten, without a scheme.
+    HostList,
     /// Multi-line text, such as a PEM certificate.
     LongText,
     /// A list of named SQL queries (database sources): `[{"name": "...", "sql": "..."}]`.
@@ -77,6 +79,7 @@ impl FieldKind {
             Self::Number => "number",
             Self::Bool => "bool",
             Self::Select(_) => "select",
+            Self::HostList => "hosts",
             Self::LongText => "long_text",
             Self::Queries => "queries",
         }
@@ -94,6 +97,7 @@ mod tests {
         assert_eq!(FieldKind::Number.name(), "number");
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
+        assert_eq!(FieldKind::HostList.name(), "hosts");
         assert_eq!(FieldKind::LongText.name(), "long_text");
         assert_eq!(FieldKind::Queries.name(), "queries");
     }

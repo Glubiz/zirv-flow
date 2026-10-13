@@ -261,8 +261,67 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
 
+      # The Kafka tests are ignored like the PostgreSQL ones and run in the step below. The
+      # script starts a Redpanda broker and an Apache Kafka broker with SASL, both advertising
+      # localhost, and prints the variables the tests read.
+      - name: Start The Kafka Fixtures
+        run: bash scripts/kafka-fixture.sh | sed 's/^export //' >> "$GITHUB_ENV"
+
       - name: Run PostgreSQL Tests
         run: cargo nextest run --run-ignored only --no-fail-fast
+
+  # Kafka needs C code (lz4 and zstd) and TLS (ring) in the static musl builds the release image
+  # ships. This builds and runs the Kafka tests against a real broker on both architectures,
+  # natively on each runner, so nothing is emulated.
+  kafka-musl:
+    name: Kafka (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Install The musl Toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Set Up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.20
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Start The Kafka Fixtures
+        run: bash scripts/kafka-fixture.sh | sed 's/^export //' >> "$GITHUB_ENV"
+
+      # The Kafka connector's tests, with and without a broker: TLS on ring, SASL, and the four
+      # compression codecs, linked against musl.
+      - name: Run The Kafka Connector Tests
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: >-
+          cargo nextest run -p zirv-flow-connectors --target ${{ matrix.target }}
+          --run-ignored all --no-fail-fast -E 'test(kafka)'
 
   dependency-audit:
     name: Dependency Advisory Check
@@ -414,6 +473,16 @@ jobs:
           tags: ghcr.io/glubiz/zirv-flow:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Only builds: the builder cross-compiles with zig on this runner, so no emulation is
+      # involved. It proves the C code of the Kafka client (lz4, zstd) and ring build for arm64.
+      - name: Build The arm64 Image
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha
 
       - name: Start The Compose Stack
         run: docker compose up -d --no-build --wait --wait-timeout 120

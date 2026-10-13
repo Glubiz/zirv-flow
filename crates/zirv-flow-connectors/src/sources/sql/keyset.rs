@@ -39,6 +39,12 @@ impl KeySpec {
         }
         let cursor = match stream.sync_mode {
             SyncMode::FullRefresh => None,
+            SyncMode::Stream => {
+                return Err(config_error(
+                    "sync_mode",
+                    "is not supported by a database source",
+                ));
+            }
             SyncMode::Incremental => Some(
                 stream
                     .cursor_field
@@ -242,6 +248,7 @@ impl<P: Pager> Paged<P> {
                 key: record_key(&primary),
                 data: self.data_of(row),
                 deleted: false,
+                occurrence: None,
             });
         }
         let checkpoint = checkpoint_of(&key);
@@ -249,6 +256,7 @@ impl<P: Pager> Paged<P> {
         Ok(Some(Batch {
             records,
             checkpoint,
+            refused: Vec::new(),
         }))
     }
 

@@ -247,6 +247,7 @@ pub(crate) async fn preview(
                     key: (position + 1).to_string(),
                     data: data.clone(),
                     deleted: false,
+                    occurrence: None,
                 };
                 preview_record(&mapping, &declared, &catalog, &record)
             })
@@ -262,7 +263,7 @@ pub(crate) async fn preview(
     let call = prepare(&state, workspace.id, source_id).await?;
     let config = StreamConfig {
         name: stream.name.clone(),
-        sync_mode: SyncMode::FullRefresh,
+        sync_mode: SyncMode::parse(&stream.sync_mode).unwrap_or(SyncMode::FullRefresh),
         cursor_field: None,
         primary_key: stream.primary_key.clone(),
     };
@@ -354,6 +355,7 @@ mod tests {
             key: "k".into(),
             data,
             deleted,
+            occurrence: None,
         }
     }
 

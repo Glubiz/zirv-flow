@@ -16,7 +16,10 @@ use zirv_flow_connectors::sources::{
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
-use zirv_flow_store::{Stream, StreamFreshness, StreamSettings};
+use zirv_flow_store::{
+    PartitionLag, RunKind, RunTrigger, Stream, StreamFreshness, StreamSettings,
+    cancel_consumer_runs, queue_run, stream_lag,
+};
 
 use super::crud::SCHEDULE_TIMEZONE;
 use super::problems;
@@ -38,7 +41,7 @@ pub(crate) struct FieldBody {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct DescriptorBody {
     fields: Vec<FieldBody>,
-    /// The sync modes the stream supports: `full_refresh`, `incremental`.
+    /// The sync modes the stream supports: `full_refresh`, `incremental`, `stream`.
     sync_modes: Vec<String>,
     default_cursor_field: Option<String>,
     default_primary_key: Vec<String>,
@@ -75,7 +78,7 @@ pub(crate) struct StreamBody {
     name: String,
     /// Whether runs read this stream. New streams start disabled.
     enabled: bool,
-    /// `full_refresh` or `incremental`.
+    /// `full_refresh`, `incremental` or `stream`.
     sync_mode: String,
     cursor_field: Option<String>,
     primary_key: Vec<String>,
@@ -147,10 +150,46 @@ pub(crate) struct FreshnessBody {
     /// Whether `threshold_seconds` is the default of twice the schedule interval and not the
     /// stream's own.
     threshold_is_default: bool,
+    /// For a `stream`-mode stream: how far behind its consumer is, once it has looked at the
+    /// log. Counts of messages, not record values: members see them.
+    lag: Option<LagBody>,
+}
+
+/// How many messages a consumer is behind.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct LagBody {
+    /// Over all partitions.
+    total: i64,
+    partitions: Vec<PartitionLagBody>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct PartitionLagBody {
+    partition: i32,
+    lag: i64,
+}
+
+impl LagBody {
+    fn new(partitions: &[PartitionLag]) -> Self {
+        Self {
+            total: partitions.iter().map(|found| found.lag).sum(),
+            partitions: partitions
+                .iter()
+                .map(|found| PartitionLagBody {
+                    partition: found.partition,
+                    lag: found.lag,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl FreshnessBody {
-    fn new(freshness: &StreamFreshness, show_high_water_mark: bool) -> Self {
+    fn new(
+        freshness: &StreamFreshness,
+        show_high_water_mark: bool,
+        lag: Option<&[PartitionLag]>,
+    ) -> Self {
         Self {
             state: freshness.state.as_str().to_owned(),
             last_success_at: freshness.last_success_at,
@@ -160,6 +199,7 @@ impl FreshnessBody {
                 .filter(|_| show_high_water_mark),
             threshold_seconds: freshness.threshold_seconds,
             threshold_is_default: freshness.threshold_is_default,
+            lag: lag.map(LagBody::new),
         }
     }
 }
@@ -180,12 +220,22 @@ pub(super) async fn bodies(
         .iter()
         .map(|found| (found.stream_id, found))
         .collect();
+    // Only a source with a consumer has offsets worth a query.
+    let lags = if streams.iter().any(|stream| stream.sync_mode == "stream") {
+        stream_lag(&state.pool, workspace, source).await?
+    } else {
+        Default::default()
+    };
     streams
         .iter()
         .map(|stream| {
-            let found = by_id
-                .get(&stream.id)
-                .map(|found| FreshnessBody::new(found, show_high_water_mark));
+            let found = by_id.get(&stream.id).map(|found| {
+                FreshnessBody::new(
+                    found,
+                    show_high_water_mark,
+                    lags.get(&stream.id).map(Vec::as_slice),
+                )
+            });
             StreamBody::new(stream, found)
         })
         .collect()
@@ -198,7 +248,7 @@ pub(super) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiErro
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct StreamSettingsRequest {
     enabled: bool,
-    /// `full_refresh` or `incremental`; one the stream supports.
+    /// `full_refresh`, `incremental` or `stream`; one the stream supports.
     #[schema(example = "incremental")]
     sync_mode: String,
     /// A field of the stream. Required for `incremental`.
@@ -236,6 +286,12 @@ fn check_deletion_settings(
         Some(limit) if limit.is_finite() && limit > 0.0 && limit <= 1.0 => limit,
         Some(_) => return Err(ApiError::invalid_sweep_limit()),
     };
+    if mode == SyncMode::Stream && limit != DEFAULT_SWEEP_LIMIT {
+        return Err(problems(vec![(
+            "sweep_limit".to_owned(),
+            "is not used by a stream-mode stream".to_owned(),
+        )]));
+    }
     let schedule = request
         .reconcile_schedule
         .as_deref()
@@ -468,6 +524,26 @@ pub(crate) async fn configure(
         source.enabled && stream.enabled,
     )
     .await?;
+    // A stream-mode stream that is enabled and mapped has a consumer: enabling it starts one, and
+    // anything else that stops it cancels the one it had.
+    let run_started =
+        if mode == SyncMode::Stream && source.enabled && stream.enabled && stream.mapping.is_some()
+        {
+            queue_run(
+                &mut tx,
+                workspace,
+                source_id,
+                stream.id,
+                RunKind::Sync,
+                RunTrigger::Manual,
+                None,
+            )
+            .await?
+            .is_some()
+        } else {
+            cancel_consumer_runs(&mut tx, workspace, source_id, Some(stream.id)).await?;
+            false
+        };
     admin::audit(
         &mut tx,
         context,
@@ -479,6 +555,7 @@ pub(crate) async fn configure(
             "name": stream.name,
             "enabled": stream.enabled,
             "sync_mode": stream.sync_mode,
+            "run_started": run_started,
             "mapping_set": mapping.is_some(),
             "delete_signal_set": stream
                 .mapping
@@ -639,7 +716,7 @@ mod tests {
 
         assert_eq!(
             error.detail(),
-            "sync_mode must be full_refresh or incremental; \
+            "sync_mode must be full_refresh, incremental or stream; \
              cursor_field is not a field of this stream; \
              primary_key names a field this stream does not have; \
              staleness_threshold_seconds must be positive"

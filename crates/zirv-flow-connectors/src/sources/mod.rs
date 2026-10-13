@@ -8,6 +8,7 @@ mod error;
 #[cfg(feature = "test-support")]
 mod fake;
 mod file;
+mod kafka;
 mod mysql;
 mod postgres;
 mod registry;
@@ -21,11 +22,13 @@ mod webhook;
 pub use context::SourceContext;
 pub use credential::{Credential, CredentialFormatError};
 pub use error::SourceError;
+pub use kafka::{PartitionPosition, Positions, ReadPlan};
 pub use registry::Registry;
 pub use source::{BoxFuture, ErasedSource, Source};
 pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 pub use types::{
-    Batch, Checkpoint, FieldDescriptor, FieldType, Record, StreamConfig, StreamDescriptor, SyncMode,
+    Batch, Checkpoint, FieldDescriptor, FieldType, Record, Refused, StreamConfig, StreamDescriptor,
+    SyncMode,
 };
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
@@ -42,5 +45,6 @@ pub(crate) static ALL: &[&dyn ErasedSource] = &[
     &mysql::Mysql,
     &postgres::Postgres,
     &file::File,
+    &kafka::Kafka,
     &webhook::Webhook,
 ];

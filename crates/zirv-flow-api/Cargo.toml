@@ -34,6 +34,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 flate2.workspace = true
 http-body-util.workspace = true
 metrics-exporter-prometheus.workspace = true
+rskafka.workspace = true
 sqlx.workspace = true
 tower.workspace = true
 tracing-subscriber.workspace = true

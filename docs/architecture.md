@@ -754,6 +754,31 @@ else's data.
   schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
   features are validated on both musl release architectures (amd64, arm64).
 
+As built (M3, Kafka): `kafka` is one module and one registry line in `zirv-flow-connectors`; a stream
+is a topic, in the new `stream` sync mode, and the record key is the message key (virtual field
+`_key`, with `_timestamp`). `read` yields batches whose checkpoint is the typed `kafka::Positions`
+(`next` and the high watermark per partition); the job stores them and `sync.run` never looks
+inside. `stream_offsets` (migration 0027) holds `next_offset`, `high_watermark` and `observed_at`
+per stream and partition; `commit_sync_batch` writes them after the lease fence and before the
+counters, so a batch that is not applied moves none. A message with a null value is a tombstone
+and deletes through `remove_contribution_in`; a malformed one is a reject whose reasons are the
+place (`partition p offset o`) and a static code, so no payload byte is stored. The event
+idempotency key hashes the log position (`Record.occurrence`) and not the record key, so a later
+message with the same key is a new event while a replayed one is a duplicate; the consumer
+commits a unit before a second message of a key it already holds, so no message replaces another
+in a unit. One run is `running` across many `kafka.consume` slices of 60 seconds; each enqueues
+its successor, under the unique key `kafka:consume:<run>:<generation>` (the running job holds its
+own key), in the transaction that completes it, and a run older than a day rotates to a fresh one.
+`fail_orphaned_runs` finds the job by either key form. After a slice, `report_stream_lag` stores
+the watermarks and records `Succeeded` within `max_lag` and `Failed` above it; `lag` joins
+`StreamFreshness` and the leader sets `zirv_flow_stream_lag_messages`. rskafka has no resolver hook,
+so its only network path is a loopback SOCKS5 relay (`sources/kafka/relay.rs`) that resolves
+through `SourceContext::resolve_checked`, dials the checked address and leaves TLS to verify the
+name; the client is built with a retry deadline, and an empty fetch below the high watermark twice
+in a row triggers a probe at `next + 1` so control batches and compacted batches do not stall a
+partition. Its limits (aborted transactions are delivered, the SASL secret is copied inside the
+client, the last release was in 2025) are in the README and the pull request.
+
 As built (native contacts, issue 43): a contact is a live `source_records` row with source
 `native`, stream `contacts` and `record_key` equal to the contact key, which is also the
 identity `external:contact_key` (the keys `search` and `bulk` are reserved because they name
@@ -1488,6 +1513,9 @@ when the budget ends. A Kafka stream is therefore not a `sync.run` batch, and a
 lost lease moves the stream to another worker without a skipped or repeated
 offset (7.6).
 
+As built (M3, Kafka): a slice's successor has the unique key `kafka:consume:<run>:<generation + 1>`,
+since the running job still holds its own key and the unique index covers running rows; it is
+enqueued through the handler's transaction, so the completion fence makes it exactly once.
 ```sql
 -- Claim: short transaction, committed before the handler runs.
 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $worker,
@@ -1626,7 +1654,9 @@ needed (5.1).
 As built (M3): `zirv_flow_core::egress` holds the pure policy and `zirv-flow-connectors` enforces it
 for HTTP through `GuardedClient`. The PostgreSQL and MySQL sources call the same policy at their own
 connect points (`SourceContext::resolve_checked`, below); the Kafka consumer and the `ai` crate will
-call it at theirs when they land.
+call it at theirs when they land. The Kafka source reaches the network only through its
+SOCKS5 relay, which resolves with `resolve_checked` for every connection the client opens: the
+bootstrap hosts, every broker the metadata names and every reconnect.
 
 - **Classes.** An address is public, loopback, private, unique-local, link-local, shared CGNAT,
   metadata, unspecified, multicast, broadcast, documentation, benchmarking or reserved. IPv4-mapped,

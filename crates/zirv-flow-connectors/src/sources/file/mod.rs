@@ -530,11 +530,13 @@ impl Read<'_> {
                 key: keys::record_key(&self.primary_key, &item.record, item.ordinal),
                 data: Value::Object(item.record),
                 deleted: false,
+                occurrence: None,
             })
             .collect();
         batches.push(Batch {
             records,
             checkpoint: Checkpoint(serde_json::to_value(checkpoint).unwrap_or(Value::Null)),
+            refused: Vec::new(),
         });
     }
 }

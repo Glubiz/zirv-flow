@@ -10,11 +10,15 @@ import {
   initialValues,
   isPush,
   kindName,
+  lagLabel,
+  lagTitle,
   lastSuccessLabel,
+  rejectReasonText,
   shapesValid,
   runErrorText,
   schemeSummary,
   showValue,
+  syncModeLabel,
   thresholdLabel,
   webhookCodeText,
   webhookUrl,
@@ -157,6 +161,62 @@ describe("freshness", () => {
     expect(thresholdLabel(aFreshness({ threshold_seconds: 90, threshold_is_default: false }))).toBe("2 min");
     expect(thresholdLabel(aFreshness({ threshold_seconds: null }))).toBe("None");
     expect(thresholdLabel(null)).toBe("None");
+  });
+});
+
+describe("streaming sources", () => {
+  it("names the stream mode and leaves an unknown one as it is", () => {
+    expect([syncModeLabel("stream"), syncModeLabel("full_refresh"), syncModeLabel("incremental")]).toEqual([
+      "Streaming",
+      "Full refresh",
+      "Incremental",
+    ]);
+    expect(syncModeLabel("other")).toBe("other");
+  });
+
+  it("shows lag as a grouped number with the partitions in the title, and nothing before the first fetch", () => {
+    const behind = aFreshness({
+      lag: {
+        total: 1204,
+        partitions: [
+          { partition: 0, lag: 4 },
+          { partition: 2, lag: 1200 },
+        ],
+      },
+    });
+
+    expect(lagLabel(behind)).toBe("Lag 1,204");
+    expect(lagTitle(behind)).toBe("Partition 0: 4\nPartition 2: 1,200");
+    expect(lagLabel(aFreshness({ lag: null }))).toBeNull();
+    expect(lagLabel(null)).toBeNull();
+    expect(lagTitle(null)).toBeUndefined();
+  });
+
+  it("explains each reason a message is refused and leaves a pull reason as it is", () => {
+    for (const code of [
+      "kafka_key_missing",
+      "kafka_key_not_text",
+      "kafka_value_not_json",
+      "kafka_value_not_object",
+      "kafka_message_too_large",
+    ]) {
+      expect(rejectReasonText(code)).not.toBe(code);
+    }
+    expect(rejectReasonText("invalid_identifier")).toBe("invalid_identifier");
+  });
+
+  it("explains each way a consumer fails in plain words", () => {
+    for (const code of [
+      "kafka_offset_out_of_range",
+      "kafka_auth_failed",
+      "kafka_tls_failed",
+      "kafka_topic_missing",
+      "kafka_connect_failed",
+    ]) {
+      const text = runErrorText(code, 0.05);
+      expect(text).not.toContain(code);
+      expect(text).not.toMatch(/^The run failed/);
+    }
   });
 });
 

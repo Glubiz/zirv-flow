@@ -127,6 +127,9 @@ pub(crate) async fn test_source(
 /// the stream names a cursor field (the database refuses incremental without one). The stream
 /// starts disabled, and the user confirms the mode before enabling it.
 fn initial(descriptor: &StreamDescriptor) -> SyncMode {
+    if descriptor.sync_modes == [SyncMode::Stream] {
+        return SyncMode::Stream;
+    }
     let incremental_only = !descriptor.sync_modes.contains(&SyncMode::FullRefresh)
         && descriptor.sync_modes.contains(&SyncMode::Incremental);
     if incremental_only && descriptor.default_cursor_field.is_some() {
@@ -324,6 +327,11 @@ mod tests {
         assert_eq!(initial(&both), SyncMode::FullRefresh);
         assert_eq!(initial(&with_cursor), SyncMode::Incremental);
         assert_eq!(initial(&without_cursor), SyncMode::FullRefresh);
+        assert_eq!(
+            initial(&descriptor(vec![SyncMode::Stream])),
+            SyncMode::Stream,
+            "a stream that only streams starts in that mode"
+        );
     }
     #[test]
     fn discovered_streams_need_1_to_256_character_unique_names_and_no_nul() {

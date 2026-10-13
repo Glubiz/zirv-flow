@@ -114,7 +114,10 @@ pub fn validate_stream_settings(
 
     let mode = SyncMode::parse(settings.sync_mode);
     match mode {
-        None => errors.push(error("sync_mode", "must be full_refresh or incremental")),
+        None => errors.push(error(
+            "sync_mode",
+            "must be full_refresh, incremental or stream",
+        )),
         Some(mode) if !descriptor.sync_modes.contains(&mode) => {
             errors.push(error("sync_mode", "is not supported by this stream"));
         }
@@ -179,6 +182,42 @@ fn scheme_reason(schemes: &[&str]) -> &'static str {
     }
 }
 
+/// The most addresses a host list may name.
+pub(crate) const MAX_HOSTS: usize = 10;
+
+/// Why `text` is not one to ten comma-separated `host:port` pairs; none when it is. A scheme, a
+/// path, an IPv6 literal (rskafka splits on the colon) and a port outside 1 to 65535 are refused.
+fn host_list_problem(text: &str) -> Option<&'static str> {
+    let entries: Vec<&str> = text.split(',').map(str::trim).collect();
+    if entries.len() > MAX_HOSTS {
+        return Some("names too many addresses");
+    }
+    for entry in entries {
+        if entry.is_empty() {
+            return Some("must be host:port pairs separated by commas");
+        }
+        if entry.contains("://") || entry.contains('/') {
+            return Some("must not contain a scheme or a path");
+        }
+        if entry.contains('[') || entry.matches(':').count() != 1 {
+            return Some("must be host:port pairs; IPv6 addresses are not supported");
+        }
+        let (host, port) = entry.split_once(':').unwrap_or_default();
+        let host_ok = !host.is_empty()
+            && host.len() <= 253
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !host_ok {
+            return Some("has a host that is not a valid name or IPv4 address");
+        }
+        if !port.parse::<u16>().is_ok_and(|port| port != 0) {
+            return Some("has a port outside 1 to 65535");
+        }
+    }
+    None
+}
+
 fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
     match field.kind {
         FieldKind::Text => match value.as_str() {
@@ -199,6 +238,10 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
         FieldKind::Select(options) => match value.as_str() {
             Some(text) if options.contains(&text) => None,
             _ => Some("must be one of the listed options"),
+        },
+        FieldKind::HostList => match value.as_str() {
+            Some(text) => host_list_problem(text),
+            None => Some("must be text"),
         },
         FieldKind::LongText => match value.as_str() {
             Some(text) if field.required && text.trim().is_empty() => Some("must not be empty"),
@@ -394,7 +437,7 @@ mod tests {
         assert_eq!(
             errors,
             [
-                "sync_mode: must be full_refresh or incremental",
+                "sync_mode: must be full_refresh, incremental or stream",
                 "cursor_field: is not a field of this stream",
                 "primary_key: names a field this stream does not have",
                 "staleness_threshold_seconds: must be positive",
@@ -421,6 +464,63 @@ mod tests {
         );
         assert_eq!(
             fields_of(unsupported.map(|_| ())),
+            ["sync_mode: is not supported by this stream"]
+        );
+    }
+
+    #[test]
+    fn a_host_list_takes_one_to_ten_host_port_pairs_and_refuses_the_rest() {
+        let field = FieldSpec {
+            key: "brokers",
+            label: "",
+            help: "",
+            kind: FieldKind::HostList,
+            required: true,
+            secret: false,
+        };
+        let problem = |text: &str| check_value(&field, &json!(text));
+        let eleven = (1..=11)
+            .map(|n| format!("h{n}:9092"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        assert_eq!(problem("a.test:9092"), None);
+        assert_eq!(problem("a.test:9092, 10.0.0.1:19092,b_1.test:1"), None);
+        assert!(problem(&eleven).is_some());
+        for bad in [
+            "",
+            "a.test",
+            "a.test:0",
+            "a.test:65536",
+            "a.test:x",
+            "tcp://a.test:9092",
+            "a.test:9092/x",
+            "[::1]:9092",
+            "::1:9092",
+            "a.test:9092,",
+            ":9092",
+            "a b:9092",
+        ] {
+            assert!(problem(bad).is_some(), "{bad}");
+        }
+        assert!(check_value(&field, &json!(5)).is_some());
+    }
+
+    #[test]
+    fn a_stream_mode_needs_no_cursor_and_only_where_the_stream_offers_it() {
+        let key = vec![];
+        let mut streaming = descriptor();
+        streaming.sync_modes = vec![SyncMode::Stream];
+
+        assert_eq!(
+            validate_stream_settings(&streaming, &settings("stream", None, &key)).unwrap(),
+            SyncMode::Stream
+        );
+        assert_eq!(
+            fields_of(
+                validate_stream_settings(&descriptor(), &settings("stream", None, &key))
+                    .map(|_| ())
+            ),
             ["sync_mode: is not supported by this stream"]
         );
     }
