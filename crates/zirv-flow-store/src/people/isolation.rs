@@ -655,4 +655,101 @@ mod tests {
             }
         }
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sources_and_streams_are_read_and_changed_only_in_their_own_workspace(pool: PgPool) {
+        use crate::{
+            DiscoveredStream, NewSource, SourceUpdate, StreamSettings, configure_stream,
+            create_source, delete_source, find_source, find_stream, list_sources, list_streams,
+            update_source, upsert_discovered_streams,
+        };
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let config = json!({});
+        let descriptor = json!({});
+        let mut sources = Vec::new();
+        for ws in [one, two] {
+            let source = create_source(
+                &pool,
+                ws,
+                &NewSource {
+                    id: Uuid::now_v7(),
+                    kind: "fake",
+                    name: "crm",
+                    config: &config,
+                    credential_secret_id: None,
+                    credential_fields: &[],
+                    schedule: None,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap();
+            let mut tx = begin(&pool).await.unwrap();
+            upsert_discovered_streams(
+                &mut tx,
+                ws,
+                source.id,
+                &[DiscoveredStream {
+                    name: "contacts",
+                    sync_mode: "full_refresh",
+                    cursor_field: None,
+                    primary_key: &[],
+                    descriptor: &descriptor,
+                }],
+            )
+            .await
+            .unwrap();
+            commit(tx).await.unwrap();
+            sources.push(source.id);
+        }
+
+        for (ws, own, foreign) in [(one, sources[0], sources[1]), (two, sources[1], sources[0])] {
+            let listed = list_sources(&pool, ws).await.unwrap();
+            assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), [own]);
+            assert!(find_source(&pool, ws, foreign).await.unwrap().is_none());
+            assert!(
+                update_source(&pool, ws, foreign, &SourceUpdate::default())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(list_streams(&pool, ws, own).await.unwrap().len(), 1);
+            assert!(list_streams(&pool, ws, foreign).await.unwrap().is_empty());
+            assert!(
+                find_stream(&pool, ws, foreign, "contacts")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let settings = StreamSettings {
+                enabled: true,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                staleness_threshold_seconds: None,
+            };
+            assert!(
+                configure_stream(&pool, ws, foreign, "contacts", &settings)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let mut connection = pool.acquire().await.unwrap();
+            assert!(
+                delete_source(&mut connection, ws, foreign)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            !find_stream(&pool, one, sources[0], "contacts")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+    }
 }
