@@ -470,10 +470,9 @@ async fn slice(
     let mut last_report = Instant::now();
     loop {
         let wait = budget.saturating_sub(started.elapsed()) + READ_SLACK;
-        let next = match tokio::time::timeout(wait, batches.next()).await {
-            Ok(next) => next,
-            Err(_) => return Err(source_failure("the source did not answer in time")),
-        };
+        let next = tokio::time::timeout(wait, batches.next())
+            .await
+            .map_err(|_| source_failure("the source did not answer in time"))?;
         match next {
             Some(Ok(batch)) => {
                 if let Unit::Stop = consumer.absorb(batch).await? {
