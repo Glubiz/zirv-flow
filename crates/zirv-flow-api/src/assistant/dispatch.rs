@@ -167,6 +167,11 @@ impl<'a> Dispatcher<'a> {
         })
     }
 
+    /// What a call of `input_tokens` and `output_tokens` costs on the chosen model, in micro-units.
+    pub(crate) fn cost_micros(&self, input_tokens: u32, output_tokens: u32) -> i64 {
+        self.model.cost_micros(input_tokens, output_tokens)
+    }
+
     /// The privacy level the workspace's opt-in allows.
     pub fn privacy(&self) -> Privacy {
         Privacy::from_opt_in(self.settings.pii_opt_in)

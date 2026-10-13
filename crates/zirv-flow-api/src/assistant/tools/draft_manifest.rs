@@ -9,12 +9,30 @@ use zirv_flow_ai::{
 };
 use zirv_flow_connectors::manifest;
 
-use super::{ToolContext, authorize_again, check_arguments};
+use super::{ToolContext, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::problem::ApiError;
 use crate::sources::ValidateRequest;
 
 pub(crate) struct DraftManifest;
+
+/// The pure part of the tool: the arguments against the schema, then the manifest validator a
+/// save runs. It returns the manifest, or the feedback lines. The golden-prompt harness runs it
+/// without a database.
+pub(crate) fn check_draft(arguments: &Value) -> Result<Value, Vec<String>> {
+    let schema = DraftManifest::parameters().map_err(|_| vec!["arguments_invalid".to_owned()])?;
+    schema.validate_value(arguments)?;
+    let Some(draft) = arguments.get("manifest") else {
+        return Err(vec![line("required", "/manifest")]);
+    };
+    match manifest::validate(draft) {
+        Ok(_) => Ok(draft.clone()),
+        Err(issues) => Err(issues
+            .iter()
+            .map(|issue| line(issue.code, &issue.path))
+            .collect()),
+    }
+}
 
 impl DraftManifest {
     fn parameters() -> Result<JsonSchema, AiError> {
@@ -62,20 +80,9 @@ impl AiTool<ToolContext> for DraftManifest {
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
             authorize_again(context).await?;
-            let schema = Self::parameters().map_err(|_| ToolError::Failed(ApiError::internal()))?;
-            check_arguments(&schema, arguments)?;
-            let Some(draft) = arguments.get("manifest") else {
-                return Err(ToolError::Invalid(vec![line("required", "/manifest")]));
-            };
-            match manifest::validate(draft) {
-                Ok(_) => Ok(ToolOutput::Draft(draft.clone())),
-                Err(issues) => Err(ToolError::Invalid(
-                    issues
-                        .iter()
-                        .map(|issue| line(issue.code, &issue.path))
-                        .collect(),
-                )),
-            }
+            check_draft(arguments)
+                .map(ToolOutput::Draft)
+                .map_err(ToolError::Invalid)
         })
     }
 }

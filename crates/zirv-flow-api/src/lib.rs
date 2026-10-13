@@ -50,7 +50,8 @@ use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
 pub use assistant::{
-    AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, DispatchError, Dispatcher, dispatch,
+    AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, CaseReport, DispatchError,
+    Dispatcher, EvaluationError, dispatch, evaluate_assistant,
 };
 pub use events::ExplorerLimits;
 pub use imports::ImportLimits;

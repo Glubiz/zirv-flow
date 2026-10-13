@@ -160,7 +160,7 @@ pub(crate) struct DraftIssue {
 
 impl DraftIssue {
     /// From a tool's feedback line: `code (column "x")`, `code at /pointer` or `code`.
-    fn from_line(line: &str) -> Self {
+    pub(crate) fn from_line(line: &str) -> Self {
         let (code, at) = if let Some((code, rest)) = line.split_once(" (column \"") {
             (code, rest.strip_suffix("\")").map(str::to_owned))
         } else if let Some((code, rest)) = line.split_once(" at ") {
@@ -277,11 +277,24 @@ fn kind_body(kind: DraftKind) -> DraftKindBody {
 }
 
 /// The one tool a run offers for a kind.
-fn tool_name(kind: DraftKind) -> &'static str {
+pub(crate) fn tool_name(kind: DraftKind) -> &'static str {
     match kind {
         DraftKind::Mapping => "draft_mapping",
         DraftKind::Manifest => "draft_manifest",
     }
+}
+
+/// The feedback for an answer that is not exactly one call of the draft tool.
+pub(crate) fn wrong_answer(want: &str) -> DraftIssue {
+    DraftIssue::from_line(&format!("answer by calling {want} exactly once"))
+}
+
+/// The arguments of the answer's one call of `want`. None for anything else: no call, several, or
+/// a tool of another name (a registered one or one the model made up), none of which is run.
+pub(crate) fn expected_call<'r>(response: &'r ChatResponse, want: &str) -> Option<&'r Value> {
+    let mut calls = response.tool_calls();
+    let (_, name, arguments) = calls.next()?;
+    (name == want && calls.next().is_none()).then_some(arguments)
 }
 
 /// Checks one answer of the model. It must be exactly one call of the kind's draft tool; the
@@ -294,19 +307,11 @@ async fn validate_turn(
     response: &ChatResponse,
 ) -> Verdict<Value, DraftIssue, ApiError> {
     let want = tool_name(kind);
-    let calls: Vec<_> = response.tool_calls().collect();
-    let feedback = || {
-        Verdict::Invalid(vec![DraftIssue::from_line(&format!(
-            "answer by calling {want} exactly once"
-        ))])
-    };
-    let [(_, name, arguments)] = calls.as_slice() else {
+    let feedback = || Verdict::Invalid(vec![wrong_answer(want)]);
+    let Some(arguments) = expected_call(response, want) else {
         return feedback();
     };
-    if *name != want {
-        return feedback();
-    }
-    let Some(tool) = tools::find(name) else {
+    let Some(tool) = tools::find(want) else {
         return feedback();
     };
     match tool.call(context, arguments).await {

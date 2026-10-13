@@ -93,7 +93,6 @@ impl ApiError {
         self.code
     }
 
-    #[cfg(test)]
     pub(crate) fn detail(&self) -> &str {
         &self.detail
     }
