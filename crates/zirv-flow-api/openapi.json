@@ -13462,7 +13462,7 @@
         ],
         "properties": {
           "high_water_mark": {
-            "description": "The stream\\'s checkpoint, opaque connector state that may hold a value of a record.\nWorkspace admins only; null for everyone else, for a full refresh and before the first\nbatch."
+            "description": "The stream's checkpoint, opaque connector state that may hold a value of a record.\nWorkspace admins only; null for everyone else, for a full refresh and before the first\nbatch."
           },
           "last_success_at": {
             "type": [
@@ -13479,7 +13479,7 @@
           },
           "threshold_is_default": {
             "type": "boolean",
-            "description": "Whether `threshold_seconds` is the default of twice the schedule interval and not the\nstream\\'s own."
+            "description": "Whether `threshold_seconds` is the default of twice the schedule interval and not the\nstream's own."
           },
           "threshold_seconds": {
             "type": [

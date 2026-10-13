@@ -2833,7 +2833,7 @@ export interface components {
         /** @description Whether a stream's data is current (architecture 7.5). The state is derived on every read. */
         FreshnessBody: {
             /**
-             * @description The stream\'s checkpoint, opaque connector state that may hold a value of a record.
+             * @description The stream's checkpoint, opaque connector state that may hold a value of a record.
              *     Workspace admins only; null for everyone else, for a full refresh and before the first
              *     batch.
              */
@@ -2851,7 +2851,7 @@ export interface components {
             state: string;
             /**
              * @description Whether `threshold_seconds` is the default of twice the schedule interval and not the
-             *     stream\'s own.
+             *     stream's own.
              */
             threshold_is_default: boolean;
             /**

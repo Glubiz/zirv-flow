@@ -75,9 +75,10 @@ impl From<&Source> for SourceBody {
 }
 
 impl SourceBody {
-    fn with_freshness(mut self, freshness: Option<Freshness>) -> Self {
-        self.freshness = freshness.map(|state| state.as_str().to_owned());
-        self
+    fn with_freshness(source: &Source, worst: &HashMap<Uuid, Freshness>) -> Self {
+        let mut body = Self::from(source);
+        body.freshness = worst.get(&source.id).map(|state| state.as_str().to_owned());
+        body
     }
 }
 
@@ -417,7 +418,7 @@ pub(crate) async fn list(
     Ok(Json(
         sources
             .iter()
-            .map(|source| SourceBody::from(source).with_freshness(worst.get(&source.id).copied()))
+            .map(|source| SourceBody::with_freshness(source, &worst))
             .collect(),
     ))
 }
@@ -488,9 +489,7 @@ pub(crate) async fn get(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let worst = source_freshness(&state.pool, workspace.id, Some(source.id)).await?;
-    Ok(Json(
-        SourceBody::from(&source).with_freshness(worst.get(&source.id).copied()),
-    ))
+    Ok(Json(SourceBody::with_freshness(&source, &worst)))
 }
 
 /// Changes a source: name, settings, schedule, enabled, or the credential. Workspace admins
@@ -532,9 +531,7 @@ pub(crate) async fn update(
     )
     .await?;
     let worst = source_freshness(&state.pool, workspace.id, Some(source.id)).await?;
-    Ok(Json(
-        SourceBody::from(&source).with_freshness(worst.get(&source.id).copied()),
-    ))
+    Ok(Json(SourceBody::with_freshness(&source, &worst)))
 }
 
 /// Deletes a source with its streams and its stored credential. Workspace admins only. Audited

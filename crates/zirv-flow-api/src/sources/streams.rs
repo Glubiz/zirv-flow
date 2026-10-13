@@ -2,6 +2,8 @@
 //! checked against the descriptor discovery last reported, so a stream cannot be set up in a way
 //! its source cannot serve.
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
@@ -124,7 +126,7 @@ pub(crate) struct FreshnessBody {
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     last_success_at: Option<OffsetDateTime>,
-    /// The stream\'s checkpoint, opaque connector state that may hold a value of a record.
+    /// The stream's checkpoint, opaque connector state that may hold a value of a record.
     /// Workspace admins only; null for everyone else, for a full refresh and before the first
     /// batch.
     #[schema(value_type = Option<serde_json::Value>)]
@@ -133,7 +135,7 @@ pub(crate) struct FreshnessBody {
     /// stale (no explicit threshold and no schedule).
     threshold_seconds: Option<i64>,
     /// Whether `threshold_seconds` is the default of twice the schedule interval and not the
-    /// stream\'s own.
+    /// stream's own.
     threshold_is_default: bool,
 }
 
@@ -164,12 +166,15 @@ pub(super) async fn bodies(
     let now = zirv_flow_store::database_now(&state.pool).await?;
     let freshness =
         zirv_flow_store::stream_freshness(&state.pool, Some(workspace), Some(source), now).await?;
+    let by_id: HashMap<Uuid, &StreamFreshness> = freshness
+        .iter()
+        .map(|found| (found.stream_id, found))
+        .collect();
     streams
         .iter()
         .map(|stream| {
-            let found = freshness
-                .iter()
-                .find(|found| found.stream_id == stream.id)
+            let found = by_id
+                .get(&stream.id)
                 .map(|found| FreshnessBody::new(found, show_high_water_mark));
             StreamBody::new(stream, found)
         })

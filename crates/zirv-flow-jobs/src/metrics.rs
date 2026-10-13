@@ -159,7 +159,15 @@ impl FreshnessGauges {
             .iter()
             .map(|stream| (stream.workspace_id, stream.stream_id))
             .collect();
-        let workspaces: BTreeSet<Uuid> = report.iter().map(|stream| stream.workspace_id).collect();
+        let mut counts: BTreeMap<Uuid, BTreeMap<Freshness, usize>> = BTreeMap::new();
+        for stream in report {
+            *counts
+                .entry(stream.workspace_id)
+                .or_default()
+                .entry(stream.state)
+                .or_default() += 1;
+        }
+        let workspaces: BTreeSet<Uuid> = counts.keys().copied().collect();
         for (workspace, stream) in self.streams.difference(&streams) {
             stream_gauges(*workspace, *stream, 0.0, 0.0);
         }
@@ -175,14 +183,6 @@ impl FreshnessGauges {
                 stream.age_seconds as f64,
                 stream.state.gauge_value(),
             );
-        }
-        let mut counts: BTreeMap<Uuid, BTreeMap<Freshness, usize>> = BTreeMap::new();
-        for stream in report {
-            *counts
-                .entry(stream.workspace_id)
-                .or_default()
-                .entry(stream.state)
-                .or_default() += 1;
         }
         for (workspace, by_state) in &counts {
             for state in STATES {

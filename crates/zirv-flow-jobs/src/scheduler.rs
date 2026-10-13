@@ -1238,7 +1238,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_publishes_the_state_of_every_enabled_stream_and_only_those(pool: PgPool) {
         migrated(&pool).await;
-        let (ws, source, streams) = freshness_streams(&pool, "ours").await;
+        let (ws, _, streams) = freshness_streams(&pool, "ours").await;
         // A stream of a disabled source is not reported either.
         let (_, disabled_source, disabled_streams) = freshness_streams(&pool, "theirs").await;
         sqlx::query("UPDATE sources SET enabled = false WHERE id = $1")
@@ -1291,7 +1291,6 @@ mod tests {
             (Some(1.0), Some(1.0), Some(1.0)),
             "{output}"
         );
-        let _ = source;
     }
 
     #[sqlx::test]
