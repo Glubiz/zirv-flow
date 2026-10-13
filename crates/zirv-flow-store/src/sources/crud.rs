@@ -398,4 +398,48 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_store_refuses_a_secret_or_a_source_of_another_workspace(pool: PgPool) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let foreign_secret = secret(&pool, two).await;
+        let config = json!({});
+
+        let created = create_source(
+            &pool,
+            one,
+            &NewSource {
+                credential_secret_id: Some(foreign_secret),
+                ..new("crm", &config)
+            },
+        )
+        .await;
+        let own = create_source(&pool, one, &new("erp", &config))
+            .await
+            .unwrap();
+        let linked = update_source(
+            &pool,
+            one,
+            own.id,
+            &SourceUpdate {
+                credential_secret_id: Some(foreign_secret),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        let stream = sqlx::query(
+            "INSERT INTO streams (id, workspace_id, source_id, name, sync_mode, discovered) \
+             VALUES ($1, $2, $3, 'a', 'full_refresh', '{}')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(two.as_uuid())
+        .bind(own.id)
+        .execute(&pool)
+        .await;
+
+        assert!(created.is_err());
+        assert!(linked.is_err());
+        assert!(stream.is_err());
+    }
 }
