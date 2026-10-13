@@ -308,7 +308,7 @@ mod tests {
 
         let more = json!({"streams": 3});
         let updated = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(updated.schedule.as_deref(), Some("0 * * * *"));
         assert!(!updated.enabled);
         let untouched = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate::default(),
@@ -337,7 +337,7 @@ mod tests {
         .unwrap();
         assert_eq!(untouched.schedule.as_deref(), Some("0 * * * *"));
         let cleared = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -353,7 +353,7 @@ mod tests {
         let secret_id = secret(&pool, ws).await;
         let fields = vec!["token".to_owned()];
         let linked = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(linked.credential_secret_id, Some(secret_id.as_uuid()));
         assert_eq!(linked.credential_fields, fields);
         let kept = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate::default(),
@@ -521,7 +521,7 @@ mod tests {
             .await
             .unwrap();
         let linked = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             one,
             own.id,
             &SourceUpdate {
@@ -560,7 +560,7 @@ mod tests {
     }
 
     async fn update(pool: &PgPool, ws: WorkspaceId, source_id: Uuid, change: SourceUpdate<'_>) {
-        update_source(&mut *pool.acquire().await.unwrap(), ws, source_id, &change)
+        update_source(&mut pool.acquire().await.unwrap(), ws, source_id, &change)
             .await
             .unwrap()
             .unwrap();
@@ -626,7 +626,7 @@ mod tests {
         let same = json!({});
 
         let refused = update_source(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             fx.ws,
             fx.source_id,
             &SourceUpdate {

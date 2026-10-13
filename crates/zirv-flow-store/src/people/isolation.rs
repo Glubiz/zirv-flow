@@ -711,7 +711,7 @@ mod tests {
             assert!(find_source(&pool, ws, foreign).await.unwrap().is_none());
             assert!(
                 update_source(
-                    &mut *pool.acquire().await.unwrap(),
+                    &mut pool.acquire().await.unwrap(),
                     ws,
                     foreign,
                     &SourceUpdate::default()
@@ -737,7 +737,7 @@ mod tests {
             };
             assert!(
                 configure_stream(
-                    &mut *pool.acquire().await.unwrap(),
+                    &mut pool.acquire().await.unwrap(),
                     ws,
                     foreign,
                     "contacts",

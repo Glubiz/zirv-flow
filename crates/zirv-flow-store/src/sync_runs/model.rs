@@ -720,7 +720,7 @@ pub(super) mod tests {
             staleness_threshold_seconds: None,
         };
         configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source,
             "unmapped",

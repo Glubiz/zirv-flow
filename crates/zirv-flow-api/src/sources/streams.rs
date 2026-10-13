@@ -234,7 +234,7 @@ pub(crate) async fn configure(
     };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let stream = zirv_flow_store::configure_stream(
-        &mut *tx,
+        &mut tx,
         workspace,
         source_id,
         name,

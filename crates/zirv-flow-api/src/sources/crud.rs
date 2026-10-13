@@ -297,7 +297,7 @@ pub(crate) async fn update_source(
         }
     }
     let source = zirv_flow_store::update_source(
-        &mut *tx,
+        &mut tx,
         workspace,
         id,
         &SourceUpdate {

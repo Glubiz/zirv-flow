@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(streams[0].primary_key, pk);
 
         let chosen = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source_id,
             "a",
@@ -399,7 +399,7 @@ mod tests {
         };
 
         let no_cursor = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source_id,
             "a",
@@ -407,7 +407,7 @@ mod tests {
         )
         .await;
         let zero = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source_id,
             "a",
@@ -415,7 +415,7 @@ mod tests {
         )
         .await;
         let unknown = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source_id,
             "a",
@@ -501,7 +501,7 @@ mod tests {
         settings: StreamSettings<'_>,
     ) {
         configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             ws,
             source_id,
             "contacts",
@@ -615,7 +615,7 @@ mod tests {
         };
 
         let refused = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             fx.ws,
             fx.source_id,
             "contacts",
@@ -623,7 +623,7 @@ mod tests {
         )
         .await;
         let allowed = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             fx.ws,
             fx.source_id,
             "contacts",
@@ -643,7 +643,7 @@ mod tests {
             .await
             .unwrap();
         let after = configure_stream(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             fx.ws,
             fx.source_id,
             "contacts",
