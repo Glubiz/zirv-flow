@@ -141,3 +141,38 @@ pub(crate) fn pki(name: &str) -> Pki {
         acceptor: TlsAcceptor::from(Arc::new(config)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suffix_is_eight_hex_digits_and_differs_between_calls() {
+        let (a, b) = (suffix(), suffix());
+
+        assert_eq!(a.len(), 8);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_generated_server_certificate_comes_with_the_ca_that_signed_it() {
+        let pki = pki("db.test");
+
+        assert!(crate::sources::sql::tls::pem_problem(&pki.ca_pem).is_none());
+    }
+
+    #[test]
+    fn the_credential_helper_sets_both_fields() {
+        let credential = credential("reader", "pw");
+
+        assert_eq!(credential.get("user").unwrap().expose(), "reader");
+        assert_eq!(credential.get("password").unwrap().expose(), "pw");
+    }
+
+    #[test]
+    #[should_panic(expected = "ZIRV_FLOW_TEST_VARIABLE_THAT_IS_NOT_SET must be set")]
+    fn a_missing_test_server_variable_fails_naming_it() {
+        required_env("ZIRV_FLOW_TEST_VARIABLE_THAT_IS_NOT_SET");
+    }
+}
