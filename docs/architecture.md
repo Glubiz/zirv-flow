@@ -733,7 +733,7 @@ As built (M3, Kafka): `kafka` is one module and one registry line in `zirv-flow-
 is a topic, in the new `stream` sync mode, and the record key is the message key (virtual field
 `_key`, with `_timestamp`). `read` yields batches whose checkpoint is the typed `kafka::Positions`
 (`next` and the high watermark per partition); the job stores them and `sync.run` never looks
-inside. `stream_offsets` (migration 0026) holds `next_offset`, `high_watermark` and `observed_at`
+inside. `stream_offsets` (migration 0028) holds `next_offset`, `high_watermark` and `observed_at`
 per stream and partition; `commit_sync_batch` writes them after the lease fence and before the
 counters, so a batch that is not applied moves none. A message with a null value is a tombstone
 and deletes through `remove_contribution_in`; a malformed one is a reject whose reasons are the
