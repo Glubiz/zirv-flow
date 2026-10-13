@@ -295,28 +295,6 @@ async fn write_tokens(
     }
 }
 
-/// Saves refreshed tokens over the source's token secret. The secret row is locked first, so two
-/// writers run one after the other; the write is checked against the HMAC root like any secret
-/// write. A refresh is routine, so no audit row is written (the connect itself is audited).
-pub async fn save_tokens(
-    pool: &PgPool,
-    keyring: &Keyring,
-    workspace: WorkspaceId,
-    source: Uuid,
-    tokens: &StoredTokens,
-) -> Result<(), TokenError> {
-    let mut tx = crate::begin(pool).await?;
-    let secret = token_secret(&mut tx, workspace, source)
-        .await?
-        .ok_or(TokenError::NotConnected)?;
-    secrets::get_for_update(&mut tx, workspace, secret)
-        .await?
-        .ok_or(TokenError::NotConnected)?;
-    write_tokens(&mut tx, keyring, workspace, secret, tokens).await?;
-    crate::commit(tx).await?;
-    Ok(())
-}
-
 /// Refreshes the source's tokens so that concurrent refreshers, in any process, make one
 /// provider call. In ONE transaction: lock the token secret row, reload and open the newest
 /// stored tokens, and if their refresh token differs from `held` another process has already
@@ -618,12 +596,13 @@ mod tests {
         assert_eq!(first.access_token.expose(), "acc-0");
         assert_eq!(first.refresh_token.expose(), "rt-0");
 
-        save_tokens(
+        refresh_serialized::<(), _, _>(
             &fx.pool,
             &fx.keys,
             fx.ws,
             fx.source,
-            &tokens("acc-1", "rt-1"),
+            &first.refresh_token,
+            |_| async { Ok(tokens("acc-1", "rt-1")) },
         )
         .await
         .unwrap();
@@ -641,8 +620,16 @@ mod tests {
                 .is_none()
         );
         assert!(matches!(
-            save_tokens(&fx.pool, &fx.keys, other, fx.source, &tokens("x", "y")).await,
-            Err(TokenError::NotConnected)
+            refresh_serialized::<(), _, _>(
+                &fx.pool,
+                &fx.keys,
+                other,
+                fx.source,
+                &first.refresh_token,
+                |_| async { Ok(tokens("x", "y")) },
+            )
+            .await,
+            Err(RefreshError::Token(TokenError::NotConnected))
         ));
     }
 

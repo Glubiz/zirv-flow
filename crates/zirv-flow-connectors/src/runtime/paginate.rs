@@ -113,42 +113,6 @@ struct Params<'a> {
 /// (the manifest it built the auth from) keeps a `Pager` and passes the auth, style and items to
 /// [`Pager::next_page`] on every call instead of using [`paginate`].
 pub struct Pager {
-    inner: Driver,
-}
-
-impl Pager {
-    /// A pager that starts with `first`, the request for the first page.
-    pub fn new(first: RequestSpec, style: Pagination<'_>) -> Self {
-        Self {
-            inner: Driver::new(first, style),
-        }
-    }
-
-    /// The next page, or `None` once the last one has been read or an error ended the stream.
-    /// `auth`, `style` and `items` must be the same on every call.
-    pub async fn next_page(
-        &mut self,
-        ctx: &SourceContext,
-        auth: &Auth<'_>,
-        style: Pagination<'_>,
-        items: &str,
-    ) -> Option<Result<Page, RuntimeError>> {
-        self.inner
-            .step(&Params {
-                ctx,
-                auth,
-                style,
-                items,
-            })
-            .await
-    }
-
-    async fn step(&mut self, params: &Params<'_>) -> Option<Result<Page, RuntimeError>> {
-        self.inner.step(params).await
-    }
-}
-
-struct Driver {
     /// The request to send next; `None` once the last page has been read or an error ended it.
     next: Option<RequestSpec>,
     /// An error found while reading the page just returned, reported on the next poll.
@@ -165,8 +129,9 @@ struct Driver {
     position: u64,
 }
 
-impl Driver {
-    fn new(first: RequestSpec, style: Pagination<'_>) -> Self {
+impl Pager {
+    /// A pager that starts with `first`, the request for the first page.
+    pub fn new(first: RequestSpec, style: Pagination<'_>) -> Self {
         let mut seen = HashSet::new();
         let (first, position) = match style {
             Pagination::Cursor { .. } => (first, 0),
@@ -205,6 +170,24 @@ impl Driver {
             max_pages: MAX_PAGES,
             position,
         }
+    }
+
+    /// The next page, or `None` once the last one has been read or an error ended the stream.
+    /// `auth`, `style` and `items` must be the same on every call.
+    pub async fn next_page(
+        &mut self,
+        ctx: &SourceContext,
+        auth: &Auth<'_>,
+        style: Pagination<'_>,
+        items: &str,
+    ) -> Option<Result<Page, RuntimeError>> {
+        self.step(&Params {
+            ctx,
+            auth,
+            style,
+            items,
+        })
+        .await
     }
 
     async fn step(&mut self, params: &Params<'_>) -> Option<Result<Page, RuntimeError>> {
@@ -1004,7 +987,7 @@ mod tests {
             limit_param: "limit",
             limit: 2,
         };
-        let mut driver = Driver::new(first, style);
+        let mut driver = Pager::new(first, style);
         let params = Params {
             ctx: &ctx,
             auth: &Auth::None,
@@ -1103,7 +1086,7 @@ mod tests {
             first: 1,
             size_param: None,
         };
-        let mut driver = Driver::new(first, style);
+        let mut driver = Pager::new(first, style);
         let params = Params {
             ctx: &ctx,
             auth: &Auth::None,
