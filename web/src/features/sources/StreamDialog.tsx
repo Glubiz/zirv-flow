@@ -5,8 +5,6 @@ import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
 import { FreshnessBadge } from "./FreshnessBadge";
 import { lastSuccessLabel, syncModeLabel, thresholdLabel, type Stream } from "./labels";
 
-type DeleteRule = "truthy" | "present";
-
 interface StreamDialogProps {
   workspaceId: string;
   sourceId: string;
@@ -28,8 +26,6 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
   const [staleness, setStaleness] = useState(
     stream.staleness_threshold_seconds ? String(stream.staleness_threshold_seconds) : "",
   );
-  const [deleteColumn, setDeleteColumn] = useState(stream.mapping?.delete_when?.column ?? "");
-  const [deleteRule, setDeleteRule] = useState<DeleteRule>(stream.mapping?.delete_when?.rule ?? "truthy");
   const [reconcile, setReconcile] = useState(stream.reconcile_schedule ?? "");
   const [limit, setLimit] = useState(String(Math.round(stream.sweep_limit * 1000) / 10));
   const [busy, setBusy] = useState(false);
@@ -42,15 +38,6 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
   const limitValue = Number(limit);
   const limitOk = limit.trim() !== "" && Number.isFinite(limitValue) && limitValue > 0 && limitValue <= 100;
   const incremental = syncMode === "incremental";
-
-  /** The stream's mapping with the delete signal chosen here; none when the stream has no mapping. */
-  function mappingToSend(): Stream["mapping"] {
-    const current = stream.mapping;
-    if (!current) return undefined;
-    const rest = { ...current };
-    delete rest.delete_when;
-    return deleteColumn === "" ? rest : { ...rest, delete_when: { column: deleteColumn, rule: deleteRule } };
-  }
 
   function togglePrimaryKey(name: string, on: boolean) {
     setPrimaryKey((current) => (on ? [...current, name] : current.filter((entry) => entry !== name)));
@@ -72,7 +59,8 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             staleness_threshold_seconds: stalenessValue,
             reconcile_schedule: incremental && reconcile.trim() !== "" ? reconcile.trim() : null,
             sweep_limit: limitValue / 100,
-            mapping: mappingToSend(),
+            // The mapping is edited in its own dialog; a save here sends it back as it is.
+            mapping: stream.mapping ?? undefined,
           },
         }),
       );
@@ -164,31 +152,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             <p className="muted">Records the source no longer lists are removed after each successful run.</p>
           )}
           {stream.mapping ? (
-            <>
-              <SelectField
-                label="Deleted column"
-                value={deleteColumn}
-                onChange={(event) => setDeleteColumn(event.target.value)}
-                hint="A column that marks a record as deleted, such as a soft-delete flag or a deleted-at time."
-              >
-                <option value="">None</option>
-                {fields.map((field) => (
-                  <option key={field.name} value={field.name}>
-                    {field.name}
-                  </option>
-                ))}
-              </SelectField>
-              {deleteColumn !== "" ? (
-                <SelectField
-                  label="A record is deleted when the column"
-                  value={deleteRule}
-                  onChange={(event) => setDeleteRule(event.target.value as DeleteRule)}
-                >
-                  <option value="truthy">is true</option>
-                  <option value="present">has a value</option>
-                </SelectField>
-              ) : null}
-            </>
+            <p className="muted">The column that marks a record as deleted is part of the mapping. Change it under Map.</p>
           ) : (
             <p className="muted">Set up a mapping for this stream to choose a column that marks deleted records.</p>
           )}

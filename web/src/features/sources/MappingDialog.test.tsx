@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -167,6 +167,77 @@ describe("the mapping dialog", () => {
       mapping: { event: { name: "order_placed" } },
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the delete signal, the event, a list, the key and the stream's schedule and limit when it saves", async () => {
+    const saved = aStream({
+      enabled: true,
+      sync_mode: "incremental",
+      reconcile_schedule: "0 3 * * *",
+      sweep_limit: 0.25,
+      mapping: {
+        key_column: "id",
+        columns: [
+          { column: "profile.email", target: { type: "identifier", kind: "email" }, transforms: [] },
+          { column: "flags.news", target: { type: "list", list_id: LIST_ID }, transforms: [] },
+          { column: "legacy", target: { type: "ignore" }, transforms: [] },
+        ],
+        event: { name: "order_placed", properties: [{ property: "sku", column: "order.sku", transforms: [] }] },
+        delete_when: { column: "meta.deleted", rule: "truthy" },
+      },
+    });
+    const calls = mockApi({
+      ...ROUTES,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([saved]),
+      [PUT_PATH]: () => json(saved),
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+
+    expect(dialog.getByLabelText("Deleted column")).toHaveValue("meta.deleted");
+    expect(dialog.getByLabelText("A record is deleted when the column")).toHaveValue("truthy");
+    await user.click(dialog.getByRole("button", { name: "Save mapping" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    const put = calls.find((call) => call.method === "PUT")!;
+    expect(put.body).toMatchObject({ reconcile_schedule: "0 3 * * *", sweep_limit: 0.25 });
+    expect((put.body as { mapping: unknown }).mapping).toEqual(saved.mapping);
+  });
+
+  it("edits the delete signal and clears it again", async () => {
+    const saved = aStream({
+      mapping: {
+        key_column: null,
+        columns: [{ column: "email", target: { type: "identifier", kind: "email" }, transforms: [] }],
+        delete_when: { column: "updated_at", rule: "present" },
+      },
+    });
+    const calls = mockApi({
+      ...ROUTES,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([saved]),
+      [PUT_PATH]: () => json(saved),
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+
+    await user.selectOptions(dialog.getByLabelText("A record is deleted when the column"), "truthy");
+    await user.clear(dialog.getByLabelText("Deleted column"));
+    await user.type(dialog.getByLabelText("Deleted column"), "meta.gone");
+    await user.click(dialog.getByRole("button", { name: "Save mapping" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1));
+    expect((calls.find((call) => call.method === "PUT")!.body as { mapping: object }).mapping).toMatchObject({
+      delete_when: { column: "meta.gone", rule: "truthy" },
+    });
+
+    const again = within(await openDialog(user));
+    await user.clear(again.getByLabelText("Deleted column"));
+    expect(again.queryByLabelText("A record is deleted when the column")).not.toBeInTheDocument();
+    await user.click(again.getByRole("button", { name: "Save mapping" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2));
+    const cleared = calls.filter((call) => call.method === "PUT")[1]!;
+    expect((cleared.body as { mapping: object }).mapping).not.toHaveProperty("delete_when");
   });
 
   it("offers no preview or save until the mapping identifies a person, and says why", async () => {

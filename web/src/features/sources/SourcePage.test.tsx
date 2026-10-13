@@ -329,13 +329,17 @@ describe("a source", () => {
     expect(dialog.getByRole("button", { name: "Save stream" })).toBeDisabled();
   });
 
-  it("edits and clears the delete signal, the reconciliation cron and the sweep limit", async () => {
+  it("edits and clears the reconciliation cron and the sweep limit, and saves the mapping unchanged", async () => {
     const mapped = aStream({
       enabled: true,
       sync_mode: "incremental",
       mapping: {
         key_column: "id",
-        columns: [{ column: "email", target: { type: "ignore" }, transforms: [] }],
+        columns: [
+          { column: "email", target: { type: "ignore" }, transforms: [] },
+          { column: "name", target: { type: "list", list_id: "22222222-2222-7222-8222-222222222222" }, transforms: [] },
+        ],
+        event: { name: "order_placed", properties: [{ property: "sku", column: "name", transforms: [] }] },
         delete_when: { column: "updated_at", rule: "present" },
       },
       reconcile_schedule: "0 3 * * *",
@@ -351,33 +355,30 @@ describe("a source", () => {
 
     await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
     const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
-    expect(dialog.getByLabelText("Deleted column")).toHaveValue("updated_at");
-    expect(dialog.getByLabelText("A record is deleted when the column")).toHaveValue("present");
+    expect(dialog.queryByLabelText("Deleted column")).not.toBeInTheDocument();
+    expect(dialog.getByText(/Change it under Map/)).toBeInTheDocument();
     expect(dialog.getByLabelText("Reconciliation schedule")).toHaveValue("0 3 * * *");
     expect(dialog.getByLabelText("Largest share a run may remove (%)")).toHaveValue(25);
-    await user.selectOptions(dialog.getByLabelText("A record is deleted when the column"), "truthy");
-    await user.selectOptions(dialog.getByLabelText("Deleted column"), "name");
     await user.clear(dialog.getByLabelText("Largest share a run may remove (%)"));
     await user.type(dialog.getByLabelText("Largest share a run may remove (%)"), "100");
     await user.click(dialog.getByRole("button", { name: "Save stream" }));
 
     await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1));
-    expect(calls.find((call) => call.method === "PUT")!.body).toMatchObject({
-      reconcile_schedule: "0 3 * * *",
-      sweep_limit: 1,
-      mapping: { delete_when: { column: "name", rule: "truthy" }, key_column: "id" },
-    });
+    const first = calls.find((call) => call.method === "PUT")!;
+    expect(first.body).toMatchObject({ reconcile_schedule: "0 3 * * *", sweep_limit: 1 });
+    // The mapping goes back exactly as it was read: the event, the list, the ignored column, the
+    // key and the delete signal.
+    expect(JSON.stringify((first.body as { mapping: unknown }).mapping)).toBe(JSON.stringify(mapped.mapping));
 
-    // Clearing both sends no delete signal and no cron.
+    // Clearing the cron sends none.
     await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
     const again = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
-    await user.selectOptions(again.getByLabelText("Deleted column"), "");
     await user.clear(again.getByLabelText("Reconciliation schedule"));
     await user.click(again.getByRole("button", { name: "Save stream" }));
     await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2));
     const cleared = calls.filter((call) => call.method === "PUT")[1]!;
     expect(cleared.body).toMatchObject({ reconcile_schedule: null, sweep_limit: 0.25 });
-    expect((cleared.body as { mapping: object }).mapping).not.toHaveProperty("delete_when");
+    expect(JSON.stringify((cleared.body as { mapping: unknown }).mapping)).toBe(JSON.stringify(mapped.mapping));
   });
 
   it("hides the cron for a full refresh stream and says what a sweep does", async () => {
