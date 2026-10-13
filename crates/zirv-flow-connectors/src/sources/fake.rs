@@ -86,6 +86,14 @@ impl Source for Fake {
                 secret: false,
             },
             FieldSpec {
+                key: "note",
+                label: "Note",
+                help: "Text written into a note field of every record, which discovery then reports.",
+                kind: FieldKind::Text,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
                 key: "fail_after_batches",
                 label: "Fail after batches",
                 help: "A read error after this many batches.",
@@ -134,6 +142,7 @@ impl Source for Fake {
         _credential: &Credential,
     ) -> Result<Vec<StreamDescriptor>, SourceError> {
         let count = config["streams"].as_u64().unwrap_or(1).min(50);
+        let note = config["note"].as_str().is_some_and(|text| !text.is_empty());
         Ok((1..=count)
             .map(|n| StreamDescriptor {
                 name: format!("stream_{n}"),
@@ -162,7 +171,13 @@ impl Source for Fake {
                         name: "deleted_at".into(),
                         field_type: FieldType::Timestamp,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(note.then(|| FieldDescriptor {
+                    name: "note".into(),
+                    field_type: FieldType::String,
+                }))
+                .collect(),
                 sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
                 default_cursor_field: Some("updated_at".into()),
                 default_primary_key: vec!["id".into()],
@@ -185,6 +200,7 @@ impl Source for Fake {
         let invalid = id_set(&config["invalid"]);
         let soft_deleted = id_set(&config["soft_deleted"]);
         let fail_after = config["fail_after_batches"].as_u64();
+        let note = config["note"].as_str().filter(|text| !text.is_empty());
         let start = checkpoint
             .and_then(|checkpoint| checkpoint.0["offset"].as_u64())
             .unwrap_or(0)
@@ -198,9 +214,8 @@ impl Source for Fake {
             }
             let end = (offset + batch).min(records);
             let batch_records = (offset..end)
-                .map(|id| Record {
-                    key: format!("{}-{id}", stream.name),
-                    data: json!({
+                .map(|id| {
+                    let mut data = json!({
                         "id": id,
                         "name": format!("{} record {id}", stream.name),
                         "email": if invalid.contains(&id) {
@@ -211,9 +226,16 @@ impl Source for Fake {
                         "updated_at": format!("2026-01-{:02}T00:00:00Z", id % 28 + 1),
                         "deleted_flag": if soft_deleted.contains(&id) { "true" } else { "false" },
                         "deleted_at": if soft_deleted.contains(&id) { "2026-02-01T00:00:00Z" } else { "" },
-                    }),
-                    deleted: deleted.contains(&id),
-                    occurrence: None,
+                    });
+                    if let Some(text) = note {
+                        data["note"] = json!(text);
+                    }
+                    Record {
+                        key: format!("{}-{id}", stream.name),
+                        data,
+                        deleted: deleted.contains(&id),
+                        occurrence: None,
+                    }
                 })
                 .collect();
             batches.push(Ok(Batch {
@@ -387,6 +409,19 @@ mod tests {
         assert_eq!(all[0].data["deleted_flag"], "false");
         assert_eq!(all[0].data["deleted_at"], "");
         assert!(all.iter().all(|record| !record.deleted));
+
+        let noted = json!({"records": 1, "note": "hello"});
+        let batches: Vec<Batch> = Fake
+            .read(&ctx, &noted, &credential, &stream, None)
+            .map(|batch| batch.unwrap())
+            .collect()
+            .await;
+        assert_eq!(batches[0].records[0].data["note"], "hello");
+        assert!(all[0].data.get("note").is_none());
+        let described = Fake.discover(&ctx, &noted, &credential).await.unwrap();
+        assert_eq!(described[0].fields.last().unwrap().name, "note");
+        let plain = Fake.discover(&ctx, &json!({}), &credential).await.unwrap();
+        assert!(plain[0].fields.iter().all(|field| field.name != "note"));
 
         let failing = json!({"fail_after_batches": 1});
         let results: Vec<_> = Fake
