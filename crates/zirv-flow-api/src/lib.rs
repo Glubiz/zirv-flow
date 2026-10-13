@@ -1,6 +1,7 @@
 //! HTTP API for zirv-flow.
 
 pub mod admin;
+mod assistant;
 mod auth;
 mod consent;
 mod contacts;
@@ -46,6 +47,7 @@ use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use assistant::{AiConfig, AiConfigError, AiModelConfig, AiProviderConfig};
 pub use events::ExplorerLimits;
 pub use imports::ImportLimits;
 pub use ingest::IngestLimits;
