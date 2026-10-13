@@ -54,6 +54,10 @@ pub enum FieldKind {
     Bool,
     /// One of the listed values.
     Select(&'static [&'static str]),
+    /// Comma-separated `host:port` pairs, one to ten, without a scheme.
+    HostList,
+    /// Several lines of text, such as a PEM certificate.
+    Multiline,
 }
 
 impl FieldKind {
@@ -65,6 +69,8 @@ impl FieldKind {
             Self::Number => "number",
             Self::Bool => "bool",
             Self::Select(_) => "select",
+            Self::HostList => "hosts",
+            Self::Multiline => "textarea",
         }
     }
 }
@@ -80,5 +86,7 @@ mod tests {
         assert_eq!(FieldKind::Number.name(), "number");
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
+        assert_eq!(FieldKind::HostList.name(), "hosts");
+        assert_eq!(FieldKind::Multiline.name(), "textarea");
     }
 }

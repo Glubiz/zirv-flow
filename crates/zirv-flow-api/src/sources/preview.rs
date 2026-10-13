@@ -299,6 +299,7 @@ mod tests {
             key: "k".into(),
             data,
             deleted,
+            occurrence: None,
         }
     }
 

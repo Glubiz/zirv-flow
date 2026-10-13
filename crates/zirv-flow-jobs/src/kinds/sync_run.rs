@@ -1868,6 +1868,7 @@ mod tests {
             key: key.into(),
             data: json!({"email": email, "name": "n"}),
             deleted,
+            occurrence: None,
         }
     }
 
@@ -1972,6 +1973,7 @@ mod tests {
             key: key.into(),
             data: json!({"email": "a@example.com", "meta": {"deleted": deleted}}),
             deleted: false,
+            occurrence: None,
         };
 
         let planned = planner.plan(vec![record("gone", true), record("kept", false)]);
@@ -2008,6 +2010,7 @@ mod tests {
             key: "k".into(),
             data: json!({"email": "not-an-email", "name": "Ad\0a", "x\0y": "1"}),
             deleted: false,
+            occurrence: None,
         };
 
         let planned = planner.plan(vec![record]);

@@ -30,6 +30,8 @@ pub enum SyncMode {
     FullRefresh,
     /// Read what changed since the checkpoint, ordered by a cursor field.
     Incremental,
+    /// Read a topic that never ends, committing per-partition offsets as it goes.
+    Stream,
 }
 
 impl SyncMode {
@@ -38,6 +40,7 @@ impl SyncMode {
         match self {
             Self::FullRefresh => "full_refresh",
             Self::Incremental => "incremental",
+            Self::Stream => "stream",
         }
     }
 
@@ -45,6 +48,7 @@ impl SyncMode {
         match text {
             "full_refresh" => Some(Self::FullRefresh),
             "incremental" => Some(Self::Incremental),
+            "stream" => Some(Self::Stream),
             _ => None,
         }
     }
@@ -78,6 +82,9 @@ pub struct Record {
     pub data: Value,
     /// True when the upstream reports the record as deleted.
     pub deleted: bool,
+    /// What tells two occurrences of the same key apart, for a source that emits one record per
+    /// message (Kafka: `"<partition>/<offset>"`). `None` for a source whose record is its key.
+    pub occurrence: Option<String>,
 }
 
 /// Where to resume a stream. Opaque to everything but the source that wrote it (architecture
@@ -91,6 +98,17 @@ pub struct Checkpoint(pub Value);
 pub struct Batch {
     pub records: Vec<Record>,
     pub checkpoint: Checkpoint,
+    /// Items the source could not turn into records; the engine stores each as a reject.
+    pub refused: Vec<Refused>,
+}
+
+/// One item a source refused to turn into a record. Holds where it was and why, never a value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Refused {
+    /// Where the item was, such as `partition 3 offset 1042`.
+    pub location: String,
+    /// A static code naming the reason.
+    pub code: &'static str,
 }
 
 #[cfg(test)]
@@ -101,7 +119,11 @@ mod tests {
 
     #[test]
     fn a_sync_mode_round_trips_through_its_stored_text() {
-        for mode in [SyncMode::FullRefresh, SyncMode::Incremental] {
+        for mode in [
+            SyncMode::FullRefresh,
+            SyncMode::Incremental,
+            SyncMode::Stream,
+        ] {
             assert_eq!(SyncMode::parse(mode.as_str()), Some(mode));
         }
         assert_eq!(SyncMode::parse("other"), None);

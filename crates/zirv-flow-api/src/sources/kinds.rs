@@ -15,7 +15,7 @@ pub(crate) struct FieldSpecBody {
     key: String,
     label: String,
     help: String,
-    /// One of `text`, `url`, `number`, `bool`, `select`.
+    /// One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `textarea`.
     kind: String,
     /// The allowed values of a `select` field; empty for the other kinds.
     options: Vec<String>,

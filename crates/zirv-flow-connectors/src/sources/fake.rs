@@ -210,11 +210,13 @@ impl Source for Fake {
                         "deleted_at": if soft_deleted.contains(&id) { "2026-02-01T00:00:00Z" } else { "" },
                     }),
                     deleted: deleted.contains(&id),
+                    occurrence: None,
                 })
                 .collect();
             batches.push(Ok(Batch {
                 records: batch_records,
                 checkpoint: Checkpoint(json!({"offset": end})),
+                refused: Vec::new(),
             }));
             offset = end;
         }
