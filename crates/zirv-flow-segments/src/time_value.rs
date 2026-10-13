@@ -55,7 +55,7 @@ fn number(digits: &str) -> Result<u64, DurationError> {
 
 /// The canonical text of a duration: whole days as `P<n>D`, anything else as `PT<n>H`.
 pub(crate) fn format_duration(hours: u64) -> String {
-    if hours % 24 == 0 {
+    if hours.is_multiple_of(24) {
         format!("P{}D", hours / 24)
     } else {
         format!("PT{hours}H")
