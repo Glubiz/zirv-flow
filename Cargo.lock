@@ -4668,6 +4668,7 @@ dependencies = [
 name = "zirv-flow-jobs"
 version = "0.37.0"
 dependencies = [
+ "axum",
  "futures-util",
  "getrandom 0.4.3",
  "metrics",

@@ -23,5 +23,6 @@ zirv-flow-store.workspace = true
 [dev-dependencies]
 zirv-flow-connectors = { workspace = true, features = ["test-support"] }
 zirv-flow-store = { workspace = true, features = ["test-support"] }
+axum.workspace = true
 metrics-exporter-prometheus.workspace = true
 tracing-subscriber.workspace = true
