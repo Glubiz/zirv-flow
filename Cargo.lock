@@ -4985,6 +4985,7 @@ dependencies = [
  "getrandom 0.4.3",
  "metrics",
  "metrics-exporter-prometheus",
+ "rskafka",
  "serde_json",
  "sqlx",
  "time",
