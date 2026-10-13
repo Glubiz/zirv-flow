@@ -5046,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "axum",
  "clap",
@@ -5076,7 +5076,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-ai"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "axum",
  "metrics",
@@ -5092,7 +5092,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5125,7 +5125,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-connectors"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5157,7 +5157,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -5181,7 +5181,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "axum",
  "chrono",
@@ -5196,7 +5196,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -5216,7 +5216,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-loadgen"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "clap",
  "reqwest 0.13.5",
@@ -5228,7 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "flate2",
  "metrics",
