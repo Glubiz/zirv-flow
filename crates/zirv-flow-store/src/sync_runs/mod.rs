@@ -11,8 +11,8 @@ mod model;
 pub(crate) mod testing;
 
 pub use batch::{
-    BatchOutcome, BatchProgress, Counts, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject,
-    SyncUpsert, commit_sync_batch,
+    BatchOutcome, BatchProgress, Counts, EventCounts, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch,
+    SyncEvent, SyncReject, SyncUpsert, commit_sync_batch,
 };
 pub use job::{RUN_JOB_KIND, run_trace};
 pub use model::{

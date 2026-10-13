@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams and sync runs (including PostgreSQL and MySQL), a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, sync runs with events and lists (including PostgreSQL and MySQL sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1079,7 +1079,7 @@ answer is the import with its header and the first 20 rows; the cells of those r
 and `samples_masked` is true for callers who may not see values (members and `read` keys).
 Row numbers are the ones a spreadsheet shows: the header is row 1, every blank line counts as a row, and a quoted value over several lines is one row.
 
-**The mapping.** `PUT .../imports/{id}/mapping` saves it and moves the import to `mapped`:
+**The mapping.** (The same language serves the sync runs of sources; see the Mapping reference.) `PUT .../imports/{id}/mapping` saves it and moves the import to `mapped`:
 
 ```json
 {
@@ -1266,9 +1266,98 @@ calls out does so through the guarded HTTP client and the egress policy (see Egr
 **API.** Under `/api/v1/workspaces/{ws}/sources`: `GET` and `POST`; `GET`, `PATCH` and `DELETE`
 on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `POST
 /{id}/discover`; `GET /{id}/streams`; and `PUT /{id}/streams/{name}` with `enabled`,
-`sync_mode`, `cursor_field`, `primary_key` and `staleness_threshold_seconds`. Settings are
+`sync_mode`, `cursor_field`, `primary_key`, `staleness_threshold_seconds` and `mapping`; and `POST /{id}/streams/{name}/preview` (see the Mapping reference). Settings are
 checked against the type and, for streams, against what discovery reported; a refusal is a 422
 that names each field, for example `incremental` without a `cursor_field`.
+
+### The file source
+
+The `file` source type reads a CSV, newline-delimited JSON or JSON file at an **https** address
+and offers one stream, `records`. Its settings are `url` and `format` (`csv`; `json` for a
+top-level array of objects; `ndjson` for one object per line). The address may not hold user
+info or a fragment, and `http` is refused. Its credential fields are all optional and sealed: a
+`token` (sent as a Bearer token), or a `username` with a `password` (Basic), and a `query`, a
+query string appended to the address, so the signature of a presigned link stays out of the
+plain settings. A signed link that redirects must be given as its final address: a redirect off
+the source's origin is refused, not followed.
+
+**How it reads.** The file is fetched in byte-range windows of 4 MiB through the guarded client
+(so the egress policy, retries with `Retry-After` and the per-source rate limit all apply), and
+a record is parsed as soon as it is complete, so memory stays bounded whatever the file's size.
+The server must answer `Range` requests for a file over 10 MiB; a server that ignores `Range`
+is read whole when the file fits the 10 MiB response cap, and otherwise the run fails with
+`file_range_unsupported`. The checkpoint is the byte offset of the next record, so a run that
+lost its lease resumes there and neither repeats nor skips a row. Every later window asks with
+`If-Range`; if the file's `ETag` (or `Last-Modified`) or size changed between windows the run
+fails with `file_changed`, keeping the units already committed. A record over 1 MiB fails with
+`record_too_large`; text that is not valid CSV or JSON fails with `csv_invalid` or
+`json_invalid`. A byte-range answer whose `Content-Range`, length or total contradicts itself or the
+request fails with `file_range_invalid`, so a short body is never taken for the end of the file.
+These codes never quote the file or its address.
+
+**Fields and keys.** For CSV the fields are the header names (blank or repeated names are
+refused), all text. For JSON they are the top-level keys of the first 100 records, typed from
+the first value that is not null; nested values are reached with a dotted path in the mapping
+(see the Mapping reference). Choose the stream's **primary key** in **Set up**: a record's key
+is its value, or several values joined as a JSON array. Without a primary key the key is the
+record's position in the file (`row:<n>`), which holds only while the file is not reordered.
+
+**Full refresh only.** A file has no cursor, so every run reads it from the start; the content
+hashes make an unchanged row cost nothing, and a row removed from the file stays until a later
+change sweeps it.
+
+### Mapping reference
+
+One mapping language serves the CSV import and the sync runs. A mapping is a list of `columns`
+rules, an optional `key_column` and, for sync runs only, an optional `event`.
+
+- **Fields and paths.** A rule's `column` is a field name. For a JSON stream it may also be a
+  dotted path: `address.city` selects a key, and a segment of digits indexes an array, as in
+  `items.0.sku`. A top-level field whose name holds a dot wins over the path. A value that is a
+  string is used as it is, a number or a boolean as its JSON text, and null, a missing step or
+  an array or object as an empty cell. A path is accepted when its first segment is a field the
+  stream reports; a path that leads nowhere in one record is an empty cell, not an error.
+- **Targets.** `identifier` (`email`, `phone`, `anonymous_id`, `external:<namespace>`), `trait`
+  by registry key, `list` (a truthy cell adds the person), or `ignore`. A list only adds: a cell
+  that turns false later does not remove the member. In a sync run a list must exist when the
+  mapping is saved and when each unit is applied (`list_missing` fails the run).
+- **Transforms**, in order: `trim`, `lower`, `upper`, `cast`, `timestamp`, `concat`, `constant`,
+  `value_map`, `split`. That is the whole set: there is no expression language and no script.
+- **Event** (sync runs only; a CSV import refuses it with `event_not_supported`). One event per
+  record: `{"name": "order_placed", "timestamp": {"column": "order.at", "transforms": [...]},
+  "properties": [{"property": "total", "column": "order.total", "transforms": [...]}]}`. The
+  name is a constant, the person is the record's identifiers, the time goes through its
+  transforms and is read as an RFC 3339 timestamp (without one the event happened when the run
+  started), and a property is the chain's value (an empty one is left out; at most 50). The
+  stream must have a primary key (`event_requires_primary_key`).
+
+Example, a JSON file of customers with an order each:
+
+```json
+{
+  "columns": [
+    {"column": "profile.email", "target": {"type": "identifier", "kind": "email"},
+     "transforms": [{"op": "trim"}, {"op": "lower"}]},
+    {"column": "profile.name", "target": {"type": "trait", "key": "display_name"}},
+    {"column": "flags.news", "target": {"type": "list", "list_id": "..."}}
+  ],
+  "event": {
+    "name": "order_placed",
+    "timestamp": {"column": "order.at", "transforms": [{"op": "timestamp", "format": "%Y-%m-%d"}]},
+    "properties": [{"property": "total", "column": "order.total",
+                    "transforms": [{"op": "cast", "to": "number"}]}]
+  }
+}
+```
+
+**Preview.** `POST /api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview` (admins only,
+because the answer holds values) reads the first records of the stream from the start, up to
+`limit` (1 to 20, default 10) or 30 seconds, and returns for each record its identifiers,
+fields, lists and event, or the `{field, reason}` codes that refused it. The body may carry a
+draft `mapping`, checked exactly as a save is; otherwise the saved one is used. It writes
+nothing, is not audited, and runs the same `core::mapping` function as a sync run. In the web UI
+open **Map** on a stream. A save or a preview against a stream whose source reported a blank or
+repeated field name answers 422 with `code` `blank_header` or `duplicate_header`.
 
 ### Sync runs
 
@@ -1276,9 +1365,10 @@ A **run** reads one stream of a source from a checkpoint and applies the records
 Start one with **Run now** on the source page (for every enabled stream that has a mapping, or
 for one), with `POST /api/v1/workspaces/{ws}/sources/{id}/runs` (`{}` or `{"stream": "name"}`,
 admins only, 202), or let the source's cron schedule start them. A stream needs a **mapping**
-before it can run: send it as `mapping` in `PUT .../streams/{name}` (the same shape as a CSV
-import's, with the stream's field names as columns; a trait must be in the registry, and a list
-target is refused because a run does not add people to lists). The mapping editor comes later.
+before it can run: send it as `mapping` in `PUT .../streams/{name}` (the same language as a CSV
+import's, see the Mapping reference, with the stream's field names or dotted paths into them as
+columns; a trait must be in the registry and a list must exist), or use **Map** on the stream
+in the web UI, which previews the mapping on the first records before it is saved.
 
 **How a run goes.** The `sync.run` job reads the source in batches, maps each record, and
 commits a unit of at least 500 records (a source batch is never split) in one transaction: the
@@ -1288,6 +1378,21 @@ lease was taken over commits nothing, and it locks the run, so a cancelled run i
 Records are kept under the source id and the stream name, with `last_seen_run` set to the run;
 nothing is swept (deleting what a full refresh no longer lists is a later change). A record the
 source reports as deleted retracts its contribution.
+
+**Events and lists.** A mapping's list rules add the people of the unit to their lists (source
+`sync`, with the usual history row and `list.membership` decision), and its event rule applies
+each record's event through the event path: validation against the published schema or the
+unplanned-name policy, redaction and reject handling as for an event sent over HTTP. Both are
+in the unit's transaction, so profiles, events, members and the checkpoint commit together or
+not at all. An event's idempotency key is derived from the source, stream, record key and event
+name, so reading the same file again records nothing twice (the event counts as a duplicate),
+and a record that changed does not rewrite its past events. The event's time is the run's start
+unless the mapping reads one; an old file's events are accepted and flagged late. A refused
+event is an event reject tied to the run (shown in its detail), and the record counts once under
+its worst outcome: rejected, then applied, then unchanged; its profile change stands. A run
+with an event fails before reading with `stream_not_keyed` (no primary key) or
+`event_key_unavailable` (the worker has no redaction key), and with `mapping_invalid` when the
+mapping no longer fits the descriptor (a field that disappeared).
 
 **Checkpoints.** Each run keeps its own checkpoint, so a retried run resumes where it stopped
 without reading or applying a committed unit again; the run shows its **attempt** number. An
@@ -1315,7 +1420,7 @@ others and hold no person id, so an erasure does not need to reach them.
 descriptor discovery last reported, and fails with `stream_settings_invalid` when they no longer
 fit (a cursor field that disappeared, say). A stream without a mapping fails with
 `stream_not_mapped`; other codes are `source_error` and `job_failed` (the last attempt failed),
-`mapping_invalid`, `source_missing`, `stream_missing` and `source_kind_unavailable`.
+`mapping_invalid`, `list_missing`, `stream_not_keyed`, `event_key_unavailable`, `file_changed` and the other file codes (see the file source), `source_missing`, `stream_missing` and `source_kind_unavailable`.
 
 **Schedules.** A source's cron schedule (UTC) is mirrored to a `schedules` row, kept in step in
 the same transaction as the source: clearing the schedule, disabling the source or deleting it
@@ -1332,7 +1437,7 @@ first 100 rejects. Any member or `read` key can read; starting and cancelling ar
 one trace (`GET .../traces/{trace_id}`): each applied, refused or deleted record has a decision
 with the `sync_run` cause and a durable id (the source record, the person, or the reject), never
 a value. Metrics: `zirv_flow_sync_runs_total{outcome}`, `zirv_flow_sync_records_total{outcome}`
-and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
+`zirv_flow_sync_events_total{outcome}` (`accepted`, `duplicate`, `rejected`) and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
 
 ### Database sources
 

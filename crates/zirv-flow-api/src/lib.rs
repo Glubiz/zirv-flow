@@ -291,6 +291,10 @@ fn routes() -> Router<AppState> {
             put(sources::streams::put),
         )
         .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview",
+            post(sources::preview::preview),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/sources/{id}/runs",
             get(sources::runs::list).post(sources::runs::start),
         )

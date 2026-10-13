@@ -50,8 +50,11 @@ pub struct FieldSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldKind {
     Text,
-    /// An absolute `http` or `https` URL.
+    /// An absolute `http` or `https` URL without credentials or a fragment.
     Url,
+    /// As `Url`, but `https` only: `http` is accepted only in a build with `test-support`, where
+    /// tests serve over loopback. Shown as a `url` field.
+    HttpsUrl,
     Number,
     Bool,
     /// One of the listed values.
@@ -67,7 +70,7 @@ impl FieldKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Text => "text",
-            Self::Url => "url",
+            Self::Url | Self::HttpsUrl => "url",
             Self::Number => "number",
             Self::Bool => "bool",
             Self::Select(_) => "select",

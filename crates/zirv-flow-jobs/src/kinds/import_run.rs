@@ -318,6 +318,7 @@ mod tests {
         }
         Mapping {
             key_column: None,
+            event: None,
             columns,
         }
     }

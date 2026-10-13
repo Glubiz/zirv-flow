@@ -100,6 +100,22 @@ pub(crate) fn record_sync_records(counts: &zirv_flow_store::SyncCounts) {
     }
 }
 
+/// Counts what the event path did with the events of a committed sync batch:
+/// `zirv_flow_sync_events_total{outcome}` with `accepted`, `duplicate` and `rejected`.
+pub(crate) fn record_sync_events(counts: &zirv_flow_store::SyncEventCounts) {
+    for (outcome, count) in [
+        ("accepted", counts.accepted),
+        ("duplicate", counts.duplicate),
+        ("rejected", counts.rejected),
+    ] {
+        if let Ok(count) = u64::try_from(count)
+            && count > 0
+        {
+            metrics::counter!("zirv_flow_sync_events_total", "outcome" => outcome).increment(count);
+        }
+    }
+}
+
 /// The `zirv_flow_ingest_inbox_age_seconds` gauge: the oldest unprocessed inbox row.
 pub(crate) fn set_inbox_age(seconds: f64) {
     metrics::gauge!("zirv_flow_ingest_inbox_age_seconds").set(seconds);
@@ -549,6 +565,31 @@ mod tests {
             !output
                 .lines()
                 .any(|line| line.starts_with("zirv_flow_stream_state{") && !line.ends_with(" 0")),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn sync_event_metrics_carry_only_the_outcome_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_sync_events(&zirv_flow_store::SyncEventCounts {
+                accepted: 5,
+                duplicate: 2,
+                rejected: 1,
+            });
+            record_sync_events(&zirv_flow_store::SyncEventCounts::default());
+        });
+        let output = handle.render();
+
+        for (outcome, count) in [("accepted", 5), ("duplicate", 2), ("rejected", 1)] {
+            let line = format!("zirv_flow_sync_events_total{{outcome=\"{outcome}\"}} {count}");
+            assert!(output.contains(&line), "{output}");
+        }
+        assert!(
+            !output.contains("source") && !output.contains("workspace") && !output.contains("name"),
             "{output}"
         );
     }

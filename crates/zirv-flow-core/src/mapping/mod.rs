@@ -13,9 +13,10 @@ mod transform;
 mod validate;
 
 pub use apply::{
-    Cells, CsvRow, Header, HeaderError, MAX_KEY_CHARS, Mapped, RowError, RowErrorReason, apply,
+    Cells, CsvRow, Header, HeaderError, MAX_EVENT_PROPERTIES, MAX_KEY_CHARS, Mapped, MappedEvent,
+    RowError, RowErrorReason, apply, map_json,
 };
 pub use json_record::JsonRecord;
-pub use model::{ColumnRule, Mapping, Target, Transform};
+pub use model::{ColumnRule, EventRule, Mapping, PropertyRule, Target, Transform, ValueRule};
 pub use sample::{RejectSample, SAMPLE_STRING_CHARS, reject_sample};
-pub use validate::{MappingError, TraitCatalog, TraitState, validate};
+pub use validate::{MappingError, TraitCatalog, TraitState, validate, validate_paths};

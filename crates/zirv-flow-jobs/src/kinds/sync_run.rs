@@ -29,18 +29,19 @@ use zirv_flow_connectors::sources::{
     StreamSettingsInput, SyncMode, validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState, reject_sample};
+use zirv_flow_core::mapping::{self, Header, Mapping, TraitState, reject_sample, validate_paths};
+use zirv_flow_store::HmacKey;
 use zirv_flow_store::secrets::{self, OpenError};
 use zirv_flow_store::{
     PgPool, ProfileRecord, RunEnd, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
-    SyncBatch, SyncBatchOutcome, SyncLease, SyncReject, SyncUpsert, commit_sync_batch, fail_run,
-    find_source, find_stream_by_id, finish_run, list_trait_definitions, queue_runs_for_source,
-    run_trace, start_run,
+    SyncBatch, SyncBatchOutcome, SyncEvent, SyncLease, SyncReject, SyncUpsert, commit_sync_batch,
+    fail_run, find_source, find_stream_by_id, finish_run, list_trait_definitions,
+    queue_runs_for_source, run_trace, start_run,
 };
 
 use super::import_rows::Probe;
 use super::ingest_drain::whole_then_singly;
-use crate::metrics::{RunOutcome, record_sync_records, record_sync_run};
+use crate::metrics::{RunOutcome, record_sync_events, record_sync_records, record_sync_run};
 use crate::{JobContext, JobError, JobKind};
 
 /// A unit of work commits once it holds at least this many records, or the stream ends. A
@@ -235,15 +236,26 @@ impl Planner<'_> {
                 planned.deleted.push(record.key);
                 continue;
             }
-            let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
             let sample = || {
                 let sample =
                     reject_sample(self.mapping, &record.data, |key| self.plain.contains(key));
                 serde_json::json!({"properties": sample.properties, "masked": sample.masked})
             };
-            match mapping::apply(self.mapping, &cells, self.catalog) {
+            let mapped = mapping::map_json(
+                self.mapping,
+                &record.data,
+                self.declared.iter().copied(),
+                self.catalog,
+            );
+            match mapped {
                 Ok(mapped) => planned.upserts.push(SyncUpsert {
                     sample: sample(),
+                    lists: mapped.lists,
+                    event: mapped.event.map(|event| SyncEvent {
+                        name: event.name,
+                        properties: event.properties,
+                        timestamp: event.occurred_at,
+                    }),
                     record: ProfileRecord {
                         source: self.source.to_owned(),
                         stream: self.stream.to_owned(),
@@ -345,6 +357,8 @@ struct Pass<'a> {
     started: Option<OffsetDateTime>,
     probe: &'a Probe,
     committed: usize,
+    /// Redacts the events' properties.
+    redaction_key: Option<Arc<HmacKey>>,
 }
 
 impl Pass<'_> {
@@ -366,6 +380,8 @@ impl Pass<'_> {
             lease_token: self.job.1,
             attempt: self.job.2,
             trace: self.planner.trace,
+            received_at: self.planner.observed_at,
+            redaction_key: self.redaction_key.as_deref(),
             upserts: &planned.upserts,
             deleted: &planned.deleted,
             rejected: &planned.rejected,
@@ -377,6 +393,7 @@ impl Pass<'_> {
         match commit_batch(self.pool, &batch).await? {
             SyncBatchOutcome::Committed(progress) => {
                 record_sync_records(&progress.batch);
+                record_sync_events(&progress.events);
                 if progress.threshold_exceeded {
                     info!(run_id = %self.ids.run, records_read = progress.run.read,
                         "sync run stopped by the reject threshold");
@@ -390,6 +407,11 @@ impl Pass<'_> {
                 Ok(Unit::Continue)
             }
             SyncBatchOutcome::LeaseLost => Err(Failure::job(LEASE_LOST)),
+            SyncBatchOutcome::ListMissing => {
+                // A list the mapping names is gone: no later batch can succeed either.
+                end_failed(self.pool, self.ids, "list_missing").await?;
+                Ok(Unit::Stop)
+            }
             SyncBatchOutcome::Cancelled => {
                 info!(run_id = %self.ids.run, "sync run stopped: it is no longer running");
                 record_sync_run(RunOutcome::Cancelled, self.seconds());
@@ -451,6 +473,33 @@ async fn run_pass(
     };
 
     let (catalog, plain) = load_traits(pool, ids.workspace).await?;
+
+    // The mapping is checked against the stream as it is now: a descriptor that lost a field, or
+    // a trait archived since, fails the run here instead of rejecting every record.
+    let fields: Vec<String> = descriptor
+        .fields
+        .iter()
+        .map(|field| field.name.clone())
+        .collect();
+    let Ok(header) = Header::new(fields) else {
+        return end_failed(pool, ids, "mapping_invalid").await;
+    };
+    if validate_paths(&mapping, &header, &catalog).is_err() {
+        return end_failed(pool, ids, "mapping_invalid").await;
+    }
+    // An event's idempotency rests on the record key, so the key must be a real one, and its
+    // properties are redacted with the worker's key.
+    let redaction_key = ctx
+        .ingest()
+        .and_then(|settings| settings.redaction_key.clone());
+    if mapping.has_event() {
+        if stream.primary_key.is_empty() {
+            return end_failed(pool, ids, "stream_not_keyed").await;
+        }
+        if redaction_key.is_none() {
+            return end_failed(pool, ids, "event_key_unavailable").await;
+        }
+    }
     let trace = run_trace(&run);
     let source_text = ids.source.to_string();
     let planner = Planner {
@@ -505,6 +554,7 @@ async fn run_pass(
         started: run.started_at,
         probe,
         committed: 0,
+        redaction_key,
     };
 
     // The credential is opened right before the read and dropped with it.
@@ -610,6 +660,7 @@ mod tests {
         };
         serde_json::to_value(Mapping {
             key_column: None,
+            event: None,
             columns: vec![
                 rule(
                     "email",
@@ -2108,5 +2159,599 @@ mod tests {
             );
             db.drop_role().await;
         }
+    }
+
+    // The file source end to end: a real `file` source against a local server.
+
+    use std::collections::HashMap;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Response};
+    use axum::routing::get;
+    use zirv_flow_core::mapping::map_json;
+    use zirv_flow_core::{HmacPurpose, HmacRoot};
+
+    /// A file served with byte ranges; from the `flip`th request on its ETag differs.
+    struct Served {
+        body: Vec<u8>,
+        flip: usize,
+        hits: AtomicUsize,
+    }
+
+    async fn serve_range(State(served): State<Arc<Served>>, headers: HeaderMap) -> Response<Body> {
+        let n = served.hits.fetch_add(1, Ordering::SeqCst);
+        let etag = if n >= served.flip { "\"v2\"" } else { "\"v1\"" };
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let whole = |body: Vec<u8>| {
+            Response::builder()
+                .status(200)
+                .header("etag", etag)
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let Some(range) = text("range") else {
+            return whole(served.body.clone());
+        };
+        if text("if-range").is_some_and(|asked| asked != etag) {
+            return whole(served.body.clone());
+        }
+        let spec = range.strip_prefix("bytes=").unwrap_or_default();
+        let (first, last) = spec.split_once('-').unwrap_or_default();
+        let first: usize = first.parse().unwrap_or(0);
+        let last: usize = last.parse().unwrap_or(usize::MAX);
+        let len = served.body.len();
+        if first >= len {
+            return Response::builder().status(416).body(Body::empty()).unwrap();
+        }
+        let last = last.min(len - 1);
+        Response::builder()
+            .status(206)
+            .header("etag", etag)
+            .header("content-range", format!("bytes {first}-{last}/{len}"))
+            .body(Body::from(served.body[first..=last].to_vec()))
+            .unwrap()
+    }
+
+    async fn serve_file(body: Vec<u8>, flip: usize) -> (String, Arc<Served>) {
+        let served = Arc::new(Served {
+            body,
+            flip,
+            hits: AtomicUsize::new(0),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = Router::new()
+            .route("/f", get(serve_range))
+            .with_state(Arc::clone(&served));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://127.0.0.1:{port}/f"), served)
+    }
+
+    fn loopback() -> Arc<EgressPolicy> {
+        Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap())
+    }
+
+    /// Records with nested fields: people, an order each, and a newsletter flag on even ones.
+    fn nested_records(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|n| {
+                json!({
+                    "id": n,
+                    "profile": {"email": format!(" User{n}@Example.com "), "name": format!("User {n}")},
+                    "flags": {"news": n % 2 == 0},
+                    "order": {
+                        "at": "2026-03-02",
+                        "total": format!("{}.50", n % 100),
+                        "items": [{"sku": format!("sku-{}", n % 7)}]
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn ndjson(records: &[Value]) -> Vec<u8> {
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn nested_mapping(news: Uuid) -> Value {
+        json!({
+            "columns": [
+                {"column": "profile.email", "target": {"type": "identifier", "kind": "email"},
+                 "transforms": [{"op": "trim"}, {"op": "lower"}]},
+                {"column": "profile.name", "target": {"type": "trait", "key": "display_name"}},
+                {"column": "flags.news", "target": {"type": "list", "list_id": news}}
+            ],
+            "event": {
+                "name": "order_placed",
+                "timestamp": {"column": "order.at",
+                              "transforms": [{"op": "timestamp", "format": "%Y-%m-%d"}]},
+                "properties": [
+                    {"property": "total", "column": "order.total",
+                     "transforms": [{"op": "cast", "to": "number"}]},
+                    {"property": "sku", "column": "order.items.0.sku"}
+                ]
+            }
+        })
+    }
+
+    /// A workspace with a `file` source reading `url` as `format`, one stream `records`
+    /// keyed by `id` (or by nothing), and a list `news`.
+    async fn setup_file(
+        pool: &PgPool,
+        url: &str,
+        format: &str,
+        primary_key: &[&str],
+    ) -> (Env, Uuid) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let ws = create_workspace(
+            pool,
+            &WorkspaceName::parse("one").unwrap(),
+            &Slug::parse("one").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        create_trait_definition(
+            pool,
+            ws,
+            &NewTraitDefinition {
+                key: "display_name".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let news = zirv_flow_store::create_list(pool, ws, "news", "", None)
+            .await
+            .unwrap()
+            .id;
+        let config = json!({"url": url, "format": format});
+        let source = create_source(
+            pool,
+            ws,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "file",
+                name: "export",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let context = SourceContext::new(
+            loopback(),
+            HttpLimits::default(),
+            "file",
+            "test",
+            Arc::default(),
+        )
+        .unwrap();
+        let found = Registry::built_in()
+            .get("file")
+            .unwrap()
+            .discover(&context, &config, &Credential::new())
+            .await
+            .unwrap();
+        let descriptor = serde_json::to_value(&found[0]).unwrap();
+        let key: Vec<String> = primary_key
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect();
+        let mut tx = begin(pool).await.unwrap();
+        let streams = upsert_discovered_streams(
+            &mut tx,
+            ws,
+            source.id,
+            &[DiscoveredStream {
+                name: "records",
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &key,
+                descriptor: &descriptor,
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        commit(tx).await.unwrap();
+        configure_stream(
+            &mut pool.acquire().await.unwrap(),
+            ws,
+            source.id,
+            "records",
+            &StreamSettings {
+                enabled: true,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &key,
+                staleness_threshold_seconds: None,
+            },
+        )
+        .await
+        .unwrap();
+        set_stream_mapping(pool, ws, source.id, "records", &nested_mapping(news))
+            .await
+            .unwrap();
+        (
+            Env {
+                pool: pool.clone(),
+                ws,
+                source: source.id,
+                stream: streams[0].id,
+            },
+            news,
+        )
+    }
+
+    fn redaction_key() -> Arc<zirv_flow_store::HmacKey> {
+        Arc::new(HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction))
+    }
+
+    /// One attempt of the job, reaching loopback when `allow` and holding a redaction key when
+    /// `key` is given; its transaction is dropped as a failed attempt's is.
+    async fn attempt_file(
+        env: &Env,
+        job: &ClaimedJob,
+        probe: &Probe,
+        allow: bool,
+        key: Option<Arc<zirv_flow_store::HmacKey>>,
+    ) -> Result<(), JobError> {
+        let mut tx = begin(&env.pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, job)
+            .with_ingest(IngestSettings {
+                pool: env.pool.clone(),
+                redaction_key: key,
+                batch_size: 500,
+                shards: 1,
+            })
+            .with_outbound(
+                None,
+                if allow { loopback() } else { Arc::default() },
+                Arc::default(),
+            );
+        run_sync(&mut ctx, &job.payload, probe).await
+    }
+
+    async fn run_file(env: &Env, key: &Arc<zirv_flow_store::HmacKey>) -> zirv_flow_store::SyncRun {
+        let (run, job) = env.queue().await;
+        attempt_file(env, &job, &Probe::default(), true, Some(Arc::clone(key)))
+            .await
+            .unwrap();
+        env.run(run.id).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nested_json_file_gives_people_traits_events_and_list_members_and_a_second_run_changes_nothing(
+        pool: PgPool,
+    ) {
+        let records = nested_records(40);
+        let (url, _) = serve_file(
+            format!(
+                "[{}]",
+                records
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",\n")
+            )
+            .into_bytes(),
+            usize::MAX,
+        )
+        .await;
+        let (env, news) = setup_file(&pool, &url, "json", &["id"]).await;
+        let key = redaction_key();
+
+        let first = run_file(&env, &key).await;
+
+        assert_eq!(first.state, "succeeded", "{:?}", first.error_code);
+        assert_eq!(
+            (
+                first.records_read,
+                first.records_applied,
+                first.records_rejected
+            ),
+            (40, 40, 0)
+        );
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 40);
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 40);
+        assert_eq!(env.count("SELECT count(*) FROM list_members").await, 20);
+        // Each event is under the run's trace, with the sync_run cause on its decision.
+        let traced: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
+            .bind(first.trace_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(traced, 40);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM decision_records \
+                 WHERE action = 'event.accepted' AND cause_kind = 'sync_run'"
+            )
+            .await,
+            40
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM list_members WHERE source = 'sync'")
+                .await,
+            20
+        );
+
+        // Preview equals applied: the pure function the preview calls gives what was stored.
+        let catalog: HashMap<String, TraitState> = [(
+            "display_name".to_owned(),
+            TraitState::Active(TraitType::String),
+        )]
+        .into();
+        let mapping: Mapping = serde_json::from_value(nested_mapping(news)).unwrap();
+        let declared = ["id", "profile", "flags", "order"];
+        let mut expected: Vec<(String, String, String)> = Vec::new();
+        let mut expected_members = 0;
+        for record in &records {
+            let mapped = map_json(&mapping, record, declared, &catalog).unwrap();
+            expected_members += mapped.lists.len();
+            let event = mapped.event.unwrap();
+            assert_eq!(event.name, "order_placed");
+            expected.push((
+                mapped.identifiers[0].1.clone(),
+                event.properties["sku"].as_str().unwrap().to_owned(),
+                format!(
+                    "{}|{}",
+                    event.properties["total"],
+                    event.occurred_at.unwrap().date()
+                ),
+            ));
+        }
+        expected.sort();
+        let mut stored: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT i.value, e.properties->>'sku', \
+                    (e.properties->'total')::text || '|' || (e.occurred_at AT TIME ZONE 'UTC')::date::text \
+             FROM events e JOIN identities i ON i.person_id = e.person_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        stored.sort();
+        assert_eq!(stored, expected);
+        assert_eq!(expected_members, 20);
+        let _ = news;
+
+        // The second run reads the same file: profiles unchanged, events duplicates.
+        let second = run_file(&env, &key).await;
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(
+            (
+                second.records_applied,
+                second.records_unchanged,
+                second.records_rejected
+            ),
+            (0, 40, 0)
+        );
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 40);
+        assert_eq!(env.count("SELECT count(*) FROM list_members").await, 20);
+        assert_eq!(
+            env.count("SELECT coalesce(sum(duplicates), 0)::bigint FROM event_dedupe")
+                .await,
+            40
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_crashed_file_run_resumes_at_the_checkpoint_offset_and_ends_as_an_uninterrupted_run(
+        pool: PgPool,
+    ) {
+        let records = nested_records(1500);
+        let body = ndjson(&records);
+        let size = body.len();
+        let (url, _) = serve_file(body, usize::MAX).await;
+        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+        let key = redaction_key();
+        let (run, job) = env.queue().await;
+
+        let first = attempt_file(
+            &env,
+            &job,
+            &Probe {
+                stop_after: Some(1),
+                before_commit: None,
+            },
+            true,
+            Some(Arc::clone(&key)),
+        )
+        .await;
+        assert!(first.is_err());
+        let mid = env.run(run.id).await;
+        assert_eq!(mid.state, "running");
+        let offset = mid.checkpoint.as_ref().unwrap()["offset"].as_u64().unwrap();
+        assert!(offset > 0 && (offset as usize) < size, "{offset} of {size}");
+        assert!(mid.records_read > 0 && mid.records_read < 1500);
+
+        attempt_file(&env, &job, &Probe::default(), true, Some(Arc::clone(&key)))
+            .await
+            .unwrap();
+
+        let done = env.run(run.id).await;
+        assert_eq!(done.state, "succeeded");
+        assert_eq!(
+            (
+                done.records_read,
+                done.records_applied,
+                done.records_rejected
+            ),
+            (1500, 1500, 0),
+            "no row twice, none missing"
+        );
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 1500);
+        assert_eq!(
+            env.count("SELECT count(DISTINCT message_id) FROM events")
+                .await,
+            1500
+        );
+        assert_eq!(done.checkpoint.unwrap()["offset"], json!(size));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_that_changes_between_windows_fails_the_run_and_keeps_the_committed_windows(
+        pool: PgPool,
+    ) {
+        // Over two 4 MiB windows; the server's ETag changes at its third request (discovery was the
+        // first, the first window the second).
+        let record = json!({
+            "id": 0,
+            "profile": {"email": "a@example.com", "name": "x"},
+            "pad": "x".repeat(8000),
+            "flags": {"news": false},
+            "order": {"at": "2026-03-02", "total": "1", "items": [{"sku": "s"}]}
+        });
+        let records: Vec<Value> = (0..700)
+            .map(|n| {
+                let mut record = record.clone();
+                record["id"] = json!(n);
+                record["profile"]["email"] = json!(format!("u{n}@example.com"));
+                record
+            })
+            .collect();
+        let body = ndjson(&records);
+        assert!(body.len() > 5 * 1024 * 1024);
+        let (url, _) = serve_file(body, 2).await;
+        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+        let key = redaction_key();
+        let (run, job) = env.queue().await;
+        let last = ClaimedJob {
+            attempts: job.max_attempts,
+            ..job.clone()
+        };
+
+        let result = attempt_file(&env, &last, &Probe::default(), true, Some(key)).await;
+
+        assert!(result.is_err());
+        let failed = env.run(run.id).await;
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        let applied = env.count("SELECT count(*) FROM source_records").await;
+        assert!(applied > 0 && applied < 700, "{applied}");
+        assert_eq!(failed.records_applied, applied);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_file_whose_address_the_egress_policy_blocks_fails_the_run_and_nothing_is_asked(
+        pool: PgPool,
+    ) {
+        let (url, served) = serve_file(ndjson(&nested_records(3)), usize::MAX).await;
+        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+        let (run, job) = env.queue().await;
+        let hits_before = served.hits.load(Ordering::SeqCst);
+        let last = ClaimedJob {
+            attempts: job.max_attempts,
+            ..job.clone()
+        };
+
+        let result =
+            attempt_file(&env, &last, &Probe::default(), false, Some(redaction_key())).await;
+
+        assert!(result.is_err());
+        let failed = env.run(run.id).await;
+        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        assert_eq!(served.hits.load(Ordering::SeqCst), hits_before);
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+    }
+
+    /// Runs the one queued run of `env` once and returns the ended run.
+    async fn ended(
+        env: &Env,
+        key: Option<Arc<zirv_flow_store::HmacKey>>,
+    ) -> zirv_flow_store::SyncRun {
+        let (run, job) = env.queue().await;
+        attempt_file(env, &job, &Probe::default(), true, key)
+            .await
+            .unwrap();
+        env.run(run.id).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_needs_a_keyed_stream_a_redaction_key_and_a_mapping_the_descriptor_still_fits(
+        pool: PgPool,
+    ) {
+        let (url, _) = serve_file(ndjson(&nested_records(5)), usize::MAX).await;
+        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+
+        // No redaction key on the worker.
+        let run = ended(&env, None).await;
+        assert_eq!(run.error_code.as_deref(), Some("event_key_unavailable"));
+        assert_eq!(run.records_read, 0);
+
+        // The stream's key was cleared since the mapping was saved.
+        sqlx::query("UPDATE streams SET primary_key = '{}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let run = ended(&env, Some(redaction_key())).await;
+        assert_eq!(run.error_code.as_deref(), Some("stream_not_keyed"));
+        sqlx::query("UPDATE streams SET primary_key = '{id}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The descriptor lost a field the mapping reads.
+        sqlx::query(
+            "UPDATE streams SET discovered = jsonb_set(discovered, '{fields}', \
+                (SELECT jsonb_agg(f) FROM jsonb_array_elements(discovered->'fields') f \
+                  WHERE f->>'name' <> 'order'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let run = ended(&env, Some(redaction_key())).await;
+        assert_eq!(run.error_code.as_deref(), Some("mapping_invalid"));
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_list_deleted_since_the_mapping_was_saved_fails_the_run_before_more_is_read(
+        pool: PgPool,
+    ) {
+        let (url, served) = serve_file(ndjson(&nested_records(10)), usize::MAX).await;
+        let (env, news) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+        sqlx::query("DELETE FROM lists WHERE id = $1")
+            .bind(news)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _ = served;
+
+        let run = ended(&env, Some(redaction_key())).await;
+
+        assert_eq!(run.state, "failed");
+        assert_eq!(run.error_code.as_deref(), Some("list_missing"));
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
     }
 }

@@ -7,6 +7,7 @@ mod credential;
 mod error;
 #[cfg(feature = "test-support")]
 mod fake;
+mod file;
 mod mysql;
 mod postgres;
 mod registry;
@@ -38,4 +39,5 @@ pub(crate) static ALL: &[&dyn ErasedSource] = &[
     &fake::Fake,
     &mysql::Mysql,
     &postgres::Postgres,
+    &file::File,
 ];

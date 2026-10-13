@@ -20,7 +20,7 @@ pub(crate) struct PersonListBody {
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     added_at: OffsetDateTime,
-    /// `ui`, `api`, `import`, `merge` or `flow`.
+    /// `ui`, `api`, `import`, `merge`, `flow` or `sync`.
     source: String,
 }
 
@@ -43,7 +43,7 @@ pub(crate) struct MembershipChangeBody {
     /// `added` or `removed`.
     #[schema(example = "added")]
     action: String,
-    /// `ui`, `api`, `import`, `merge` or `flow`.
+    /// `ui`, `api`, `import`, `merge`, `flow` or `sync`.
     source: String,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]

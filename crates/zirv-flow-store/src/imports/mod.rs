@@ -55,6 +55,7 @@ mod tests {
     fn mapping() -> Mapping {
         Mapping {
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "email".into(),
                 target: Target::Identifier {

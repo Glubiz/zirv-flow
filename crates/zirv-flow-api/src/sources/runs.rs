@@ -520,6 +520,7 @@ mod tests {
     fn a_sample_is_masked_again_against_the_mapping_and_the_registry() {
         let mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),
                 target: Target::Trait { key: "plan".into() },

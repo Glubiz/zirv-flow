@@ -81,6 +81,7 @@ mod tests {
     fn mapping() -> Mapping {
         Mapping {
             key_column: Some("id".into()),
+            event: None,
             columns: vec![
                 rule(
                     "email",
@@ -131,6 +132,7 @@ mod tests {
     fn numbers_and_booleans_stay_and_long_strings_are_cut() {
         let mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![
                 rule("a", Target::Trait { key: "plan".into() }),
                 rule("b", Target::Trait { key: "plan".into() }),
@@ -154,6 +156,7 @@ mod tests {
     fn a_nul_in_a_name_or_a_kept_value_becomes_a_replacement_character() {
         let mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![rule("pl\0an", Target::Trait { key: "plan".into() })],
         };
         let data = json!({"pl\0an": "a\0b", "ot\0her": "x"});
@@ -171,5 +174,35 @@ mod tests {
         let sample = reject_sample(&mapping(), &json!([1]), plain);
 
         assert!(sample.properties.is_empty() && sample.masked.is_empty());
+    }
+
+    #[test]
+    fn a_nested_path_rule_masks_its_whole_top_level_field_and_event_columns_are_never_shown() {
+        let mut mapping = Mapping {
+            key_column: None,
+            event: None,
+            columns: vec![rule("profile.plan", Target::Trait { key: "plan".into() })],
+        };
+        mapping.event = Some(super::super::model::EventRule {
+            name: "order".into(),
+            timestamp: None,
+            properties: vec![super::super::model::PropertyRule {
+                property: "total".into(),
+                column: "total".into(),
+                transforms: Vec::new(),
+            }],
+        });
+        let data = json!({"profile": {"plan": "pro"}, "total": 12, "profile.plan": "dotted"});
+
+        let sample = reject_sample(&mapping, &data, plain);
+
+        // A top-level field named exactly like the path is the rule's own field and is shown;
+        // the nested object and the event's column are not.
+        assert_eq!(sample.properties["profile.plan"], json!("dotted"));
+        assert_eq!(sample.properties["profile"], Value::Null);
+        assert_eq!(sample.properties["total"], Value::Null);
+        assert_eq!(sample.masked, ["profile", "total"]);
+        let shown = serde_json::to_string(&sample.properties).unwrap();
+        assert!(!shown.contains("\"pro\"") && !shown.contains("12"));
     }
 }

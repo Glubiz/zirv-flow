@@ -181,7 +181,7 @@ pub(super) async fn bodies(
         .collect()
 }
 
-fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
+pub(super) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
     serde_json::from_value(stream.discovered.clone()).map_err(|_| ApiError::internal())
 }
 
@@ -237,24 +237,12 @@ fn mapping_problem(error: &MappingError) -> ApiError {
     ApiError::unprocessable(detail)
 }
 
-/// Checks a mapping against the stream's field names and the trait registry. A sync run does
-/// not add people to lists, so a list target is refused rather than silently ignored.
-async fn checked_mapping(
+/// The trait registry as the mapping sees it.
+pub(super) async fn trait_catalog(
     state: &AppState,
     workspace: WorkspaceId,
-    descriptor: &StreamDescriptor,
-    body: &MappingBody,
-) -> Result<Mapping, ApiError> {
-    let mapping = body.to_core()?;
-    let header = Header::new(
-        descriptor
-            .fields
-            .iter()
-            .map(|field| field.name.clone())
-            .collect(),
-    )
-    .map_err(|_| ApiError::internal())?;
-    let catalog: std::collections::HashMap<String, TraitState> =
+) -> Result<std::collections::HashMap<String, TraitState>, ApiError> {
+    Ok(
         zirv_flow_store::list_trait_definitions(&state.pool, workspace)
             .await?
             .into_iter()
@@ -266,17 +254,54 @@ async fn checked_mapping(
                 };
                 (definition.key, trait_state)
             })
-            .collect();
-    mapping::validate(&mapping, &header, &catalog).map_err(|error| mapping_problem(&error))?;
-    if let Some(rule) = mapping
-        .columns
-        .iter()
-        .find(|rule| matches!(rule.target, mapping::Target::List { .. }))
-    {
-        return Err(ApiError::unprocessable(format!(
-            "mapping: unsupported_list_target (column \"{}\")",
-            rule.column
-        )));
+            .collect(),
+    )
+}
+
+/// The stream's field names as a mapping header. A source can report names a header refuses (a
+/// blank or repeated one); that is the source's answer being unusable, not a server fault.
+fn descriptor_header(descriptor: &StreamDescriptor) -> Result<Header, ApiError> {
+    Header::new(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
+    )
+    .map_err(|error| ApiError::source_fields_invalid(error.code()))
+}
+
+/// Checks a mapping against the stream's field names (a column may be a dotted path into a
+/// field) and the trait registry, that every list it names exists in the workspace, and that a
+/// mapping with an event has a primary key to hang the event's idempotency on.
+pub(super) async fn checked_mapping(
+    state: &AppState,
+    workspace: WorkspaceId,
+    descriptor: &StreamDescriptor,
+    primary_key: &[String],
+    body: &MappingBody,
+) -> Result<Mapping, ApiError> {
+    let mapping = body.to_core()?;
+    let header = descriptor_header(descriptor)?;
+    let catalog = trait_catalog(state, workspace).await?;
+    mapping::validate_paths(&mapping, &header, &catalog)
+        .map_err(|error| mapping_problem(&error))?;
+    for rule in &mapping.columns {
+        if let mapping::Target::List { list_id } = &rule.target
+            && zirv_flow_store::find_list(&state.pool, workspace, *list_id)
+                .await?
+                .is_none()
+        {
+            return Err(ApiError::unprocessable(format!(
+                "mapping: unknown_list (column \"{}\")",
+                rule.column
+            )));
+        }
+    }
+    if mapping.has_event() && primary_key.is_empty() {
+        return Err(ApiError::unprocessable(
+            "mapping: event_requires_primary_key",
+        ));
     }
     Ok(mapping)
 }
@@ -296,9 +321,24 @@ pub(crate) async fn configure(
     let descriptor = descriptor_of(&existing)?;
     let mode = check_settings(&descriptor, request)?;
     let mapping = match &request.mapping {
-        Some(body) => Some(checked_mapping(state, workspace, &descriptor, body).await?),
+        Some(body) => {
+            Some(checked_mapping(state, workspace, &descriptor, &request.primary_key, body).await?)
+        }
         None => None,
     };
+    // A mapping left as it is must still fit the key this request sets.
+    if mapping.is_none()
+        && request.primary_key.is_empty()
+        && existing
+            .mapping
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<Mapping>(value.clone()).ok())
+            .is_some_and(|saved| saved.has_event())
+    {
+        return Err(ApiError::unprocessable(
+            "mapping: event_requires_primary_key",
+        ));
+    }
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let stream = zirv_flow_store::configure_stream(
         &mut tx,
@@ -398,7 +438,7 @@ pub(crate) async fn list(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "A change of the sync mode, cursor field or primary key while the stream has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "Settings the stream cannot serve, such as incremental without a cursor field, a mapping that names a column the stream does not have, or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
