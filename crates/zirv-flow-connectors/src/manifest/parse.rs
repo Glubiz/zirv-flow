@@ -394,7 +394,10 @@ fn auth(walk: &mut Walk, value: &Value, path: String) -> Option<Auth> {
                     } else {
                         KeyLocation::Query
                     };
-                    if location == KeyLocation::Header && !is_token(name) {
+                    if location == KeyLocation::Header && is_forbidden_header(name) {
+                        walk.add(code::FORBIDDEN_HEADER, obj.at("name"));
+                        None
+                    } else if location == KeyLocation::Header && !is_token(name) {
                         walk.add(code::INVALID_HEADER, obj.at("name"));
                         None
                     } else {
@@ -457,6 +460,13 @@ fn is_token(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
+/// Whether a manifest may not send a header of this name: the runtime or the transport owns it, or it
+/// makes the request conditional.
+fn is_forbidden_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    FORBIDDEN_HEADERS.contains(&lower.as_str()) || lower.starts_with("if-")
+}
+
 fn headers(walk: &mut Walk, value: &Value, path: String) -> Vec<(String, String)> {
     let Some(map) = value.as_object() else {
         walk.add(code::INVALID_TYPE, path);
@@ -469,8 +479,7 @@ fn headers(walk: &mut Walk, value: &Value, path: String) -> Vec<(String, String)
     let mut headers = Vec::new();
     for (name, value) in map {
         let at = child(&path, name);
-        let lower = name.to_ascii_lowercase();
-        if FORBIDDEN_HEADERS.contains(&lower.as_str()) || lower.starts_with("if-") {
+        if is_forbidden_header(name) {
             walk.add(code::FORBIDDEN_HEADER, at);
             continue;
         }
@@ -574,7 +583,7 @@ fn stream_path(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<String> {
         && text.len() <= MAX_PATH
         && !text.contains("//")
         && !text.contains("..")
-        && !text.contains(['?', '#', '\\'])
+        && !text.contains(['?', '#', '\\', '%'])
         && !text.chars().any(char::is_control);
     if !ok {
         walk.add(code::PATH_INVALID, obj.at("path"));
@@ -1250,6 +1259,41 @@ mod tests {
             code::INVALID_POINTER,
             "/streams/0/records_path",
         );
+    }
+
+    #[test]
+    fn a_stream_path_never_holds_a_percent_encoded_dot_segment_or_slash() {
+        for bad in ["/a/%2e%2e/b", "/a/%2E%2E/b", "/a/%2e/b", "/a%2fb"] {
+            assert_issue(
+                &with(|v| v["streams"][0]["path"] = json!(bad)),
+                code::PATH_INVALID,
+                "/streams/0/path",
+            );
+        }
+    }
+
+    #[test]
+    fn an_api_key_header_is_held_to_the_same_forbidden_list_as_the_headers_map() {
+        for name in [
+            "Host",
+            "Transfer-Encoding",
+            "Content-Length",
+            "Connection",
+            "Cookie",
+            "If-Match",
+        ] {
+            assert_issue(
+                &with(|v| v["auth"] = json!({"type": "api_key", "in": "header", "name": name})),
+                code::FORBIDDEN_HEADER,
+                "/auth/name",
+            );
+        }
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "api_key", "in": "header", "name": "X-Api-Key"});
+        }));
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "api_key", "in": "query", "name": "host"});
+        }));
     }
 
     #[test]
