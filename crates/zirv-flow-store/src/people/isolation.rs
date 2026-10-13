@@ -783,8 +783,18 @@ mod tests {
             CancelOutcome::NotFound
         );
         assert!(start_run(&pool, two, run).await.unwrap().is_none());
-        assert!(!fail_run(&pool, two, run, "x").await.unwrap());
-        assert!(!finish_run(&pool, two, run).await.unwrap());
+        let lease = crate::SyncLease {
+            job_id: fx.job.id,
+            token: fx.job.lease_token,
+        };
+        assert_eq!(
+            fail_run(&pool, two, run, lease, "x").await.unwrap(),
+            crate::RunEnd::Over
+        );
+        assert_eq!(
+            finish_run(&pool, two, run, lease).await.unwrap(),
+            crate::RunEnd::Over
+        );
         assert!(
             queue_run(
                 &mut connection,

@@ -145,10 +145,10 @@ pub use suppressions::{
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
-    Counts as SyncCounts, FanOut, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, RunCursor, RunReject,
-    RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncRun, SyncUpsert,
-    cancel_run, commit_sync_batch, fail_run, find_run, finish_run, list_run_rejects, list_runs,
-    queue_run, queue_runs_for_source, run_trace, start_run,
+    Counts as SyncCounts, FanOut, Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, RunCursor,
+    RunEnd, RunReject, RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncRun,
+    SyncUpsert, cancel_run, commit_sync_batch, fail_orphaned_runs, fail_run, find_run, finish_run,
+    list_run_rejects, list_runs, queue_run, queue_runs_for_source, run_trace, start_run,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

@@ -32,25 +32,32 @@ pub fn reject_sample(
         return RejectSample { properties, masked };
     };
     for (name, value) in object {
+        let clean_name = clean(name);
         let visible = mapping.columns.iter().any(|rule| {
             &rule.column == name && matches!(&rule.target, Target::Trait { key } if plain(key))
         }) && matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_));
         if visible {
-            properties.insert(name.clone(), shorten(value));
+            properties.insert(clean_name, shorten(value));
         } else {
-            properties.insert(name.clone(), Value::Null);
-            masked.push(name.clone());
+            properties.insert(clean_name.clone(), Value::Null);
+            masked.push(clean_name);
         }
     }
     masked.sort();
     RejectSample { properties, masked }
 }
 
+/// Replaces the NUL characters of `text`, which PostgreSQL refuses in `jsonb`: one odd record
+/// must not make its own reject impossible to store.
+fn clean(text: &str) -> String {
+    text.replace('\0', "\u{FFFD}")
+}
+
 fn shorten(value: &Value) -> Value {
     match value {
-        Value::String(text) if text.chars().count() > SAMPLE_STRING_CHARS => {
-            Value::String(text.chars().take(SAMPLE_STRING_CHARS).collect())
-        }
+        Value::String(text) => Value::String(clean(
+            &text.chars().take(SAMPLE_STRING_CHARS).collect::<String>(),
+        )),
         other => other.clone(),
     }
 }
@@ -141,6 +148,22 @@ mod tests {
             256
         );
         assert!(sample.masked.is_empty());
+    }
+
+    #[test]
+    fn a_nul_in_a_name_or_a_kept_value_becomes_a_replacement_character() {
+        let mapping = Mapping {
+            key_column: None,
+            columns: vec![rule("pl\0an", Target::Trait { key: "plan".into() })],
+        };
+        let data = json!({"pl\0an": "a\0b", "ot\0her": "x"});
+
+        let sample = reject_sample(&mapping, &data, plain);
+
+        assert_eq!(sample.properties["pl\u{FFFD}an"], json!("a\u{FFFD}b"));
+        assert_eq!(sample.masked, ["ot\u{FFFD}her"]);
+        let stored = serde_json::to_string(&sample.properties).unwrap();
+        assert!(!stored.contains("\\u0000"), "{stored}");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use zirv_flow_core::{Slug, TraceContext, WorkspaceId, WorkspaceName};
 
 use super::batch::{SyncBatch, SyncUpsert};
 use super::job::run_trace;
-use super::model::{RunTrigger, SyncRun, queue_run, start_run};
+use super::model::{Lease, RunTrigger, SyncRun, queue_run, start_run};
 use crate::{
     ClaimedJob, DiscoveredStream, NewSource, ProfileRecord, begin, claim_job, commit,
     configure_stream, create_source, create_workspace, set_stream_mapping,
@@ -138,6 +138,18 @@ pub(crate) async fn started_run(
         run,
         job,
         trace,
+    }
+}
+
+/// Claims the next `sync.run` job and returns the lease it gives.
+pub(crate) async fn claim_lease(pool: &PgPool) -> Lease {
+    let job = claim_job(pool, "w", &["sync.run"], Duration::from_secs(30), None)
+        .await
+        .unwrap()
+        .unwrap();
+    Lease {
+        job_id: job.id,
+        token: job.lease_token,
     }
 }
 

@@ -142,7 +142,8 @@ pub async fn find_source_for_update(
 }
 
 /// Changes the given fields. `None` when there is no such source; a name taken by another
-/// source is a conflict.
+/// source is a conflict. A changed `config` clears the checkpoints of the source's streams: a
+/// new database or URL invalidates a cursor.
 pub async fn update_source<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -150,7 +151,13 @@ pub async fn update_source<'e>(
     update: &SourceUpdate<'_>,
 ) -> Result<Option<Source>, StoreError> {
     sqlx::query_as(concat!(
-        "UPDATE sources SET name = COALESCE($3, name), config = COALESCE($4, config), \
+        "WITH cleared AS ( \
+            UPDATE streams SET checkpoint = NULL \
+            WHERE workspace_id = $1 AND source_id = $2 AND checkpoint IS NOT NULL \
+              AND $4::jsonb IS NOT NULL \
+              AND $4::jsonb IS DISTINCT FROM (SELECT config FROM sources \
+                                              WHERE workspace_id = $1 AND id = $2)) \
+         UPDATE sources SET name = COALESCE($3, name), config = COALESCE($4, config), \
             schedule = CASE WHEN $5 THEN $6 ELSE schedule END, \
             enabled = COALESCE($7, enabled), \
             credential_secret_id = COALESCE($8, credential_secret_id), \
@@ -493,5 +500,75 @@ mod tests {
         assert!(created.is_err());
         assert!(linked.is_err());
         assert!(stream.is_err());
+    }
+
+    async fn set_checkpoint(pool: &PgPool) {
+        sqlx::query("UPDATE streams SET checkpoint = '{\"offset\": 5}'::jsonb")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn kept(pool: &PgPool) -> bool {
+        sqlx::query_scalar("SELECT checkpoint IS NOT NULL FROM streams")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn update(pool: &PgPool, ws: WorkspaceId, source_id: Uuid, change: SourceUpdate<'_>) {
+        update_source(pool, ws, source_id, &change)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_config_clears_the_checkpoints_of_the_streams_and_other_changes_keep_them(
+        pool: PgPool,
+    ) {
+        use crate::sync_runs::testing::source_with_stream;
+
+        let ws = workspace(&pool, "one").await;
+        let (source_id, _) = source_with_stream(&pool, ws, "crm", "incremental").await;
+        let config = json!({"records": 3});
+        let same = json!({});
+
+        set_checkpoint(&pool).await;
+        update(
+            &pool,
+            ws,
+            source_id,
+            SourceUpdate {
+                name: Some("renamed"),
+                enabled: Some(false),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        assert!(kept(&pool).await, "a rename keeps the cursor");
+        update(
+            &pool,
+            ws,
+            source_id,
+            SourceUpdate {
+                config: Some(&same),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        assert!(kept(&pool).await, "the same config keeps the cursor");
+        update(
+            &pool,
+            ws,
+            source_id,
+            SourceUpdate {
+                config: Some(&config),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        assert!(!kept(&pool).await, "a new config clears it");
     }
 }

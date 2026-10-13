@@ -16,6 +16,7 @@ pub use batch::{
 };
 pub use job::{RUN_JOB_KIND, run_trace};
 pub use model::{
-    CancelOutcome, FanOut, RunCursor, RunReject, RunTrigger, SyncRun, cancel_run, fail_run,
-    find_run, finish_run, list_run_rejects, list_runs, queue_run, queue_runs_for_source, start_run,
+    CancelOutcome, FanOut, Lease, RunCursor, RunEnd, RunReject, RunTrigger, SyncRun, cancel_run,
+    fail_orphaned_runs, fail_run, find_run, finish_run, list_run_rejects, list_runs, queue_run,
+    queue_runs_for_source, start_run,
 };

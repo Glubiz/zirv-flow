@@ -32,10 +32,10 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState, reject_sample};
 use zirv_flow_store::secrets::{self, OpenError};
 use zirv_flow_store::{
-    PgPool, ProfileRecord, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
-    SyncBatch, SyncBatchOutcome, SyncReject, SyncUpsert, commit_sync_batch, fail_run, find_source,
-    find_stream_by_id, finish_run, list_trait_definitions, queue_runs_for_source, run_trace,
-    start_run,
+    PgPool, ProfileRecord, RunEnd, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
+    SyncBatch, SyncBatchOutcome, SyncLease, SyncReject, SyncUpsert, commit_sync_batch, fail_run,
+    find_source, find_stream_by_id, finish_run, list_trait_definitions, queue_runs_for_source,
+    run_trace, start_run,
 };
 
 use super::import_rows::Probe;
@@ -131,14 +131,21 @@ pub(super) async fn run_sync(
         source: source_id,
         stream: stream_id,
         run: run_id,
+        lease: SyncLease {
+            job_id: ctx.job_id(),
+            token: ctx.lease_token(),
+        },
     };
     match run_pass(ctx, &pool, ids, probe).await {
         Ok(()) => Ok(()),
         Err(failure) => {
+            // A lost lease writes nothing: the run belongs to whoever holds the job now, or to the
+            // reconciliation of dead jobs.
             if last
-                && fail_run(&pool, workspace, run_id, failure.code)
-                    .await
-                    .unwrap_or(false)
+                && matches!(
+                    fail_run(&pool, workspace, run_id, ids.lease, failure.code).await,
+                    Ok(RunEnd::Ended)
+                )
             {
                 record_sync_run(RunOutcome::Failed, 0.0);
             }
@@ -184,12 +191,15 @@ struct Ids {
     source: Uuid,
     stream: Uuid,
     run: Uuid,
+    lease: SyncLease,
 }
 
 /// Ends the run with `code`, unless it ended already.
 async fn end_failed(pool: &PgPool, ids: Ids, code: &'static str) -> Result<(), Failure> {
-    if fail_run(pool, ids.workspace, ids.run, code).await? {
-        record_sync_run(RunOutcome::Failed, 0.0);
+    match fail_run(pool, ids.workspace, ids.run, ids.lease, code).await? {
+        RunEnd::Ended => record_sync_run(RunOutcome::Failed, 0.0),
+        RunEnd::Over => {}
+        RunEnd::LeaseLost => return Err(Failure::job(LEASE_LOST)),
     }
     Ok(())
 }
@@ -534,9 +544,13 @@ async fn run_pass(
         return Ok(());
     }
     let seconds = pass.seconds();
-    if finish_run(pool, ids.workspace, ids.run).await? {
-        info!(run_id = %ids.run, "sync run finished");
-        record_sync_run(RunOutcome::Succeeded, seconds);
+    match finish_run(pool, ids.workspace, ids.run, ids.lease).await? {
+        RunEnd::Ended => {
+            info!(run_id = %ids.run, "sync run finished");
+            record_sync_run(RunOutcome::Succeeded, seconds);
+        }
+        RunEnd::Over => {}
+        RunEnd::LeaseLost => return Err(Failure::job(LEASE_LOST)),
     }
     Ok(())
 }
@@ -1536,5 +1550,63 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_fails_a_run_whose_job_died_and_frees_its_stream(pool: PgPool) {
+        use crate::{Scheduler, SchedulerConfig};
+
+        let env = setup(&pool, json!({}), "full_refresh").await;
+        let (run, job) = env.queue().await;
+        sqlx::query("UPDATE jobs SET state = 'dead' WHERE id = $1")
+            .bind(job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(env.run(run.id).await.state, "queued");
+        let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
+
+        leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
+
+        let failed = env.run(run.id).await;
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
+        let (next, _) = env.queue().await;
+        assert_ne!(next.id, run.id, "the stream takes a new run");
+    }
+
+    #[test]
+    fn a_nul_in_a_record_is_rejected_with_a_sample_that_holds_none() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::from([(
+            "display_name".to_owned(),
+            TraitState::Active(TraitType::String),
+        )]);
+        let plain = HashSet::from(["display_name".to_owned()]);
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = Planner {
+            mapping: &mapping,
+            catalog: &catalog,
+            plain: &plain,
+            declared: vec!["email", "name"],
+            source: "s",
+            stream: "stream_1",
+            observed_at: OffsetDateTime::now_utc(),
+            trace: &trace,
+        };
+        let record = Record {
+            key: "k".into(),
+            data: json!({"email": "not-an-email", "name": "Ad\0a", "x\0y": "1"}),
+            deleted: false,
+        };
+
+        let planned = planner.plan(vec![record]);
+
+        assert!(planned.upserts.is_empty());
+        assert_eq!(planned.rejected.len(), 1);
+        let sample = planned.rejected[0].sample.to_string();
+        assert!(!sample.contains("\\u0000"), "{sample}");
+        assert!(sample.contains("Ad\u{FFFD}a"));
     }
 }

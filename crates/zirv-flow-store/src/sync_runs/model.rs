@@ -8,7 +8,7 @@ use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
 use super::job::{RUN_JOB_KIND, run_trace};
-use crate::{NewJob, StoreError, enqueue};
+use crate::{NewJob, PgPool, StoreError, begin, commit, enqueue, lock_lease};
 
 /// What started a run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,43 +360,98 @@ pub async fn cancel_run(
     })
 }
 
-/// Ends an active run as `failed` with a code (never a value). False when it had ended.
-pub async fn fail_run<'e>(
-    executor: impl PgExecutor<'e>,
+/// The job and lease token a write of a worker is fenced on.
+#[derive(Clone, Copy, Debug)]
+pub struct Lease {
+    pub job_id: Uuid,
+    pub token: Uuid,
+}
+
+/// What an end-of-run write did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunEnd {
+    /// The run is over as asked.
+    Ended,
+    /// The run had ended already (cancelled, say): nothing was written.
+    Over,
+    /// The job's lease is gone: another worker owns the run now. Nothing was written.
+    LeaseLost,
+}
+
+/// Runs `end` in a transaction that first locks the job's lease, as a batch does, so a worker
+/// that lost its lease cannot end the run.
+async fn fenced_end(
+    pool: &PgPool,
+    lease: Lease,
+    end: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<RunEnd, StoreError> {
+    let mut tx = begin(pool).await?;
+    if !lock_lease(&mut tx, lease.job_id, lease.token).await? {
+        return Ok(RunEnd::LeaseLost);
+    }
+    let done = end.execute(&mut *tx).await.map_err(StoreError::query)?;
+    commit(tx).await?;
+    Ok(if done.rows_affected() == 1 {
+        RunEnd::Ended
+    } else {
+        RunEnd::Over
+    })
+}
+
+/// Ends an active run as `failed` with a code (never a value), fenced on the job's lease.
+pub async fn fail_run(
+    pool: &PgPool,
     workspace: WorkspaceId,
     run_id: Uuid,
+    lease: Lease,
     code: &str,
-) -> Result<bool, StoreError> {
-    let done = sqlx::query(
+) -> Result<RunEnd, StoreError> {
+    let end = sqlx::query(
         "UPDATE sync_runs SET state = 'failed', error_code = $3, finished_at = now(), \
             updated_at = now() \
          WHERE workspace_id = $1 AND id = $2 AND state IN ('queued', 'running')",
     )
     .bind(workspace.as_uuid())
     .bind(run_id)
-    .bind(code)
-    .execute(executor)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(done.rows_affected() == 1)
+    .bind(code);
+    fenced_end(pool, lease, end).await
 }
 
-/// Ends a running run as `succeeded`. False when it had ended.
-pub async fn finish_run<'e>(
-    executor: impl PgExecutor<'e>,
+/// Ends a running run as `succeeded`, fenced on the job's lease.
+pub async fn finish_run(
+    pool: &PgPool,
     workspace: WorkspaceId,
     run_id: Uuid,
-) -> Result<bool, StoreError> {
-    let done = sqlx::query(
+    lease: Lease,
+) -> Result<RunEnd, StoreError> {
+    let end = sqlx::query(
         "UPDATE sync_runs SET state = 'succeeded', finished_at = now(), updated_at = now() \
          WHERE workspace_id = $1 AND id = $2 AND state = 'running'",
     )
     .bind(workspace.as_uuid())
-    .bind(run_id)
-    .execute(executor)
+    .bind(run_id);
+    fenced_end(pool, lease, end).await
+}
+
+/// Fails every active run whose job is dead or gone, with `job_failed`, and returns the ids.
+///
+/// A job the reaper buried after its last lease expiry, or that was deleted, never runs its
+/// handler again, so nothing else would end its run, and the run would keep the stream's one
+/// active-run slot for good. The job is found by the key `queue_run` gave it. A run and its job
+/// are inserted in one transaction, so a run without a job row is never one still being
+/// queued.
+pub async fn fail_orphaned_runs(pool: &PgPool) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "UPDATE sync_runs r SET state = 'failed', error_code = 'job_failed', \
+            finished_at = now(), updated_at = now() \
+         WHERE r.state IN ('queued', 'running') \
+           AND NOT EXISTS (SELECT 1 FROM jobs j \
+                           WHERE j.unique_key = 'sync:run:' || r.id::text AND j.state <> 'dead') \
+         RETURNING r.id",
+    )
+    .fetch_all(pool)
     .await
-    .map_err(StoreError::query)?;
-    Ok(done.rows_affected() == 1)
+    .map_err(StoreError::query)
 }
 
 /// A record a run refused, as the API shows it: codes and a masked sample.
@@ -486,7 +541,7 @@ pub(super) mod tests {
     use serde_json::json;
     use sqlx::PgPool;
 
-    use crate::sync_runs::testing::{fixture, source_with_stream, workspace};
+    use crate::sync_runs::testing::{claim_lease, fixture, source_with_stream, workspace};
     use crate::{StreamSettings, configure_stream};
 
     async fn queue(
@@ -546,13 +601,23 @@ pub(super) mod tests {
         let (source, stream) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
         let first = queue(&pool, ws, source, stream).await.unwrap();
         start_run(&pool, ws, first.id).await.unwrap().unwrap();
+        let lease = claim_lease(&pool).await;
 
-        assert!(finish_run(&pool, ws, first.id).await.unwrap());
+        assert_eq!(
+            finish_run(&pool, ws, first.id, lease).await.unwrap(),
+            RunEnd::Ended
+        );
         let next = queue(&pool, ws, source, stream).await;
 
         assert!(next.is_some());
-        assert!(!finish_run(&pool, ws, first.id).await.unwrap());
-        assert!(!fail_run(&pool, ws, first.id, "x").await.unwrap());
+        assert_eq!(
+            finish_run(&pool, ws, first.id, lease).await.unwrap(),
+            RunEnd::Over
+        );
+        assert_eq!(
+            fail_run(&pool, ws, first.id, lease, "x").await.unwrap(),
+            RunEnd::Over
+        );
     }
 
     #[sqlx::test]
@@ -568,7 +633,13 @@ pub(super) mod tests {
         assert_eq!((first.state.as_str(), first.attempt), ("running", 1));
         assert_eq!(again.attempt, 2);
         assert_eq!(again.started_at, first.started_at);
-        assert!(fail_run(&pool, ws, run.id, "source_error").await.unwrap());
+        let lease = claim_lease(&pool).await;
+        assert_eq!(
+            fail_run(&pool, ws, run.id, lease, "source_error")
+                .await
+                .unwrap(),
+            RunEnd::Ended
+        );
         assert!(start_run(&pool, ws, run.id).await.unwrap().is_none());
         let failed = find_run(&pool, ws, source, run.id).await.unwrap().unwrap();
         assert_eq!(failed.state, "failed");
@@ -743,7 +814,8 @@ pub(super) mod tests {
         let mut ids = Vec::new();
         for _ in 0..3 {
             let run = queue(&pool, ws, source, stream).await.unwrap();
-            fail_run(&pool, ws, run.id, "x").await.unwrap();
+            let lease = claim_lease(&pool).await;
+            fail_run(&pool, ws, run.id, lease, "x").await.unwrap();
             ids.push(run.id);
         }
         queue(&pool, other, other_source, other_stream)
@@ -806,5 +878,124 @@ pub(super) mod tests {
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].reason, "invalid_email");
         assert!(none.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_that_lost_its_lease_can_neither_finish_nor_fail_the_run(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let held = Lease {
+            job_id: fx.job.id,
+            token: fx.job.lease_token,
+        };
+        let stale = Lease {
+            token: Uuid::new_v4(),
+            ..held
+        };
+
+        let finished = finish_run(&pool, fx.ws, fx.run.id, stale).await.unwrap();
+        let failed = fail_run(&pool, fx.ws, fx.run.id, stale, "job_failed")
+            .await
+            .unwrap();
+
+        assert_eq!((finished, failed), (RunEnd::LeaseLost, RunEnd::LeaseLost));
+        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "running");
+        assert_eq!(run.error_code, None);
+        assert_eq!(
+            finish_run(&pool, fx.ws, fx.run.id, held).await.unwrap(),
+            RunEnd::Ended
+        );
+    }
+
+    async fn state_of(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        source: Uuid,
+        run: Uuid,
+    ) -> (String, Option<String>) {
+        let run = find_run(pool, ws, source, run).await.unwrap().unwrap();
+        (run.state, run.error_code)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_whose_job_is_dead_or_gone_is_failed_and_the_rest_are_left_alone(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, _) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
+        let descriptor = json!({});
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let names = ["dead", "gone", "live", "running", "done"];
+        let streams: Vec<crate::DiscoveredStream<'_>> = names
+            .iter()
+            .map(|name| crate::DiscoveredStream {
+                name,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                descriptor: &descriptor,
+            })
+            .collect();
+        let found = crate::upsert_discovered_streams(&mut tx, ws, source, &streams)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        let mut runs = std::collections::HashMap::new();
+        for name in names {
+            let stream = found.iter().find(|stream| stream.name == name).unwrap();
+            runs.insert(name, queue(&pool, ws, source, stream.id).await.unwrap());
+        }
+        let job_of = |name: &str| format!("sync:run:{}", runs[name].id);
+        sqlx::query("UPDATE jobs SET state = 'dead' WHERE unique_key = $1")
+            .bind(job_of("dead"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs WHERE unique_key = $1")
+            .bind(job_of("gone"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sync_runs SET state = 'running' WHERE id = $1")
+            .bind(runs["running"].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A finished run has no use for its job.
+        sqlx::query("UPDATE sync_runs SET state = 'succeeded' WHERE id = $1")
+            .bind(runs["done"].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs WHERE unique_key = $1")
+            .bind(job_of("done"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut failed = fail_orphaned_runs(&pool).await.unwrap();
+        failed.sort();
+
+        let mut expected = vec![runs["dead"].id, runs["gone"].id];
+        expected.sort();
+        assert_eq!(failed, expected);
+        for (name, state, code) in [
+            ("dead", "failed", Some("job_failed")),
+            ("gone", "failed", Some("job_failed")),
+            ("live", "queued", None),
+            ("running", "running", None),
+            ("done", "succeeded", None),
+        ] {
+            let found = state_of(&pool, ws, source, runs[name].id).await;
+            assert_eq!(found, (state.to_owned(), code.map(str::to_owned)), "{name}");
+        }
+        // The stream is free again, and a second pass finds nothing.
+        let stream = found.iter().find(|stream| stream.name == "dead").unwrap();
+        assert!(queue(&pool, ws, source, stream.id).await.is_some());
+        assert!(fail_orphaned_runs(&pool).await.unwrap().is_empty());
     }
 }

@@ -468,7 +468,7 @@ stateDiagram-v2
   running --> succeeded: stream exhausted, sweep applied
   running --> failed: retries exhausted or reject threshold exceeded
   running --> cancelled: operator cancels
-  running --> queued: lease expired, resume from checkpoint
+  running --> running: lease expired, job re-delivered, resume from checkpoint
 ```
 
 A checkpoint is opaque connector state (cursor, page token, LSN) written in the
@@ -490,7 +490,8 @@ lease (`store::lock_lease`) and then the run row, so a lost lease or a cancel wr
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
 re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
 checkpoint; only the last failed attempt marks the run `failed` (`source_error` for a read error,
-else `job_failed`). An incremental stream also keeps `streams.checkpoint`, written in the same
+else `job_failed`); the scheduler leader fails, with `job_failed`, a run whose job is dead or
+gone. A lost lease also cannot end a run: the end-of-run writes lock the lease like a batch. An incremental stream also keeps `streams.checkpoint`, written in the same
 transaction except for a batch that fails the run on its rejects. The reject check applies from
 100 records read (`SYNC_REJECT_CHECK_MIN_RECORDS`) at 5%, stored per run. A source's cron is
 mirrored to a `schedules` row (`schedules.source_id`, cascading); the leader's firing queues

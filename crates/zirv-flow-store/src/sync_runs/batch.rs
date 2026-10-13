@@ -915,4 +915,46 @@ mod tests {
         };
         assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nul_in_a_record_does_not_stop_its_reject_from_being_stored(pool: PgPool) {
+        use zirv_flow_core::mapping::{ColumnRule, Mapping, Target, reject_sample};
+
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let mapping = Mapping {
+            key_column: None,
+            columns: vec![ColumnRule {
+                column: "plan".into(),
+                target: Target::Trait { key: "plan".into() },
+                transforms: Vec::new(),
+            }],
+        };
+        let data = json!({"plan": "pr\0o", "e\0mail": "a@b.c"});
+        let sample = reject_sample(&mapping, &data, |_| true);
+        let rejected = [SyncReject {
+            reasons: vec![("plan".into(), "wrong_type")],
+            sample: json!({"properties": sample.properties, "masked": sample.masked}),
+        }];
+        let cp = json!({"offset": 1});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                rejected: &rejected,
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, BatchOutcome::Committed(_)));
+        let stored: Value = sqlx::query_scalar("SELECT sample FROM ingest_rejects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
+        assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+    }
 }

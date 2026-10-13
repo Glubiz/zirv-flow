@@ -1293,7 +1293,9 @@ source reports as deleted retracts its contribution.
 without reading or applying a committed unit again; the run shows its **attempt** number. An
 incremental stream also keeps its cursor on the stream: the next run starts there, while a full
 refresh always starts from the beginning. A run that fails on its rejects does not move the
-stream's cursor, so its records are read again next time.
+stream's cursor, so after the mapping is fixed the next run reads those records again. Changing a
+stream's sync mode, cursor field or primary key, or a source's settings, clears the stream's
+cursor, since it belonged to the old ones.
 
 **Cancel** with `POST .../runs/{run_id}/cancel` (admins only; 409 when the run has ended). The
 run stops at its next unit: the unit in flight is not applied, and the checkpoint stays at the
@@ -1316,7 +1318,9 @@ fit (a cursor field that disappeared, say). A stream without a mapping fails wit
 the same transaction as the source: clearing the schedule, disabling the source or deleting it
 stops the firing. When the scheduler leader fires it, the job queues a run for each enabled,
 mapped stream that has no active run; a stream with an active run is skipped. One active run
-per stream is enforced by the database.
+per stream is enforced by the database. The leader also fails (`job_failed`) a run whose job was
+buried by the job system or deleted, at most a minute later, so a lost job cannot keep a stream
+blocked.
 
 **Reading.** `GET .../runs?stream=&limit=&cursor=` lists runs newest first, and `GET
 .../runs/{run_id}` returns one with its counters, state, attempt, error code, trace id and its

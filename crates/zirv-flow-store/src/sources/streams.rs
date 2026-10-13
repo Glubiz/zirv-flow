@@ -163,7 +163,9 @@ pub async fn find_stream_by_id<'e>(
 }
 
 /// Replaces the settings of a stream; `None` when the source has no such stream. The database
-/// refuses an incremental stream with no cursor field.
+/// refuses an incremental stream with no cursor field. A change of the sync mode, the cursor
+/// field or the primary key clears the stream's checkpoint, which belongs to the old ones; any
+/// other change keeps it.
 pub async fn configure_stream<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -173,7 +175,11 @@ pub async fn configure_stream<'e>(
 ) -> Result<Option<Stream>, StoreError> {
     sqlx::query_as(concat!(
         "UPDATE streams SET enabled = $4, sync_mode = $5, cursor_field = $6, primary_key = $7, \
-            staleness_threshold_seconds = $8, updated_at = now() \
+            staleness_threshold_seconds = $8, updated_at = now(), \
+            checkpoint = CASE WHEN sync_mode IS DISTINCT FROM $5 \
+                               OR cursor_field IS DISTINCT FROM $6 \
+                               OR primary_key IS DISTINCT FROM $7 \
+                         THEN NULL ELSE checkpoint END \
          WHERE workspace_id = $1 AND source_id = $2 AND name = $3 RETURNING ",
         stream_columns!()
     ))
@@ -425,5 +431,111 @@ mod tests {
         .unwrap();
 
         assert!(columns.is_empty(), "{columns:?}");
+    }
+
+    async fn set_checkpoint(pool: &PgPool) {
+        sqlx::query("UPDATE streams SET checkpoint = '{\"offset\": 5}'::jsonb")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn checkpoint_of(pool: &PgPool, ws: WorkspaceId, source_id: Uuid) -> Option<Value> {
+        find_stream(pool, ws, source_id, "contacts")
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint
+    }
+
+    async fn configure(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        source_id: Uuid,
+        settings: StreamSettings<'_>,
+    ) {
+        configure_stream(pool, ws, source_id, "contacts", &settings)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_cursor_sync_mode_or_primary_key_clears_the_checkpoint_and_other_changes_keep_it(
+        pool: PgPool,
+    ) {
+        use crate::sync_runs::testing::source_with_stream;
+
+        let ws = workspace(&pool, "one").await;
+        let (source_id, _) = source_with_stream(&pool, ws, "crm", "incremental").await;
+        let key = vec!["id".to_owned()];
+        let settings = |mode, cursor, primary_key, staleness| StreamSettings {
+            enabled: true,
+            sync_mode: mode,
+            cursor_field: cursor,
+            primary_key,
+            staleness_threshold_seconds: staleness,
+        };
+        // The first settings are those the fixture saved, so nothing changes.
+        set_checkpoint(&pool).await;
+        configure(
+            &pool,
+            ws,
+            source_id,
+            settings("incremental", Some("updated_at"), &[], Some(60)),
+        )
+        .await;
+        assert!(
+            checkpoint_of(&pool, ws, source_id).await.is_some(),
+            "a staleness change keeps the cursor"
+        );
+        configure(
+            &pool,
+            ws,
+            source_id,
+            settings("incremental", Some("updated_at"), &[], None),
+        )
+        .await;
+        assert!(
+            checkpoint_of(&pool, ws, source_id).await.is_some(),
+            "nothing changed"
+        );
+
+        configure(
+            &pool,
+            ws,
+            source_id,
+            settings("incremental", Some("id"), &[], None),
+        )
+        .await;
+        assert!(
+            checkpoint_of(&pool, ws, source_id).await.is_none(),
+            "a new cursor field"
+        );
+        set_checkpoint(&pool).await;
+        configure(
+            &pool,
+            ws,
+            source_id,
+            settings("incremental", Some("id"), &key, None),
+        )
+        .await;
+        assert!(
+            checkpoint_of(&pool, ws, source_id).await.is_none(),
+            "a new primary key"
+        );
+        set_checkpoint(&pool).await;
+        configure(
+            &pool,
+            ws,
+            source_id,
+            settings("full_refresh", Some("id"), &key, None),
+        )
+        .await;
+        assert!(
+            checkpoint_of(&pool, ws, source_id).await.is_none(),
+            "a new sync mode"
+        );
     }
 }
