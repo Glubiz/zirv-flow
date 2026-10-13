@@ -8,7 +8,8 @@
 //! the policy holds for metadata-learned brokers and on every reconnect.
 //!
 //! Residual risk: while a read runs, any local process can use the listener to reach destinations
-//! the policy allows. The policy still applies to them.
+//! the policy allows. The policy still applies to them, and the sessions are capped. The relay
+//! lives as long as one read, check or discover, which is bounded.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use zirv_flow_core::egress::AddressClass;
@@ -28,6 +30,10 @@ use super::super::error::SourceError;
 
 /// How long one upstream connection attempt, and the SOCKS handshake, may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many sessions one relay carries at once: a read needs the bootstrap connection and one per
+/// broker. A connection beyond it is closed before the handshake.
+const MAX_SESSIONS: usize = 64;
 
 const REPLY_OK: u8 = 0;
 const REPLY_RULESET: u8 = 2;
@@ -65,18 +71,27 @@ pub(super) struct Relay {
 impl Relay {
     /// Binds a loopback port and starts serving.
     pub(super) async fn start(ctx: SourceContext) -> io::Result<Self> {
+        Self::start_capped(ctx, MAX_SESSIONS).await
+    }
+
+    async fn start_capped(ctx: SourceContext, sessions: usize) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let denial = DenialSlot::default();
         let slot = denial.clone();
+        let permits = Arc::new(Semaphore::new(sessions));
         let task = tokio::spawn(async move {
             // Dropped with the task, which aborts every connection.
             let mut connections = JoinSet::new();
             while let Ok((client, _)) = listener.accept().await {
                 while connections.try_join_next().is_some() {}
+                let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                    continue;
+                };
                 let ctx = ctx.clone();
                 let slot = slot.clone();
                 connections.spawn(async move {
+                    let _permit = permit;
                     let _ = serve(client, &ctx, &slot).await;
                 });
             }
@@ -314,6 +329,32 @@ mod tests {
         assert_eq!(&echoed, b"ping");
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(relay.denial(), None);
+    }
+
+    #[tokio::test]
+    async fn a_connection_beyond_the_session_cap_is_closed_before_the_handshake() {
+        let (port, _count) = target().await;
+        let entries = vec!["127.0.0.0/8".to_owned()];
+        let ctx = SourceContext::new(
+            Arc::new(EgressPolicy::parse(&entries).unwrap()),
+            crate::http::HttpLimits::default(),
+            "kafka",
+            "source-1",
+            Arc::default(),
+        )
+        .unwrap()
+        .with_lookup(table(&[("broker.test", &["127.0.0.1"])]));
+        let relay = Relay::start_capped(ctx, 1).await.unwrap();
+        let (code, held) = connect(&relay, "broker.test", port).await;
+        assert_eq!(code, REPLY_OK);
+
+        let mut refused = TcpStream::connect(relay.proxy()).await.unwrap();
+        let _ = refused.write_all(&[5, 1, 0]).await;
+        let mut answer = [0u8; 2];
+        let outcome = refused.read_exact(&mut answer).await;
+
+        assert!(outcome.is_err(), "no greeting answer: {answer:?}");
+        drop(held);
     }
 
     #[tokio::test]
