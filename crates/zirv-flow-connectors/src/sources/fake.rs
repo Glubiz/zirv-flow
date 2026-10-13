@@ -54,6 +54,7 @@ impl Source for Fake {
             required: true,
             secret: true,
         }],
+        rate_limit: None,
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,

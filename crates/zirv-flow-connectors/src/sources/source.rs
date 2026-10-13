@@ -134,6 +134,7 @@ mod tests {
             description: "",
             config_fields: &[],
             credential_fields: &[],
+            rate_limit: None,
             capabilities: Capabilities {
                 incremental: false,
                 full_refresh: true,
