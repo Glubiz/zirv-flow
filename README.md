@@ -1580,8 +1580,9 @@ and the mapping codes of the Mapping reference.
 
 **Sample.** `POST .../sources/{id}/manifest/sample` with `{"stream": "...", "limit": 1-20,
 "manifest": ...}` (an admin; the draft is optional and checked as a save is) reads from the start,
-with the stored credential and account tokens, and returns the raw records. It writes nothing and is
-not audited.
+with the stored credential and account tokens, and returns the raw records. A draft must keep
+the saved base URL and `auth` section (otherwise 409 `manifest_draft_auth_changed`, before anything
+is opened): save those changes first. It writes nothing and is not audited.
 
 **Connect account.** For an `oauth2_authorization_code` manifest, an admin opens the source and
 chooses **Connect account**: the page asks the server for the provider's consent URL

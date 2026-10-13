@@ -207,6 +207,18 @@ impl ApiError {
         }
     }
 
+    /// A sample was asked for with a draft that changes where requests go or how they authenticate:
+    /// the saved account and credential must not be used with an endpoint they were not set up for.
+    pub(crate) fn manifest_draft_auth_changed() -> Self {
+        Self {
+            code: Some("manifest_draft_auth_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "save the manifest to sample with a changed base URL or authentication",
+            )
+        }
+    }
+
     /// A consent was asked for a source whose manifest does not use the authorization-code grant.
     pub(crate) fn oauth_not_configured() -> Self {
         Self {

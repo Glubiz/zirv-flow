@@ -1152,6 +1152,40 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sample_draft_cannot_move_the_base_url_or_the_auth_and_sends_nothing_when_it_tries(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_source(fx.manifest()).await;
+        fx.connect(&id).await;
+        let tail = format!("/sources/{id}/manifest/sample");
+        let before = fx.upstream.refreshes.load(Ordering::SeqCst);
+        let refresh_before = fx.upstream.valid_refresh.lock().unwrap().clone();
+
+        let mut moved = fx.manifest();
+        moved["base_url"] = json!("https://elsewhere.example.test");
+        let mut other_scopes = fx.manifest();
+        other_scopes["auth"]["scopes"] = json!(["contacts.write"]);
+        let mut other_token_url = fx.manifest();
+        other_token_url["auth"]["token_url"] = json!("https://elsewhere.example.test/token");
+        for draft in [moved, other_scopes, other_token_url] {
+            let reply = fx
+                .as_key(
+                    "POST",
+                    &tail,
+                    Some(json!({"stream": "contacts", "manifest": draft})),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+            assert_eq!(reply.body["code"], "manifest_draft_auth_changed");
+        }
+
+        assert_eq!(fx.upstream.refreshes.load(Ordering::SeqCst), before);
+        assert_eq!(*fx.upstream.valid_refresh.lock().unwrap(), refresh_before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn changing_how_the_manifest_authenticates_disconnects_the_account_but_a_rate_edit_does_not(
         pool: PgPool,
     ) {

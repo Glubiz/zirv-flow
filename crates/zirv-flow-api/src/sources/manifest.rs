@@ -166,6 +166,14 @@ pub(crate) struct SampleBody {
     truncated: bool,
 }
 
+/// Whether a draft keeps the saved manifest's base URL and `auth` section as they are.
+fn keeps_connection(saved: &Value, draft: &Value) -> bool {
+    let saved = saved.get("manifest").unwrap_or(&Value::Null);
+    ["base_url", "auth"]
+        .iter()
+        .all(|key| saved.get(key) == draft.get(key))
+}
+
 /// Reads the first records of a stream with a draft or the saved manifest, using the source's
 /// stored credential and account tokens, and returns them raw. Reads from the start, never from
 /// a checkpoint, and writes nothing. Workspace admins only; not audited, since it changes
@@ -185,7 +193,7 @@ pub(crate) struct SampleBody {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or source, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The source does not use a manifest, or its type is not in this build", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The source does not use a manifest, its type is not in this build, or a draft changes the saved base URL or authentication (`manifest_draft_auth_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid draft manifest (the same codes as a save), a stream the manifest does not have, or a limit outside 1 to 20", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The API refused or failed the request", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the credential", body = Problem, content_type = "application/problem+json"),
@@ -204,7 +212,18 @@ pub(crate) async fn sample(
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(invalid("limit", "must be 1 to 20"));
     }
-    let call = prepare(&state, workspace.id, path_id::<Uuid>(&id)?).await?;
+    let id = path_id::<Uuid>(&id)?;
+    // Checked before the credential or the account tokens are opened: a draft that moves the base
+    // URL or the authentication would send them to an endpoint they were not set up for.
+    if let Some(draft) = &request.manifest {
+        let saved = zirv_flow_store::find_source(&state.pool, workspace.id, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if saved.kind == "http" && !keeps_connection(&saved.config, draft) {
+            return Err(ApiError::manifest_draft_auth_changed());
+        }
+    }
+    let call = prepare(&state, workspace.id, id).await?;
     if call.driver.spec().kind != "http" {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -267,6 +286,22 @@ mod tests {
                 "primary_key": ["id"]
             }]
         })
+    }
+
+    #[test]
+    fn a_draft_may_change_streams_but_not_the_base_url_or_the_auth() {
+        let saved = json!({"manifest": valid()});
+        let keep = |edit: &dyn Fn(&mut Value)| {
+            let mut draft = valid();
+            edit(&mut draft);
+            keeps_connection(&saved, &draft)
+        };
+
+        assert!(keep(&|draft| draft["streams"][0]["path"] = json!("/other")));
+        assert!(!keep(
+            &|draft| draft["base_url"] = json!("https://evil.example.test")
+        ));
+        assert!(!keep(&|draft| draft["auth"] = json!({"type": "bearer"})));
     }
 
     #[test]

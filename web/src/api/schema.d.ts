@@ -10796,7 +10796,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The source does not use a manifest, or its type is not in this build */
+            /** @description The source does not use a manifest, its type is not in this build, or a draft changes the saved base URL or authentication (`manifest_draft_auth_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;
