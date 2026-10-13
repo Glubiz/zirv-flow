@@ -1,6 +1,7 @@
 //! What a source type declares about itself: the fields a marketer fills in and what it can do.
 //! The setup wizard renders its form from these.
 
+use super::validate::FieldError;
 use crate::runtime::RateLimit;
 
 /// A source type, as the registry lists it.
@@ -18,6 +19,10 @@ pub struct SourceSpec {
     /// The request rate the source type tolerates, enforced per process by the runtime;
     /// `None` is unlimited.
     pub rate_limit: Option<RateLimit>,
+    /// A check of the whole configuration that the field specs cannot express, run by
+    /// `validate_config` once every field has its declared type. Pure, and its reasons never
+    /// repeat a value: an `http` source checks its manifest here.
+    pub config_check: Option<fn(&serde_json::Value) -> Vec<FieldError>>,
 }
 
 /// What a source type can do.
@@ -54,6 +59,8 @@ pub enum FieldKind {
     Bool,
     /// One of the listed values.
     Select(&'static [&'static str]),
+    /// A JSON object. The setup form shows it as text the person edits.
+    Json,
 }
 
 impl FieldKind {
@@ -65,6 +72,7 @@ impl FieldKind {
             Self::Number => "number",
             Self::Bool => "bool",
             Self::Select(_) => "select",
+            Self::Json => "json",
         }
     }
 }
@@ -80,5 +88,6 @@ mod tests {
         assert_eq!(FieldKind::Number.name(), "number");
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
+        assert_eq!(FieldKind::Json.name(), "json");
     }
 }

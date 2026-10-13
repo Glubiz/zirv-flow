@@ -11,12 +11,21 @@ use super::credential::Credential;
 use super::error::SourceError;
 use super::spec::SourceSpec;
 use super::types::{Batch, Checkpoint, StreamConfig, StreamDescriptor};
+use crate::runtime::RateLimit;
 
 /// A type of external system records are read from. The implementation holds no state: the
 /// configuration, the credential and the checkpoint arrive with every call.
 pub trait Source: Send + Sync + 'static {
     /// What the type declares about itself.
     const SPEC: SourceSpec;
+
+    /// The request rate for a source with this `config`. Defaults to the type's own
+    /// [`SourceSpec::rate_limit`]; a type whose rate is a setting (an `http` source declares it in
+    /// its manifest) overrides it. Callers build the context with this, not with the spec.
+    fn rate_limit(&self, config: &Value) -> Option<RateLimit> {
+        let _ = config;
+        Self::SPEC.rate_limit
+    }
 
     /// Proves the configuration and the credential work, without reading data.
     fn check(
@@ -54,6 +63,9 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait ErasedSource: Send + Sync {
     fn spec(&self) -> &'static SourceSpec;
 
+    /// See [`Source::rate_limit`].
+    fn rate_limit(&self, config: &Value) -> Option<RateLimit>;
+
     fn check<'a>(
         &'a self,
         ctx: &'a SourceContext,
@@ -81,6 +93,10 @@ pub trait ErasedSource: Send + Sync {
 impl<S: Source> ErasedSource for S {
     fn spec(&self) -> &'static SourceSpec {
         &S::SPEC
+    }
+
+    fn rate_limit(&self, config: &Value) -> Option<RateLimit> {
+        Source::rate_limit(self, config)
     }
 
     fn check<'a>(
@@ -135,6 +151,7 @@ mod tests {
             config_fields: &[],
             credential_fields: &[],
             rate_limit: None,
+            config_check: None,
             capabilities: Capabilities {
                 incremental: false,
                 full_refresh: true,
@@ -193,6 +210,7 @@ mod tests {
         };
 
         assert_eq!(source.spec().kind, "empty");
+        assert_eq!(source.rate_limit(&config), None);
         assert_eq!(source.check(&ctx, &config, &credential).await, Ok(()));
         assert_eq!(
             source.discover(&ctx, &config, &credential).await,

@@ -103,6 +103,7 @@ impl Source for Fake {
             secret: true,
         }],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,
@@ -164,6 +165,7 @@ impl Source for Fake {
                 sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
                 default_cursor_field: Some("updated_at".into()),
                 default_primary_key: vec!["id".into()],
+                suggested_mapping: None,
             })
             .collect())
     }

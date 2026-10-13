@@ -312,6 +312,7 @@ mod tests {
             sync_modes: modes,
             default_cursor_field: None,
             default_primary_key: vec![],
+            suggested_mapping: None,
         }
     }
 
@@ -341,6 +342,7 @@ mod tests {
         };
         let nul_key = StreamDescriptor {
             default_primary_key: vec!["i\0d".into()],
+            suggested_mapping: None,
             ..descriptor(vec![SyncMode::FullRefresh])
         };
 
@@ -387,6 +389,7 @@ mod tests {
             requests: 2,
             per: Duration::from_secs(1),
         }),
+        config_check: None,
     };
 
     fn state() -> AppState {

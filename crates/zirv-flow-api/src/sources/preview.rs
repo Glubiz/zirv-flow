@@ -276,6 +276,7 @@ mod tests {
             sync_modes: vec![SyncMode::FullRefresh],
             default_cursor_field: None,
             default_primary_key: Vec::new(),
+            suggested_mapping: None,
         }
     }
 

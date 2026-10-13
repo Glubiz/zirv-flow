@@ -114,6 +114,7 @@ impl Source for File {
             },
         ],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             incremental: false,
             full_refresh: true,
@@ -588,6 +589,7 @@ async fn discover(
         sync_modes: vec![SyncMode::FullRefresh],
         default_cursor_field: None,
         default_primary_key: Vec::new(),
+        suggested_mapping: None,
     }])
 }
 

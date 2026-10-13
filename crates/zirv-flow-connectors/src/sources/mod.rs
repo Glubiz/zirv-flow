@@ -8,6 +8,8 @@ mod error;
 #[cfg(feature = "test-support")]
 mod fake;
 mod file;
+mod http;
+mod record_key;
 mod registry;
 mod source;
 mod spec;
@@ -17,6 +19,7 @@ mod validate;
 pub use context::SourceContext;
 pub use credential::{Credential, CredentialFormatError};
 pub use error::SourceError;
+pub use http::REFRESH_TOKEN_KEY;
 pub use registry::Registry;
 pub use source::{BoxFuture, ErasedSource, Source};
 pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
@@ -36,4 +39,5 @@ pub(crate) static ALL: &[&dyn ErasedSource] = &[
     #[cfg(feature = "test-support")]
     &fake::Fake,
     &file::File,
+    &http::Http,
 ];

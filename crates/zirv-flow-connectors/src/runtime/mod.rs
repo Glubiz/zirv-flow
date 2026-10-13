@@ -9,7 +9,7 @@ mod rate_limit;
 mod retry;
 mod send;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 pub(crate) use auth::TokenSlot;
 pub use auth::{
@@ -17,7 +17,7 @@ pub use auth::{
     exchange_code,
 };
 pub use error::RuntimeError;
-pub use paginate::{Page, Pagination, paginate};
+pub use paginate::{Page, Pager, Pagination, paginate};
 pub use rate_limit::{RateLimit, RateLimits};
 pub use reqwest::Method;
 pub use retry::RetryPolicy;

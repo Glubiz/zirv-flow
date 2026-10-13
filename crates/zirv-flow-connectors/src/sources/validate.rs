@@ -48,6 +48,11 @@ pub fn validate_config(spec: &SourceSpec, config: &Value) -> Result<(), Vec<Fiel
             }
         }
     }
+    if errors.is_empty()
+        && let Some(check) = spec.config_check
+    {
+        errors.extend(check(config));
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -192,6 +197,7 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
         },
         FieldKind::Number => (!value.is_number()).then_some("must be a number"),
         FieldKind::Bool => (!value.is_boolean()).then_some("must be true or false"),
+        FieldKind::Json => (!value.is_object()).then_some("must be a JSON object"),
         FieldKind::Select(options) => match value.as_str() {
             Some(text) if options.contains(&text) => None,
             _ => Some("must be one of the listed options"),
@@ -233,6 +239,7 @@ mod tests {
             field("extra", FieldKind::Text, false, true),
         ],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             incremental: false,
             full_refresh: true,
@@ -331,6 +338,7 @@ mod tests {
             sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
             default_cursor_field: Some("updated_at".into()),
             default_primary_key: vec!["id".into()],
+            suggested_mapping: None,
         }
     }
 
