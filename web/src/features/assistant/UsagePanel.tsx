@@ -103,7 +103,15 @@ export function UsagePanel({ workspaceId, version }: UsagePanelProps) {
                         {call.input_tokens} / {call.output_tokens}
                       </td>
                       <td className="num">{formatMicros(call.estimated_cost_micros)}</td>
-                      <td>{call.outcome === "ok" ? <Pill>OK</Pill> : <Pill tone="error">{call.outcome}</Pill>}</td>
+                      <td>
+                        {call.outcome === "ok" ? (
+                          <Pill>OK</Pill>
+                        ) : call.outcome === "pending" ? (
+                          <Pill>pending</Pill>
+                        ) : (
+                          <Pill tone="error">{call.outcome}</Pill>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

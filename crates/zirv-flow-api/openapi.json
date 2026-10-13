@@ -9881,7 +9881,7 @@
           },
           "outcome": {
             "type": "string",
-            "description": "`ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`."
+            "description": "`pending` (reserved, not finished), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`."
           },
           "output_tokens": {
             "type": "integer",

@@ -25,7 +25,8 @@ CREATE TABLE ai_settings (
 
 -- One row per dispatched model call, whatever the outcome. It holds counts and names only:
 -- never a prompt, a response or an error body. A call refused by a gate is not dispatched and
--- leaves no row.
+-- leaves no row. The row is reserved 'pending' at its worst-case cost before the request, so the
+-- rate limit and the budget hold under concurrent calls, and finished when the call ends.
 CREATE TABLE ai_calls (
     id                    uuid PRIMARY KEY,
     workspace_id          uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
@@ -38,7 +39,8 @@ CREATE TABLE ai_calls (
     estimated_cost_micros bigint NOT NULL DEFAULT 0 CHECK (estimated_cost_micros >= 0),
     latency_ms            integer NOT NULL DEFAULT 0 CHECK (latency_ms >= 0),
     outcome               text NOT NULL CHECK (outcome IN
-        ('ok', 'http_error', 'timeout', 'egress_denied', 'transport', 'malformed', 'capability')),
+        ('pending', 'ok', 'http_error', 'timeout', 'egress_denied', 'transport', 'malformed',
+         'capability')),
     draft_id              uuid,
     created_at            timestamptz NOT NULL DEFAULT now()
 );

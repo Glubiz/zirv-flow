@@ -10,8 +10,9 @@ mod settings;
 mod transcripts;
 
 pub use calls::{
-    AiCall, AiUsage, CallOutcome, FeatureUsage, NewAiCall, UserUsage, ai_usage,
-    calls_in_last_minute, month_start, record_ai_call, spent_this_month,
+    AiCall, AiUsage, CallOutcome, FeatureUsage, FinishedAiCall, NewAiCall, Reservation, UserUsage,
+    ai_usage, calls_in_last_minute, finish_ai_call, month_start, record_ai_call, reserve_ai_call,
+    spent_this_month,
 };
 pub use settings::{
     AiSettings, AiSettingsUpdate, ProbeRecord, find_ai_settings, lock_ai_settings, put_ai_settings,

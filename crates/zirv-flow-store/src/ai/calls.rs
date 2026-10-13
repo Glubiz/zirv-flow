@@ -13,6 +13,9 @@ use crate::StoreError;
 /// How a dispatched call ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CallOutcome {
+    /// Reserved before the request and not finished yet. A process that dies mid-call leaves it
+    /// at its worst-case cost.
+    Pending,
     Ok,
     HttpError,
     Timeout,
@@ -25,6 +28,7 @@ pub enum CallOutcome {
 impl CallOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Ok => "ok",
             Self::HttpError => "http_error",
             Self::Timeout => "timeout",
@@ -76,6 +80,82 @@ pub async fn record_ai_call(
     .bind(call.outcome.as_str())
     .bind(call.draft_id)
     .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// What a reservation came to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reservation {
+    /// A `pending` row was recorded; the request may be sent.
+    Granted,
+    /// The user already made the limit of calls in the last minute.
+    RateLimited,
+    /// The workspace has already spent its monthly budget.
+    BudgetExceeded,
+}
+
+/// Checks the rate limit and the budget and, when both admit the call, records it as `pending` at
+/// `call.estimated_cost_micros` (its worst-case cost), all under a lock on the workspace that is
+/// held until the transaction ends. Counting pending rows too is what makes the limits hold
+/// under concurrent calls: a call that is still in flight is already counted. Run it in a
+/// transaction and commit it before the request is sent; a refusal records nothing.
+pub async fn reserve_ai_call(
+    connection: &mut PgConnection,
+    call: &NewAiCall<'_>,
+    rate_limit: i64,
+    budget_micros: i64,
+    now: OffsetDateTime,
+) -> Result<Reservation, StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("ai_calls:{}", call.workspace_id.as_uuid()))
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    if calls_in_last_minute(&mut *connection, call.workspace_id, call.user_id).await? >= rate_limit
+    {
+        return Ok(Reservation::RateLimited);
+    }
+    if spent_this_month(&mut *connection, call.workspace_id, now).await? >= budget_micros {
+        return Ok(Reservation::BudgetExceeded);
+    }
+    let pending = NewAiCall {
+        outcome: CallOutcome::Pending,
+        ..call.clone()
+    };
+    record_ai_call(connection, &pending).await?;
+    Ok(Reservation::Granted)
+}
+
+/// How a reserved call ended.
+#[derive(Clone, Copy, Debug)]
+pub struct FinishedAiCall {
+    pub outcome: CallOutcome,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub estimated_cost_micros: i64,
+    pub latency_ms: u32,
+}
+
+/// Finishes the `pending` row of a reserved call, replacing its worst-case cost with the actual
+/// one. It fails when the row is not pending.
+pub async fn finish_ai_call(
+    connection: &mut PgConnection,
+    id: Uuid,
+    finished: &FinishedAiCall,
+) -> Result<(), StoreError> {
+    let clamp = |tokens: u32| i32::try_from(tokens).unwrap_or(i32::MAX);
+    sqlx::query_scalar::<_, Uuid>(
+        "UPDATE ai_calls SET input_tokens = $2, output_tokens = $3, estimated_cost_micros = $4, \n             latency_ms = $5, outcome = $6 WHERE id = $1 AND outcome = 'pending' RETURNING id",
+    )
+    .bind(id)
+    .bind(clamp(finished.input_tokens))
+    .bind(clamp(finished.output_tokens))
+    .bind(finished.estimated_cost_micros.max(0))
+    .bind(clamp(finished.latency_ms))
+    .bind(finished.outcome.as_str())
+    .fetch_one(connection)
     .await
     .map_err(StoreError::query)?;
     Ok(())
@@ -358,6 +438,7 @@ mod tests {
     #[test]
     fn outcomes_have_stable_names_matching_the_database_check() {
         let names: Vec<&str> = [
+            CallOutcome::Pending,
             CallOutcome::Ok,
             CallOutcome::HttpError,
             CallOutcome::Timeout,
@@ -371,6 +452,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "pending",
                 "ok",
                 "http_error",
                 "timeout",
@@ -513,5 +595,97 @@ mod tests {
         .execute(&pool)
         .await;
         assert!(bad.is_err());
+    }
+
+    fn reservation(ws: WorkspaceId, user: Option<UserId>, cost: i64) -> NewAiCall<'static> {
+        NewAiCall {
+            id: Uuid::now_v7(),
+            workspace_id: ws,
+            user_id: user,
+            feature: "mapping",
+            provider_id: "openai",
+            model: "gpt-x",
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_micros: cost,
+            latency_ms: 0,
+            outcome: CallOutcome::Ok,
+            draft_id: None,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reservation_is_pending_and_counts_in_both_limits_until_it_is_finished(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let now = OffsetDateTime::now_utc();
+        let reserve = |call: NewAiCall<'static>, rate: i64, budget: i64| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                let result = reserve_ai_call(&mut tx, &call, rate, budget, now)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                result
+            }
+        };
+
+        let first = reservation(ws, Some(ada), 400);
+        assert_eq!(reserve(first.clone(), 2, 1_000).await, Reservation::Granted);
+        let outcome: String = sqlx::query_scalar("SELECT outcome FROM ai_calls WHERE id = $1")
+            .bind(first.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outcome, "pending", "the caller's outcome is not trusted");
+        assert_eq!(
+            reserve(reservation(ws, Some(ada), 400), 2, 1_000).await,
+            Reservation::Granted
+        );
+        // Two pending rows are 800 micro-units: under the budget, but at the rate limit.
+        assert_eq!(
+            reserve(reservation(ws, Some(ada), 1), 2, 1_000).await,
+            Reservation::RateLimited
+        );
+        assert_eq!(
+            reserve(reservation(ws, None, 400), 2, 800).await,
+            Reservation::BudgetExceeded
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM ai_calls")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 2, "a refusal records nothing");
+
+        let mut connection = pool.acquire().await.unwrap();
+        finish_ai_call(
+            &mut connection,
+            first.id,
+            &FinishedAiCall {
+                outcome: CallOutcome::Ok,
+                input_tokens: 10,
+                output_tokens: 5,
+                estimated_cost_micros: 30,
+                latency_ms: 7,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(spent_this_month(&pool, ws, now).await.unwrap(), 430);
+        let again = finish_ai_call(
+            &mut connection,
+            first.id,
+            &FinishedAiCall {
+                outcome: CallOutcome::Timeout,
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_micros: 0,
+                latency_ms: 0,
+            },
+        )
+        .await;
+        assert!(again.is_err(), "only a pending row can be finished");
     }
 }

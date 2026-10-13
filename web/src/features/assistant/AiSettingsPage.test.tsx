@@ -93,6 +93,19 @@ const USAGE = {
       outcome: "timeout",
       created_at: "2026-10-10T09:00:00Z",
     },
+    {
+      id: "c2",
+      user_id: null,
+      feature: "mapping",
+      provider_id: "openai",
+      model: "big",
+      input_tokens: 0,
+      output_tokens: 0,
+      estimated_cost_micros: 150_000,
+      latency_ms: 0,
+      outcome: "pending",
+      created_at: "2026-10-10T09:00:01Z",
+    },
   ],
 };
 
@@ -381,6 +394,7 @@ describe("AI assistant settings", () => {
     expect(byUser.getByText("0190…0001")).toBeInTheDocument();
     const recent = within(screen.getByRole("table", { name: "Recent calls" }));
     expect(recent.getByText("timeout")).toBeInTheDocument();
+    expect(recent.getByText("pending")).toBeInTheDocument();
     expect(recent.getByText("1000 / 300")).toBeInTheDocument();
     expect(recent.getByText("0.70")).toBeInTheDocument();
   });

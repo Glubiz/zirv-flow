@@ -10036,4 +10036,119 @@ email,b@example.com,
             assert!(output.contains(expected), "{expected} in {output}");
         }
     }
+
+    /// Runs `count` dispatches at once against a provider that takes a moment to answer, and
+    /// returns how many went through and how many each gate refused.
+    async fn dispatch_together(
+        state: &AppState,
+        user: Option<UserId>,
+        workspace: zirv_flow_core::WorkspaceId,
+        count: usize,
+    ) -> (usize, usize, usize) {
+        let results = futures_util::future::join_all((0..count).map(|_| {
+            crate::dispatch(state, user, workspace, "mapping", |privacy| {
+                mapping_request(privacy, false)
+            })
+        }))
+        .await;
+        let mut counts = (0, 0, 0);
+        for result in results {
+            match result {
+                Ok(_) => counts.0 += 1,
+                Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::RateLimited)) => counts.1 += 1,
+                Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::BudgetExceeded)) => {
+                    counts.2 += 1;
+                }
+                Err(other) => panic!("unexpected {other:?}"),
+            }
+        }
+        counts
+    }
+
+    fn slow_fake(answers: usize) -> Arc<zirv_flow_ai::fake::FakeProvider> {
+        let fake = Arc::new(
+            zirv_flow_ai::fake::FakeProvider::new()
+                .with_delay(std::time::Duration::from_millis(400)),
+        );
+        for _ in 0..answers {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+        }
+        fake
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_calls_cannot_pass_the_rate_limit_together(pool: PgPool) {
+        let fake = slow_fake(0);
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 2), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let user = owner_id(&pool).await;
+        let sent = fake.call_count();
+        for _ in 0..5 {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+        }
+
+        let (ok, rate_limited, over_budget) =
+            dispatch_together(&state, Some(user), workspace, 5).await;
+
+        assert_eq!(
+            (ok, rate_limited, over_budget),
+            (2, 3, 0),
+            "exactly the limit reached the provider"
+        );
+        assert_eq!(fake.call_count(), sent + 2);
+        assert_eq!(ai_calls(&pool).await, 2, "refusals record nothing");
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_calls WHERE outcome = 'pending'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0, "every reservation was finished");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_calls_cannot_spend_past_the_budget_together(pool: PgPool) {
+        let fake = slow_fake(0);
+        let config = ai_config(None, 20);
+        let request = mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false).unwrap();
+        let model = config.model("openai", "big").unwrap().1.clone();
+        let worst_case = model.cost_micros(
+            u32::try_from(request.text_bytes()).unwrap(),
+            request.max_output_tokens(),
+        );
+        // A budget that three worst-case reservations spend exactly.
+        let (state, _router, _owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            config,
+            json!({"monthly_budget_micros": 3 * worst_case}),
+        )
+        .await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let sent = fake.call_count();
+        for _ in 0..6 {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+        }
+
+        let (ok, rate_limited, over_budget) = dispatch_together(&state, None, workspace, 6).await;
+
+        assert_eq!((ok, rate_limited, over_budget), (3, 0, 3));
+        assert_eq!(fake.call_count(), sent + 3);
+        let (calls, spent, pending): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), COALESCE(sum(estimated_cost_micros), 0)::bigint, \
+                    count(*) FILTER (WHERE outcome = 'pending') FROM ai_calls",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(pending, 0);
+        assert_eq!(
+            spent,
+            3 * model.cost_micros(10, 10),
+            "the actual cost replaced the reserve"
+        );
+    }
 }

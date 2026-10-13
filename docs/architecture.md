@@ -1308,11 +1308,16 @@ As built (M3, AI provider layer): `api::assistant::dispatch` is the only way pro
 model. In order it loads the settings (refusing with `Disabled` when the workspace is off, has no
 key or its model left the allowlist), refuses over the per-user per-minute limit (429), refuses when
 the month's spend has reached the budget (402; a budget of 0 allows no calls), builds the request
-under the workspace's `Privacy`, opens the key, calls the provider, then records an `ai_calls` row
-and, if the workspace opted in, an `ai_transcripts` row. A refusal at a gate sends and records
-nothing. Spend and rate are read from `ai_calls` (the sum of `estimated_cost_micros` since the first
-of the month in UTC; the calls of the last minute by the database clock), so they hold across
-instances; concurrent calls can overshoot either by the number in flight. Personal data is a
+under the workspace's `Privacy`, opens the key, reserves the call, calls the provider, then finishes
+the `ai_calls` row and, if the workspace opted in, adds an `ai_transcripts` row. A refusal at a gate
+sends and records nothing. Spend and rate are read from `ai_calls` (the sum of
+`estimated_cost_micros` since the first of the month in UTC; the calls of the last minute by the
+database clock), so they hold across instances. The reservation is one transaction under an advisory
+lock on the workspace: it counts every row, `pending` ones included, and inserts a `pending` row
+whose cost is the worst case (one input token per byte of the request text, the full output cap), so
+concurrent calls cannot all pass the gates. The row is then finished with the real tokens and cost; a
+process that dies mid-call leaves it pending at the worst-case cost, which is conservative and
+intended. Personal data is a
 distinct request content type (`Personal`), and a request builder at `SchemaOnly` privacy returns
 `PersonalDataNotAllowed` for it, so the check does not depend on the caller. Untrusted content is
 fenced in `<untrusted_data>` delimiters, with a system notice added whenever it appears. Bounded

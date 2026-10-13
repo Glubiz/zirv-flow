@@ -2,8 +2,11 @@
 //!
 //! A call is refused before anything is sent when the assistant is off, the user is over the
 //! per-minute limit or the workspace's monthly budget is spent. Both counts are read from the
-//! call log in the database, so they hold across instances. A dispatched call always leaves a
-//! content-free row in `ai_calls`; a transcript is stored only when an admin opted in. The key is
+//! call log in the database, so they hold across instances, and a call is reserved in that log as a
+//! `pending` row at its worst-case cost before the request is sent, so concurrent calls cannot all
+//! pass the gates. A process that dies mid-call leaves its row pending at the worst-case cost,
+//! which is conservative and intended. A dispatched call always leaves a content-free row in
+//! `ai_calls`, finished with the real tokens and cost; a transcript is stored only when an admin opted in. The key is
 //! opened right before the call and dropped after it.
 
 use std::time::Instant;
@@ -17,7 +20,9 @@ use zirv_flow_ai::{
 use zirv_flow_core::{
     SecretId, SecretPurpose, SecretString, UserId, WorkspaceId, open, secret_aad,
 };
-use zirv_flow_store::{AiSettings, CallOutcome, NewAiCall, StoreError, secrets};
+use zirv_flow_store::{
+    AiSettings, CallOutcome, FinishedAiCall, NewAiCall, Reservation, StoreError, secrets,
+};
 
 use super::config::{AiModelConfig, AiProviderConfig};
 use crate::AppState;
@@ -157,32 +162,59 @@ impl<'a> Dispatcher<'a> {
         Privacy::from_opt_in(self.settings.pii_opt_in)
     }
 
-    /// Steps 2 and 3: the per-user rate limit, then the monthly budget. Nothing is sent and
-    /// nothing is recorded when either refuses.
-    pub async fn check_gates(&self) -> Result<(), DispatchError> {
-        let limit = i64::from(self.state.ai.config.rate_limit_per_user_per_minute);
-        let recent =
-            zirv_flow_store::calls_in_last_minute(&self.state.pool, self.workspace, self.user)
-                .await?;
-        if recent >= limit {
-            refused("rate_limited");
-            return Err(AiError::RateLimited.into());
-        }
-        let spent = zirv_flow_store::spent_this_month(
-            &self.state.pool,
-            self.workspace,
+    /// Steps 2 and 3: reserves the call before anything is sent. In one transaction under a lock on
+    /// the workspace it checks the per-user rate limit, then the monthly budget, and records the
+    /// call as `pending` at its worst-case cost: the model's price for an input of one token per
+    /// byte of the request's text (a token is at least one byte) and the full output cap. Pending
+    /// rows count in both limits, so calls that are still in flight are counted, on this instance
+    /// and on every other. A process that dies mid-call leaves its row pending at the worst-case
+    /// cost, which is conservative and intended. Nothing is sent and nothing is recorded when a
+    /// limit refuses.
+    async fn reserve(&self, request: &ChatRequest) -> Result<Uuid, DispatchError> {
+        let call = Uuid::now_v7();
+        let input_upper = u32::try_from(request.text_bytes()).unwrap_or(u32::MAX);
+        let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
+        let reservation = zirv_flow_store::reserve_ai_call(
+            &mut tx,
+            &NewAiCall {
+                id: call,
+                workspace_id: self.workspace,
+                user_id: self.user,
+                feature: self.feature,
+                provider_id: &self.provider.id,
+                model: &self.model.name,
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_micros: self
+                    .model
+                    .cost_micros(input_upper, request.max_output_tokens()),
+                latency_ms: 0,
+                outcome: CallOutcome::Pending,
+                draft_id: None,
+            },
+            i64::from(self.state.ai.config.rate_limit_per_user_per_minute),
+            self.settings.monthly_budget_micros,
             OffsetDateTime::now_utc(),
         )
         .await?;
-        if spent >= self.settings.monthly_budget_micros {
-            refused("budget_exceeded");
-            return Err(AiError::BudgetExceeded.into());
+        match reservation {
+            Reservation::Granted => {
+                zirv_flow_store::commit(tx).await?;
+                Ok(call)
+            }
+            Reservation::RateLimited => {
+                refused("rate_limited");
+                Err(AiError::RateLimited.into())
+            }
+            Reservation::BudgetExceeded => {
+                refused("budget_exceeded");
+                Err(AiError::BudgetExceeded.into())
+            }
         }
-        Ok(())
     }
 
-    /// Steps 5 to 8: opens the key, calls the provider, records the call and, when the workspace
-    /// opted in, a transcript. The gates must have passed.
+    /// Steps 2 to 8: opens the key, reserves the call, calls the provider, finishes the call's
+    /// row and, when the workspace opted in, stores a transcript. A refused call sends nothing.
     pub async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, DispatchError> {
         let key = open_provider_key(self.state, self.workspace, self.key).await?;
         let http = self.state.ai.http(self.state.egress_policy())?;
@@ -191,6 +223,7 @@ impl<'a> Dispatcher<'a> {
             base_url: self.provider.base_url.clone(),
             model: self.model.name.clone(),
         };
+        let call = self.reserve(request).await?;
 
         let started = Instant::now();
         let result = provider.complete(http, &endpoint, &key, request).await;
@@ -203,23 +236,16 @@ impl<'a> Dispatcher<'a> {
         };
         let (input_tokens, output_tokens) =
             usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
-        let call = Uuid::now_v7();
         let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
-        zirv_flow_store::record_ai_call(
+        zirv_flow_store::finish_ai_call(
             &mut tx,
-            &NewAiCall {
-                id: call,
-                workspace_id: self.workspace,
-                user_id: self.user,
-                feature: self.feature,
-                provider_id: &self.provider.id,
-                model: &self.model.name,
+            call,
+            &FinishedAiCall {
+                outcome,
                 input_tokens,
                 output_tokens,
                 estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
                 latency_ms,
-                outcome,
-                draft_id: None,
             },
         )
         .await?;
@@ -252,11 +278,7 @@ impl Sender for Dispatcher<'_> {
         request: &'a ChatRequest,
     ) -> BoxFuture<'a, Result<ChatResponse, AiError>> {
         Box::pin(async move {
-            let sent = async {
-                self.check_gates().await?;
-                self.call(request).await
-            }
-            .await;
+            let sent = async { self.call(request).await }.await;
             sent.map_err(|error| match error {
                 DispatchError::Ai(error) => error,
                 DispatchError::Store(_) => {
@@ -268,8 +290,8 @@ impl Sender for Dispatcher<'_> {
     }
 }
 
-/// Dispatches one request: the settings, the gates, the request built under the workspace's
-/// privacy level, then the call. A refusal at a gate sends and records nothing.
+/// Dispatches one request: the settings, the request built under the workspace's privacy level,
+/// then the gated call. A refusal at a gate sends and records nothing.
 pub async fn dispatch(
     state: &AppState,
     user: Option<UserId>,
@@ -278,7 +300,6 @@ pub async fn dispatch(
     build: impl FnOnce(Privacy) -> Result<ChatRequest, AiError>,
 ) -> Result<ChatResponse, DispatchError> {
     let dispatcher = Dispatcher::open(state, user, workspace, feature).await?;
-    dispatcher.check_gates().await?;
     let request = build(dispatcher.privacy()).inspect_err(|error| {
         if *error == AiError::PersonalDataNotAllowed {
             refused("personal_data");
