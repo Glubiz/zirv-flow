@@ -420,4 +420,44 @@ mod tests {
             started.elapsed()
         );
     }
+
+    /// The rendered wait metric for the `limited` source type.
+    fn wait_metric(handle: &metrics_exporter_prometheus::PrometheusHandle) -> Vec<String> {
+        handle
+            .render()
+            .lines()
+            .filter(|line| line.starts_with("zirv_flow_source_rate_limit_wait_seconds_total"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn two_sources_get_separate_buckets_so_a_fresh_one_records_no_wait() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The recorder is local to this thread, and the current-thread runtime stays on it.
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let state = state();
+                let busy = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
+                let fresh = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
+                // Two requests per second: the third and fourth calls wait.
+                for _ in 0..4 {
+                    refused_call(&busy).await;
+                }
+                let after_busy = wait_metric(&handle);
+                assert_eq!(after_busy.len(), 1, "{after_busy:?}");
+
+                // The fresh source is inside its own burst, so it waits for nothing.
+                refused_call(&fresh).await;
+                refused_call(&fresh).await;
+
+                assert_eq!(wait_metric(&handle), after_busy);
+            });
+        });
+    }
 }

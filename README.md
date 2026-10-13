@@ -1238,7 +1238,10 @@ and does not prevent it. Enforcing the limit across workers is decided with open
 at a JSON pointer, a missing, null or empty cursor ends it), offset (ends on a page shorter than
 the limit), page number (ends on an empty page, or a short one when a page size is set) and the
 `Link: rel="next"` header. A cursor or link that repeats ends with an error rather than looping,
-and so does a response whose records are not an array.
+and so does a response whose records are not an array, or a cursor or link longer than 8 KiB. An
+offset or page stream whose API ignores the parameter and sends the same full-size page three times
+in a row ends with the same error (two identical pages can be genuine, so they are read); with no
+page size set, only the 100,000-page cap ends such a stream.
 
 **Metrics and logs.** `zirv_flow_source_requests_total{source_type,outcome}`,
 `zirv_flow_source_retries_total{source_type,reason}` and

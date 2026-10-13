@@ -136,7 +136,7 @@ impl SourceContext {
         binding: &str,
         rejected: Option<&AccessToken>,
     ) -> Option<AccessToken> {
-        let mut slot = self.slot();
+        let slot = self.slot();
         let token = slot.current.as_ref()?;
         if !token.is_usable(binding, rejected) {
             return None;

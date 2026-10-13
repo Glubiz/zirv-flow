@@ -18,11 +18,15 @@ use crate::sources::SourceContext;
 
 /// The most pages one stream reads. An API that pages without end, with a new cursor or a
 /// different page every time, ends here with [`RuntimeError::PaginationLoop`]. (One that sends
-/// the same page again, as an API that ignores the offset does, ends at the second.)
+/// the same full-size page three times in a row, as an API that ignores the offset does, ends at
+/// the third.)
 const MAX_PAGES: usize = 100_000;
 
 /// The longest cursor or next link the driver keeps track of, in bytes.
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
+
+/// Identical full-size pages in a row that end an offset or page stream as a loop.
+const IDENTICAL_FULL_PAGES: u32 = 3;
 
 /// A fixed-size fingerprint (SHA-256, truncated to 128 bits) of a cursor, a link or a page, so
 /// the loop guards hold 16 bytes per entry however large the input is.
@@ -98,8 +102,10 @@ struct Driver<'a> {
     deferred: Option<RuntimeError>,
     /// Fingerprints of the cursors or URLs already requested.
     seen: HashSet<Fingerprint>,
-    /// The fingerprint of the previous non-empty page, for the offset and page styles.
+    /// The fingerprint of the previous full-size page, for the offset and page styles.
     last_page: Option<Fingerprint>,
+    /// How many full-size pages in a row were identical to the one before.
+    identical_run: u32,
     pages: usize,
     max_pages: usize,
     /// The next offset or page number.
@@ -150,6 +156,7 @@ impl<'a> Driver<'a> {
             deferred: None,
             seen,
             last_page: None,
+            identical_run: 0,
             pages: 0,
             max_pages: MAX_PAGES,
             position,
@@ -191,19 +198,32 @@ impl<'a> Driver<'a> {
         Ok(Page { body, items: found })
     }
 
-    /// Whether an offset or page stream got the page it got last time, which is what an API that
-    /// ignores the parameter sends. Remembers this page for the next comparison.
+    /// Whether an offset or page stream has got the same full-size page three times in a row,
+    /// which is what an API that ignores the parameter sends. Two identical pages can be genuine
+    /// (rows with few distinct values), so they are not enough, and a short page is the last one.
+    /// Without a known size (a page stream with no `size_param`) nothing is detected here and
+    /// the page cap ends the stream. Remembers this page for the next comparison.
     fn repeats_previous_page(&mut self, found: &[Value]) -> bool {
-        if found.is_empty()
-            || !matches!(
-                self.style,
-                Pagination::Offset { .. } | Pagination::Page { .. }
-            )
-        {
+        let size = match self.style {
+            Pagination::Offset { limit, .. } => Some(u64::from(limit.max(1))),
+            Pagination::Page {
+                size_param: Some((_, size)),
+                ..
+            } => Some(u64::from(size)),
+            _ => None,
+        };
+        if size != Some(found.len() as u64) {
+            self.last_page = None;
+            self.identical_run = 0;
             return false;
         }
         let page = fingerprint(&serde_json::to_vec(found).unwrap_or_default());
-        self.last_page.replace(page) == Some(page)
+        if self.last_page.replace(page) == Some(page) {
+            self.identical_run += 1;
+        } else {
+            self.identical_run = 1;
+        }
+        self.identical_run >= IDENTICAL_FULL_PAGES
     }
 
     /// The request for the page after the one just read, or `None` at the end.
@@ -247,7 +267,7 @@ impl<'a> Driver<'a> {
                 Ok(Some(spec.with_url(url)))
             }
             Pagination::LinkHeader => {
-                let Some(target) = next_link(response, spec.url()) else {
+                let Some(target) = next_link(response, spec.url())? else {
                     return Ok(None);
                 };
                 if !spec.owns(&target) {
@@ -301,9 +321,11 @@ fn with_param(url: &Url, key: &str, value: &str) -> Url {
     url
 }
 
-/// The `rel="next"` target of the response's `Link` headers, resolved against `base`.
-fn next_link(response: &RuntimeResponse, base: &Url) -> Option<Url> {
-    response
+/// The `rel="next"` target of the response's `Link` headers, resolved against `base`. The raw
+/// target is measured before it is resolved, because resolving `./` and `../` segments shortens
+/// it.
+fn next_link(response: &RuntimeResponse, base: &Url) -> Result<Option<Url>, RuntimeError> {
+    let target = response
         .headers()
         .get_all(LINK)
         .iter()
@@ -312,8 +334,14 @@ fn next_link(response: &RuntimeResponse, base: &Url) -> Option<Url> {
         .find(|(_, rels)| {
             rels.split_ascii_whitespace()
                 .any(|rel| rel.eq_ignore_ascii_case("next"))
-        })
-        .and_then(|(target, _)| base.join(&target).ok())
+        });
+    let Some((target, _)) = target else {
+        return Ok(None);
+    };
+    if target.len() > MAX_TOKEN_BYTES {
+        return Err(RuntimeError::PaginationTokenTooLong);
+    }
+    Ok(base.join(&target).ok())
 }
 
 /// The `(target, rel)` pairs of one `Link` header value (RFC 8288 section 3): comma-separated
@@ -888,7 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_api_that_ignores_the_offset_or_page_is_a_loop_on_the_second_page() {
+    async fn an_api_that_ignores_the_offset_or_page_is_a_loop_on_the_third_page() {
         let mock = serve(Router::new().route(
             "/items",
             get(|| async { axum::Json(json!({"data": [{"id": 1}, {"id": 2}]})) }),
@@ -903,7 +931,7 @@ mod tests {
             Pagination::Page {
                 param: "page",
                 first: 1,
-                size_param: None,
+                size_param: Some(("per_page", 2)),
             },
         ];
 
@@ -911,14 +939,101 @@ mod tests {
             let before = mock.hits();
             let pages = read(&mock, style, &Auth::None).await;
 
-            assert_eq!(pages.len(), 2, "{style:?}");
-            assert!(pages[0].is_ok());
+            assert_eq!(pages.len(), 3, "{style:?}");
+            assert!(pages[0].is_ok() && pages[1].is_ok());
             assert_eq!(
-                pages[1].as_ref().unwrap_err(),
+                pages[2].as_ref().unwrap_err(),
                 &RuntimeError::PaginationLoop
             );
-            assert_eq!(mock.hits() - before, 2, "the repeat is caught on request 2");
+            assert_eq!(mock.hits() - before, 3, "the repeat is caught on request 3");
         }
+    }
+
+    #[tokio::test]
+    async fn two_identical_full_pages_then_a_short_one_are_read_to_the_end() {
+        // Low-cardinality rows: the first two pages happen to be identical.
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|RawQuery(query): RawQuery| async move {
+                let offset: u64 = param(&query, "offset").unwrap().parse().unwrap();
+                let data = if offset < 4 {
+                    vec![json!({"colour": "red"}), json!({"colour": "red"})]
+                } else {
+                    vec![json!({"colour": "blue"})]
+                };
+                axum::Json(json!({"data": data}))
+            }),
+        ))
+        .await;
+        let style = Pagination::Offset {
+            param: "offset",
+            limit_param: "limit",
+            limit: 2,
+        };
+
+        let pages = read(&mock, style, &Auth::None).await;
+
+        assert_eq!(pages.len(), 3);
+        assert!(pages.iter().all(Result::is_ok), "{pages:?}");
+    }
+
+    #[tokio::test]
+    async fn a_page_stream_with_no_known_size_relies_on_the_page_cap() {
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|| async { axum::Json(json!({"data": [{"id": 1}]})) }),
+        ))
+        .await;
+        let ctx = context("paged", "s");
+        let first = RequestSpec::get(&mock.base(), mock.url("/items"));
+        let style = Pagination::Page {
+            param: "page",
+            first: 1,
+            size_param: None,
+        };
+        let mut driver = Driver::new(&ctx, &Auth::None, first, style, "/data");
+        driver.max_pages = 5;
+
+        let mut results = Vec::new();
+        while let Some(result) = driver.step().await {
+            results.push(result);
+        }
+
+        assert_eq!(results.len(), 6);
+        assert_eq!(mock.hits(), 5);
+        assert_eq!(
+            results[5].as_ref().unwrap_err(),
+            &RuntimeError::PaginationLoop
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_target_is_measured_before_it_is_resolved() {
+        // `./` segments disappear when the link is resolved, so the long raw target is short
+        // afterwards; it is still refused.
+        let target = format!("/{}items", "./".repeat(MAX_TOKEN_BYTES));
+        assert!(target.len() > MAX_TOKEN_BYTES);
+        let mock = serve(Router::new().route(
+            "/items",
+            get(move || {
+                let link = format!("<{target}>; rel=\"next\"");
+                async move {
+                    let mut response = axum::Json(json!({"data": []})).into_response();
+                    response.headers_mut().insert("link", link.parse().unwrap());
+                    response
+                }
+            }),
+        ))
+        .await;
+
+        let pages = read(&mock, Pagination::LinkHeader, &Auth::None).await;
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            pages[1].as_ref().unwrap_err(),
+            &RuntimeError::PaginationTokenTooLong
+        );
+        assert_eq!(mock.hits(), 1);
     }
 
     #[tokio::test]

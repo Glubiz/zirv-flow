@@ -118,6 +118,7 @@ impl RateLimits {
         }
     }
 
+    #[cfg(test)]
     fn reserve(&self, source: &str, rate: RateLimit, now: Instant) -> Duration {
         self.reserve_numbered(source, rate, now).0
     }
