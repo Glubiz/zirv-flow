@@ -76,9 +76,9 @@ fn probe_request() -> Result<(crate::request::ChatRequest, JsonSchema), AiError>
         )])?
         .tool(ToolSpec {
             name: "probe".to_owned(),
-            description: "Reports the result of a capability check.".to_owned(),
+            description: Content::Instruction("Reports the result of a capability check.".into()),
             parameters: parameters.clone(),
-        })
+        })?
         .max_output_tokens(64)
         .build();
     Ok((request, parameters))

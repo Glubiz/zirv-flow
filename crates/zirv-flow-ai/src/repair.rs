@@ -63,7 +63,7 @@ where
         match validate(&response) {
             Ok(value) => return Ok(RepairOutcome::Valid(value, attempts)),
             Err(errors) if attempts > max_repairs => return Ok(RepairOutcome::Exhausted(errors)),
-            Err(errors) => current = current.with_repair(&response.parts, &errors),
+            Err(errors) => current = current.with_repair(&response, &errors),
         }
     }
 }

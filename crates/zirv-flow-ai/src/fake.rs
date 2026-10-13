@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::Value;
 use zirv_flow_core::SecretString;
@@ -19,11 +20,19 @@ use crate::response::{ChatResponse, Part, Usage};
 pub struct FakeProvider {
     script: Mutex<VecDeque<Result<ChatResponse, AiError>>>,
     seen: Mutex<Vec<ChatRequest>>,
+    delay: Duration,
 }
 
 impl FakeProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes every call take this long to answer, as a slow provider would; the request is
+    /// recorded when the call starts.
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     /// Queues an answer.
@@ -52,6 +61,15 @@ pub fn text_response(text: &str, input_tokens: u32, output_tokens: u32) -> ChatR
             input_tokens,
             output_tokens,
         },
+        model: "fake-model".to_owned(),
+    }
+}
+
+/// An answer made of the given parts, with no usage.
+pub fn reply(parts: Vec<Part>) -> ChatResponse {
+    ChatResponse {
+        parts,
+        usage: Usage::default(),
         model: "fake-model".to_owned(),
     }
 }
@@ -91,6 +109,7 @@ impl Provider for FakeProvider {
     ) -> BoxFuture<'a, Result<ChatResponse, AiError>> {
         Box::pin(async move {
             self.seen.lock().unwrap().push(request.clone());
+            tokio::time::sleep(self.delay).await;
             self.script
                 .lock()
                 .unwrap()

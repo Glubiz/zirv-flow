@@ -62,7 +62,7 @@ fn build_body(model: &str, request: &ChatRequest) -> Value {
             .map(|tool| {
                 json!({"type": "function", "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    "description": tool.description.render(),
                     "parameters": tool.parameters.as_value(),
                 }})
             })
@@ -159,6 +159,7 @@ fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake::reply;
     use crate::providers::testing::{loopback_http, serve};
     use crate::request::{Content, Privacy, RequestBuilder, ToolSpec};
     use crate::schema::JsonSchema;
@@ -194,9 +195,10 @@ mod tests {
             .unwrap()
             .tool(ToolSpec {
                 name: "map_columns".into(),
-                description: "Maps columns".into(),
+                description: Content::Instruction("Maps columns".into()),
                 parameters,
             })
+            .unwrap()
             .max_output_tokens(256)
             .build()
     }
@@ -274,11 +276,11 @@ mod tests {
     async fn a_repair_conversation_replays_the_tool_call_and_its_result() {
         let (base, seen) = serve(200, TEXT).await;
         let repaired = request().with_repair(
-            &[Part::ToolCall {
+            &reply(vec![Part::ToolCall {
                 id: "call_9".into(),
                 name: "map_columns".into(),
                 arguments: json!({}),
-            }],
+            }]),
             &["$.email: is required".to_owned()],
         );
         let key = SecretString::new("k".to_owned());
