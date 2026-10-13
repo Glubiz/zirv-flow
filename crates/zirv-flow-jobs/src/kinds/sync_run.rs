@@ -4133,10 +4133,12 @@ mod tests {
         use axum::response::IntoResponse;
         use axum::routing::post;
         use zirv_flow_connectors::runtime::RateLimits;
-        use zirv_flow_core::HmacRoot;
+        use zirv_flow_connectors::sources::{active_binding, seed_refresh_token};
+        use zirv_flow_core::{HmacRoot, SecretBytes, SecretString};
         use zirv_flow_store::{StoredTokens, load_tokens};
 
         use super::*;
+        use crate::kinds::sync_tokens::from_stored;
 
         const MANIFEST: &str = include_str!(
             "../../../zirv-flow-connectors/tests/fixtures/manifests/cursor_oauth2_code.json"
@@ -4314,6 +4316,44 @@ mod tests {
             .unwrap()
         }
 
+        /// The source's credential: the OAuth client the mock provider registered.
+        fn client() -> Value {
+            json!({"client_id": "client", "client_secret": "shh"})
+        }
+
+        /// [`client`] opened, as a run opens the credential before a read.
+        fn client_credential() -> Credential {
+            Credential::from_json(&SecretBytes::new(client().to_string().into_bytes())).unwrap()
+        }
+
+        /// The source's settings: the cursor reference manifest pointed at the mock on `port`,
+        /// asking for pages of `page` and allowing a thousand requests a second.
+        fn http_config(port: u16, page: u32) -> Value {
+            let base = format!("http://127.0.0.1:{port}");
+            let mut manifest: Value = serde_json::from_str(
+                &MANIFEST
+                    .replace("https://api.example.test", &base)
+                    .replace("https://auth.example.test", &base),
+            )
+            .unwrap();
+            manifest["streams"][0]["query"] = json!({"limit": page});
+            manifest["rate_limit"] = json!({"requests": 1000, "per_seconds": 1});
+            json!({"manifest": manifest})
+        }
+
+        /// The tokens a consent under `config` leaves, with an access token that lapsed long
+        /// ago, so the first call of a run refreshes it with `rt-0`. They carry the binding of
+        /// `config`: a run seeds no tokens issued for another token endpoint, client or scopes,
+        /// and reads such a source as not connected.
+        fn account_tokens(config: &Value) -> StoredTokens {
+            StoredTokens {
+                access_token: SecretString::new("stale".to_owned()),
+                refresh_token: SecretString::new("rt-0".to_owned()),
+                expires_at: Some(OffsetDateTime::UNIX_EPOCH),
+                binding: active_binding(config, &client_credential()).unwrap(),
+            }
+        }
+
         struct Account {
             env: Env,
             keyring: Arc<Keyring>,
@@ -4321,8 +4361,9 @@ mod tests {
         }
 
         /// A workspace with an `http` source on the cursor reference manifest, an account
-        /// connected earlier (a refresh token and a stale access token), one stream `contacts`
-        /// mapped and read in `sync_mode`. `page` is the page size the manifest asks for.
+        /// connected earlier under the same manifest and client (a refresh token and a lapsed
+        /// access token), one stream `contacts` mapped and read in `sync_mode`. `page` is the
+        /// page size the manifest asks for.
         async fn setup_http(
             pool: &PgPool,
             records: Vec<Value>,
@@ -4367,38 +4408,24 @@ mod tests {
             )
             .await
             .unwrap();
-            let base = format!("http://127.0.0.1:{port}");
-            let mut manifest: Value = serde_json::from_str(
-                &MANIFEST
-                    .replace("https://api.example.test", &base)
-                    .replace("https://auth.example.test", &base),
-            )
-            .unwrap();
-            manifest["streams"][0]["query"] = json!({"limit": page});
-            manifest["rate_limit"] = json!({"requests": 1000, "per_seconds": 1});
-            let config = json!({"manifest": manifest});
+            let config = http_config(port, page);
 
             // The credential and the account tokens, as the API's consent leaves them.
-            let secret = |purpose: SecretPurpose, plaintext: Value| {
+            let secret = |purpose: SecretPurpose, plaintext: &[u8]| {
                 let id = SecretId::new();
-                let sealed = seal(
-                    &keyring,
-                    plaintext.to_string().as_bytes(),
-                    &secret_aad(ws, id, purpose),
-                );
+                let sealed = seal(&keyring, plaintext, &secret_aad(ws, id, purpose));
                 (id, sealed, purpose)
             };
             let (credential, sealed, purpose) = secret(
                 SecretPurpose::ConnectorCredential,
-                json!({"client_id": "client", "client_secret": "shh"}),
+                client().to_string().as_bytes(),
             );
             zirv_flow_store::secrets::insert_unchecked(pool, ws, purpose, credential, &sealed)
                 .await
                 .unwrap();
             let (tokens, sealed, purpose) = secret(
                 SecretPurpose::OAuthToken,
-                json!({"access_token": "stale", "refresh_token": "rt-0",
-                       "expires_at": null, "binding": "from-another-config"}),
+                account_tokens(&config).to_plaintext().unwrap().expose(),
             );
             zirv_flow_store::secrets::insert_unchecked(pool, ws, purpose, tokens, &sealed)
                 .await
@@ -4544,6 +4571,59 @@ mod tests {
                     .await
                     .unwrap()
             }
+        }
+
+        /// The account `setup_http` stores, seeded as `sync_tokens::prepare` seeds it and read
+        /// as a run reads it, without the database and so without the token store. Tokens a run
+        /// does not seed leave the source not connected, and every run below would fail before
+        /// its first request.
+        #[tokio::test]
+        async fn the_stored_account_is_seeded_and_each_lapsed_or_revoked_token_refreshed_once() {
+            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+            let (port, api) = serve_api(records).await;
+            api.revoke_at.store(2, Ordering::SeqCst);
+            let config = http_config(port, 2);
+            let tokens = account_tokens(&config);
+            let mut credential = client_credential();
+
+            assert!(seed_refresh_token(
+                &mut credential,
+                &config,
+                &tokens.refresh_token,
+                &tokens.binding
+            ));
+            let driver = Registry::built_in().get("http").unwrap();
+            let context = SourceContext::new(
+                loopback(),
+                HttpLimits::default(),
+                "http",
+                "test",
+                Arc::default(),
+            )
+            .unwrap()
+            .with_rate_limit(driver.rate_limit(&config))
+            .with_access_token(from_stored(tokens));
+            let stream = StreamConfig {
+                name: "contacts".to_owned(),
+                sync_mode: SyncMode::Incremental,
+                cursor_field: Some("updated_at".to_owned()),
+                primary_key: vec!["id".to_owned()],
+            };
+            let batches: Vec<_> = driver
+                .read(&context, &config, &credential, &stream, None)
+                .map(Result::unwrap)
+                .collect()
+                .await;
+
+            let read: usize = batches.iter().map(|batch| batch.records.len()).sum();
+            assert_eq!(read, 5);
+            // One refresh for the lapsed token, one more for the revoked one.
+            assert_eq!(api.refreshes.load(Ordering::SeqCst), 2);
+            assert_eq!(api.data_requests.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                batches.last().unwrap().checkpoint.0,
+                json!({"since": "2026-01-05T00:00:00Z"})
+            );
         }
 
         #[sqlx::test]

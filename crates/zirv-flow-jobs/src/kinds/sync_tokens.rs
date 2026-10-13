@@ -36,7 +36,7 @@ fn to_stored(token: &AccessToken) -> Result<StoredTokens, RuntimeError> {
     })
 }
 
-fn from_stored(stored: StoredTokens) -> AccessToken {
+pub(super) fn from_stored(stored: StoredTokens) -> AccessToken {
     let token = AccessToken::new_unix(
         stored.access_token,
         stored.expires_at.map(OffsetDateTime::unix_timestamp),
