@@ -1,0 +1,34 @@
+//! Sources: external systems records are read from (architecture 5.3). A source type is one
+//! module here plus one line in [`ALL`]. Sources return records and checkpoints and never write
+//! the profile store. Every network call goes through the [`SourceContext`].
+
+mod context;
+mod credential;
+mod error;
+#[cfg(feature = "test-support")]
+mod fake;
+mod registry;
+mod source;
+mod spec;
+mod types;
+mod validate;
+
+pub use context::SourceContext;
+pub use credential::Credential;
+pub use error::SourceError;
+pub use registry::Registry;
+pub use source::{BoxFuture, ErasedSource, Source};
+pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
+pub use types::{
+    Batch, Checkpoint, FieldDescriptor, FieldType, Record, StreamConfig, StreamDescriptor, SyncMode,
+};
+pub use validate::{FieldError, validate_config, validate_credential};
+
+/// The token the fake source's connection test accepts.
+#[cfg(feature = "test-support")]
+pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
+
+pub(crate) static ALL: &[&dyn ErasedSource] = &[
+    #[cfg(feature = "test-support")]
+    &fake::Fake,
+];
