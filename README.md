@@ -1216,7 +1216,10 @@ once and retries the call once, and a second `401` is a refused credential. The 
 handed back to the caller (`take_refreshed_token`) to store; the runtime never writes to the
 database. The authorization-code grant is not supported yet. Auth is attached only to requests for
 the source's base origin (scheme, host and port); a request for any other origin, such as a
-pagination link that points elsewhere, is refused before it is sent.
+pagination link that points elsewhere, is refused before it is sent. Redirects are followed only
+within the same origin: a redirect to another origin, including `http` to `https` on the same host,
+ends the call with the same error, so a header or query key never leaves the origin. Give such a
+source its final base URL.
 
 **Retries.** `GET` and `HEAD` (and a request the source marks idempotent) are retried on `429`,
 `500`, `502`, `503`, `504` and on connection failures and timeouts, up to 5 attempts, with an
