@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
+use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -120,25 +121,55 @@ struct Refusal {
     sample: Value,
 }
 
+/// Why a unit of work on a run may not proceed.
+pub(super) enum Unfenced {
+    /// The job's lease is gone.
+    LeaseLost,
+    /// The run is no longer running.
+    Cancelled,
+}
+
+/// Fences a unit of work on a run: locks the job's lease, then the run, which must be running.
+/// Nothing has been written when it refuses.
+pub(super) async fn fence_run(
+    tx: &mut PgConnection,
+    workspace: WorkspaceId,
+    run_id: Uuid,
+    job_id: Uuid,
+    lease_token: Uuid,
+) -> Result<Option<Unfenced>, StoreError> {
+    if !lock_lease(tx, job_id, lease_token).await? {
+        return Ok(Some(Unfenced::LeaseLost));
+    }
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM sync_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    Ok((state.as_deref() != Some("running")).then_some(Unfenced::Cancelled))
+}
+
 /// Commits one batch of a run.
 pub async fn commit_sync_batch(
     pool: &PgPool,
     batch: &SyncBatch<'_>,
 ) -> Result<BatchOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    if !lock_lease(&mut tx, batch.job_id, batch.lease_token).await? {
-        return Ok(BatchOutcome::LeaseLost);
-    }
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT state FROM sync_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    match fence_run(
+        &mut tx,
+        batch.workspace,
+        batch.run_id,
+        batch.job_id,
+        batch.lease_token,
     )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    if state.as_deref() != Some("running") {
-        return Ok(BatchOutcome::Cancelled);
+    .await?
+    {
+        Some(Unfenced::LeaseLost) => return Ok(BatchOutcome::LeaseLost),
+        Some(Unfenced::Cancelled) => return Ok(BatchOutcome::Cancelled),
+        None => {}
     }
 
     let results = apply_upserts(&mut tx, batch).await?;

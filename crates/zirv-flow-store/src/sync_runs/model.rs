@@ -219,6 +219,25 @@ pub async fn queue_run(
     Ok(Some(run))
 }
 
+/// Locks the source against deletion while runs are queued for it, and says whether it exists and
+/// (with `only_enabled`) is enabled.
+async fn lock_queueable_source(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    only_enabled: bool,
+) -> Result<bool, StoreError> {
+    let enabled: Option<bool> = sqlx::query_scalar(
+        "SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(enabled.is_some_and(|enabled| enabled || !only_enabled))
+}
+
 /// Queues a run for every enabled stream of the source that has a mapping, and counts the ones
 /// skipped for having an active run. `None` when the workspace has no such source, or when
 /// `only_enabled` is set and the source is disabled.
@@ -230,18 +249,8 @@ pub async fn queue_runs_for_source(
     created_by: Option<UserId>,
     only_enabled: bool,
 ) -> Result<Option<FanOut>, StoreError> {
-    let enabled: Option<bool> = sqlx::query_scalar(
-        "SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(source_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    match enabled {
-        None => return Ok(None),
-        Some(false) if only_enabled => return Ok(None),
-        Some(_) => {}
+    if !lock_queueable_source(connection, workspace, source_id, only_enabled).await? {
+        return Ok(None);
     }
     let streams: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM streams \
@@ -297,19 +306,13 @@ pub async fn queue_reconcile_run(
     created_by: Option<UserId>,
     only_enabled: bool,
 ) -> Result<ReconcileQueued, StoreError> {
-    let enabled: Option<bool> = sqlx::query_scalar(
-        "SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(source_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    if enabled.is_none() || (only_enabled && enabled == Some(false)) {
+    if !lock_queueable_source(connection, workspace, source_id, only_enabled).await? {
         return Ok(ReconcileQueued::Ineligible);
     }
     let eligible: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM streams \n                        WHERE workspace_id = $1 AND source_id = $2 AND id = $3 AND enabled \n                          AND mapping IS NOT NULL AND sync_mode = 'incremental')",
+        "SELECT EXISTS (SELECT 1 FROM streams \
+         WHERE workspace_id = $1 AND source_id = $2 AND id = $3 AND enabled \
+           AND mapping IS NOT NULL AND sync_mode = 'incremental')",
     )
     .bind(workspace.as_uuid())
     .bind(source_id)

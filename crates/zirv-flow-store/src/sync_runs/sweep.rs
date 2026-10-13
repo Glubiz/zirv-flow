@@ -13,9 +13,9 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::batch::DELETE_BY_SWEEP;
+use super::batch::{DELETE_BY_SWEEP, Unfenced, fence_run};
 use crate::people::remove_contribution_in;
-use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit, lock_lease};
+use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit};
 
 /// The most records one sweep unit removes.
 pub const SYNC_SWEEP_BATCH: i64 = 200;
@@ -62,19 +62,18 @@ pub async fn sweep_unreached(
     unit: &SweepUnit<'_>,
 ) -> Result<SweepOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    if !lock_lease(&mut tx, unit.job_id, unit.lease_token).await? {
-        return Ok(SweepOutcome::LeaseLost);
-    }
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT state FROM sync_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    match fence_run(
+        &mut tx,
+        unit.workspace,
+        unit.run_id,
+        unit.job_id,
+        unit.lease_token,
     )
-    .bind(unit.workspace.as_uuid())
-    .bind(unit.run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    if state.as_deref() != Some("running") {
-        return Ok(SweepOutcome::Cancelled);
+    .await?
+    {
+        Some(Unfenced::LeaseLost) => return Ok(SweepOutcome::LeaseLost),
+        Some(Unfenced::Cancelled) => return Ok(SweepOutcome::Cancelled),
+        None => {}
     }
 
     let unreached: Vec<(Uuid, String)> = sqlx::query_as(

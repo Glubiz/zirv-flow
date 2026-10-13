@@ -12,6 +12,13 @@ use crate::sync_runs::RUN_JOB_KIND;
 /// The zone a source's cron is read in.
 pub const SCHEDULE_TIMEZONE: &str = "UTC";
 
+/// The cron and its next slot after now; none for no cron, an empty one, or one with no later slot.
+fn first_slot(cron: Option<&str>) -> Option<(&str, OffsetDateTime)> {
+    let cron = cron.filter(|cron| !cron.is_empty())?;
+    let slot = next_after(cron, SCHEDULE_TIMEZONE, OffsetDateTime::now_utc()).ok()?;
+    Some((cron, slot))
+}
+
 /// Makes the `schedules` row of a source match its settings, in the caller's transaction:
 ///
 /// - with a `schedule`, the row exists with that cron, enabled as the source is. A changed cron
@@ -27,13 +34,7 @@ pub async fn sync_schedule(
     schedule: Option<&str>,
     enabled: bool,
 ) -> Result<(), StoreError> {
-    let next = schedule
-        .filter(|cron| !cron.is_empty())
-        .map(|cron| {
-            next_after(cron, SCHEDULE_TIMEZONE, OffsetDateTime::now_utc()).map(|slot| (cron, slot))
-        })
-        .transpose();
-    let Ok(Some((cron, next_run_at))) = next else {
+    let Some((cron, next_run_at)) = first_slot(schedule) else {
         sqlx::query("DELETE FROM schedules WHERE source_id = $1 AND workspace_id = $2")
             .bind(source_id)
             .bind(workspace.as_uuid())
@@ -84,13 +85,7 @@ pub async fn sync_reconcile_schedule(
     cron: Option<&str>,
     enabled: bool,
 ) -> Result<(), StoreError> {
-    let next = cron
-        .filter(|cron| !cron.is_empty())
-        .map(|cron| {
-            next_after(cron, SCHEDULE_TIMEZONE, OffsetDateTime::now_utc()).map(|slot| (cron, slot))
-        })
-        .transpose();
-    let Ok(Some((cron, next_run_at))) = next else {
+    let Some((cron, next_run_at)) = first_slot(cron) else {
         sqlx::query("DELETE FROM schedules WHERE stream_id = $1 AND workspace_id = $2")
             .bind(stream_id)
             .bind(workspace.as_uuid())
