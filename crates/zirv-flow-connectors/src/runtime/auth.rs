@@ -373,7 +373,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::Router;
-    use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
@@ -381,48 +380,44 @@ mod tests {
     use super::super::testing::{Mock, context, serve};
     use super::super::{RequestSpec, RuntimeError};
 
+    type TokenLog = Arc<Mutex<Vec<(Option<String>, String)>>>;
+
     struct Idp {
         mock: Mock,
         issued: Arc<AtomicUsize>,
         /// The authorization header and the form body of each token request.
-        requests: Arc<Mutex<Vec<(Option<String>, String)>>>,
+        requests: TokenLog,
     }
 
     /// An identity provider whose tokens are `tok-1`, `tok-2`, ... and which says `expires_in`.
     async fn idp(valid: Arc<Mutex<String>>, expires_in: u64, status: StatusCode) -> Idp {
         let issued = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = (Arc::clone(&issued), Arc::clone(&requests), valid);
-        let router = Router::new()
-            .route(
-                "/token",
-                post(
-                    move |State((issued, requests, valid)): State<(
-                        Arc<AtomicUsize>,
-                        Arc<Mutex<Vec<(Option<String>, String)>>>,
-                        Arc<Mutex<String>>,
-                    )>,
-                          headers: HeaderMap,
-                          body: String| async move {
-                        let authorization = headers
-                            .get("authorization")
-                            .map(|value| value.to_str().unwrap().to_owned());
-                        requests.lock().unwrap().push((authorization, body));
-                        if status != StatusCode::OK {
-                            return (status, "idp says: CLIENTSECRETECHO").into_response();
-                        }
-                        let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
-                        *valid.lock().unwrap() = format!("tok-{n}");
-                        axum::Json(serde_json::json!({
-                            "access_token": format!("tok-{n}"),
-                            "token_type": "Bearer",
-                            "expires_in": expires_in,
-                        }))
-                        .into_response()
-                    },
-                ),
-            )
-            .with_state(state);
+        let (counted, logged) = (Arc::clone(&issued), Arc::clone(&requests));
+        let router = Router::new().route(
+            "/token",
+            post(move |headers: HeaderMap, body: String| {
+                let (issued, requests) = (Arc::clone(&counted), Arc::clone(&logged));
+                let valid = Arc::clone(&valid);
+                async move {
+                    let authorization = headers
+                        .get("authorization")
+                        .map(|value| value.to_str().unwrap().to_owned());
+                    requests.lock().unwrap().push((authorization, body));
+                    if status != StatusCode::OK {
+                        return (status, "idp says: CLIENTSECRETECHO").into_response();
+                    }
+                    let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+                    *valid.lock().unwrap() = format!("tok-{n}");
+                    axum::Json(serde_json::json!({
+                        "access_token": format!("tok-{n}"),
+                        "token_type": "Bearer",
+                        "expires_in": expires_in,
+                    }))
+                    .into_response()
+                }
+            }),
+        );
         Idp {
             mock: serve(router).await,
             issued,

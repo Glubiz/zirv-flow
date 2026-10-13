@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::Request;
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use url::Url;
@@ -18,7 +18,6 @@ use crate::sources::SourceContext;
 /// What a mock upstream saw of one request.
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
-    pub(crate) method: String,
     pub(crate) path_and_query: String,
     pub(crate) headers: HeaderMap,
 }
@@ -54,22 +53,22 @@ impl Mock {
 pub(crate) async fn serve(router: Router) -> Mock {
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let router = router.layer(axum::middleware::from_fn_with_state(
-        (Arc::clone(&hits), Arc::clone(&seen)),
-        |State((hits, seen)): State<(Arc<AtomicUsize>, Arc<Mutex<Vec<Seen>>>)>,
-         request: Request,
-         next: Next| async move {
-            hits.fetch_add(1, Ordering::SeqCst);
-            seen.lock().unwrap().push(Seen {
-                method: request.method().to_string(),
-                path_and_query: request
-                    .uri()
-                    .path_and_query()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
-                headers: request.headers().clone(),
-            });
-            next.run(request).await
+    let (counted, logged) = (Arc::clone(&hits), Arc::clone(&seen));
+    let router = router.layer(axum::middleware::from_fn(
+        move |request: Request, next: Next| {
+            let (hits, seen) = (Arc::clone(&counted), Arc::clone(&logged));
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                seen.lock().unwrap().push(Seen {
+                    path_and_query: request
+                        .uri()
+                        .path_and_query()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    headers: request.headers().clone(),
+                });
+                next.run(request).await
+            }
         },
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
