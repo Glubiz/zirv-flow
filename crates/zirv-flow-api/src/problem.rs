@@ -88,6 +88,11 @@ impl ApiError {
         self.status
     }
 
+    /// The stable code of the problem, when it has one.
+    pub(crate) fn code(&self) -> Option<&'static str> {
+        self.code
+    }
+
     #[cfg(test)]
     pub(crate) fn detail(&self) -> &str {
         &self.detail

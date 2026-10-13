@@ -69,14 +69,15 @@ pub enum RepairError<E> {
 /// Dispatches `request`, validates the answer and, on failure, dispatches again with the issues,
 /// at most `max_repairs` times after the first dispatch. A dispatch error or an abort ends the
 /// loop at once. The validator may await.
-pub async fn repair<T, I, E, S>(
+pub async fn repair<T, I, E, S, V>(
     max_repairs: u32,
     request: &ChatRequest,
     sender: &S,
-    mut validate: impl AsyncFnMut(&ChatResponse) -> Verdict<T, I, E>,
+    mut validate: V,
 ) -> Result<RepairOutcome<T, I>, RepairError<E>>
 where
     S: Sender + ?Sized,
+    V: for<'r> FnMut(&'r ChatResponse) -> BoxFuture<'r, Verdict<T, I, E>>,
     I: fmt::Display,
 {
     let mut current = request.clone();
@@ -162,8 +163,8 @@ mod tests {
             .push(Ok(text_response("bad", 1, 1)))
             .push(Ok(text_response("never", 1, 1)));
 
-        let error = repair(5, &request(), &fixture.sender(), async |_| {
-            Verdict::<(), String, &str>::Abort("refused")
+        let error = repair(5, &request(), &fixture.sender(), |_| {
+            Box::pin(async { Verdict::<(), String, &str>::Abort("refused") })
         })
         .await
         .unwrap_err();
@@ -187,9 +188,10 @@ mod tests {
         }
         let mut seen = 0;
 
-        let outcome = repair(1, &request(), &fixture.sender(), async |_| {
+        let outcome = repair(1, &request(), &fixture.sender(), |_| {
             seen += 1;
-            Verdict::<(), Issue, ()>::Invalid(vec![Issue(seen)])
+            let number = seen;
+            Box::pin(async move { Verdict::<(), Issue, ()>::Invalid(vec![Issue(number)]) })
         })
         .await
         .unwrap();
@@ -208,9 +210,11 @@ mod tests {
         let fixture = Fixture::new();
         fixture.fake.push(Ok(text_response("ok", 1, 1)));
 
-        let outcome = repair(0, &request(), &fixture.sender(), async |response| {
-            tokio::task::yield_now().await;
-            Verdict::<String, String, ()>::Valid(response.text())
+        let outcome = repair(0, &request(), &fixture.sender(), |response| {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                Verdict::<String, String, ()>::Valid(response.text())
+            })
         })
         .await
         .unwrap();
@@ -223,9 +227,11 @@ mod tests {
         let fixture = Fixture::new();
         fixture.fake.push(Ok(text_response("ok", 1, 1)));
 
-        let outcome = repair(2, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap();
+        let outcome = repair(2, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap();
 
         assert_eq!(outcome, RepairOutcome::Valid("ok".to_owned(), 1));
         assert_eq!(fixture.fake.call_count(), 1);
@@ -239,9 +245,11 @@ mod tests {
             .push(Ok(text_response("nope", 1, 1)))
             .push(Ok(text_response("ok", 1, 1)));
 
-        let outcome = repair(2, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap();
+        let outcome = repair(2, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap();
 
         assert_eq!(outcome, RepairOutcome::Valid("ok".to_owned(), 2));
         let second = &fixture.fake.requests()[1];
@@ -257,9 +265,11 @@ mod tests {
             fixture.fake.push(Ok(text_response(word, 1, 1)));
         }
 
-        let outcome = repair(2, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap();
+        let outcome = repair(2, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap();
 
         assert_eq!(
             outcome,
@@ -273,9 +283,11 @@ mod tests {
         let fixture = Fixture::new();
         fixture.fake.push(Ok(text_response("bad", 1, 1)));
 
-        let outcome = repair(0, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap();
+        let outcome = repair(0, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap();
 
         assert!(matches!(outcome, RepairOutcome::Exhausted(..)));
         assert_eq!(fixture.fake.call_count(), 1);
@@ -289,9 +301,11 @@ mod tests {
             .push(Ok(text_response("bad", 1, 1)))
             .push(Err(AiError::BudgetExceeded));
 
-        let error = repair(5, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap_err();
+        let error = repair(5, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap_err();
 
         assert_eq!(error, RepairError::Dispatch(AiError::BudgetExceeded));
         assert_eq!(fixture.fake.call_count(), 2);
@@ -305,9 +319,11 @@ mod tests {
             .push(Ok(tool_call_response("map", json!({}), 1, 1)))
             .push(Ok(text_response("ok", 1, 1)));
 
-        repair(1, &request(), &fixture.sender(), async |r| wants_ok(r))
-            .await
-            .unwrap();
+        repair(1, &request(), &fixture.sender(), |r| {
+            Box::pin(async move { wants_ok(r) })
+        })
+        .await
+        .unwrap();
 
         let second = &fixture.fake.requests()[1];
         assert!(matches!(second.messages()[2], Message::ToolResult { .. }));

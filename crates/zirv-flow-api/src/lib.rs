@@ -141,6 +141,16 @@ fn routes() -> Router<AppState> {
             get(assistant::settings::usage),
         )
         .route(
+            "/api/v1/workspaces/{ws}/ai/drafts",
+            post(assistant::drafts::create).layer(DefaultBodyLimit::max(
+                assistant::drafts::MAX_DRAFT_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept",
+            post(assistant::drafts::accept),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/traits",
             get(people::list).post(people::create),
         )

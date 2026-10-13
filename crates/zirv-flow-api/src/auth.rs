@@ -119,6 +119,19 @@ impl Principal {
     }
 }
 
+#[cfg(test)]
+impl Principal {
+    /// A signed-in principal without a request, for tests of code that takes one.
+    pub(crate) fn session_for_tests(user: User) -> Self {
+        Self::Session(SessionPrincipal {
+            user,
+            token_hash: [0; 32],
+            csrf_hash: Vec::new(),
+            csrf_token: String::new(),
+        })
+    }
+}
+
 impl FromRequestParts<AppState> for Principal {
     type Rejection = ApiError;
 

@@ -54,7 +54,8 @@ are entered separately, so name only the kind of authentication.
 If your answer is refused, the problems are listed with their JSON pointers: fix exactly those \
 and call the tool again.";
 
-/// An example manifest, kept valid by a test.
+/// An example manifest, kept valid by a test. The reference below carries a copy.
+#[cfg(test)]
 pub(crate) const MANIFEST_EXAMPLE: &str = r#"{
   "version": "v1",
   "base_url": "https://api.example.com/v1",

@@ -440,14 +440,6 @@ impl MappingCheck {
         Self::for_sample_keys(header, self.catalog, self.lists, self.primary_key)
     }
 
-    pub(crate) fn catalog(&self) -> &HashMap<String, TraitState> {
-        &self.catalog
-    }
-
-    pub(crate) fn lists(&self) -> &hashbrown::HashSet<Uuid> {
-        &self.lists
-    }
-
     /// Checks a mapping against the stream's field names (a column may be a dotted path into a
     /// field) and the trait registry, that every list it names exists in the workspace, and that
     /// a mapping with an event has a primary key to hang the event's idempotency on.

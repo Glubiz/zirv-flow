@@ -9836,11 +9836,15 @@ email,b@example.com,
             .await
             .unwrap();
         let request = mapping_request(dispatcher.privacy(), false).unwrap();
-        let wants_ok = async |response: &zirv_flow_ai::ChatResponse| match response.text().as_str()
-        {
-            "ok" => zirv_flow_ai::Verdict::Valid(()),
-            other => zirv_flow_ai::Verdict::Invalid(vec![format!("expected ok, got {other}")]),
-        };
+        fn wants_ok(
+            response: &zirv_flow_ai::ChatResponse,
+        ) -> zirv_flow_ai::BoxFuture<'_, zirv_flow_ai::Verdict<(), String, ()>> {
+            let verdict = match response.text().as_str() {
+                "ok" => zirv_flow_ai::Verdict::Valid(()),
+                other => zirv_flow_ai::Verdict::Invalid(vec![format!("expected ok, got {other}")]),
+            };
+            Box::pin(async move { verdict })
+        }
         let sent = fake.call_count();
         for word in ["bad", "worse", "worst"] {
             fake.push(Ok(zirv_flow_ai::fake::text_response(word, 10, 10)));

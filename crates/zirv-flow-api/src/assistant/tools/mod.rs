@@ -27,8 +27,8 @@ use crate::problem::ApiError;
 pub(crate) enum DraftTarget {
     /// A stream's mapping.
     Mapping { source_id: Uuid, stream: String },
-    /// An `http` source's manifest; none for a source not yet saved.
-    Manifest { source_id: Option<Uuid> },
+    /// An `http` source's manifest. Whether it is saved yet only matters to the dry run.
+    Manifest,
 }
 
 /// The caller of a tool: the signed-in user and the workspace, taken from the authorized request.
@@ -88,7 +88,7 @@ pub(super) fn arguments_invalid() -> ToolError<ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use hashbrown::HashSet;
 
     use zirv_flow_ai::{Content, ToolEffect};
 

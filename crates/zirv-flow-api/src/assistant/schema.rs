@@ -330,11 +330,13 @@ mod tests {
     #[test]
     fn nullable_refs_and_formats_are_dropped() {
         #[derive(Deserialize, ToSchema)]
+        #[allow(dead_code)]
         struct Inner {
             /// The inner name.
             name: String,
         }
         #[derive(Deserialize, ToSchema)]
+        #[allow(dead_code)]
         struct Outer {
             inner: Option<Inner>,
             id: Uuid,
