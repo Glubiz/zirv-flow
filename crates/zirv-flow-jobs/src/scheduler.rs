@@ -14,10 +14,10 @@ use zirv_flow_store::{
     database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
     enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
     expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
-    reap_expired, try_lead,
+    reap_expired, stream_freshness, try_lead,
 };
 
-use crate::metrics::{QueueGauges, RunOutcome, record_sync_run, set_inbox_age};
+use crate::metrics::{FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_inbox_age};
 
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
@@ -32,6 +32,9 @@ const IMPORT_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 const FEED_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 /// How often runs whose job is gone are failed.
 const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the stream freshness gauges are refreshed. Thresholds are hours, so half a minute of
+/// lag is immaterial.
+const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -89,6 +92,10 @@ pub struct Scheduler {
     feed_pruned: Option<Instant>,
     /// When the sync runs were last reconciled with their jobs; none until this instance leads.
     sync_reconciled: Option<Instant>,
+    /// The stream freshness gauges.
+    freshness: FreshnessGauges,
+    /// When the freshness gauges were last refreshed; none until this instance leads.
+    freshness_checked: Option<Instant>,
 }
 
 impl Scheduler {
@@ -102,6 +109,8 @@ impl Scheduler {
             imports_checked: None,
             feed_pruned: None,
             sync_reconciled: None,
+            freshness: FreshnessGauges::default(),
+            freshness_checked: None,
         }
     }
 
@@ -128,6 +137,7 @@ impl Scheduler {
             .get_mut()
             .expect("the gauge lock is never held across a panic")
             .zero_all();
+        self.freshness.zero_all();
     }
 
     /// One pass: take or keep the lock, and if this instance leads, do the leader's work
@@ -141,6 +151,7 @@ impl Scheduler {
         self.keep_imports().await;
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
+        self.keep_freshness(now).await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -155,6 +166,7 @@ impl Scheduler {
         self.keep_imports().await;
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
+        self.keep_freshness(now).await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -253,6 +265,24 @@ impl Scheduler {
         }
     }
 
+    /// Refreshes the stream freshness gauges from the state `stream_freshness` computes at
+    /// `now`: on gaining leadership, then at most every [`FRESHNESS_INTERVAL`]. The state is
+    /// derived on every call and never stored, so there is nothing to mark. A failure is logged
+    /// and retried at the next check.
+    async fn keep_freshness(&mut self, now: OffsetDateTime) {
+        let due = self
+            .freshness_checked
+            .is_none_or(|checked| checked.elapsed() >= FRESHNESS_INTERVAL);
+        if !due {
+            return;
+        }
+        self.freshness_checked = Some(Instant::now());
+        match stream_freshness(&self.pool, None, None, now).await {
+            Ok(report) => self.freshness.update(&report),
+            Err(error) => warn!("could not refresh the stream freshness gauges: {error}"),
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -266,6 +296,8 @@ impl Scheduler {
             self.imports_checked = None;
             self.feed_pruned = None;
             self.sync_reconciled = None;
+            self.freshness_checked = None;
+            self.freshness.zero_all();
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")
@@ -1096,5 +1128,355 @@ mod tests {
             .parse()
             .unwrap();
         assert!((39.0..120.0).contains(&age), "{age}");
+    }
+
+    /// A workspace with one source whose streams `fresh`, `stale`, `failing` and `off` are set
+    /// up, as `(workspace, [(name, stream id)])`. `fresh` and `stale` carry a threshold.
+    async fn freshness_streams(
+        pool: &PgPool,
+        slug: &str,
+    ) -> (WorkspaceId, Uuid, Vec<(String, Uuid)>) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        use zirv_flow_store::{
+            DiscoveredStream, NewSource, StreamOutcome, StreamSettings, configure_stream,
+            create_source, create_workspace, record_stream_outcome, upsert_discovered_streams,
+        };
+
+        let ws = create_workspace(
+            pool,
+            &WorkspaceName::parse(slug).unwrap(),
+            &Slug::parse(slug).unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let config = json!({});
+        let source = create_source(
+            pool,
+            ws,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "crm",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let descriptor = json!({});
+        let names = ["fresh", "stale", "failing", "off"];
+        let found: Vec<DiscoveredStream<'_>> = names
+            .iter()
+            .map(|name| DiscoveredStream {
+                name,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                descriptor: &descriptor,
+            })
+            .collect();
+        let mut tx = begin(pool).await.unwrap();
+        upsert_discovered_streams(&mut tx, ws, source.id, &found)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut streams = Vec::new();
+        for (name, enabled, threshold) in [
+            ("fresh", true, Some(3600)),
+            ("stale", true, Some(60)),
+            ("failing", true, Some(60)),
+            ("off", false, Some(60)),
+        ] {
+            let stream = configure_stream(
+                &mut pool.acquire().await.unwrap(),
+                ws,
+                source.id,
+                name,
+                &StreamSettings {
+                    enabled,
+                    sync_mode: "full_refresh",
+                    cursor_field: None,
+                    primary_key: &[],
+                    staleness_threshold_seconds: threshold,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            streams.push((name.to_owned(), stream.id));
+        }
+        let failing = streams[2].1;
+        record_stream_outcome(
+            &mut pool.acquire().await.unwrap(),
+            ws,
+            failing,
+            StreamOutcome::Failed,
+            BASE,
+        )
+        .await
+        .unwrap();
+        (ws, source.id, streams)
+    }
+
+    /// The value of the one sample of `metric` whose labels include every `(key, value)`.
+    fn sample(output: &str, metric: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        output.lines().find_map(|line| {
+            let rest = line.strip_prefix(metric)?.strip_prefix('{')?;
+            let (inside, value) = rest.split_once("} ")?;
+            labels
+                .iter()
+                .all(|(key, value)| inside.contains(&format!("{key}=\"{value}\"")))
+                .then(|| value.parse().unwrap())
+        })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_state_of_every_enabled_stream_and_only_those(pool: PgPool) {
+        migrated(&pool).await;
+        let (ws, source, streams) = freshness_streams(&pool, "ours").await;
+        // A stream of a disabled source is not reported either.
+        let (_, disabled_source, disabled_streams) = freshness_streams(&pool, "theirs").await;
+        sqlx::query("UPDATE sources SET enabled = false WHERE id = $1")
+            .bind(disabled_source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = |name: &str| {
+            streams
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap()
+                .1
+                .to_string()
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap() + time::Duration::minutes(10);
+
+        assert!(matches!(leader.tick_at(now).await.unwrap(), Tick::Led(_)));
+
+        let output = handle.render();
+        let state =
+            |name: &str| sample(&output, "zirv_flow_stream_state", &[("stream", &id(name))]);
+        assert_eq!(state("fresh"), Some(0.0), "{output}");
+        assert_eq!(state("stale"), Some(1.0), "{output}");
+        assert_eq!(state("failing"), Some(2.0), "{output}");
+        assert_eq!(state("off"), None, "a disabled stream has no gauge");
+        let age = sample(
+            &output,
+            "zirv_flow_stream_freshness_seconds",
+            &[("stream", &id("stale"))],
+        )
+        .unwrap();
+        assert!((599.0..700.0).contains(&age), "{age}");
+        for (_, stream) in &disabled_streams {
+            assert!(!output.contains(&stream.to_string()), "{output}");
+        }
+        let count = |state: &str| {
+            sample(
+                &output,
+                "zirv_flow_streams",
+                &[("workspace", &ws.as_uuid().to_string()), ("state", state)],
+            )
+        };
+        assert_eq!(
+            (count("fresh"), count("stale"), count("failing")),
+            (Some(1.0), Some(1.0), Some(1.0)),
+            "{output}"
+        );
+        let _ = source;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_freshness_labels_are_ids_only(pool: PgPool) {
+        migrated(&pool).await;
+        let (ws, _, streams) = freshness_streams(&pool, "ours").await;
+        sqlx::query("UPDATE sources SET name = 'secret-crm-name', schedule = '0 * * * *'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+
+        let output = handle.render();
+        let lines: Vec<&str> = output
+            .lines()
+            .filter(|line| line.starts_with("zirv_flow_stream") && !line.starts_with('#'))
+            .collect();
+        assert!(!lines.is_empty(), "{output}");
+        for line in lines {
+            let inside = line.split_once('{').unwrap().1.split_once('}').unwrap().0;
+            let keys: BTreeSet<&str> = inside
+                .split(',')
+                .map(|pair| pair.split_once('=').unwrap().0)
+                .collect();
+            let expected: BTreeSet<&str> = if line.starts_with("zirv_flow_streams{") {
+                ["workspace", "state"].into()
+            } else {
+                ["workspace", "stream"].into()
+            };
+            assert_eq!(keys, expected, "{line}");
+            for quoted in inside.split('"').skip(1).step_by(2) {
+                let known = quoted == ws.as_uuid().to_string()
+                    || streams.iter().any(|(_, id)| quoted == id.to_string())
+                    || ["fresh", "stale", "failing"].contains(&quoted);
+                assert!(known, "{line}");
+            }
+        }
+        assert!(!output.contains("secret-crm-name"));
+        assert!(!output.contains("0 * * * *"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_later_tick_follows_a_success_and_a_disable_but_not_before_the_interval(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{
+            StreamOutcome, StreamSettings, configure_stream, record_stream_outcome,
+        };
+
+        migrated(&pool).await;
+        let (ws, source, streams) = freshness_streams(&pool, "ours").await;
+        let id = |name: &str| streams.iter().find(|(n, _)| n == name).unwrap().1;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap() + time::Duration::minutes(10);
+        leader.tick_at(now).await.unwrap();
+        let state = |name: &str| {
+            sample(
+                &handle.render(),
+                "zirv_flow_stream_state",
+                &[("stream", &id(name).to_string())],
+            )
+        };
+        assert_eq!((state("stale"), state("failing")), (Some(1.0), Some(2.0)));
+
+        // A success and a disable land, but the next tick is inside the interval.
+        for name in ["stale", "failing"] {
+            record_stream_outcome(
+                &mut pool.acquire().await.unwrap(),
+                ws,
+                id(name),
+                StreamOutcome::Succeeded,
+                now,
+            )
+            .await
+            .unwrap();
+        }
+        configure_stream(
+            &mut pool.acquire().await.unwrap(),
+            ws,
+            source,
+            "fresh",
+            &StreamSettings {
+                enabled: false,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                staleness_threshold_seconds: Some(3600),
+            },
+        )
+        .await
+        .unwrap();
+        leader.tick_at(now).await.unwrap();
+        assert_eq!((state("stale"), state("failing")), (Some(1.0), Some(2.0)));
+        assert_eq!(state("fresh"), Some(0.0));
+
+        // Once the interval has passed the gauges follow the database.
+        leader.freshness_checked = None;
+        leader.tick_at(now).await.unwrap();
+        assert_eq!((state("stale"), state("failing")), (Some(0.0), Some(0.0)));
+        assert_eq!(state("fresh"), Some(0.0), "a disabled stream is zeroed");
+        let output = handle.render();
+        let count = |name: &str| {
+            sample(
+                &output,
+                "zirv_flow_streams",
+                &[("workspace", &ws.as_uuid().to_string()), ("state", name)],
+            )
+        };
+        assert_eq!(
+            (count("fresh"), count("stale"), count("failing")),
+            (Some(2.0), Some(0.0), Some(0.0)),
+            "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_standby_instance_publishes_no_freshness(pool: PgPool) {
+        migrated(&pool).await;
+        freshness_streams(&pool, "ours").await;
+        let _leader = try_lead(&pool).await.unwrap().expect("the lock is free");
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut standby = scheduler(&pool);
+
+        let tick = standby.tick_at(BASE).await.unwrap();
+
+        assert_eq!(tick, Tick::Standby);
+        assert!(!handle.render().contains("zirv_flow_stream"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn losing_the_leadership_lock_zeroes_the_published_freshness_gauges(pool: PgPool) {
+        migrated(&pool).await;
+        let (_, _, streams) = freshness_streams(&pool, "ours").await;
+        let stale = streams
+            .iter()
+            .find(|(n, _)| n == "stale")
+            .unwrap()
+            .1
+            .to_string();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap() + time::Duration::minutes(10);
+        leader.tick_at(now).await.unwrap();
+        let read = || {
+            sample(
+                &handle.render(),
+                "zirv_flow_stream_state",
+                &[("stream", &stale)],
+            )
+        };
+        assert_eq!(read(), Some(1.0));
+
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks \
+             WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid() \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let _rival = loop {
+            if let Some(rival) = try_lead(&pool).await.unwrap() {
+                break rival;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        assert_eq!(leader.tick_at(now).await.unwrap(), Tick::Standby);
+        assert_eq!(read(), Some(0.0));
     }
 }
