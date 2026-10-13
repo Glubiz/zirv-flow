@@ -1,6 +1,8 @@
 import type { components } from "../../api";
 import { formatAgo, formatDuration } from "../../ui";
 
+import { parseQueries, queriesValid } from "./queries";
+
 export type Source = components["schemas"]["SourceBody"];
 export type SourceKind = components["schemas"]["SourceKindBody"];
 export type FieldSpec = components["schemas"]["FieldSpecBody"];
@@ -53,6 +55,12 @@ export function configFrom(fields: FieldSpec[], values: Values): Record<string, 
   for (const field of fields) {
     const text = (values[field.key] ?? "").trim();
     if (text === "") continue;
+    if (field.kind === "queries") {
+      // The form keeps the list as JSON text; an empty list is a setting that is not there.
+      const rows = parseQueries(text);
+      if (rows !== null && rows.length > 0) config[field.key] = rows;
+      continue;
+    }
     config[field.key] = field.kind === "number" ? Number(text) : field.kind === "bool" ? text === "true" : text;
   }
   return config;
@@ -133,6 +141,14 @@ export function runErrorText(code: string, threshold: number): string {
     source_kind_unavailable: "This build of the server does not include this type of source.",
   };
   return texts[code] ?? `The run failed (${code}).`;
+}
+
+/**
+ * Whether the values that have a shape of their own hold something the server will accept the
+ * shape of: for now, the queries of a database source. Blocks saving a form edited into nonsense.
+ */
+export function shapesValid(fields: FieldSpec[], values: Values): boolean {
+  return fields.every((field) => field.kind !== "queries" || queriesValid(values[field.key] ?? ""));
 }
 
 export type Freshness = components["schemas"]["FreshnessBody"];

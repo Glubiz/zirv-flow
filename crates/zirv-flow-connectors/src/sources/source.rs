@@ -135,6 +135,7 @@ mod tests {
             config_fields: &[],
             credential_fields: &[],
             rate_limit: None,
+            config_check: None,
             capabilities: Capabilities {
                 push: false,
                 incremental: false,

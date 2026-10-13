@@ -11,6 +11,7 @@ import {
   isPush,
   kindName,
   lastSuccessLabel,
+  shapesValid,
   runErrorText,
   schemeSummary,
   showValue,
@@ -19,7 +20,7 @@ import {
   webhookUrl,
   withoutSecrets,
 } from "./labels";
-import { aFreshness, aWebhook, FAKE_KIND, WEBHOOK_KIND } from "./testData";
+import { aFreshness, aWebhook, FAKE_KIND, POSTGRES_KIND, WEBHOOK_KIND } from "./testData";
 
 const CONFIG = FAKE_KIND.config_fields;
 const CREDENTIAL = FAKE_KIND.credential_fields;
@@ -65,6 +66,43 @@ describe("source forms", () => {
     expect(showValue(false)).toBe("false");
     expect(showValue({ a: 1 })).toBe('{"a":1}');
     expect(showValue(null)).toBe("");
+  });
+
+  it("sends the queries of a database source as a list and leaves an empty list out", () => {
+    const fields = POSTGRES_KIND.config_fields;
+    const queries = JSON.stringify([{ name: "vip", sql: "SELECT id FROM customers" }]);
+
+    expect(configFrom(fields, { host: "db.example.com", port: "5433", queries })).toEqual({
+      host: "db.example.com",
+      port: 5433,
+      queries: [{ name: "vip", sql: "SELECT id FROM customers" }],
+    });
+    expect(configFrom(fields, { host: "db", queries: "[]" })).toEqual({ host: "db" });
+    expect(configFrom(fields, { host: "db", queries: "" })).toEqual({ host: "db" });
+    expect(configFrom(fields, { ca_certificate: "  -----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n" })).toEqual({
+      ca_certificate: "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----",
+    });
+  });
+
+  it("shows the stored queries as the JSON text the editor reads", () => {
+    const fields = POSTGRES_KIND.config_fields;
+    const stored = [{ name: "vip", sql: "SELECT 1" }];
+
+    const values = initialValues(fields, { host: "db", queries: stored });
+
+    expect(values.queries).toBe(JSON.stringify(stored));
+    expect(configFrom(fields, values)).toEqual({ host: "db", queries: stored });
+  });
+
+  it("blocks a form whose queries are not valid and passes one without queries", () => {
+    const fields = POSTGRES_KIND.config_fields;
+
+    expect(shapesValid(fields, {})).toBe(true);
+    expect(shapesValid(fields, { queries: JSON.stringify([{ name: "vip", sql: "SELECT 1" }]) })).toBe(true);
+    expect(shapesValid(fields, { queries: JSON.stringify([{ name: "Vip!", sql: "SELECT 1" }]) })).toBe(false);
+    expect(shapesValid(fields, { queries: JSON.stringify([{ name: "vip", sql: "SELECT 1;" }]) })).toBe(false);
+    expect(shapesValid(fields, { queries: "not json" })).toBe(false);
+    expect(shapesValid(CONFIG, { streams: "2" })).toBe(true);
   });
 
   it("names a type by its label and falls back to its id", () => {

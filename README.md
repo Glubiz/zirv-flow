@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists, a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL and MySQL sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1112,6 +1112,15 @@ and list exists, every trait key exists and is not archived, no trait is filled 
 and every transform is well formed. It can be saved again until the first run starts; saving
 clears an earlier dry run.
 
+**Timestamps.** A value that a mapping reads as a timestamp (a `timestamp` trait target, a
+`cast` to `timestamp`, an event time) is RFC 3339, or the SQL text form that PostgreSQL and MySQL
+produce: `YYYY-MM-DD HH:MM:SS`, a space or a `T` between the date and the time, then optionally
+`.fraction` (1 to 9 digits) and an offset (`+HH`, `-HH`, `+HH:MM`, `-HH:MM` or `+HHMM`). A value
+without an offset is **UTC**, so a MySQL `DATETIME` or a `timestamp without time zone` must hold
+UTC to be right. The date alone, a time without seconds and a value with trailing text are
+`bad_timestamp`; use the `timestamp` transform with a `format` for those. CSV imports read
+timestamps with the same leniency as sync runs.
+
 **Dry run.** `POST .../imports/{id}/dry-run` queues the `import.dry_run` job. It reads the
 whole file with the mapping and writes nothing but the rejected rows (phase `dry_run`) and the
 counters: no person, identifier, field or list changes. Poll `GET .../imports/{id}` for
@@ -1331,7 +1340,7 @@ rules, an optional `key_column` and, for sync runs only, an optional `event` and
   record: `{"name": "order_placed", "timestamp": {"column": "order.at", "transforms": [...]},
   "properties": [{"property": "total", "column": "order.total", "transforms": [...]}]}`. The
   name is a constant, the person is the record's identifiers, the time goes through its
-  transforms and is read as an RFC 3339 timestamp (without one the event happened when the run
+  transforms and is read as a timestamp, RFC 3339 or SQL text, see Timestamps (without one the event happened when the run
   started), and a property is the chain's value (an empty one is left out; at most 50). The
   stream must have a primary key (`event_requires_primary_key`).
 
@@ -1484,6 +1493,96 @@ one trace (`GET .../traces/{trace_id}`): each applied, refused or deleted record
 with the `sync_run` cause and a durable id (the source record, the person, or the reject), never
 a value. Metrics: `zirv_flow_sync_runs_total{outcome}`, `zirv_flow_sync_records_total{outcome}`
 `zirv_flow_sync_events_total{outcome}` (`accepted`, `duplicate`, `rejected`) and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
+
+### Database sources
+
+The `postgres` and `mysql` source types read the tables and queries of one schema (PostgreSQL) or
+one database (MySQL). Supported versions: PostgreSQL 16 and 18 and MySQL 8.4, the ones CI runs
+against; MariaDB is not supported. Add one in the setup wizard like any source: the form asks for
+the host, the port (5432 or 3306 by default), the database, for PostgreSQL the schema (`public` by
+default), TLS, an optional CA certificate, a statement timeout and the queries, and the credential
+is a user and a password.
+
+**Create a read-only role.** The role's grants are the real guarantee that nothing is written.
+Every statement also runs in a read-only transaction, which the server refuses to write in, but do
+not depend on that alone. Grant `SELECT` on the tables to read and nothing else:
+
+```sql
+-- PostgreSQL
+CREATE ROLE zirv_flow_reader LOGIN PASSWORD 'choose-a-long-password';
+ALTER ROLE zirv_flow_reader SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE shop TO zirv_flow_reader;
+GRANT USAGE ON SCHEMA public TO zirv_flow_reader;
+GRANT SELECT ON public.customers, public.orders TO zirv_flow_reader;
+
+-- MySQL
+CREATE USER 'zirv_flow_reader'@'%' IDENTIFIED BY 'choose-a-long-password' REQUIRE SSL;
+GRANT SELECT ON shop.customers TO 'zirv_flow_reader'@'%';
+GRANT SELECT ON shop.orders TO 'zirv_flow_reader'@'%';
+```
+
+Discovery lists the base tables the role can see in the schema (not views and not other schemas),
+so the grants decide which streams exist. More than 1,000 tables is refused: grant the role fewer.
+
+**Streams.** A table is a stream named after the table. A **query** is a stream named
+`query:<name>`: enter queries in the **Queries** setting of the source (at most 20; a name of 1 to
+64 characters of `a-z`, `0-9` and `_`). A query is one `SELECT` or `WITH` statement of at most
+20,000 characters, with no semicolon at the end, whose column names are unique. It must return the
+primary key columns and, for an incremental stream, the cursor column. No `ORDER BY` is needed: the
+source orders and pages it. Discovery prepares each query (the server parses and plans it and does
+not run it) to learn its columns. After discovery, set each stream's primary key and, for an
+incremental one, its cursor field in the stream settings; a table's primary key is filled in for
+you, and `updated_at` is offered as the cursor when the table has a timestamp column of that name.
+
+**Egress.** A database on a private address needs its range in `egress.allow` (see Egress), for
+example `allow = ["10.0.5.0/24"]`. The host is resolved and every address checked at each
+connection (a test, a discovery and each run); one refused address refuses the host. The
+connection goes to the checked address, and the host name you entered is the name the certificate
+must match.
+
+**TLS.** The default, `verify`, requires TLS and checks the certificate against the **CA
+certificate** setting (a PEM, which is then the only CA trusted) or, when that is empty, the public
+roots compiled into the server. The operating system's certificate store is not used. There is no
+plaintext fallback. `off` is accepted only toward non-public addresses (private, loopback,
+link-local) that the egress policy allows; a public address always needs TLS, even when it is
+allowlisted in `egress.allow`.
+
+**How a table is read.** A stream is read in pages of 500 rows, each in its own short read-only
+transaction with the statement timeout set (`statement_timeout_seconds`, 60 by default, 1 to 600).
+Rows are ordered by the cursor and then the primary key (incremental) or by the primary key (full
+refresh), and the next page starts strictly after the last row of the previous one, so rows that
+share a cursor value across a page boundary are neither skipped nor read twice. The checkpoint is
+the key of the last row. Consequences to plan for:
+
+- A stream must have a **primary key** (one or more columns): without one it cannot be resumed,
+  and the run fails. A table without a primary key can be listed but not read.
+- The cursor and primary key columns must be of a type that can be paged on. PostgreSQL: `int2`,
+  `int4`, `int8`, `numeric`, `text`, `varchar`, `bpchar`, `uuid`, `date`, `timestamp`,
+  `timestamptz`. MySQL: integer types (signed and unsigned), `decimal`, `char`, `varchar`, `text`,
+  `date`, `datetime`, `timestamp`. Other types (floats, booleans, binary, JSON) are refused.
+- Choose a cursor that only moves forward and is assigned when the row is committed, such as an
+  `updated_at` maintained by a trigger, and index it together with the primary key. A transaction
+  that commits a row with an older cursor value after the stream has passed it is picked up by the
+  next full refresh, not before: that is inherent to reading by cursor.
+- **Rows whose cursor is NULL are not read by an incremental stream**; a full refresh reads them.
+- A NULL primary key value fails the run (it cannot be a record key).
+- Sweeping what a full refresh no longer lists, and soft-delete signals, come later: these sources
+  never report a record as deleted.
+
+**Values.** Every selected column is read as text and arrives as a JSON string, or `null` for SQL
+`NULL`; the mapping's cast transforms turn it into numbers, booleans and timestamps (the text
+forms PostgreSQL and MySQL give are read as they are, see Timestamps under the mapping). Timestamps are
+read in UTC. JSON columns arrive as JSON text. Binary columns (`bytea`, `BLOB`, `BINARY`) are not
+text and arrive as `null`.
+
+**Errors and privacy.** An error from the database can quote the value that broke a constraint, so
+no server or driver message is ever shown, logged or stored: a failure is one of a few fixed
+messages (the credential was refused; the database could not be reached or did not answer in time;
+the connection could not be secured; the query failed; a write was refused), and the log line
+holds the source type and the SQLSTATE or MySQL error number only. Metrics (no source, stream or
+workspace label): `zirv_flow_source_db_batches_total{source_type}` and
+`zirv_flow_source_db_errors_total{source_type,reason}` with `reason` one of `auth`, `unreachable`,
+`egress`, `timeout`, `tls`, `read_only`, `config` or `query`.
 
 ### Source freshness
 
@@ -1745,6 +1844,15 @@ DATABASE_URL=postgres://postgres:postgres@localhost:55416/postgres cargo nextest
 
 docker run --name zf-pg18 -e POSTGRES_PASSWORD=postgres -p 55418:5432 -d postgres:18
 DATABASE_URL=postgres://postgres:postgres@localhost:55418/postgres cargo nextest run --run-ignored only --no-fail-fast
+```
+
+The MySQL source tests also need a MySQL 8.4 server, named by `ZIRV_FLOW_TEST_MYSQL_URL` (CI starts one
+as a service next to PostgreSQL). A test that needs a server it was not given fails and names the
+variable instead of passing silently:
+
+```sh
+docker run --name zf-mysql -e MYSQL_ROOT_PASSWORD=mysql -p 53306:3306 -d mysql:8.4
+ZIRV_FLOW_TEST_MYSQL_URL=mysql://root:mysql@127.0.0.1:53306/mysql DATABASE_URL=postgres://postgres:postgres@localhost:55416/postgres cargo nextest run --run-ignored only --no-fail-fast
 ```
 
 ## Contributing, security, and license

@@ -103,6 +103,7 @@ impl Source for Fake {
             secret: true,
         }],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             push: false,
             incremental: true,

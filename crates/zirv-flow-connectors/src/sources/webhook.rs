@@ -27,6 +27,7 @@ impl Source for Webhook {
         config_fields: &[],
         credential_fields: &[],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             push: true,
             incremental: false,

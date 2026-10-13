@@ -49,6 +49,20 @@ mod tests {
     }
 
     #[test]
+    fn the_database_sources_are_registered_with_secret_credentials_and_no_secret_settings() {
+        let registry = Registry::built_in();
+
+        for kind in ["postgres", "mysql"] {
+            let spec = registry.get(kind).expect(kind).spec();
+            let credentials: Vec<_> = spec.credential_fields.iter().map(|f| f.key).collect();
+            assert_eq!(spec.kind, kind);
+            assert_eq!(credentials, ["user", "password"]);
+            assert!(spec.capabilities.incremental && spec.capabilities.full_refresh);
+            assert!(!spec.capabilities.emits_deletes);
+        }
+    }
+
+    #[test]
     fn an_unknown_kind_is_not_found() {
         assert!(Registry::built_in().get("no-such-kind").is_none());
     }
@@ -71,9 +85,11 @@ mod tests {
     #[test]
     fn a_source_module_is_reached_only_through_its_registry_line() {
         let production = include_str!("mod.rs");
-        let mentions = production.matches("fake::Fake").count();
+        for module in ["fake::Fake", "postgres::Postgres", "mysql::Mysql"] {
+            let mentions = production.matches(module).count();
 
-        assert_eq!(mentions, 1, "one registry line names the fake source");
+            assert_eq!(mentions, 1, "one registry line names {module}");
+        }
     }
 
     #[test]

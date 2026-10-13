@@ -1,6 +1,7 @@
 //! What a source type declares about itself: the fields a marketer fills in and what it can do.
 //! The setup wizard renders its form from these.
 
+use super::validate::FieldError;
 use crate::runtime::RateLimit;
 
 /// A source type, as the registry lists it.
@@ -18,6 +19,10 @@ pub struct SourceSpec {
     /// The request rate the source type tolerates, enforced per process by the runtime;
     /// `None` is unlimited.
     pub rate_limit: Option<RateLimit>,
+    /// Checks that span or refine the fields (a host's format, a port's range), run by
+    /// [`validate_config`](super::validate_config) once every field has its declared type. It
+    /// returns the settings that failed, naming each without repeating its value.
+    pub config_check: Option<fn(&serde_json::Value) -> Vec<FieldError>>,
 }
 
 /// What a source type can do.
@@ -57,6 +62,10 @@ pub enum FieldKind {
     Bool,
     /// One of the listed values.
     Select(&'static [&'static str]),
+    /// Multi-line text, such as a PEM certificate.
+    LongText,
+    /// A list of named SQL queries (database sources): `[{"name": "...", "sql": "..."}]`.
+    Queries,
 }
 
 impl FieldKind {
@@ -68,6 +77,8 @@ impl FieldKind {
             Self::Number => "number",
             Self::Bool => "bool",
             Self::Select(_) => "select",
+            Self::LongText => "long_text",
+            Self::Queries => "queries",
         }
     }
 }
@@ -83,5 +94,7 @@ mod tests {
         assert_eq!(FieldKind::Number.name(), "number");
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
+        assert_eq!(FieldKind::LongText.name(), "long_text");
+        assert_eq!(FieldKind::Queries.name(), "queries");
     }
 }
