@@ -9,10 +9,13 @@ mod error;
 mod fake;
 mod file;
 mod http;
+mod mysql;
+mod postgres;
 mod record_key;
 mod registry;
 mod source;
 mod spec;
+mod sql;
 mod types;
 mod validate;
 
@@ -38,6 +41,8 @@ pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
 pub(crate) static ALL: &[&dyn ErasedSource] = &[
     #[cfg(feature = "test-support")]
     &fake::Fake,
+    &mysql::Mysql,
+    &postgres::Postgres,
     &file::File,
     &http::Http,
 ];

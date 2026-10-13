@@ -10,6 +10,7 @@ import {
   credentialFrom,
   filled,
   initialValues,
+  shapesValid,
   withoutSecrets,
   type Source,
   type SourceKind,
@@ -20,6 +21,10 @@ import { STEPS, type Step } from "./steps";
 import { StreamsPanel } from "./StreamsPanel";
 
 const MAX_NAME_CHARS = 128;
+
+/** The source types that read a database, which the setup guide covers. */
+const DATABASE_KINDS = ["postgres", "mysql"];
+const DATABASE_GUIDE = "https://github.com/Glubiz/zirv-flow#database-sources";
 
 export function NewSourcePage() {
   const { ws = "" } = useParams();
@@ -119,7 +124,9 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
   const nameOk = name.trim() !== "" && name.trim().length <= MAX_NAME_CHARS;
   // A retry may leave the credential blank to keep the one already stored.
   const requiredOk = kind
-    ? filled(kind.config_fields, values) && (source !== null || filled(kind.credential_fields, values))
+    ? filled(kind.config_fields, values) &&
+      shapesValid(kind.config_fields, values) &&
+      (source !== null || filled(kind.credential_fields, values))
     : false;
 
   return (
@@ -187,6 +194,15 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                   onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
                   disabled={busy}
                 />
+                {DATABASE_KINDS.includes(kind.kind) ? (
+                  <p className="muted">
+                    Connect with a role that can only read what should be synced.{" "}
+                    <a href={DATABASE_GUIDE} target="_blank" rel="noreferrer">
+                      How to create one
+                    </a>
+                    .
+                  </p>
+                ) : null}
                 {kind.credential_fields.length > 0 ? (
                   <fieldset className="stack">
                     <legend className="strong">Credential</legend>

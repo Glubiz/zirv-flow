@@ -203,7 +203,7 @@ pub(crate) async fn start(
 struct Failure {
     reason: &'static str,
     at: Option<(WorkspaceId, Uuid)>,
-    error: Option<ApiError>,
+    error: Option<Box<ApiError>>,
 }
 
 impl Failure {
@@ -225,7 +225,7 @@ impl Failure {
         Self {
             reason: "exchange_failed",
             at: None,
-            error: Some(error.into()),
+            error: Some(Box::new(error.into())),
         }
     }
 }
@@ -294,7 +294,7 @@ pub(crate) async fn callback(
         }
         Err(Failure {
             error: Some(error), ..
-        }) => Err(error),
+        }) => Err(*error),
         Err(failure) => {
             count(failure.reason);
             if let Some((workspace, source)) = failure.at {
@@ -411,7 +411,7 @@ async fn complete(
     store_tokens(state, principal, workspace, &source, &stored)
         .await
         .map_err(|error| Failure {
-            error: Some(error),
+            error: Some(Box::new(error)),
             ..failed("exchange_failed")
         })?;
     Ok((workspace, source_id))

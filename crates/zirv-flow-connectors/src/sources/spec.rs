@@ -19,9 +19,9 @@ pub struct SourceSpec {
     /// The request rate the source type tolerates, enforced per process by the runtime;
     /// `None` is unlimited.
     pub rate_limit: Option<RateLimit>,
-    /// A check of the whole configuration that the field specs cannot express, run by
-    /// `validate_config` once every field has its declared type. Pure, and its reasons never
-    /// repeat a value: an `http` source checks its manifest here.
+    /// Checks that span or refine the fields (a host's format, a port's range), run by
+    /// [`validate_config`](super::validate_config) once every field has its declared type. It
+    /// returns the settings that failed, naming each without repeating its value.
     pub config_check: Option<fn(&serde_json::Value) -> Vec<FieldError>>,
 }
 
@@ -61,6 +61,10 @@ pub enum FieldKind {
     Select(&'static [&'static str]),
     /// A JSON object. The setup form shows it as text the person edits.
     Json,
+    /// Multi-line text, such as a PEM certificate.
+    LongText,
+    /// A list of named SQL queries (database sources): `[{"name": "...", "sql": "..."}]`.
+    Queries,
 }
 
 impl FieldKind {
@@ -73,6 +77,8 @@ impl FieldKind {
             Self::Bool => "bool",
             Self::Select(_) => "select",
             Self::Json => "json",
+            Self::LongText => "long_text",
+            Self::Queries => "queries",
         }
     }
 }
@@ -89,5 +95,7 @@ mod tests {
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
         assert_eq!(FieldKind::Json.name(), "json");
+        assert_eq!(FieldKind::LongText.name(), "long_text");
+        assert_eq!(FieldKind::Queries.name(), "queries");
     }
 }

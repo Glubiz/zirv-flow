@@ -832,6 +832,7 @@ mod tests {
 
     use serde_json::json;
     use sqlx::PgPool;
+    use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::mapping::{ColumnRule, Target};
     use zirv_flow_core::people::{Precedence, TraitType};
     use zirv_flow_core::{
@@ -1072,6 +1073,18 @@ mod tests {
         keyring: Option<Arc<Keyring>>,
         keep: bool,
     ) -> Result<(), JobError> {
+        attempt_with(env, job, probe, keyring, Arc::default(), keep).await
+    }
+
+    /// As [`attempt_as`], with the egress policy the worker follows.
+    async fn attempt_with(
+        env: &Env,
+        job: &ClaimedJob,
+        probe: &Probe,
+        keyring: Option<Arc<Keyring>>,
+        egress: Arc<EgressPolicy>,
+        keep: bool,
+    ) -> Result<(), JobError> {
         let mut tx = begin(&env.pool).await.unwrap();
         let result = {
             let mut ctx = JobContext::new(&mut tx, job)
@@ -1081,7 +1094,7 @@ mod tests {
                     batch_size: 500,
                     shards: 1,
                 })
-                .with_outbound(keyring, Arc::default(), Arc::default());
+                .with_outbound(keyring, egress, Arc::default());
             run_sync(&mut ctx, &job.payload, probe).await
         };
         if keep && result.is_ok() {
@@ -2036,6 +2049,494 @@ mod tests {
         assert!(sample.contains("Ad\u{FFFD}a"));
     }
 
+    /// The PostgreSQL source end to end: a table of the test database is the upstream.
+    mod database {
+        use std::sync::atomic::AtomicUsize;
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        use super::*;
+
+        const ROWS: u32 = 1500;
+
+        struct Database {
+            env: Env,
+            role: String,
+            keys: Arc<Keyring>,
+        }
+
+        /// A policy that lets the worker reach the local database.
+        fn loopback() -> Arc<EgressPolicy> {
+            Arc::new(
+                EgressPolicy::parse(&["127.0.0.0/8".to_owned(), "::1/128".to_owned()]).unwrap(),
+            )
+        }
+
+        /// A workspace with a `postgres` source reading the table `items` of the test database
+        /// through a role that can only select from it, and the stream `items`, mapped and read
+        /// in `sync_mode`. `items` holds `ROWS` rows; row `n` has `updated_at` n minutes after
+        /// the epoch of the fixture.
+        async fn setup_database(pool: &PgPool, sync_mode: &str) -> Database {
+            setup_rows(pool, sync_mode, ROWS).await
+        }
+
+        async fn setup_rows(pool: &PgPool, sync_mode: &str, rows: u32) -> Database {
+            zirv_flow_store::migrate(pool).await.unwrap();
+            let ws = create_workspace(
+                pool,
+                &WorkspaceName::parse("one").unwrap(),
+                &Slug::parse("one").unwrap(),
+            )
+            .await
+            .unwrap()
+            .id;
+            create_trait_definition(
+                pool,
+                ws,
+                &NewTraitDefinition {
+                    key: "display_name".into(),
+                    trait_type: TraitType::String,
+                    precedence: Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii: false,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+            let role = format!("zf_job_{}", Uuid::now_v7().simple());
+            for statement in [
+                "CREATE TABLE items (id bigint PRIMARY KEY, email text NOT NULL, name text, \
+                    updated_at timestamptz)"
+                    .to_owned(),
+                format!(
+                    "INSERT INTO items SELECT n, 'user' || n || '@example.com', 'User ' || n, \
+                        timestamptz '2024-01-01 00:00:00+00' + n * interval '1 minute' \
+                     FROM generate_series(1, {rows}) AS n"
+                ),
+                format!("CREATE ROLE {role} LOGIN PASSWORD 'zf_job_pw'"),
+                format!("GRANT SELECT ON items TO {role}"),
+            ] {
+                sqlx::query(sqlx::AssertSqlSafe(statement))
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            let options = pool.connect_options();
+            let config = json!({
+                "host": options.get_host(),
+                "port": options.get_port(),
+                "database": options.get_database().unwrap(),
+                "tls": "off",
+            });
+            let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+            let secret = zirv_flow_core::SecretId::new();
+            let sealed = seal(
+                &keys,
+                json!({"user": role, "password": "zf_job_pw"})
+                    .to_string()
+                    .as_bytes(),
+                &secret_aad(ws, secret, SecretPurpose::ConnectorCredential),
+            );
+            zirv_flow_store::secrets::insert_unchecked(
+                pool,
+                ws,
+                SecretPurpose::ConnectorCredential,
+                secret,
+                &sealed,
+            )
+            .await
+            .unwrap();
+            let source = create_source(
+                pool,
+                ws,
+                &NewSource {
+                    id: Uuid::now_v7(),
+                    kind: "postgres",
+                    name: "warehouse",
+                    config: &config,
+                    credential_secret_id: Some(secret),
+                    credential_fields: &["user".to_owned(), "password".to_owned()],
+                    schedule: None,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap();
+            let env = Env {
+                pool: pool.clone(),
+                ws,
+                source: source.id,
+                stream: Uuid::nil(),
+            };
+            let stream = discover_and_configure(&env, &role, sync_mode).await;
+            Database {
+                env: Env { stream, ..env },
+                role,
+                keys: Arc::new(keys),
+            }
+        }
+
+        /// Runs discovery against the real database and stores the result, as the API does,
+        /// configuring the stream `items` the first time.
+        async fn discover_and_configure(env: &Env, role: &str, sync_mode: &str) -> Uuid {
+            let context = SourceContext::new(
+                loopback(),
+                HttpLimits::default(),
+                "postgres",
+                "test",
+                Arc::default(),
+            )
+            .unwrap();
+            let config: Value = sqlx::query_scalar("SELECT config FROM sources WHERE id = $1")
+                .bind(env.source)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            let mut credential = Credential::new();
+            credential.insert("user", zirv_flow_core::SecretString::new(role.to_owned()));
+            credential.insert(
+                "password",
+                zirv_flow_core::SecretString::new("zf_job_pw".to_owned()),
+            );
+            let found = Registry::built_in()
+                .get("postgres")
+                .unwrap()
+                .discover(&context, &config, &credential)
+                .await
+                .unwrap();
+            let descriptors: Vec<Value> = found
+                .iter()
+                .map(|descriptor| serde_json::to_value(descriptor).unwrap())
+                .collect();
+            let incremental = sync_mode == "incremental";
+            let cursor = incremental.then_some("updated_at");
+            let key = vec!["id".to_owned()];
+            let discovered: Vec<DiscoveredStream<'_>> = found
+                .iter()
+                .zip(&descriptors)
+                .map(|(descriptor, json)| DiscoveredStream {
+                    name: &descriptor.name,
+                    sync_mode,
+                    cursor_field: cursor,
+                    primary_key: &key,
+                    descriptor: json,
+                    suggested_mapping: None,
+                })
+                .collect();
+            let mut tx = begin(&env.pool).await.unwrap();
+            let streams = upsert_discovered_streams(&mut tx, env.ws, env.source, &discovered)
+                .await
+                .unwrap()
+                .unwrap();
+            commit(tx).await.unwrap();
+            let stream = streams
+                .iter()
+                .find(|stream| stream.name == "items")
+                .expect("discovery lists the table items");
+            if env.stream.is_nil() {
+                configure_stream(
+                    &mut env.pool.acquire().await.unwrap(),
+                    env.ws,
+                    env.source,
+                    "items",
+                    &StreamSettings {
+                        enabled: true,
+                        sync_mode,
+                        cursor_field: cursor,
+                        primary_key: &key,
+                        staleness_threshold_seconds: None,
+                        reconcile_schedule: None,
+                        sweep_limit: 0.5,
+                    },
+                )
+                .await
+                .unwrap();
+                set_stream_mapping(&env.pool, env.ws, env.source, "items", &mapping())
+                    .await
+                    .unwrap();
+            }
+            stream.id
+        }
+
+        impl Database {
+            async fn attempt(
+                &self,
+                job: &ClaimedJob,
+                probe: &Probe,
+                egress: Arc<EgressPolicy>,
+            ) -> Result<(), JobError> {
+                attempt_with(
+                    &self.env,
+                    job,
+                    probe,
+                    Some(Arc::clone(&self.keys)),
+                    egress,
+                    false,
+                )
+                .await
+            }
+
+            async fn drop_role(&self) {
+                sqlx::query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {}", self.role)))
+                    .execute(&self.env.pool)
+                    .await
+                    .unwrap();
+                sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {}", self.role)))
+                    .execute(&self.env.pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_run_stopped_after_its_first_unit_resumes_and_applies_every_row_once(
+            pool: PgPool,
+        ) {
+            let db = setup_database(&pool, "full_refresh").await;
+            let (run, job) = db.env.queue().await;
+
+            let first = db
+                .attempt(
+                    &job,
+                    &Probe {
+                        stop_after: Some(1),
+                        before_commit: None,
+                    },
+                    loopback(),
+                )
+                .await;
+            assert!(first.is_err());
+            let mid = db.env.run(run.id).await;
+            assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
+            assert_eq!(mid.checkpoint, Some(json!({"v": 1, "key": ["500"]})));
+
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+
+            let done = db.env.run(run.id).await;
+            assert_eq!(done.state, "succeeded");
+            assert_eq!(done.attempt, 2);
+            assert_eq!(
+                (
+                    done.records_read,
+                    done.records_applied,
+                    done.records_unchanged
+                ),
+                (1500, 1500, 0)
+            );
+            assert_eq!(done.checkpoint, Some(json!({"v": 1, "key": ["1500"]})));
+            let env = &db.env;
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1500);
+            assert_eq!(
+                env.count("SELECT count(*) - count(DISTINCT record_key) FROM source_records")
+                    .await,
+                0,
+                "no key was applied twice"
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
+                    .await,
+                1500
+            );
+            db.drop_role().await;
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn an_incremental_run_reads_nothing_when_nothing_changed_and_exactly_the_new_rows_after(
+            pool: PgPool,
+        ) {
+            let db = setup_database(&pool, "incremental").await;
+            let env = &db.env;
+            let (first, job) = env.queue().await;
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+            assert_eq!(env.run(first.id).await.records_read, 1500);
+
+            let (second, job) = env.queue().await;
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+            let unchanged = env.run(second.id).await;
+            assert_eq!(
+                (unchanged.state.as_str(), unchanged.records_read),
+                ("succeeded", 0)
+            );
+
+            // Ten new rows; the first shares the last cursor value (with a greater key).
+            sqlx::query(
+                "INSERT INTO items SELECT n, 'user' || n || '@example.com', 'User ' || n, \
+                    timestamptz '2024-01-01 00:00:00+00' + GREATEST(n - 1, 1500) * interval '1 minute' \
+                 FROM generate_series(1501, 1510) AS n",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let (third, job) = env.queue().await;
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+
+            let new = env.run(third.id).await;
+            assert_eq!((new.state.as_str(), new.records_read), ("succeeded", 10));
+            assert_eq!(new.records_applied, 10);
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 1510);
+            db.drop_role().await;
+        }
+
+        /// A TCP forwarder to the real database that counts the connections it accepts.
+        async fn counting_proxy(target: (String, u16)) -> (u16, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&accepted);
+            tokio::spawn(async move {
+                while let Ok((mut inbound, _)) = listener.accept().await {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let target = target.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) =
+                            TcpStream::connect((target.0.as_str(), target.1)).await
+                        {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            });
+            (port, accepted)
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn the_workers_egress_policy_decides_whether_the_run_connects(pool: PgPool) {
+            let db = setup_database(&pool, "full_refresh").await;
+            let options = pool.connect_options();
+            let (port, accepted) =
+                counting_proxy((options.get_host().to_owned(), options.get_port())).await;
+            sqlx::query(
+                "UPDATE sources SET config = config || jsonb_build_object('host', '127.0.0.1', \
+                    'port', $1::int)",
+            )
+            .bind(i32::from(port))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let (denied_run, job) = db.env.queue().await;
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job.clone()
+            };
+
+            let denied = db.attempt(&last, &Probe::default(), Arc::default()).await;
+
+            assert!(denied.is_err());
+            let failed = db.env.run(denied_run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(failed.records_read, 0);
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                0,
+                "a refused address is never dialled"
+            );
+
+            let (allowed_run, job) = db.env.queue().await;
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+
+            let done = db.env.run(allowed_run.id).await;
+            assert_eq!(
+                (done.state.as_str(), done.records_read),
+                ("succeeded", 1500)
+            );
+            assert!(accepted.load(Ordering::SeqCst) >= 1);
+            db.drop_role().await;
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_dropped_cursor_column_fails_the_run_and_never_applies_part_of_it(pool: PgPool) {
+            let db = setup_database(&pool, "incremental").await;
+            let env = &db.env;
+            sqlx::query("ALTER TABLE items DROP COLUMN updated_at")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            // The stored descriptor is stale: the read finds the column gone and fails with a
+            // fixed source error.
+            let (stale, job) = env.queue().await;
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job
+            };
+            let result = db.attempt(&last, &Probe::default(), loopback()).await;
+            assert!(result.is_err());
+            let failed = env.run(stale.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+
+            // After discovery ran again, the settings are checked against the new descriptor
+            // before anything is read.
+            discover_and_configure(env, &db.role, "incremental").await;
+            let (fresh, job) = env.queue().await;
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+            let rejected = env.run(fresh.id).await;
+            assert_eq!(rejected.state, "failed");
+            assert_eq!(
+                rejected.error_code.as_deref(),
+                Some("stream_settings_invalid")
+            );
+            assert_eq!((rejected.records_read, rejected.records_applied), (0, 0));
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+            db.drop_role().await;
+        }
+
+        /// A measurement, not a check: with `ZIRV_FLOW_MEASURE_ROWS` set it seeds that many rows,
+        /// runs the stream once and prints the records per second the run took. Without the
+        /// variable it does nothing, so the ignored suite stays quick. Build with
+        /// `ZIRV_FLOW_BENCH_BUILD=1 --features zirv-flow-store/bench-no-decisions` for the same
+        /// run without decision appends; the difference is their overhead at batch 500.
+        #[sqlx::test]
+        #[ignore = "a measurement; set ZIRV_FLOW_MEASURE_ROWS to run it"]
+        async fn measure_records_per_second(pool: PgPool) {
+            let Some(rows) = std::env::var("ZIRV_FLOW_MEASURE_ROWS")
+                .ok()
+                .and_then(|text| text.parse::<u32>().ok())
+            else {
+                return;
+            };
+            let db = setup_rows(&pool, "full_refresh", rows).await;
+            let (run, job) = db.env.queue().await;
+
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+
+            let done = db.env.run(run.id).await;
+            let seconds = (done.finished_at.unwrap() - done.started_at.unwrap()).as_seconds_f64();
+            println!(
+                "MEASURE rows={} state={} seconds={seconds:.2} records_per_second={:.0}",
+                done.records_read,
+                done.state,
+                done.records_read as f64 / seconds
+            );
+            db.drop_role().await;
+        }
+    }
+
     // ---- deletion: the sweep, the delete signal and reconciliation ----
 
     impl Env {
@@ -2876,7 +3377,6 @@ mod tests {
     use axum::extract::State;
     use axum::http::{HeaderMap, Response};
     use axum::routing::get;
-    use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::mapping::map_json;
     use zirv_flow_core::{HmacPurpose, HmacRoot};
 
