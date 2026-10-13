@@ -71,3 +71,48 @@ export function credentialFrom(fields: FieldSpec[], values: Values): Record<stri
 export function filled(fields: FieldSpec[], values: Values): boolean {
   return fields.every((field) => !field.required || (values[field.key] ?? "").trim() !== "" || field.kind === "bool");
 }
+
+export type Run = components["schemas"]["RunBody"];
+export type RunDetail = components["schemas"]["RunDetailBody"];
+export type RunReject = components["schemas"]["RunRejectBody"];
+
+export function isActiveRun(run: Pick<Run, "state">): boolean {
+  return run.state === "queued" || run.state === "running";
+}
+
+export function runStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    queued: "Queued",
+    running: "Running",
+    succeeded: "Succeeded",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  };
+  return labels[state] ?? state;
+}
+
+export function runStateTone(state: string): "neutral" | "attention" | "error" {
+  return state === "failed" ? "error" : state === "succeeded" ? "neutral" : "attention";
+}
+
+export function triggerLabel(trigger: string): string {
+  return trigger === "schedule" ? "Schedule" : trigger === "manual" ? "Manual" : trigger;
+}
+
+/** What a failed run's error code means, in plain words. */
+export function runErrorText(code: string, threshold: number): string {
+  const percent = Math.round(threshold * 1000) / 10;
+  const texts: Record<string, string> = {
+    reject_threshold: `More than ${percent}% of the records were refused, so the run stopped. Records applied before that were kept, and nothing was removed.`,
+    stream_not_mapped: "The stream has no mapping. Set one up, then run it again.",
+    mapping_invalid: "The stream's mapping could not be read. Save the mapping again.",
+    stream_settings_invalid:
+      "The stream's settings no longer fit what the source offers. Discover the streams again, set the stream up, then run it again.",
+    source_error: "The source could not be read after several tries. Test the connection, then run it again.",
+    job_failed: "The run could not finish after several tries. Run it again; if it keeps failing, look at the jobs page.",
+    source_missing: "The source is gone.",
+    stream_missing: "The stream is gone. Discover the streams again.",
+    source_kind_unavailable: "This build of the server does not include this type of source.",
+  };
+  return texts[code] ?? `The run failed (${code}).`;
+}

@@ -1420,6 +1420,69 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sources/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The runs of a source, newest first. Members of the workspace may read them. */
+        get: operations["list_sync_runs"];
+        put?: never;
+        /**
+         * Starts a sync run of one stream of the source, or of every enabled stream that has a
+         *     mapping. A run is queued and read by a worker; poll it with `GET .../runs/{run_id}`.
+         *     Workspace admins only. Audited as `sync_run.started`.
+         */
+        post: operations["start_sync_runs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One run with its counters, state, attempt, error code and trace id, and its first 100
+         *     rejects. Members of the workspace may read it.
+         */
+        get: operations["get_sync_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancels a queued or running run. A running run stops at its next batch: the batch in flight
+         *     is not applied and the checkpoint stays at the last committed one. Workspace admins only.
+         *     Audited as `sync_run.cancelled`.
+         */
+        post: operations["cancel_sync_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/sources/{id}/streams": {
         parameters: {
             query?: never;
@@ -1831,7 +1894,7 @@ export interface components {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
             id: string;
             /**
-             * @description `event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`.
+             * @description `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
              * @example api
              */
             kind: string;
@@ -2300,7 +2363,7 @@ export interface components {
              * @description When the decision was recorded.
              */
             at: string;
-            /** @description `event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`. */
+            /** @description `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`. */
             cause_kind: string;
             /** Format: uuid */
             id: string;
@@ -3266,6 +3329,99 @@ export interface components {
             /** Format: uuid */
             user_id: string;
         };
+        /** @description One sync run: a read of one stream. */
+        RunBody: {
+            /**
+             * Format: int32
+             * @description How many times a worker started the run; more than 1 means an earlier attempt was lost
+             *     and the run resumed from its checkpoint.
+             */
+            attempt: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            /**
+             * @description Why a failed run failed, such as `reject_threshold`, `stream_not_mapped`,
+             *     `stream_settings_invalid`, `source_error` or `job_failed`; never a value.
+             */
+            error_code?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            records_applied: number;
+            /** Format: int64 */
+            records_deleted: number;
+            /**
+             * Format: int64
+             * @description Records the source delivered and the run has committed.
+             */
+            records_read: number;
+            /** Format: int64 */
+            records_rejected: number;
+            /**
+             * Format: int64
+             * @description Records that repeated what is stored already.
+             */
+            records_unchanged: number;
+            /**
+             * Format: double
+             * @description The rejected share above which the run stops, once at least 100 records are read.
+             */
+            reject_threshold: number;
+            /** Format: uuid */
+            source_id: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            /** @description `queued`, `running`, `succeeded`, `failed` or `cancelled`. */
+            state: string;
+            /** @description The name of the stream. */
+            stream: string;
+            /** Format: uuid */
+            stream_id: string;
+            /** @description The stream's sync mode when the run was queued: `full_refresh` or `incremental`. */
+            sync_mode: string;
+            /** @description The trace of the run: 32 lowercase hex characters. Every change the run made is under it. */
+            trace_id: string;
+            /** @description `manual` or `schedule`. */
+            trigger: string;
+        };
+        /** @description A run with its first 100 rejects. */
+        RunDetailBody: components["schemas"]["RunBody"] & {
+            /** @description Oldest first, at most 100; `records_rejected` is the total. */
+            rejects: components["schemas"]["RunRejectBody"][];
+        };
+        /** @description A record the run refused. */
+        RunRejectBody: {
+            /** Format: uuid */
+            id: string;
+            /** @description The first reason code. */
+            reason: string;
+            reasons: components["schemas"]["RunRejectReasonBody"][];
+            /** Format: date-time */
+            received_at: string;
+            /**
+             * @description `{properties, masked}`: a value stays only when the stream's mapping sends its field to
+             *     a trait the field registry marks non-PII. Every other value is null and its field is
+             *     listed in `masked`.
+             */
+            sample: Record<string, never>;
+        };
+        /** @description A field of a refused record and why it was refused. */
+        RunRejectReasonBody: {
+            /** @description The field of the record; empty when no one field is at fault. Never its value. */
+            property: string;
+            /** @description A static code such as `invalid_identifier`, `wrong_type` or `missing_identifier`. */
+            reason: string;
+        };
+        /** @description A page of runs, newest first. */
+        RunsBody: {
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
+            runs: components["schemas"]["RunBody"][];
+        };
         SaveDraftRequest: {
             /** @description Replaces the draft. */
             properties: components["schemas"]["PropertyBody"][];
@@ -3411,6 +3567,11 @@ export interface components {
             kind: string;
             label: string;
         };
+        /** @description Which stream to run. */
+        StartRunRequest: {
+            /** @description The name of one stream. Without it every enabled stream with a mapping is run. */
+            stream?: string | null;
+        };
         StatusBody: {
             /** @example ok */
             status: string;
@@ -3422,6 +3583,7 @@ export interface components {
             enabled: boolean;
             /** Format: uuid */
             id: string;
+            mapping?: null | components["schemas"]["MappingBody"];
             name: string;
             primary_key: string[];
             /**
@@ -3438,6 +3600,7 @@ export interface components {
             /** @description A field of the stream. Required for `incremental`. */
             cursor_field?: string | null;
             enabled: boolean;
+            mapping?: null | components["schemas"]["MappingBody"];
             /** @description Fields of the stream that identify a record. */
             primary_key?: string[];
             /**
@@ -9693,6 +9856,265 @@ export interface operations {
             };
         };
     };
+    list_sync_runs: {
+        parameters: {
+            query?: {
+                /** @description Only runs of the stream with this name */
+                stream?: string;
+                /** @description Runs per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunsBody"];
+                };
+            };
+            /** @description limit is out of range or cursor is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    start_sync_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartRunRequest"];
+            };
+        };
+        responses: {
+            /** @description The queued runs */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or stream, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The stream already has an active run (`code` is `sync_run_active`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sync_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+                /** @description Run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or run, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancel_sync_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+                /** @description Run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cancelled run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or run, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The run is not active */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_source_streams: {
         parameters: {
             query?: never;
@@ -9801,7 +10223,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Settings the stream cannot serve, such as incremental without a cursor field */
+            /** @description Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have */
             422: {
                 headers: {
                     [name: string]: unknown;

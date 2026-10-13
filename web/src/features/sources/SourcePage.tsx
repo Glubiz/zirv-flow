@@ -6,6 +6,7 @@ import { Button, Dialog, formatDateTime, InlineError, PageHeader, Panel, Pill, R
 import { useSourceAccess } from "./access";
 import { EditSourceDialog } from "./EditSourceDialog";
 import { kindName, plural, showValue, type Stream } from "./labels";
+import { RunsPanel } from "./RunsPanel";
 import { StreamsPanel } from "./StreamsPanel";
 
 export function SourcePage() {
@@ -38,6 +39,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [runsVersion, setRunsVersion] = useState(0);
 
   async function run(task: () => Promise<void>) {
     setBusy(true);
@@ -75,6 +77,19 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
     run(async () => {
       await unwrapEmpty(client.DELETE("/api/v1/workspaces/{ws}/sources/{id}", path));
       void navigate(`/w/${workspaceId}/sources`);
+    });
+
+  /** Starts a run of one stream, or of every enabled stream that has a mapping. */
+  const startRuns = (stream: string | null) =>
+    run(async () => {
+      const started = await unwrap(
+        client.POST("/api/v1/workspaces/{ws}/sources/{id}/runs", {
+          params: { path: { ws: workspaceId, id: sourceId } },
+          body: stream === null ? {} : { stream },
+        }),
+      );
+      setNotice(`Started ${plural(started.length, "run", "runs")}.`);
+      setRunsVersion((value) => value + 1);
     });
 
   function streamChanged(saved: Stream) {
@@ -156,6 +171,8 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                         streams={list}
                         canManage={canManage}
                         onChanged={streamChanged}
+                        onRun={(stream) => void startRuns(stream.name)}
+                        busy={busy}
                       />
                       {canManage ? (
                         <div className="panel-footer">
@@ -167,6 +184,16 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                     </>
                   )}
                 </ResourceView>
+              </Panel>
+              <Panel title="Runs" flush>
+                {canManage ? (
+                  <div className="panel-footer">
+                    <Button onClick={() => void startRuns(null)} disabled={busy}>
+                      Run now
+                    </Button>
+                  </div>
+                ) : null}
+                <RunsPanel workspaceId={workspaceId} sourceId={sourceId} canManage={canManage} version={runsVersion} />
               </Panel>
               {!canManage ? <p className="muted">You can look at this source but not change it.</p> : null}
               <p>
