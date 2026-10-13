@@ -88,7 +88,7 @@ export const HTTP_KIND: SourceKind = {
     setting("client_id", "Client ID", "text", { secret: true }),
     setting("client_secret", "Client secret", "text", { secret: true }),
   ],
-  capabilities: { incremental: true, full_refresh: true, emits_deletes: true },
+  capabilities: { incremental: true, full_refresh: true, emits_deletes: true, push: false },
 };
 
 export function aSource(change: Partial<Source> = {}): Source {
