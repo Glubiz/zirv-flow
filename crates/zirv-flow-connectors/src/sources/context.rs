@@ -86,10 +86,14 @@ impl SourceContext {
     }
 
     /// Seeds the OAuth2 token slot with the token the caller stored last time, so the first call
-    /// does not fetch one.
+    /// does not fetch one. Only a token with a [binding](AccessToken::binding) is taken: one
+    /// without could belong to any client, endpoint or scope, so it is ignored and the first call
+    /// fetches a token.
     pub fn with_access_token(self, token: AccessToken) -> Self {
-        // A seed is not a refresh: the caller already has it.
-        self.slot().current = Some(token);
+        if token.binding().is_some() {
+            // A seed is not a refresh: the caller already has it.
+            self.slot().current = Some(token);
+        }
         self
     }
 
@@ -126,8 +130,7 @@ impl SourceContext {
         self.retry
     }
 
-    /// The cached token if it can go on a request for the configuration `binding`. A token that
-    /// carries no binding yet is bound to this one.
+    /// The cached token if it can go on a request for the configuration `binding`.
     pub(crate) fn reusable_token(
         &self,
         binding: &str,
@@ -138,9 +141,7 @@ impl SourceContext {
         if !token.is_usable(binding, rejected) {
             return None;
         }
-        let token = token.clone().with_binding(binding);
-        slot.current = Some(token.clone());
-        Some(token)
+        Some(token.clone())
     }
 
     /// Waits for the token fetch in progress, if any, and holds the right to start the next.

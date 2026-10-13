@@ -121,8 +121,8 @@ impl AccessToken {
 
     /// A fingerprint of the token URL, the client id and the scopes the token was fetched for,
     /// never of the secret. A token is used only with the configuration it is bound to. Store it
-    /// with the token and give it back with [`AccessToken::with_binding`]; a token without one
-    /// is bound to the configuration it is first used with.
+    /// with the token and give it back with [`AccessToken::with_binding`]; a token without one is
+    /// never used.
     pub fn binding(&self) -> Option<&str> {
         self.binding.as_deref()
     }
@@ -141,11 +141,11 @@ impl AccessToken {
         Arc::ptr_eq(&self.token, &other.token) || self.token.expose() == other.token.expose()
     }
 
-    /// Whether the token can go on the next request: unexpired, bound to `binding` (or to
-    /// nothing yet), and not the one the upstream just refused.
+    /// Whether the token can go on the next request: unexpired, bound to `binding`, and not the
+    /// one the upstream just refused.
     pub(crate) fn is_usable(&self, binding: &str, rejected: Option<&Self>) -> bool {
         !self.is_expired(Utc::now())
-            && self.binding.as_deref().is_none_or(|bound| bound == binding)
+            && self.binding.as_deref() == Some(binding)
             && rejected.is_none_or(|refused| !self.same_as(refused))
     }
 }
@@ -534,11 +534,14 @@ mod tests {
             .await
     }
 
-    fn token(value: &str, lifetime: i64) -> AccessToken {
+    /// A stored token for `idp`'s client, as the caller would give it back.
+    fn token(idp: &Idp, value: &str, lifetime: i64) -> AccessToken {
+        let binding = binding_of(&idp.mock.url("/token"), "the-client", &[]);
         AccessToken::new(
             SecretString::new(value.into()),
             Some(Utc::now() + TimeDelta::seconds(lifetime)),
         )
+        .with_binding(binding)
     }
 
     #[tokio::test]
@@ -570,7 +573,7 @@ mod tests {
         let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
         let api = api(valid, false).await;
         let secret = SecretString::new("client-secret".into());
-        let ctx = context("oauth", "s").with_access_token(token("seeded", 3600));
+        let ctx = context("oauth", "s").with_access_token(token(&idp, "seeded", 3600));
         let auth = oauth(&idp, &secret, ClientAuth::Body);
 
         call(&ctx, &api, &auth).await.unwrap();
@@ -587,7 +590,7 @@ mod tests {
         let api = api(valid, false).await;
         let secret = SecretString::new("client-secret".into());
         // Valid for 30 s more, which is inside the 60 s skew.
-        let ctx = context("oauth", "s").with_access_token(token("old", 30));
+        let ctx = context("oauth", "s").with_access_token(token(&idp, "old", 30));
 
         call(&ctx, &api, &oauth(&idp, &secret, ClientAuth::Body))
             .await
@@ -608,7 +611,7 @@ mod tests {
         let api = api(valid, false).await;
         let secret = SecretString::new("client-secret".into());
         // Not expired as far as the clock knows, but the upstream has revoked it.
-        let ctx = context("oauth", "s").with_access_token(token("revoked", 3600));
+        let ctx = context("oauth", "s").with_access_token(token(&idp, "revoked", 3600));
 
         let response = call(&ctx, &api, &oauth(&idp, &secret, ClientAuth::Body))
             .await
@@ -631,7 +634,7 @@ mod tests {
         let secret = SecretString::new("client-secret".into());
         let auth = oauth(&idp, &secret, ClientAuth::Body);
 
-        let cached = context("oauth", "s").with_access_token(token("revoked", 3600));
+        let cached = context("oauth", "s").with_access_token(token(&idp, "revoked", 3600));
         assert_eq!(
             call(&cached, &api, &auth).await.unwrap_err(),
             RuntimeError::Unauthorized
@@ -848,7 +851,7 @@ mod tests {
         let api = api(valid, false).await;
         let secret = SecretString::new("client-secret".into());
         let auth = oauth(&idp, &secret, ClientAuth::Body);
-        let ctx = context("oauth", "s").with_access_token(token("old", 30));
+        let ctx = context("oauth", "s").with_access_token(token(&idp, "old", 30));
 
         let calls = (0..8).map(|_| {
             let ctx = ctx.clone();
@@ -873,7 +876,7 @@ mod tests {
         let api = api(valid, false).await;
         let secret = SecretString::new("client-secret".into());
         let auth = oauth(&idp, &secret, ClientAuth::Body);
-        let ctx = context("oauth", "s").with_access_token(token("revoked", 3600));
+        let ctx = context("oauth", "s").with_access_token(token(&idp, "revoked", 3600));
 
         let calls = (0..8).map(|_| {
             let ctx = ctx.clone();
@@ -893,5 +896,30 @@ mod tests {
             16,
             "each call: the revoked token, then the new one"
         );
+    }
+
+    #[tokio::test]
+    async fn a_seeded_token_without_a_binding_is_never_sent_and_a_fetch_happens() {
+        let valid = Arc::new(Mutex::new("unbound".to_owned()));
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(valid, false).await;
+        let secret = SecretString::new("client-secret".into());
+        let auth = oauth(&idp, &secret, ClientAuth::Body);
+        // The API would accept it: only the missing binding keeps it from being sent.
+        let unbound = AccessToken::new(
+            SecretString::new("unbound".into()),
+            Some(Utc::now() + TimeDelta::seconds(3600)),
+        );
+        let ctx = context("oauth", "s").with_access_token(unbound);
+
+        call(&ctx, &api, &auth).await.unwrap();
+
+        assert_eq!(idp.issued.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ctx.take_refreshed_token().unwrap().token().expose(),
+            "tok-1"
+        );
+        let sent = api.seen()[0].headers.get("authorization").unwrap().clone();
+        assert_eq!(sent, "Bearer tok-1");
     }
 }
