@@ -92,6 +92,15 @@ mod tests {
     }
 
     async fn fixture_with(pool: &PgPool, keyring: Option<Arc<Keyring>>) -> Fixture {
+        fixture_with_egress(pool, keyring, None).await
+    }
+
+    /// `fixture_with`, and the egress policy the server enforces when one is given.
+    async fn fixture_with_egress(
+        pool: &PgPool,
+        keyring: Option<Arc<Keyring>>,
+        egress: Option<zirv_flow_core::egress::EgressPolicy>,
+    ) -> Fixture {
         zirv_flow_store::migrate(pool).await.unwrap();
         let name = WorkspaceName::parse("ours").unwrap();
         let slug = Slug::parse("ours").unwrap();
@@ -111,6 +120,9 @@ mod tests {
                 .await
                 .unwrap();
             state = state.with_keyring(keyring);
+        }
+        if let Some(policy) = egress {
+            state = state.with_egress_policy(Arc::new(policy));
         }
         let router = router(state);
         let key = |scopes: &'static [Scope]| {
@@ -2231,5 +2243,154 @@ mod tests {
         assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
         let read = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
         assert_eq!(read.body["config"]["queries"], more);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_postgres_table_stream_previews_through_the_mapping_editor_without_writing(
+        pool: PgPool,
+    ) {
+        // The test database is the upstream: a table, and a role that can only read it.
+        let role = format!("zf_prev_{}", uuid::Uuid::now_v7().simple());
+        for statement in [
+            "CREATE TABLE items (id bigint PRIMARY KEY, email text NOT NULL, name text, \
+             updated_at timestamptz)"
+                .to_owned(),
+            "INSERT INTO items SELECT n, 'user' || n || '@example.com', 'User ' || n, \
+             timestamptz '2024-01-01 00:00:00+00' + n * interval '1 minute' \
+             FROM generate_series(1, 30) AS n"
+                .to_owned(),
+            format!("CREATE ROLE {role} LOGIN PASSWORD 'zf_prev_pw'"),
+            format!("GRANT SELECT ON items TO {role}"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
+            "127.0.0.0/8".to_owned(),
+            "::1/128".to_owned(),
+        ])
+        .unwrap();
+        let fx = fixture_with_egress(
+            &pool,
+            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
+            Some(policy),
+        )
+        .await;
+        zirv_flow_store::create_trait_definition(&pool, fx.ws, &trait_definition("plan", false))
+            .await
+            .unwrap();
+        let options = pool.connect_options();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "postgres",
+                    "name": "warehouse",
+                    "config": {
+                        "host": options.get_host(),
+                        "port": options.get_port(),
+                        "database": options.get_database().unwrap(),
+                        "tls": "off"
+                    },
+                    "credential": {"user": role, "password": "zf_prev_pw"}
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let discovered = fx
+            .as_admin("POST", &format!("/sources/{id}/discover"), None)
+            .await;
+        assert_eq!(discovered.status, StatusCode::OK, "{:?}", discovered.body);
+        let mapping = json!({
+            "columns": [
+                email_rule(),
+                {"column": "name", "target": {"type": "trait", "key": "plan"}}
+            ],
+            "event": {"name": "seen", "timestamp": {"column": "updated_at", "transforms": [{"op": "timestamp", "format": "%Y-%m-%d %H:%M:%S%#z"}]},
+                      "properties": [{"property": "who", "column": "name"}]}
+        });
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &format!("/sources/{id}/streams/items"),
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                            "primary_key": ["id"], "mapping": mapping})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let before: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM people) + (SELECT count(*) FROM events) \
+             + (SELECT count(*) FROM sync_runs) + (SELECT count(*) FROM jobs)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let saved_preview = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/items/preview"),
+                Some(json!({"limit": 3})),
+            )
+            .await;
+        let draft = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/items/preview"),
+                Some(json!({"limit": 20, "mapping": {"columns": [email_rule()]}})),
+            )
+            .await;
+
+        assert_eq!(
+            saved_preview.status,
+            StatusCode::OK,
+            "{:?}",
+            saved_preview.body
+        );
+        assert_eq!(saved_preview.body["read"], 3);
+        assert_eq!(saved_preview.body["truncated"], true);
+        let first = &saved_preview.body["records"][0];
+        assert_eq!(first["result"], "mapped");
+        assert_eq!(first["key"], "1");
+        assert_eq!(first["identifiers"][0]["value"], "user1@example.com");
+        assert_eq!(first["traits"]["plan"], "User 1");
+        assert_eq!(first["event"]["properties"]["who"], "User 1");
+        assert_eq!(first["event"]["occurred_at"], "2024-01-01T00:01:00Z");
+        // PostgreSQL hands a timestamptz over as text ("2024-01-01 00:01:00+00"), which is not RFC 3339,
+        // so an event time from it needs the timestamp transform; the bare column is refused.
+        let bare = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/items/preview"),
+                Some(json!({"limit": 1, "mapping": {"columns": [email_rule()],
+                    "event": {"name": "seen", "timestamp": {"column": "updated_at"}}}})),
+            )
+            .await;
+        assert_eq!(
+            bare.body["records"][0]["result"], "rejected",
+            "{:?}",
+            bare.body
+        );
+        assert_eq!(
+            bare.body["records"][0]["errors"][0]["reason"],
+            "bad_timestamp"
+        );
+        assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
+        assert_eq!(draft.body["read"], 20);
+        assert_eq!(draft.body["truncated"], true, "30 rows, 20 shown");
+        assert_eq!(draft.body["records"][19]["key"], "20");
+        let after: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM people) + (SELECT count(*) FROM events) \
+             + (SELECT count(*) FROM sync_runs) + (SELECT count(*) FROM jobs)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "a preview writes nothing");
     }
 }
