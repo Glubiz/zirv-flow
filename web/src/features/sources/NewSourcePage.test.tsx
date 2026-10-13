@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { NewSourcePage } from "./NewSourcePage";
-import { aSource, aStream, FAKE_KIND } from "./testData";
+import { aSource, aStream, FAKE_KIND, POSTGRES_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -163,6 +163,89 @@ describe("the source wizard", () => {
     expect(await screen.findByText("The connection to CRM works.")).toBeInTheDocument();
     const patch = calls.find((call) => call.method === "PATCH");
     expect(patch?.body).toEqual({ name: "CRM", config: { streams: 2 } });
+  });
+
+  it("offers the database types and creates a PostgreSQL source with a CA and a query", async () => {
+    const calls = mockApi({
+      ...BASE,
+      "GET /api/v1/source-kinds": () => json([FAKE_KIND, POSTGRES_KIND]),
+      "POST /api/v1/workspaces/ws1/sources": () => json(aSource({ kind: "postgres", name: "Warehouse" }), 201),
+      "POST /api/v1/workspaces/ws1/sources/src-1/test": () => json({ ok: true, error: null }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Choose PostgreSQL" }));
+    expect(screen.getByRole("link", { name: "How to create one" })).toHaveAttribute(
+      "href",
+      "https://github.com/Glubiz/zirv-flow#database-sources",
+    );
+    expect(screen.getByText("No queries")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Name"), "Warehouse");
+    await user.type(screen.getByLabelText("Host"), "db.example.com");
+    await user.type(screen.getByLabelText("Database"), "shop");
+    await user.selectOptions(screen.getByLabelText("TLS (optional)"), "verify");
+    await user.click(screen.getByLabelText("CA certificate (optional)"));
+    await user.paste("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----");
+    await user.click(screen.getByRole("button", { name: "Add query" }));
+    await user.type(screen.getByLabelText("Query 1 name"), "vip");
+    const save = screen.getByRole("button", { name: "Save and test" });
+    await user.type(screen.getByLabelText("User"), "reader");
+    await user.type(screen.getByLabelText("Password"), "pw");
+    // An unfinished query keeps the form from being saved.
+    expect(save).toBeDisabled();
+    await user.type(screen.getByLabelText("Query 1 SQL"), "SELECT id, email FROM customers");
+    expect(save).toBeEnabled();
+    await user.click(save);
+
+    expect(await screen.findByText("The connection to Warehouse works.")).toBeInTheDocument();
+    const created = calls.find((call) => call.method === "POST" && call.path.endsWith("/sources"));
+    expect(created?.body).toEqual({
+      kind: "postgres",
+      name: "Warehouse",
+      config: {
+        host: "db.example.com",
+        database: "shop",
+        tls: "verify",
+        ca_certificate: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+        queries: [{ name: "vip", sql: "SELECT id, email FROM customers" }],
+      },
+      credential: { user: "reader", password: "pw" },
+    });
+  });
+
+  it("round-trips the queries and the CA when the settings are opened again", async () => {
+    const calls = mockApi({
+      ...BASE,
+      "GET /api/v1/source-kinds": () => json([POSTGRES_KIND]),
+      "POST /api/v1/workspaces/ws1/sources": () => json(aSource({ kind: "postgres" }), 201),
+      "PATCH /api/v1/workspaces/ws1/sources/src-1": () => json(aSource({ kind: "postgres" })),
+      "POST /api/v1/workspaces/ws1/sources/src-1/test": () => json({ ok: false, error: "the source could not be reached" }),
+    });
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole("button", { name: "Choose PostgreSQL" }));
+    await user.type(screen.getByLabelText("Name"), "Warehouse");
+    await user.type(screen.getByLabelText("Host"), "db.example.com");
+    await user.type(screen.getByLabelText("Database"), "shop");
+    await user.click(screen.getByRole("button", { name: "Add query" }));
+    await user.type(screen.getByLabelText("Query 1 name"), "vip");
+    await user.type(screen.getByLabelText("Query 1 SQL"), "SELECT 1");
+    await user.type(screen.getByLabelText("User"), "reader");
+    await user.type(screen.getByLabelText("Password"), "pw");
+    await user.click(screen.getByRole("button", { name: "Save and test" }));
+
+    await user.click(await screen.findByRole("button", { name: "Back to settings" }));
+
+    expect(screen.getByLabelText("Query 1 name")).toHaveValue("vip");
+    expect(screen.getByLabelText("Query 1 SQL")).toHaveValue("SELECT 1");
+    await user.click(screen.getByRole("button", { name: "Save and test" }));
+    await screen.findByText("The connection test failed");
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.body).toEqual({
+      name: "Warehouse",
+      config: { host: "db.example.com", database: "shop", queries: [{ name: "vip", sql: "SELECT 1" }] },
+    });
   });
 
   it("says why saving failed and stays on the settings", async () => {
