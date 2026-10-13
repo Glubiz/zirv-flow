@@ -45,7 +45,7 @@ pub(crate) struct PreviewRequest {
     /// For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all)
     /// to map as the drain would. Required for a webhook stream and refused for any other.
     #[serde(default)]
-    #[schema(value_type = Option<Vec<Object>>)]
+    #[schema(value_type = Option<Vec<std::collections::BTreeMap<String, serde_json::Value>>>)]
     sample: Option<Vec<Value>>,
 }
 

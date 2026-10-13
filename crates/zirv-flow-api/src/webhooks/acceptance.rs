@@ -443,6 +443,13 @@ mod tests {
             );
         }
         fx.drain().await;
+        // The older payload arrived last but must not have overwritten the newer one.
+        let after_older: Value =
+            sqlx::query_scalar("SELECT traits->'plan'->'v' FROM source_records")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after_older, json!("pro"));
         // The same signed payload again, with a fresh signature and without one.
         let replay = signed(&hook.secret, now, &newer);
         let again = post_hook(&fx.router, &hook.id, &replay, newer.clone()).await;

@@ -15718,7 +15718,11 @@
               "null"
             ],
             "items": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": {},
+              "propertyNames": {
+                "type": "string"
+              }
             },
             "description": "For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all)\nto map as the drain would. Required for a webhook stream and refused for any other."
           }
