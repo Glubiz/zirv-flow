@@ -3260,6 +3260,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, value, minute)| EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],
             name: name.into(),
@@ -5445,6 +5446,7 @@ email,b@example.com,
         .await;
         let merged = apply(&[("anonymous_id", "anon-1")], "2", json!({})).await;
         let event = zirv_flow_store::EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "ada@example.com".into())],
             name: "page_view".into(),
@@ -7594,6 +7596,7 @@ email,b@example.com,
     ) -> zirv_flow_store::EventRecord {
         let now = time::OffsetDateTime::now_utc();
         zirv_flow_store::EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), who.into())],
             name: name.into(),

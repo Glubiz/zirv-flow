@@ -2519,6 +2519,7 @@ mod tests {
             ws,
             &key,
             &[EventRecord {
+                source_record_id: None,
                 source: "web".into(),
                 identifiers: vec![("email".into(), "event@example.com".into())],
                 name: "seen".into(),

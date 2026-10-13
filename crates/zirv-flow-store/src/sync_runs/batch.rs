@@ -211,12 +211,6 @@ pub async fn commit_sync_batch(
     }
 
     let results = apply_upserts(&mut tx, batch).await?;
-    let events = apply_events(&mut tx, batch, &results).await?;
-    link_event_rejects(&mut tx, batch, &events).await?;
-    if !join_lists(&mut tx, batch, &results).await? {
-        return Ok(BatchOutcome::ListMissing);
-    }
-
     // Every record the run read that still exists in the source is marked as seen: the applied
     // and unchanged ones, and the ones the mapping or the store refused, whose earlier
     // contribution a sweep must not take away (a broken mapping cannot cascade into deletions).
@@ -234,6 +228,11 @@ pub async fn commit_sync_batch(
         .chain(batch.seen.iter().map(String::as_str))
         .collect();
     let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
+    let events = apply_events(&mut tx, batch, &results, &seen).await?;
+    link_event_rejects(&mut tx, batch, &events).await?;
+    if !join_lists(&mut tx, batch, &results).await? {
+        return Ok(BatchOutcome::ListMissing);
+    }
 
     let mut counts = Counts {
         read: i64::try_from(
@@ -495,6 +494,7 @@ async fn apply_events(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
     results: &[Option<ProfileOutcome>],
+    seen: &HashMap<String, Uuid>,
 ) -> Result<EventsApplied, StoreError> {
     let mut applied = EventsApplied::default();
     if batch.upserts.iter().all(|upsert| upsert.event.is_none()) {
@@ -523,6 +523,8 @@ async fn apply_events(
             received_at: batch.received_at,
             message_id: Some(message_id.clone()),
             trace: batch.trace.clone(),
+            // The event goes with the record: removing the record removes it.
+            source_record_id: seen.get(upsert.record.record_key.as_str()).copied(),
         };
         let outcome = if batch.singly {
             let outcome = apply_event_singly(tx, batch, key, &record, &message_id).await?;

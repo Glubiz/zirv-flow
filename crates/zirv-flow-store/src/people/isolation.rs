@@ -243,6 +243,7 @@ mod tests {
             publish_schema_draft(&mut tx, ws, name, None).await.unwrap();
             commit(tx).await.unwrap();
             let rejected = EventRecord {
+                source_record_id: None,
                 source: "web".into(),
                 identifiers: vec![("email".into(), "a@example.com".into())],
                 name: name.into(),

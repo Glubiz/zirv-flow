@@ -382,6 +382,7 @@ mod tests {
         .await;
         // An event names an email the person had no record for: the identity is only observed.
         let event = EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![
                 ("external:crm".into(), "1".into()),

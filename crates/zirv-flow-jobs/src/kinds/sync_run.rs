@@ -2176,6 +2176,71 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_removes_the_sync_written_event_of_a_dropped_record_and_no_other(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+        let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        mapping.event = Some(zirv_flow_core::mapping::EventRule {
+            name: "synced".into(),
+            timestamp: None,
+            properties: Vec::new(),
+        });
+        set_stream_mapping(
+            &pool,
+            env.ws,
+            env.source,
+            "stream_1",
+            &serde_json::to_value(mapping).unwrap(),
+        )
+        .await
+        .unwrap();
+        let key = redaction_key();
+        let (first, job) = env.queue_kind(RunKind::Sync).await;
+        attempt_file(&env, &job, &Probe::default(), false, Some(Arc::clone(&key)))
+            .await
+            .unwrap();
+        assert_eq!(env.run(first.id).await.state, "succeeded");
+        // Every sync-written event names the ledger row of its record.
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
+                 WHERE e.person_id = r.person_id"
+            )
+            .await,
+            5
+        );
+        // A first-party event of the person of the record that will be dropped.
+        env.event_of("stream_1-4", false).await;
+        env.config(json!({"records": 4})).await;
+
+        let (second, job) = env.queue_kind(RunKind::Sync).await;
+        attempt_file(&env, &job, &Probe::default(), false, Some(key))
+            .await
+            .unwrap();
+
+        let second = env.run(second.id).await;
+        assert_eq!(second.state, "succeeded");
+        assert_eq!(second.records_deleted, 1);
+        assert_eq!(env.live_keys().await, keys(0..4));
+        // The dropped record's own event went; the other four and the first-party one stay.
+        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE source_record_id IS NULL")
+                .await,
+            1
+        );
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
+                 WHERE r.deleted_at IS NOT NULL"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_that_fails_on_the_source_sweeps_nothing(pool: PgPool) {
         let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
         env.finish(RunKind::Sync).await;

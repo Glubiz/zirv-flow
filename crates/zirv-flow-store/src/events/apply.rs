@@ -45,6 +45,9 @@ pub struct EventRecord {
     /// The client's retry key.
     pub message_id: Option<String>,
     pub trace: TraceContext,
+    /// The ledger row of the synced record whose mapping produced the event. The event is
+    /// deleted with the row; every other event leaves it `None`.
+    pub source_record_id: Option<Uuid>,
 }
 
 /// What happened to one event.
@@ -418,7 +421,7 @@ async fn judge_event_record(
             reasons: &reasons,
             flags: &flags,
             late: timing.is_late(),
-            source_record_id: None,
+            source_record_id: record.source_record_id,
         },
     )
     .await?;
@@ -803,6 +806,7 @@ mod tests {
 
     fn event(name: &str, properties: Value) -> EventRecord {
         EventRecord {
+            source_record_id: None,
             source: "web".to_owned(),
             identifiers: vec![("email".to_owned(), "ada@example.com".to_owned())],
             name: name.to_owned(),

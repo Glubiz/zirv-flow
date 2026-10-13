@@ -731,6 +731,7 @@ mod tests {
         properties: Value,
     ) {
         let record = EventRecord {
+            source_record_id: None,
             source: "web".to_owned(),
             identifiers: vec![("email".to_owned(), who.to_owned())],
             name: name.to_owned(),

@@ -88,6 +88,7 @@ pub(crate) async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
 
 fn event(name: &str, message_id: &str, at: Option<OffsetDateTime>) -> EventRecord {
     EventRecord {
+        source_record_id: None,
         source: "web".into(),
         identifiers: vec![("email".into(), EMAIL.into())],
         name: name.into(),
