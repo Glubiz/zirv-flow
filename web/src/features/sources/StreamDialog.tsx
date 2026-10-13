@@ -2,7 +2,8 @@ import { useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
-import { syncModeLabel, type Stream } from "./labels";
+import { FreshnessBadge } from "./FreshnessBadge";
+import { lastSuccessLabel, syncModeLabel, thresholdLabel, type Stream } from "./labels";
 
 interface StreamDialogProps {
   workspaceId: string;
@@ -62,6 +63,24 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
 
   return (
     <Dialog title={`Set up ${stream.name}`} onClose={onClose}>
+      {stream.freshness ? (
+        <dl className="facts">
+          <div className="fact">
+            <dt>Freshness</dt>
+            <dd>
+              <FreshnessBadge state={stream.freshness.state} />
+            </dd>
+          </div>
+          <div className="fact">
+            <dt>Last succeeded</dt>
+            <dd>{lastSuccessLabel(stream.freshness)}</dd>
+          </div>
+          <div className="fact">
+            <dt>Stale after</dt>
+            <dd>{thresholdLabel(stream.freshness)}</dd>
+          </div>
+        </dl>
+      ) : null}
       <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
         <label className="check">
           <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
@@ -103,7 +122,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
         </fieldset>
         <TextField
           label="Staleness threshold (seconds)"
-          hint="Optional. How long without new data before the stream counts as stale."
+          hint="Optional. Seconds without a successful run before the stream counts as stale. Left empty, it is twice the source schedule's interval, or never when the source has no schedule."
           type="number"
           min={1}
           value={staleness}

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SourcePage } from "./SourcePage";
-import { aSource, aStream, FAKE_KIND } from "./testData";
+import { aFreshness, aSource, aStream, FAKE_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -49,6 +49,88 @@ describe("a source", () => {
     expect(settings.getByText("Set")).toBeInTheDocument();
     const table = await screen.findByRole("table", { name: "Streams of this source" });
     expect(within(table).getByText("stream_1")).toBeInTheDocument();
+  });
+
+  it("shows the freshness of the source and of each stream with when it last succeeded", async () => {
+    const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1": () => json(aSource({ freshness: "failing" })),
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () =>
+        json([
+          aStream({
+            id: "a",
+            name: "stream_a",
+            enabled: true,
+            freshness: aFreshness({
+              state: "fresh",
+              last_success_at: hoursAgo(3),
+              threshold_seconds: 7200,
+              threshold_is_default: true,
+            }),
+          }),
+          aStream({
+            id: "b",
+            name: "stream_b",
+            enabled: true,
+            staleness_threshold_seconds: 60,
+            freshness: aFreshness({ state: "stale", last_success_at: null, threshold_seconds: 60 }),
+          }),
+          aStream({
+            id: "c",
+            name: "stream_c",
+            enabled: true,
+            freshness: aFreshness({ state: "failing", last_success_at: hoursAgo(30) }),
+          }),
+          aStream({ id: "d", name: "stream_d", enabled: false, freshness: null }),
+        ]),
+    });
+    mount();
+
+    const settings = within(await screen.findByRole("region", { name: "Settings" }));
+    expect(settings.getByText("Failing")).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "Streams of this source" });
+    const row = (name: string) => within(within(table).getByText(name).closest("tr")!);
+    expect(row("stream_a").getByText("Fresh")).toBeInTheDocument();
+    expect(row("stream_a").getByText("3 hours ago")).toBeInTheDocument();
+    expect(row("stream_a").getByText("7200 (default)")).toBeInTheDocument();
+    expect(row("stream_b").getByText("Stale")).toBeInTheDocument();
+    expect(row("stream_b").getByText("Never")).toBeInTheDocument();
+    expect(row("stream_b").getByText("60")).toBeInTheDocument();
+    expect(row("stream_c").getByText("Failing")).toBeInTheDocument();
+    expect(row("stream_c").getByText("1 day ago")).toBeInTheDocument();
+    expect(row("stream_c").getByText("None")).toBeInTheDocument();
+    expect(row("stream_d").queryByText(/Fresh|Stale|Failing/)).not.toBeInTheDocument();
+    expect(row("stream_d").getByText("Not read")).toBeInTheDocument();
+    expect(row("stream_d").getByText("—")).toBeInTheDocument();
+  });
+
+  it("shows the time since the last success and the threshold in the stream dialog", async () => {
+    const threeHoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString();
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () =>
+        json([
+          aStream({
+            enabled: true,
+            freshness: aFreshness({
+              state: "stale",
+              last_success_at: threeHoursAgo,
+              threshold_seconds: 7200,
+              threshold_is_default: true,
+            }),
+          }),
+        ]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+
+    const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+    expect(dialog.getByText("Stale")).toBeInTheDocument();
+    expect(dialog.getByText("3 hours ago")).toBeInTheDocument();
+    expect(dialog.getByText("2.0 h (default)")).toBeInTheDocument();
   });
 
   it("shows a loading state while it loads", async () => {

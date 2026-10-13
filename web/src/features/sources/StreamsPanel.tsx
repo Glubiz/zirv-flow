@@ -1,8 +1,9 @@
 import { useState } from "react";
 
-import { Button, EmptyState, Pill } from "../../ui";
+import { Button, EmptyState, formatDateTime, Pill } from "../../ui";
 import { StreamDialog } from "./StreamDialog";
-import { syncModeLabel, type Stream } from "./labels";
+import { FreshnessBadge } from "./FreshnessBadge";
+import { lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
 
 interface StreamsPanelProps {
   workspaceId: string;
@@ -13,6 +14,13 @@ interface StreamsPanelProps {
   /** Starts a run of one stream; without it the table offers no run. */
   onRun?: (stream: Stream) => void;
   busy?: boolean;
+}
+
+/** The threshold in force, in seconds, marked when it is the default; the stream's own setting while it is not read. */
+function stalenessCell(stream: Stream): string {
+  const threshold = stream.freshness ? stream.freshness.threshold_seconds : stream.staleness_threshold_seconds;
+  if (threshold === null || threshold === undefined) return "None";
+  return stream.freshness?.threshold_is_default ? `${threshold} (default)` : String(threshold);
 }
 
 /** The streams of a source with their settings; admins set each one up in a dialog. */
@@ -37,6 +45,8 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
             <tr>
               <th scope="col">Stream</th>
               <th scope="col">Status</th>
+              <th scope="col">Freshness</th>
+              <th scope="col">Last success</th>
               <th scope="col">Sync mode</th>
               <th scope="col">Cursor field</th>
               <th scope="col">Primary key</th>
@@ -57,10 +67,16 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                 <td>
                   <Pill tone={stream.enabled ? "neutral" : "attention"}>{stream.enabled ? "Read" : "Not read"}</Pill>
                 </td>
+                <td>
+                  <FreshnessBadge state={stream.freshness?.state} />
+                </td>
+                <td title={stream.freshness?.last_success_at ? formatDateTime(stream.freshness.last_success_at) : undefined}>
+                  {stream.freshness ? lastSuccessLabel(stream.freshness) : "—"}
+                </td>
                 <td>{syncModeLabel(stream.sync_mode)}</td>
                 <td>{stream.cursor_field ?? "None"}</td>
                 <td>{stream.primary_key.length > 0 ? stream.primary_key.join(", ") : "None"}</td>
-                <td className="num">{stream.staleness_threshold_seconds ?? "None"}</td>
+                <td className="num">{stalenessCell(stream)}</td>
                 {canManage ? (
                   <td className="num">
                     {onRun && stream.enabled && stream.mapping ? (
