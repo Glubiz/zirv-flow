@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configFrom, credentialFrom, filled, initialValues, kindName, showValue, withoutSecrets } from "./labels";
+import { configFrom, credentialFrom, filled, initialValues, kindName, runErrorText, showValue, withoutSecrets } from "./labels";
 import { FAKE_KIND } from "./testData";
 
 const CONFIG = FAKE_KIND.config_fields;
@@ -53,5 +53,21 @@ describe("source forms", () => {
     expect(kindName([FAKE_KIND], "fake")).toBe("Fake source");
     expect(kindName([FAKE_KIND], "other")).toBe("other");
     expect(kindName(null, "fake")).toBe("fake");
+  });
+
+  it("explains the codes a file run can fail with and falls back to the code", () => {
+    for (const code of [
+      "file_changed",
+      "file_range_unsupported",
+      "record_too_large",
+      "csv_invalid",
+      "json_invalid",
+      "list_missing",
+      "stream_not_keyed",
+      "event_key_unavailable",
+    ]) {
+      expect(runErrorText(code, 0.05)).not.toContain(code);
+    }
+    expect(runErrorText("something_new", 0.05)).toBe("The run failed (something_new).");
   });
 });

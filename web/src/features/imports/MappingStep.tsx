@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
-import { Button, ErrorState, InlineError, LoadingState, SelectField } from "../../ui";
+import { Button, ErrorState, InlineError, LoadingState, SelectField, TransformEditor } from "../../ui";
 import {
   draftProblems,
   draftsToMapping,
@@ -11,7 +11,6 @@ import {
   type IdentifierChoice,
   type TargetChoice,
 } from "./mapping";
-import { TransformEditor } from "./TransformEditor";
 
 type Trait = components["schemas"]["TraitBody"];
 type ListItem = components["schemas"]["ListBody"];

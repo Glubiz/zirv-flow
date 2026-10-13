@@ -16,3 +16,15 @@ export type { StepEntry } from "./Stepper";
 export { EmptyState, ErrorState, InlineError, LoadingState } from "./States";
 export { kindLabel } from "./identityKinds";
 export { formatDate, formatDateTime, formatDuration, shortId } from "./format";
+export { TransformEditor } from "./TransformEditor";
+export {
+  chainToApi,
+  newTransform,
+  opLabel,
+  parseEntries,
+  TRAIT_TYPES,
+  transformFromApi,
+  transformToApi,
+  TRANSFORM_OPS,
+} from "./transforms";
+export type { Transform, TraitType, TransformDraft, TransformOp } from "./transforms";

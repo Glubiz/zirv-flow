@@ -1,6 +1,6 @@
 import { useId } from "react";
 
-import { Button } from "../../ui";
+import { Button } from "./Button";
 import {
   newTransform,
   opLabel,
@@ -9,7 +9,7 @@ import {
   type TraitType,
   type TransformDraft,
   type TransformOp,
-} from "./mapping";
+} from "./transforms";
 
 const TYPE_LABELS: Record<TraitType, string> = {
   string: "Text",

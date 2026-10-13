@@ -28,6 +28,8 @@ export function sourceLabel(source: string): string {
       return "CSV import";
     case "merge":
       return "Merged people";
+    case "sync":
+      return "A source sync";
     case "flow":
       return "A flow";
     default:

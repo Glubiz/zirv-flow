@@ -1578,6 +1578,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Shows what a mapping makes of the first records of a stream. Reads from the start of the
+         *     stream, never from a checkpoint, and writes nothing. The saved mapping is used unless the
+         *     body brings a draft, which is checked as a save is. Workspace admins only; not audited, since
+         *     it changes nothing.
+         */
+        post: operations["preview_stream_mapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/sources/{id}/test": {
         parameters: {
             query?: never;
@@ -2034,7 +2056,10 @@ export interface components {
             suppressed: boolean;
         };
         ColumnRuleBody: {
-            /** @description A column name of the header. */
+            /**
+             * @description A column name of the header, or for a JSON stream a dotted path such as `address.city`
+             *     or `items.0.sku`.
+             */
             column: string;
             target: components["schemas"]["TargetBody"];
             /** @description Applied in order to the cell before it reaches the target; at most 10. */
@@ -2605,6 +2630,14 @@ export interface components {
              */
             unplanned: string;
         };
+        /** @description The event a record yields: a constant name, the person of the record, a time and properties. */
+        EventRuleBody: {
+            /** @description The event's name. */
+            name: string;
+            /** @description The event's properties, each from one column; at most 50. */
+            properties?: components["schemas"]["PropertyRuleBody"][];
+            timestamp?: null | components["schemas"]["ValueRuleBody"];
+        };
         EventSchemaBody: {
             /** Format: date-time */
             created_at: string;
@@ -3096,7 +3129,7 @@ export interface components {
             /** Format: uuid */
             person_id: string;
             /**
-             * @description `ui`, `api`, `import`, `merge` or `flow`.
+             * @description `ui`, `api`, `import`, `merge`, `flow` or `sync`.
              * @example ui
              */
             source: string;
@@ -3110,6 +3143,7 @@ export interface components {
         /** @description How the columns of a file become identifiers, traits and lists. */
         MappingBody: {
             columns: components["schemas"]["ColumnRuleBody"][];
+            event?: null | components["schemas"]["EventRuleBody"];
             /**
              * @description The column whose value is the record key. Without it the key is the file's hash and the
              *     row number, so only the same file can be run again without changes.
@@ -3153,7 +3187,7 @@ export interface components {
             list_name: string;
             /** Format: date-time */
             occurred_at: string;
-            /** @description `ui`, `api`, `import`, `merge` or `flow`. */
+            /** @description `ui`, `api`, `import`, `merge`, `flow` or `sync`. */
             source: string;
             /**
              * Format: uuid
@@ -3234,7 +3268,7 @@ export interface components {
             /** Format: uuid */
             list_id: string;
             name: string;
-            /** @description `ui`, `api`, `import`, `merge` or `flow`. */
+            /** @description `ui`, `api`, `import`, `merge`, `flow` or `sync`. */
             source: string;
         };
         /** @description The person a privacy request is about: give a `person_id` or an `identifier`, not both. */
@@ -3267,6 +3301,55 @@ export interface components {
             redaction_changed: boolean;
             /** Format: uuid */
             reject_id: string;
+        };
+        PreviewBody: {
+            /**
+             * Format: int32
+             * @description How many records were mapped.
+             */
+            read: number;
+            records: components["schemas"]["PreviewRecord"][];
+            /** @description The stream has more records than the preview shows. */
+            truncated: boolean;
+        };
+        /** @description Why the mapping refused a record: the field and the rule, never the value. */
+        PreviewError: {
+            field: string;
+            reason: string;
+        };
+        /** @description The event a record would yield. */
+        PreviewEvent: {
+            name: string;
+            /** @description When the event happened, when the mapping says; otherwise the run's start decides. */
+            occurred_at?: string | null;
+            properties: Record<string, never>;
+        };
+        PreviewIdentifier: {
+            kind: string;
+            value: string;
+        };
+        /** @description One record of the sample and what the mapping makes of it. */
+        PreviewRecord: {
+            /** @description The source reports the record as deleted. */
+            deleted: boolean;
+            errors: components["schemas"]["PreviewError"][];
+            event?: null | components["schemas"]["PreviewEvent"];
+            identifiers: components["schemas"]["PreviewIdentifier"][];
+            /** @description The record's key within the stream. */
+            key: string;
+            /** @description The lists the person would join. */
+            lists: string[];
+            /** @description `mapped`, `rejected` or `deleted`. */
+            result: string;
+            traits: Record<string, never>;
+        };
+        PreviewRequest: {
+            /**
+             * Format: int32
+             * @description How many records to show, 1 to 20; 10 when absent.
+             */
+            limit?: number | null;
+            mapping?: null | components["schemas"]["MappingBody"];
         };
         PrivacySettingsBody: {
             /**
@@ -3385,6 +3468,12 @@ export interface components {
              * @example number
              */
             type: string;
+        };
+        /** @description One property of the event. */
+        PropertyRuleBody: {
+            column: string;
+            property: string;
+            transforms?: components["schemas"]["TransformBody"][];
         };
         ProviderBody: {
             base_url: string;
@@ -4130,6 +4219,11 @@ export interface components {
             count: number;
             /** @description The property's text; a list or an object is its JSON. */
             value: string;
+        };
+        /** @description A column and the transforms that turn it into a value. */
+        ValueRuleBody: {
+            column: string;
+            transforms?: components["schemas"]["TransformBody"][];
         };
         VersionBody: {
             /** @description The running zirv-flow version. */
@@ -10679,6 +10773,109 @@ export interface operations {
             };
             /** @description Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    preview_stream_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+                /** @description Stream name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The sample records and what the mapping makes of them */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, source or stream, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, or no mapping to preview (`stream_not_mapped`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source refused or failed the request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source did not answer in time */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
