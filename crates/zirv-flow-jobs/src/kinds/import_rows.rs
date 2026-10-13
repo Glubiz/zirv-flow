@@ -3,7 +3,8 @@
 //!
 //! Nothing here logs a cell, an identifier or a trait value.
 
-use std::collections::{HashMap, VecDeque};
+use hashbrown::HashMap;
+use std::collections::VecDeque;
 
 use time::OffsetDateTime;
 use uuid::Uuid;

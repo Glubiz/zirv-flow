@@ -2,7 +2,7 @@
 //! writes its own loop. Every page is fetched with [`SourceContext::send`], so each one gets the
 //! auth, the retries, the rate limit and the origin binding.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};

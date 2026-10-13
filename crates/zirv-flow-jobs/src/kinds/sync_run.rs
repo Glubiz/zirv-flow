@@ -21,7 +21,7 @@
 //!
 //! Nothing here logs a record value, an identifier, a trait value or a credential.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -2852,7 +2852,7 @@ mod tests {
 
     // The file source end to end: a real `file` source against a local server.
 
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     use axum::Router;
     use axum::body::Body;

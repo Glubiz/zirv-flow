@@ -149,7 +149,7 @@ pub async fn find_people_by_identifiers<'e>(
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
-    let by_identity: std::collections::HashMap<(&str, &str), Uuid> = owners
+    let by_identity: hashbrown::HashMap<(&str, &str), Uuid> = owners
         .iter()
         .map(|(kind, value, person)| ((kind.as_str(), value.as_str()), *person))
         .collect();

@@ -2,7 +2,7 @@
 //! checked against the descriptor discovery last reported, so a stream cannot be set up in a way
 //! its source cannot serve.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -292,7 +292,7 @@ fn mapping_problem(error: &MappingError) -> ApiError {
 pub(super) async fn trait_catalog(
     state: &AppState,
     workspace: WorkspaceId,
-) -> Result<std::collections::HashMap<String, TraitState>, ApiError> {
+) -> Result<hashbrown::HashMap<String, TraitState>, ApiError> {
     Ok(
         zirv_flow_store::list_trait_definitions(&state.pool, workspace)
             .await?

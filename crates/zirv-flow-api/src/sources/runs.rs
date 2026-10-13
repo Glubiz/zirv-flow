@@ -514,13 +514,12 @@ pub(crate) async fn get(
     let mapping: Option<Mapping> = stream
         .and_then(|stream| stream.mapping)
         .and_then(|value| serde_json::from_value(value).ok());
-    let plain: std::collections::HashSet<String> =
-        list_trait_definitions(&state.pool, workspace.id)
-            .await?
-            .into_iter()
-            .filter(|definition| !definition.archived && !definition.pii)
-            .map(|definition| definition.key)
-            .collect();
+    let plain: hashbrown::HashSet<String> = list_trait_definitions(&state.pool, workspace.id)
+        .await?
+        .into_iter()
+        .filter(|definition| !definition.archived && !definition.pii)
+        .map(|definition| definition.key)
+        .collect();
     let plain = |key: &str| plain.contains(key);
     Ok(Json(RunDetailBody {
         run: RunBody::from(&run),

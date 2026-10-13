@@ -1229,6 +1229,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hashlink"
@@ -4528,6 +4533,7 @@ dependencies = [
  "axum",
  "clap",
  "figment",
+ "hashbrown 0.17.1",
  "http-body-util",
  "metrics-exporter-prometheus",
  "opentelemetry",
@@ -4556,6 +4562,7 @@ name = "zirv-flow-ai"
 version = "0.40.0"
 dependencies = [
  "axum",
+ "hashbrown 0.17.1",
  "metrics",
  "reqwest 0.13.5",
  "rustls",
@@ -4575,6 +4582,7 @@ dependencies = [
  "base64 0.23.1",
  "flate2",
  "futures-util",
+ "hashbrown 0.17.1",
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
@@ -4609,6 +4617,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
+ "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",
  "rand 0.8.8",
@@ -4637,6 +4646,7 @@ dependencies = [
  "croner",
  "csv-core",
  "getrandom 0.4.3",
+ "hashbrown 0.17.1",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "ipnet",
@@ -4655,6 +4665,7 @@ version = "0.40.0"
 dependencies = [
  "axum",
  "chrono",
+ "hashbrown 0.17.1",
  "openidconnect",
  "rand 0.8.8",
  "rsa",
@@ -4671,6 +4682,7 @@ dependencies = [
  "axum",
  "futures-util",
  "getrandom 0.4.3",
+ "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",
  "serde_json",
@@ -4690,6 +4702,7 @@ name = "zirv-flow-loadgen"
 version = "0.40.0"
 dependencies = [
  "clap",
+ "hashbrown 0.17.1",
  "reqwest 0.13.5",
  "rustls",
  "serde",
@@ -4702,6 +4715,7 @@ name = "zirv-flow-store"
 version = "0.40.0"
 dependencies = [
  "flate2",
+ "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",
  "serde",

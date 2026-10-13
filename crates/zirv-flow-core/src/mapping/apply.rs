@@ -1,6 +1,6 @@
 //! Applying a mapping to one row: a profile record's parts, or the codes of what is wrong.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use serde_json::{Map, Value};
 use time::OffsetDateTime;

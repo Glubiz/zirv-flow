@@ -1,7 +1,7 @@
 //! The per-key rate limit: an in-process token bucket that counts items. It is per `serve`
 //! process, so a deployment with several of them allows each key their sum.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

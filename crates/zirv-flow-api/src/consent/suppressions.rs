@@ -2,7 +2,7 @@
 //! the value is hashed on the way in and never kept, so listings and the export show hashes
 //! only.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::io;
 
 use axum::Json;
