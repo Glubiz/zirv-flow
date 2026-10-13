@@ -28,13 +28,14 @@ pub(crate) async fn resolve(
     Ok(ips)
 }
 
-/// `tls = off` is accepted only when no checked address is public: plaintext on a public network
-/// is exactly where an attacker sits between the server and the database.
+/// `tls = off` is accepted only toward non-public addresses (private, loopback, link-local) that
+/// the egress policy allows; a public address always needs TLS, even when allowlisted. Plaintext
+/// on a public network is exactly where an attacker sits between the server and the database.
 pub(crate) fn tls_allowed(mode: TlsMode, ips: &[IpAddr]) -> Result<(), SourceError> {
     if mode == TlsMode::Off && ips.iter().any(|ip| classify(*ip) == AddressClass::Public) {
         return Err(config_error(
             "tls",
-            "cannot be off toward a public address; allowlist the range in the egress settings",
+            "cannot be off toward a public address; a public address always needs TLS, even when allowlisted",
         ));
     }
     Ok(())
@@ -73,7 +74,7 @@ mod tests {
                 tls_allowed(TlsMode::Off, &ips).unwrap_err(),
                 config_error(
                     "tls",
-                    "cannot be off toward a public address; allowlist the range in the egress settings"
+                    "cannot be off toward a public address; a public address always needs TLS, even when allowlisted"
                 )
             );
         }

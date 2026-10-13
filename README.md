@@ -1383,8 +1383,9 @@ must match.
 **TLS.** The default, `verify`, requires TLS and checks the certificate against the **CA
 certificate** setting (a PEM, which is then the only CA trusted) or, when that is empty, the public
 roots compiled into the server. The operating system's certificate store is not used. There is no
-plaintext fallback. `off` is accepted only when no address of the host is public, that is, only
-inside ranges you allowlisted in `egress.allow`; toward a public address it is refused.
+plaintext fallback. `off` is accepted only toward non-public addresses (private, loopback,
+link-local) that the egress policy allows; a public address always needs TLS, even when it is
+allowlisted in `egress.allow`.
 
 **How a table is read.** A stream is read in pages of 500 rows, each in its own short read-only
 transaction with the statement timeout set (`statement_timeout_seconds`, 60 by default, 1 to 600).

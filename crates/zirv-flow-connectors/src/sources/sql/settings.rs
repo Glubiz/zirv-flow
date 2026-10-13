@@ -51,7 +51,8 @@ pub(crate) mod fields {
         "tls",
         "TLS",
         "verify (default) checks the server's certificate; off is accepted only toward \
-         addresses the egress allowlist names.",
+         non-public addresses (private, loopback, link-local) that the egress policy allows; a \
+         public address always needs TLS.",
         FieldKind::Select(&["verify", "off"]),
     );
     pub(crate) const CA_CERTIFICATE: FieldSpec = optional(
@@ -109,7 +110,7 @@ pub(crate) mod fields {
 pub(crate) enum TlsMode {
     /// TLS, verified against the configured CA or the compiled-in roots. The default.
     Verify,
-    /// No TLS. Accepted only toward addresses the operator allowlisted.
+    /// No TLS. Accepted only toward non-public addresses the egress policy allows.
     Off,
 }
 

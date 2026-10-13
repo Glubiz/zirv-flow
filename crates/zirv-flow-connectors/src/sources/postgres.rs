@@ -954,7 +954,7 @@ mod tests {
             error,
             config_error(
                 "tls",
-                "cannot be off toward a public address; allowlist the range in the egress settings"
+                "cannot be off toward a public address; a public address always needs TLS, even when allowlisted"
             )
         );
     }

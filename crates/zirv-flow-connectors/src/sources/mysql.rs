@@ -210,12 +210,14 @@ struct Column {
 /// The types a stream can be paged on. A checkpoint value is bound as what the column holds, so the
 /// comparison is exact: integers as integers (a string compared to a BIGINT is compared as a float
 /// and loses precision above 2^53, and `CAST(? AS UNSIGNED)` of a string saturates at the signed
-/// maximum), decimals as a string cast to a wide decimal, text and temporal types as the string.
+/// maximum), decimals as a string cast to a decimal of the column's own scale (so no value of the
+/// column overflows the cast), text and temporal types as the string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyType {
     Signed,
     Unsigned,
-    Decimal,
+    /// An exact decimal with this many digits after the point.
+    Decimal(u8),
     Text,
     Temporal,
 }
@@ -223,10 +225,10 @@ enum KeyType {
 impl KeyType {
     /// The placeholder for a checkpoint value of this type. From this fixed table, never from
     /// user text.
-    fn placeholder(self) -> &'static str {
+    fn placeholder(self) -> String {
         match self {
-            Self::Decimal => "CAST(? AS DECIMAL(65,30))",
-            Self::Signed | Self::Unsigned | Self::Text | Self::Temporal => "?",
+            Self::Decimal(scale) => format!("CAST(? AS DECIMAL(65,{scale}))"),
+            Self::Signed | Self::Unsigned | Self::Text | Self::Temporal => "?".to_owned(),
         }
     }
 
@@ -237,7 +239,9 @@ impl KeyType {
         Ok(match self {
             Self::Signed => Value::Int(text.parse().map_err(|_| stale())?),
             Self::Unsigned => Value::UInt(text.parse().map_err(|_| stale())?),
-            Self::Decimal | Self::Text | Self::Temporal => Value::Bytes(text.as_bytes().to_vec()),
+            Self::Decimal(_) | Self::Text | Self::Temporal => {
+                Value::Bytes(text.as_bytes().to_vec())
+            }
         })
     }
 }
@@ -247,11 +251,14 @@ fn describe_column(
     column_type: ColumnType,
     flags: ColumnFlags,
     charset: u16,
+    decimals: u8,
 ) -> Column {
     use ColumnType::*;
     let binary_charset = charset == BINARY_CHARSET;
+    // A DECIMAL has at most 30 digits after the point, which leaves 35 before it in 65.
+    let scale = decimals.min(30);
     let textual =
-        !binary_charset && !flags.contains(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG);
+        !binary_charset && !flags.intersects(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG);
     let (binary, key, field_type) = match column_type {
         MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_LONG | MYSQL_TYPE_INT24
         | MYSQL_TYPE_LONGLONG => (
@@ -265,7 +272,7 @@ fn describe_column(
         ),
         MYSQL_TYPE_YEAR | MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => (false, None, FieldType::Number),
         MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => {
-            (false, Some(KeyType::Decimal), FieldType::Number)
+            (false, Some(KeyType::Decimal(scale)), FieldType::Number)
         }
         MYSQL_TYPE_DATE
         | MYSQL_TYPE_NEWDATE
@@ -375,6 +382,7 @@ fn column_of(column: &mysql_async::Column) -> Column {
         column.column_type(),
         column.flags(),
         column.character_set(),
+        column.decimals(),
     )
 }
 
@@ -575,7 +583,7 @@ mod tests {
     use crate::sources::SyncMode;
 
     fn column(name: &str, column_type: ColumnType, flags: ColumnFlags, charset: u16) -> Column {
-        describe_column(name.to_owned(), column_type, flags, charset)
+        describe_column(name.to_owned(), column_type, flags, charset, 0)
     }
 
     fn keys_of(names: &[(&str, KeyType)]) -> Vec<(String, KeyType)> {
@@ -660,7 +668,7 @@ mod tests {
             &cols()[..1],
             &keys_of(&[
                 ("a", KeyType::Unsigned),
-                ("b", KeyType::Decimal),
+                ("b", KeyType::Decimal(4)),
                 ("c", KeyType::Text),
             ]),
             false,
@@ -673,11 +681,30 @@ mod tests {
         );
         assert!(
             composite.contains(
-                "WHERE (s.`a` > ? OR (s.`a` = ? AND s.`b` > CAST(? AS DECIMAL(65,30))) OR (s.`a` = ? AND s.`b` = CAST(? AS DECIMAL(65,30)) AND s.`c` > ?))"
+                "WHERE (s.`a` > ? OR (s.`a` = ? AND s.`b` > CAST(? AS DECIMAL(65,4))) OR (s.`a` = ? AND s.`b` = CAST(? AS DECIMAL(65,4)) AND s.`c` > ?))"
             ),
             "{composite}"
         );
         assert_eq!(bindings, [0, 0, 1, 0, 1, 2]);
+    }
+
+    #[test]
+    fn a_decimal_is_cast_with_the_columns_own_scale_so_every_integer_digit_fits() {
+        use ColumnType::MYSQL_TYPE_NEWDECIMAL;
+        let none = ColumnFlags::empty();
+        let placeholder = |scale| {
+            describe_column("x".to_owned(), MYSQL_TYPE_NEWDECIMAL, none, 63, scale)
+                .key
+                .unwrap()
+                .placeholder()
+        };
+
+        // DECIMAL(65,0) keeps all 65 integer digits; the old fixed (65,30) kept 35.
+        assert_eq!(placeholder(0), "CAST(? AS DECIMAL(65,0))");
+        assert_eq!(placeholder(4), "CAST(? AS DECIMAL(65,4))");
+        assert_eq!(placeholder(30), "CAST(? AS DECIMAL(65,30))");
+        // A scale the server cannot declare is clamped to its maximum.
+        assert_eq!(placeholder(31), "CAST(? AS DECIMAL(65,30))");
     }
 
     #[test]
@@ -713,8 +740,16 @@ mod tests {
         );
         assert_eq!(
             key_of(MYSQL_TYPE_NEWDECIMAL, none, 63),
-            Some(KeyType::Decimal)
+            Some(KeyType::Decimal(0))
         );
+        assert_eq!(
+            describe_column("x".to_owned(), MYSQL_TYPE_NEWDECIMAL, none, 63, 7).key,
+            Some(KeyType::Decimal(7))
+        );
+        // ENUM and SET are ordered by index on the server, not as text, so they are not key types.
+        for flag in [ColumnFlags::ENUM_FLAG, ColumnFlags::SET_FLAG] {
+            assert_eq!(key_of(MYSQL_TYPE_STRING, flag, 255), None, "{flag:?}");
+        }
         assert_eq!(
             key_of(MYSQL_TYPE_VAR_STRING, none, 255),
             Some(KeyType::Text)
@@ -1006,7 +1041,7 @@ mod tests {
             error,
             config_error(
                 "tls",
-                "cannot be off toward a public address; allowlist the range in the egress settings"
+                "cannot be off toward a public address; a public address always needs TLS, even when allowlisted"
             )
         );
     }
@@ -1527,6 +1562,63 @@ mod tests {
             on_cursor.unwrap_err(),
             config_error("cursor_field", "has a type that cannot be paged on")
         );
+        assert_eq!(
+            on_key.unwrap_err(),
+            config_error("primary_key", "has a type that cannot be paged on")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn a_decimal_key_above_ten_to_the_thirty_fifth_pages_across_a_batch_boundary_once_each() {
+        let fixture = Fixture::new().await;
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "SET SESSION cte_max_recursion_depth = 5000;\n\
+                 CREATE TABLE {db}.wide (k DECIMAL(65,0) NOT NULL PRIMARY KEY);\n\
+                 INSERT INTO {db}.wide\n\
+                 WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1200)\n\
+                 SELECT CAST('90000000000000000000000000000000000000000000000000' AS DECIMAL(65,0)) + n FROM seq;\n",
+                db = fixture.database
+            ),
+        )
+        .await;
+        let config = fixture.config(json!({}));
+        let wide = stream("wide", SyncMode::FullRefresh, None, &["k"]);
+
+        let batches = fixture.read(&config, &wide, None).await.unwrap();
+
+        let expected: Vec<String> = (1..=1200u32).map(|n| format!("9{n:049}")).collect();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(keys(&batches), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn an_enum_or_set_cursor_or_key_is_refused() {
+        let fixture = Fixture::new().await;
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {db}.kinds (id BIGINT NOT NULL PRIMARY KEY, kind ENUM('b','a') NOT NULL, tags SET('x','y') NOT NULL);\n\
+                 INSERT INTO {db}.kinds VALUES (1, 'a', 'x'), (2, 'b', 'y');\n",
+                db = fixture.database
+            ),
+        )
+        .await;
+        let config = fixture.config(json!({}));
+        let enum_cursor = stream("kinds", SyncMode::Incremental, Some("kind"), &["id"]);
+        let set_cursor = stream("kinds", SyncMode::Incremental, Some("tags"), &["id"]);
+        let enum_key = stream("kinds", SyncMode::FullRefresh, None, &["kind"]);
+
+        let on_enum = fixture.read(&config, &enum_cursor, None).await;
+        let on_set = fixture.read(&config, &set_cursor, None).await;
+        let on_key = fixture.read(&config, &enum_key, None).await;
+
+        let cursor = config_error("cursor_field", "has a type that cannot be paged on");
+        assert_eq!(on_enum.unwrap_err(), cursor);
+        assert_eq!(on_set.unwrap_err(), cursor);
         assert_eq!(
             on_key.unwrap_err(),
             config_error("primary_key", "has a type that cannot be paged on")
