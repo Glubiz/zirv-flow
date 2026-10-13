@@ -596,6 +596,18 @@ authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
 (16.1) and delivery capabilities (idempotency keys, batching, erase).
 
+As built (M3): `zirv_flow_connectors::runtime` implements auth, retries, the rate limit and the
+pagination drivers once, behind `SourceContext::send` and `paginate`. `SourceContext` now carries
+the source type (the metrics label), the source id (the rate-limit key) and a shared `RateLimits`
+registry that `AppState` holds. The limit is one token bucket per source per worker process
+(ruling 691b13cf), shared by sync runs, test connection and discovery; concurrent workers can
+exceed it in aggregate, `Retry-After` handling mitigates but does not prevent that, and
+distributed enforcement is revisited with OQ-9 at M6. Auth is attached only to the source's base
+origin, and any other origin is refused before sending. A refreshed OAuth2 token is handed back
+through the context's token slot (`take_refreshed_token`); `connectors` never writes to `store`
+(5.1), so the caller stores it through `encrypted_secrets`, and test connection and discovery drop
+it. Errors carry a variant, a status and an attempt count, never a URL, header or body.
+
 ### 7.6 Native contacts and streaming updates
 
 Some companies have no external customer store. For them Zirv Flow is the
