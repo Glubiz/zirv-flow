@@ -175,8 +175,14 @@ mod tests {
     #[tokio::test]
     async fn the_erased_form_forwards_the_spec_and_every_call() {
         let source: &dyn ErasedSource = &Empty;
-        let ctx =
-            SourceContext::new(Arc::new(EgressPolicy::default()), HttpLimits::default()).unwrap();
+        let ctx = SourceContext::new(
+            Arc::new(EgressPolicy::default()),
+            HttpLimits::default(),
+            "empty",
+            "source-1",
+            Arc::default(),
+        )
+        .unwrap();
         let config = json!({});
         let credential = Credential::new();
         let stream = StreamConfig {
