@@ -21,6 +21,7 @@ mod privacy;
 pub mod secrets;
 mod sessions;
 mod sources;
+mod stream_freshness;
 mod suppressions;
 mod sync_runs;
 mod workspaces;
@@ -138,6 +139,9 @@ pub use sources::{
     sync_schedule, update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
+pub use stream_freshness::{
+    StreamFreshness, StreamOutcome, record_stream_outcome, stream_freshness,
+};
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,

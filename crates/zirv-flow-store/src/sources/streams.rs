@@ -32,6 +32,12 @@ pub struct Stream {
     pub sweep_limit: f64,
     /// The descriptor discovery last reported.
     pub discovered: Value,
+    /// When the stream was last enabled; none while it is disabled.
+    pub enabled_at: Option<OffsetDateTime>,
+    /// When the stream last succeeded.
+    pub last_success_at: Option<OffsetDateTime>,
+    /// Whether the last verdict on the stream was a failure.
+    pub last_run_failed: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -41,7 +47,7 @@ macro_rules! stream_columns {
     () => {
         "id, source_id, name, enabled, sync_mode, cursor_field, primary_key, mapping, \
          checkpoint, staleness_threshold_seconds, reconcile_schedule, sweep_limit, discovered, \
-         created_at, updated_at"
+         enabled_at, last_success_at, last_run_failed, created_at, updated_at"
     };
 }
 
@@ -214,6 +220,9 @@ pub async fn configure_stream(
         "UPDATE streams SET enabled = $4, sync_mode = $5, cursor_field = $6, primary_key = $7, \
             staleness_threshold_seconds = $8, reconcile_schedule = $9, sweep_limit = $10, \
             updated_at = now(), \
+            enabled_at = CASE WHEN $4 AND NOT enabled THEN now() \
+                              WHEN NOT $4 THEN NULL ELSE enabled_at END, \
+            last_run_failed = CASE WHEN $4 AND NOT enabled THEN false ELSE last_run_failed END, \
             checkpoint = CASE WHEN sync_mode IS DISTINCT FROM $5 \
                                OR cursor_field IS DISTINCT FROM $6 \
                                OR primary_key IS DISTINCT FROM $7 \
@@ -675,6 +684,64 @@ mod tests {
         .unwrap();
         assert_eq!(after.cursor_field.as_deref(), Some("id"));
         assert_eq!(after.checkpoint, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enabling_sets_enabled_at_and_clears_the_failure_and_disabling_clears_enabled_at(
+        pool: PgPool,
+    ) {
+        use crate::sync_runs::testing::source_with_stream;
+        use crate::{StreamOutcome, record_stream_outcome};
+
+        let ws = workspace(&pool, "one").await;
+        let (source_id, stream_id) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
+        let settings = |enabled, staleness| StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
+            enabled,
+            sync_mode: "full_refresh",
+            cursor_field: None,
+            primary_key: &[],
+            staleness_threshold_seconds: staleness,
+        };
+        let read = || async {
+            find_stream_by_id(&pool, ws, source_id, stream_id)
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let fail = || async {
+            record_stream_outcome(
+                &mut pool.acquire().await.unwrap(),
+                ws,
+                stream_id,
+                StreamOutcome::Failed,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap()
+        };
+        let first = read().await.enabled_at.expect("enabled by the fixture");
+
+        // An unrelated save of an enabled stream changes neither column.
+        fail().await;
+        configure(&pool, ws, source_id, settings(true, Some(60))).await;
+        let saved = read().await;
+        assert_eq!(saved.enabled_at, Some(first));
+        assert!(saved.last_run_failed);
+
+        // Disabling clears enabled_at; the failure is kept until the stream is enabled again.
+        configure(&pool, ws, source_id, settings(false, Some(60))).await;
+        let disabled = read().await;
+        assert_eq!(disabled.enabled_at, None);
+        assert!(disabled.last_run_failed);
+
+        // Enabling again restarts the grace period and clears the failure.
+        configure(&pool, ws, source_id, settings(true, Some(60))).await;
+        let enabled = read().await;
+        assert!(enabled.enabled_at > Some(first));
+        assert!(!enabled.last_run_failed);
     }
 
     #[sqlx::test]

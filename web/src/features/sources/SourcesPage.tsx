@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router";
 import { client, unwrap, useResource } from "../../api";
 import { EmptyState, formatDateTime, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useSourceAccess } from "./access";
+import { FreshnessBadge } from "./FreshnessBadge";
 import { kindName, plural } from "./labels";
 
 export function SourcesPage() {
@@ -56,6 +57,7 @@ function Sources({ workspaceId }: { workspaceId: string }) {
                       <th scope="col">Name</th>
                       <th scope="col">Type</th>
                       <th scope="col">Status</th>
+                      <th scope="col">Freshness</th>
                       <th scope="col">Updated</th>
                     </tr>
                   </thead>
@@ -70,6 +72,13 @@ function Sources({ workspaceId }: { workspaceId: string }) {
                           <Pill tone={source.enabled ? "neutral" : "attention"}>
                             {source.enabled ? "Enabled" : "Disabled"}
                           </Pill>
+                        </td>
+                        <td>
+                          {source.freshness ? (
+                            <FreshnessBadge state={source.freshness} />
+                          ) : (
+                            <span className="faint">No enabled streams</span>
+                          )}
                         </td>
                         <td>{formatDateTime(source.updated_at)}</td>
                       </tr>

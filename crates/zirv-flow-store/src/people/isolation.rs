@@ -874,6 +874,38 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn stream_freshness_is_read_and_recorded_only_in_its_own_workspace(pool: PgPool) {
+        use crate::sync_runs::testing::source_with_stream;
+        use crate::{StreamOutcome, record_stream_outcome, stream_freshness};
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let (source, stream) = source_with_stream(&pool, one, "crm", "full_refresh").await;
+        let now = crate::database_now(&pool).await.unwrap();
+
+        let foreign = stream_freshness(&pool, Some(two), None, now).await.unwrap();
+        let foreign_source = stream_freshness(&pool, Some(two), Some(source), now)
+            .await
+            .unwrap();
+        let recorded = record_stream_outcome(
+            &mut pool.acquire().await.unwrap(),
+            two,
+            stream,
+            StreamOutcome::Failed,
+            now,
+        )
+        .await
+        .unwrap();
+
+        assert!(foreign.is_empty());
+        assert!(foreign_source.is_empty());
+        assert!(!recorded);
+        let own = stream_freshness(&pool, Some(one), None, now).await.unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].state, zirv_flow_core::Freshness::Fresh);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sweep_in_one_workspace_leaves_the_records_and_events_of_another(pool: PgPool) {
         use crate::sync_runs::testing::{commit_records, fixture, next_run, upsert};
         use crate::{
