@@ -10,6 +10,7 @@ mod fake;
 mod registry;
 mod source;
 mod spec;
+mod sql;
 mod types;
 mod validate;
 

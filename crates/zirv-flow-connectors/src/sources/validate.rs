@@ -16,6 +16,9 @@ pub struct FieldError {
     pub reason: String,
 }
 
+/// The longest long-text setting, in bytes.
+const MAX_LONG_TEXT: usize = 100_000;
+
 fn error(field: &str, reason: &str) -> FieldError {
     FieldError {
         field: field.to_owned(),
@@ -162,6 +165,18 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
             Some(text) if options.contains(&text) => None,
             _ => Some("must be one of the listed options"),
         },
+        FieldKind::LongText => match value.as_str() {
+            Some(text) if field.required && text.trim().is_empty() => Some("must not be empty"),
+            Some(text) if text.contains('\0') => Some("must not contain a NUL character"),
+            Some(text) if text.len() > MAX_LONG_TEXT => Some("is too long"),
+            // The one long-text setting that has a format: a CA certificate.
+            Some(text) if field.key == "ca_certificate" && !text.trim().is_empty() => {
+                super::sql::tls::pem_problem(text)
+            }
+            Some(_) => None,
+            None => Some("must be text"),
+        },
+        FieldKind::Queries => super::sql::settings::queries_problem(value),
     }
 }
 
@@ -193,6 +208,9 @@ mod tests {
             field("count", FieldKind::Number, false, false),
             field("flag", FieldKind::Bool, false, false),
             field("mode", FieldKind::Select(&["a", "b"]), false, false),
+            field("notes", FieldKind::LongText, false, false),
+            field("ca_certificate", FieldKind::LongText, false, false),
+            field("queries", FieldKind::Queries, false, false),
         ],
         credential_fields: &[
             field("token", FieldKind::Text, true, true),
@@ -368,5 +386,49 @@ mod tests {
             fields_of(unsupported.map(|_| ())),
             ["sync_mode: is not supported by this stream"]
         );
+    }
+
+    #[test]
+    fn long_text_accepts_multi_line_text_and_a_ca_must_be_a_pem_certificate() {
+        let mut params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let pem = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem();
+
+        assert!(validate_config(&SPEC, &json!({"name": "x", "notes": "a\nb\nc"})).is_ok());
+        assert!(validate_config(&SPEC, &json!({"name": "x", "ca_certificate": pem})).is_ok());
+        let errors = fields_of(validate_config(
+            &SPEC,
+            &json!({"name": "x", "notes": 1, "ca_certificate": "secret-not-pem"}),
+        ));
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|e| e == "notes: must be text"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("ca_certificate: must hold at least one PEM"))
+        );
+        assert!(!errors.join(" ").contains("secret-not-pem"));
+        let nul = fields_of(validate_config(
+            &SPEC,
+            &json!({"name": "x", "notes": "a\u{0}b"}),
+        ));
+        assert_eq!(nul, ["notes: must not contain a NUL character"]);
+    }
+
+    #[test]
+    fn queries_are_validated_by_the_database_source_rules() {
+        let good = json!({"name": "x", "queries": [{"name": "vip", "sql": "SELECT 1"}]});
+        let bad = json!({"name": "x", "queries": [{"name": "vip", "sql": "DROP TABLE secrets"}]});
+
+        assert!(validate_config(&SPEC, &good).is_ok());
+        let errors = fields_of(validate_config(&SPEC, &bad));
+        assert_eq!(
+            errors,
+            ["queries: has a query that does not start with SELECT or WITH"]
+        );
+        assert!(!errors.join(" ").contains("secrets"));
     }
 }
