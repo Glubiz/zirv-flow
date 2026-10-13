@@ -26,8 +26,8 @@ pub use provider::{BoxFuture, Endpoint, Provider, ProviderKind, provider_for};
 pub use providers::{AnthropicProvider, OpenAiCompatibleProvider};
 pub use repair::{ProviderSender, RepairOutcome, Sender, repair};
 pub use request::{
-    ChatRequest, Content, DEFAULT_MAX_OUTPUT_TOKENS, Message, Privacy, RequestBuilder, ToolSpec,
-    UNTRUSTED_NOTICE,
+    ChatRequest, Content, DEFAULT_MAX_OUTPUT_TOKENS, FRAMING_BASE_TOKENS, FRAMING_TOKENS_PER_UNIT,
+    Message, Privacy, RequestBuilder, ToolSpec, UNTRUSTED_NOTICE,
 };
 pub use response::{ChatResponse, Part, Usage};
 pub use schema::JsonSchema;

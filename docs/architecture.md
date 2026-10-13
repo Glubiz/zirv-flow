@@ -1314,9 +1314,13 @@ sends and records nothing. Spend and rate are read from `ai_calls` (the sum of
 `estimated_cost_micros` since the first of the month in UTC; the calls of the last minute by the
 database clock), so they hold across instances. The reservation is one transaction under an advisory
 lock on the workspace: it counts every row, `pending` ones included, and inserts a `pending` row
-whose cost is the worst case (one input token per byte of the request text, the full output cap), so
-concurrent calls cannot all pass the gates. The row is then finished with the real tokens and cost; a
-process that dies mid-call leaves it pending at the worst-case cost, which is conservative and
+whose cost is the worst case (one input token per byte of the request text plus framing, the full
+output cap), and admits the call only when the month's spend plus that cost stays within the budget,
+so concurrent calls cannot all pass the gates and real spend never exceeds the budget. The call then
+runs in a task of its own, so a dropped handler cannot leave the row pending, and the row is
+finished with the real tokens and cost. A panic marks it `abandoned`; a process that dies mid-call
+leaves it `pending`, and the next reservation of the workspace marks `pending` rows older than the
+client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is conservative and
 intended. Personal data is a
 distinct request content type (`Personal`), and a request builder at `SchemaOnly` privacy returns
 `PersonalDataNotAllowed` for it, so the check does not depend on the caller. Untrusted content is

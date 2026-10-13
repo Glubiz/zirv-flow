@@ -1677,7 +1677,7 @@ export interface components {
             /** Format: int32 */
             latency_ms: number;
             model: string;
-            /** @description `pending` (reserved, not finished), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`. */
+            /** @description `pending` (reserved, not finished), `abandoned` (given up on while pending; keeps its worst-case cost), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`. */
             outcome: string;
             /** Format: int32 */
             output_tokens: number;

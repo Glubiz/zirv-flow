@@ -142,18 +142,18 @@ fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, A
     else {
         return Err(AiError::Capability("usage".to_owned()));
     };
-    Ok(ChatResponse {
+    Ok(ChatResponse::new(
         parts,
-        usage: Usage {
+        Usage {
             input_tokens,
             output_tokens,
         },
-        model: value
+        value
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or(requested_model)
             .to_owned(),
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -216,19 +216,19 @@ mod tests {
         let response = call(&base).await.unwrap();
 
         assert_eq!(
-            response.parts,
+            response.parts(),
             vec![Part::Text {
                 text: "Hello there".into()
             }]
         );
         assert_eq!(
-            response.usage,
+            response.usage(),
             Usage {
                 input_tokens: 12,
                 output_tokens: 3
             }
         );
-        assert_eq!(response.model, "gpt-test-2025");
+        assert_eq!(response.model(), "gpt-test-2025");
     }
 
     #[tokio::test]
@@ -237,14 +237,14 @@ mod tests {
         let response = call(&base).await.unwrap();
 
         assert_eq!(
-            response.parts,
+            response.parts(),
             vec![Part::ToolCall {
                 id: "call_9".into(),
                 name: "map_columns".into(),
                 arguments: json!({"email": "Email"}),
             }]
         );
-        assert_eq!(response.usage.output_tokens, 11);
+        assert_eq!(response.usage().output_tokens, 11);
     }
 
     #[tokio::test]

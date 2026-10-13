@@ -53,25 +53,21 @@ impl FakeProvider {
 
 /// A text answer with the given usage.
 pub fn text_response(text: &str, input_tokens: u32, output_tokens: u32) -> ChatResponse {
-    ChatResponse {
-        parts: vec![Part::Text {
+    ChatResponse::new(
+        vec![Part::Text {
             text: text.to_owned(),
         }],
-        usage: Usage {
+        Usage {
             input_tokens,
             output_tokens,
         },
-        model: "fake-model".to_owned(),
-    }
+        "fake-model".to_owned(),
+    )
 }
 
 /// An answer made of the given parts, with no usage.
 pub fn reply(parts: Vec<Part>) -> ChatResponse {
-    ChatResponse {
-        parts,
-        usage: Usage::default(),
-        model: "fake-model".to_owned(),
-    }
+    ChatResponse::new(parts, Usage::default(), "fake-model".to_owned())
 }
 
 /// A one-tool-call answer with the given usage.
@@ -81,18 +77,18 @@ pub fn tool_call_response(
     input_tokens: u32,
     output_tokens: u32,
 ) -> ChatResponse {
-    ChatResponse {
-        parts: vec![Part::ToolCall {
+    ChatResponse::new(
+        vec![Part::ToolCall {
             id: "call_1".to_owned(),
             name: name.to_owned(),
             arguments,
         }],
-        usage: Usage {
+        Usage {
             input_tokens,
             output_tokens,
         },
-        model: "fake-model".to_owned(),
-    }
+        "fake-model".to_owned(),
+    )
 }
 
 impl Provider for FakeProvider {

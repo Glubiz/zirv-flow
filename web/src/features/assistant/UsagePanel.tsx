@@ -106,8 +106,8 @@ export function UsagePanel({ workspaceId, version }: UsagePanelProps) {
                       <td>
                         {call.outcome === "ok" ? (
                           <Pill>OK</Pill>
-                        ) : call.outcome === "pending" ? (
-                          <Pill>pending</Pill>
+                        ) : call.outcome === "pending" || call.outcome === "abandoned" ? (
+                          <Pill>{call.outcome}</Pill>
                         ) : (
                           <Pill tone="error">{call.outcome}</Pill>
                         )}

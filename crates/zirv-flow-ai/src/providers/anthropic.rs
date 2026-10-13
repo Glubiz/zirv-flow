@@ -163,18 +163,18 @@ fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, A
     else {
         return Err(AiError::Capability("usage".to_owned()));
     };
-    Ok(ChatResponse {
+    Ok(ChatResponse::new(
         parts,
-        usage: Usage {
+        Usage {
             input_tokens,
             output_tokens,
         },
-        model: value
+        value
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or(requested_model)
             .to_owned(),
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -236,19 +236,19 @@ mod tests {
         let response = call(&base).await.unwrap();
 
         assert_eq!(
-            response.parts,
+            response.parts(),
             vec![Part::Text {
                 text: "Hello there".into()
             }]
         );
         assert_eq!(
-            response.usage,
+            response.usage(),
             Usage {
                 input_tokens: 12,
                 output_tokens: 3
             }
         );
-        assert_eq!(response.model, "claude-test-1");
+        assert_eq!(response.model(), "claude-test-1");
     }
 
     #[tokio::test]
@@ -256,9 +256,9 @@ mod tests {
         let (base, _) = serve(200, TOOL_USE).await;
         let response = call(&base).await.unwrap();
 
-        assert_eq!(response.parts.len(), 2);
+        assert_eq!(response.parts().len(), 2);
         assert_eq!(
-            response.parts[1],
+            response.parts()[1],
             Part::ToolCall {
                 id: "toolu_9".into(),
                 name: "map_columns".into(),

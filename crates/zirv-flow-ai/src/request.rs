@@ -20,6 +20,12 @@ pub const UNTRUSTED_NOTICE: &str = "Text between <untrusted_data> and </untruste
 /// The default cap on a model's output when the builder is not told otherwise.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1024;
 
+/// Input tokens added to the byte length of a request for framing, once per request.
+pub const FRAMING_BASE_TOKENS: u64 = 1024;
+
+/// Input tokens added per system text, message, content part and tool.
+pub const FRAMING_TOKENS_PER_UNIT: u64 = 32;
+
 /// A piece of text in a request, labelled by what it may contain.
 #[derive(Clone, Eq, PartialEq)]
 pub enum Content {
@@ -169,33 +175,52 @@ impl ChatRequest {
             .join("\n\n")
     }
 
-    /// The total UTF-8 byte length of the request's text: the system text, every message and
-    /// every tool. A token is at least one byte, so this is an upper bound on the input tokens.
-    pub fn text_bytes(&self) -> u64 {
-        let message = |message: &Message| match message {
-            Message::User(contents) => contents.iter().map(|content| content.render().len()).sum(),
-            Message::Assistant(parts) => parts
-                .iter()
-                .map(|part| match part {
-                    Part::Text { text } => text.len(),
-                    Part::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    } => id.len() + name.len() + arguments.to_string().len(),
-                })
-                .sum(),
-            Message::ToolResult { call_id, content } => call_id.len() + content.render().len(),
-        };
-        let tool = |tool: &ToolSpec| {
-            tool.name.len()
-                + tool.description.render().len()
-                + tool.parameters.as_value().to_string().len()
-        };
-        let total = self.system_text().len()
-            + self.messages.iter().map(message).sum::<usize>()
-            + self.tools.iter().map(tool).sum::<usize>();
-        u64::try_from(total).unwrap_or(u64::MAX)
+    /// An upper bound on the input tokens of this request: its UTF-8 byte length (a token is at
+    /// least one byte) plus framing, a base of [`FRAMING_BASE_TOKENS`] and
+    /// [`FRAMING_TOKENS_PER_UNIT`] for each system text, message, content part and tool, which
+    /// covers the delimiters and wrappers the adapters add. Every addition saturates.
+    pub fn input_tokens_upper_bound(&self) -> u32 {
+        let len = |text: &str| u64::try_from(text.len()).unwrap_or(u64::MAX);
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let mut bytes = saturating_sum(self.system.iter().map(|content| len(&content.render())));
+        let mut units = count(self.system.len());
+        for message in &self.messages {
+            units = units.saturating_add(1);
+            let (message_bytes, parts) = match message {
+                Message::User(contents) => (
+                    saturating_sum(contents.iter().map(|content| len(&content.render()))),
+                    contents.len(),
+                ),
+                Message::Assistant(parts) => (
+                    saturating_sum(parts.iter().map(|part| {
+                        match part {
+                            Part::Text { text } => len(text),
+                            Part::ToolCall {
+                                id,
+                                name,
+                                arguments,
+                            } => len(id)
+                                .saturating_add(len(name))
+                                .saturating_add(len(&arguments.to_string())),
+                        }
+                    })),
+                    parts.len(),
+                ),
+                Message::ToolResult { call_id, content } => {
+                    (len(call_id).saturating_add(len(&content.render())), 1)
+                }
+            };
+            bytes = bytes.saturating_add(message_bytes);
+            units = units.saturating_add(count(parts));
+        }
+        for tool in &self.tools {
+            units = units.saturating_add(1);
+            bytes = bytes
+                .saturating_add(len(&tool.name))
+                .saturating_add(len(&tool.description.render()))
+                .saturating_add(len(&tool.parameters.as_value().to_string()));
+        }
+        bound(bytes, units)
     }
 
     /// Every piece of content in the request, for audits and tests.
@@ -218,9 +243,10 @@ impl ChatRequest {
             "The previous answer was not valid. Fix these problems and answer again:\n{}",
             errors.join("\n")
         ));
-        next.messages.push(Message::Assistant(reply.parts.clone()));
+        next.messages
+            .push(Message::Assistant(reply.parts().to_vec()));
         let mut answered = false;
-        for part in &reply.parts {
+        for part in reply.parts() {
             if let Part::ToolCall { id, .. } = part {
                 answered = true;
                 next.messages.push(Message::ToolResult {
@@ -234,6 +260,18 @@ impl ChatRequest {
         }
         next
     }
+}
+
+fn saturating_sum(values: impl Iterator<Item = u64>) -> u64 {
+    values.fold(0, u64::saturating_add)
+}
+
+/// The input-token bound for `bytes` of text in `units` pieces, saturating at `u32::MAX`.
+fn bound(bytes: u64, units: u64) -> u32 {
+    let framing = units
+        .saturating_mul(FRAMING_TOKENS_PER_UNIT)
+        .saturating_add(FRAMING_BASE_TOKENS);
+    u32::try_from(bytes.saturating_add(framing)).unwrap_or(u32::MAX)
 }
 
 /// Builds a [`ChatRequest`] under a [`Privacy`] level, refusing personal data without the opt-in.
@@ -273,7 +311,7 @@ impl RequestBuilder {
     pub fn assistant(mut self, reply: &ChatResponse) -> Self {
         self.request
             .messages
-            .push(Message::Assistant(reply.parts.clone()));
+            .push(Message::Assistant(reply.parts().to_vec()));
         self
     }
 
@@ -490,7 +528,8 @@ mod tests {
     }
 
     #[test]
-    fn the_text_size_counts_every_byte_the_request_sends() {
+    fn the_input_bound_is_the_bytes_plus_framing_per_unit_and_saturates() {
+        let schema = json!({"type": "object"}).to_string().len() as u64;
         let request = RequestBuilder::new(Privacy::SchemaOnly)
             .system(instruction("abc"))
             .unwrap()
@@ -499,9 +538,43 @@ mod tests {
             .tool(tool(instruction("xy")))
             .unwrap()
             .build();
-        let schema = json!({"type": "object"}).to_string().len();
-        // "abc", "héllo" is six bytes, then the tool name, description and schema.
-        assert_eq!(request.text_bytes(), (3 + 6 + 3 + 2 + schema) as u64);
+        // "abc", "héllo" is six bytes, then the tool name, description and schema; the units are
+        // the system text, the message, its one part and the tool.
+        let bytes = 3 + 6 + 3 + 2 + schema;
+        let framing = FRAMING_BASE_TOKENS + 4 * FRAMING_TOKENS_PER_UNIT;
+        assert_eq!(
+            u64::from(request.input_tokens_upper_bound()),
+            bytes + framing
+        );
+
+        // Each further message adds its bytes and at least the framing for it.
+        let before = request.input_tokens_upper_bound();
+        let longer = RequestBuilder::new(Privacy::SchemaOnly)
+            .user(vec![Content::Schema("a".into())])
+            .unwrap()
+            .user(vec![Content::Schema("b".into())])
+            .unwrap()
+            .build();
+        let one = RequestBuilder::new(Privacy::SchemaOnly)
+            .user(vec![Content::Schema("a".into())])
+            .unwrap()
+            .build();
+        assert!(
+            longer.input_tokens_upper_bound() - one.input_tokens_upper_bound()
+                >= u32::try_from(2 * FRAMING_TOKENS_PER_UNIT).unwrap()
+        );
+        assert!(before > FRAMING_BASE_TOKENS as u32);
+
+        // Absurd sizes saturate instead of overflowing.
+        assert_eq!(saturating_sum([u64::MAX, 1].into_iter()), u64::MAX);
+        assert_eq!(bound(u64::MAX, u64::MAX), u32::MAX);
+        assert_eq!(bound(u64::from(u32::MAX), 0), u32::MAX);
+        assert_eq!(
+            RequestBuilder::new(Privacy::SchemaOnly)
+                .build()
+                .input_tokens_upper_bound(),
+            FRAMING_BASE_TOKENS as u32
+        );
     }
 
     #[test]

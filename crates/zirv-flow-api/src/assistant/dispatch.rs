@@ -4,10 +4,13 @@
 //! per-minute limit or the workspace's monthly budget is spent. Both counts are read from the
 //! call log in the database, so they hold across instances, and a call is reserved in that log as a
 //! `pending` row at its worst-case cost before the request is sent, so concurrent calls cannot all
-//! pass the gates. A process that dies mid-call leaves its row pending at the worst-case cost,
-//! which is conservative and intended. A dispatched call always leaves a content-free row in
-//! `ai_calls`, finished with the real tokens and cost; a transcript is stored only when an admin opted in. The key is
-//! opened right before the call and dropped after it.
+//! pass the gates. The call and its bookkeeping run in a task of their own, so a dropped handler cannot leave
+//! the row pending. A panic, or a process that dies mid-call, leaves the row at the worst-case cost:
+//! a panic marks it `abandoned` at once, and a reservation marks this workspace's `pending` rows
+//! older than the client timeout plus a margin `abandoned`, keeping their cost, which is
+//! conservative and intended. A dispatched call always leaves a content-free row in `ai_calls`,
+//! finished with the real tokens and cost; a transcript is stored only when an admin opted in. The
+//! key is opened right before the request and dropped after it.
 
 use std::time::Instant;
 
@@ -21,7 +24,8 @@ use zirv_flow_core::{
     SecretId, SecretPurpose, SecretString, UserId, WorkspaceId, open, secret_aad,
 };
 use zirv_flow_store::{
-    AiSettings, CallOutcome, FinishedAiCall, NewAiCall, Reservation, StoreError, secrets,
+    AiSettings, CallOutcome, FinishedAiCall, NewAiCall, Reservation, ReservationLimits, StoreError,
+    secrets,
 };
 
 use super::config::{AiModelConfig, AiProviderConfig};
@@ -163,16 +167,20 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Steps 2 and 3: reserves the call before anything is sent. In one transaction under a lock on
-    /// the workspace it checks the per-user rate limit, then the monthly budget, and records the
-    /// call as `pending` at its worst-case cost: the model's price for an input of one token per
-    /// byte of the request's text (a token is at least one byte) and the full output cap. Pending
-    /// rows count in both limits, so calls that are still in flight are counted, on this instance
-    /// and on every other. A process that dies mid-call leaves its row pending at the worst-case
-    /// cost, which is conservative and intended. Nothing is sent and nothing is recorded when a
-    /// limit refuses.
-    async fn reserve(&self, request: &ChatRequest) -> Result<Uuid, DispatchError> {
+    /// the workspace it gives up on this workspace's calls that have been pending for longer than
+    /// the client's timeout, then checks the per-user rate limit and the monthly budget, and
+    /// records the call as `pending` at its worst-case cost: the model's price for the request's
+    /// input-token upper bound and the full output cap. A call is admitted only when the month's
+    /// spend plus that cost stays within the budget, so real spend never exceeds it. Pending rows
+    /// count in both limits, so calls still in flight are counted, on this instance and on every
+    /// other. Nothing is sent and nothing is recorded when a limit refuses. Returns the call's id
+    /// and its worst-case cost.
+    async fn reserve(&self, request: &ChatRequest) -> Result<(Uuid, i64), DispatchError> {
         let call = Uuid::now_v7();
-        let input_upper = u32::try_from(request.text_bytes()).unwrap_or(u32::MAX);
+        let worst_case = self.model.cost_micros(
+            request.input_tokens_upper_bound(),
+            request.max_output_tokens(),
+        );
         let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
         let reservation = zirv_flow_store::reserve_ai_call(
             &mut tx,
@@ -185,22 +193,23 @@ impl<'a> Dispatcher<'a> {
                 model: &self.model.name,
                 input_tokens: 0,
                 output_tokens: 0,
-                estimated_cost_micros: self
-                    .model
-                    .cost_micros(input_upper, request.max_output_tokens()),
+                estimated_cost_micros: worst_case,
                 latency_ms: 0,
                 outcome: CallOutcome::Pending,
                 draft_id: None,
             },
-            i64::from(self.state.ai.config.rate_limit_per_user_per_minute),
-            self.settings.monthly_budget_micros,
+            ReservationLimits {
+                rate_limit: i64::from(self.state.ai.config.rate_limit_per_user_per_minute),
+                budget_micros: self.settings.monthly_budget_micros,
+                stale_after_secs: self.state.ai.stale_after().as_secs_f64(),
+            },
             OffsetDateTime::now_utc(),
         )
         .await?;
         match reservation {
             Reservation::Granted => {
                 zirv_flow_store::commit(tx).await?;
-                Ok(call)
+                Ok((call, worst_case))
             }
             Reservation::RateLimited => {
                 refused("rate_limited");
@@ -213,61 +222,170 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Steps 2 to 8: opens the key, reserves the call, calls the provider, finishes the call's
-    /// row and, when the workspace opted in, stores a transcript. A refused call sends nothing.
+    /// Steps 2 to 8: reserves the call, then, in a task of its own, opens the key, calls the
+    /// provider, finishes the call's row and, when the workspace opted in, stores a transcript. The
+    /// task is not tied to this future, so a handler that is dropped (a client that went away)
+    /// cannot cancel the call or leave its row pending. A refused call sends nothing.
     pub async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, DispatchError> {
-        let key = open_provider_key(self.state, self.workspace, self.key).await?;
-        let http = self.state.ai.http(self.state.egress_policy())?;
-        let provider = self.state.ai.provider(self.provider.kind);
-        let endpoint = Endpoint {
-            base_url: self.provider.base_url.clone(),
-            model: self.model.name.clone(),
+        let (call, worst_case) = self.reserve(request).await?;
+        let flight = Flight {
+            state: self.state.clone(),
+            workspace: self.workspace,
+            user: self.user,
+            feature: self.feature,
+            transcript_days: self.settings.transcript_days,
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            key: self.key,
+            call,
+            request: request.clone(),
         };
-        let call = self.reserve(request).await?;
+        match tokio::spawn(flight.run()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // The task panicked. Whether the provider billed the call is unknown, so the row
+                // keeps its worst-case cost.
+                let finished = FinishedAiCall {
+                    outcome: CallOutcome::Abandoned,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    estimated_cost_micros: worst_case,
+                    latency_ms: 0,
+                };
+                finish(&self.state.pool, call, &finished, None).await?;
+                metrics::counter!(
+                    "zirv_flow_ai_calls_total",
+                    "feature" => self.feature,
+                    "outcome" => CallOutcome::Abandoned.as_str(),
+                )
+                .increment(1);
+                Err(AiError::Transport("the call was interrupted".to_owned()).into())
+            }
+        }
+    }
+}
 
+/// How often the bookkeeping of a finished call is tried before it is left to stale recovery.
+const FINISH_ATTEMPTS: u32 = 3;
+
+/// A transcript to store with the finished call.
+struct NewTranscript {
+    workspace: WorkspaceId,
+    user: Option<UserId>,
+    content: Value,
+    expires_at: OffsetDateTime,
+}
+
+/// Finishes a reserved call's row, and stores its transcript, in one transaction, trying again
+/// after a short pause when the database fails.
+async fn finish(
+    pool: &zirv_flow_store::PgPool,
+    call: Uuid,
+    finished: &FinishedAiCall,
+    transcript: Option<&NewTranscript>,
+) -> Result<(), StoreError> {
+    let mut attempt = 1;
+    loop {
+        let tried = async {
+            let mut tx = zirv_flow_store::begin(pool).await?;
+            zirv_flow_store::finish_ai_call(&mut tx, call, finished).await?;
+            if let Some(transcript) = transcript {
+                zirv_flow_store::insert_ai_transcript(
+                    &mut tx,
+                    transcript.workspace,
+                    call,
+                    transcript.user,
+                    &transcript.content,
+                    transcript.expires_at,
+                )
+                .await?;
+            }
+            zirv_flow_store::commit(tx).await
+        }
+        .await;
+        match tried {
+            Err(error) if attempt < FINISH_ATTEMPTS => {
+                tracing::warn!(
+                    attempt,
+                    "finishing an AI call failed, trying again: {error}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100 * u64::from(attempt)))
+                    .await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Everything a reserved call needs once it runs on its own.
+struct Flight {
+    state: AppState,
+    workspace: WorkspaceId,
+    user: Option<UserId>,
+    feature: &'static str,
+    transcript_days: Option<i32>,
+    provider: AiProviderConfig,
+    model: AiModelConfig,
+    key: SecretId,
+    call: Uuid,
+    request: ChatRequest,
+}
+
+impl Flight {
+    async fn run(self) -> Result<ChatResponse, DispatchError> {
         let started = Instant::now();
-        let result = provider.complete(http, &endpoint, &key, request).await;
+        // The key is opened right before the request. When it cannot be, nothing was sent: the
+        // row is finished at no cost.
+        let sent = async {
+            let key = open_provider_key(&self.state, self.workspace, self.key).await?;
+            let http = self.state.ai.http(self.state.egress_policy())?;
+            let provider = self.state.ai.provider(self.provider.kind);
+            let endpoint = Endpoint {
+                base_url: self.provider.base_url.clone(),
+                model: self.model.name.clone(),
+            };
+            Ok::<_, DispatchError>(
+                provider
+                    .complete(http, &endpoint, &key, &self.request)
+                    .await,
+            )
+        }
+        .await;
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-        drop(key);
-
-        let (outcome, usage) = match &result {
-            Ok(response) => (CallOutcome::Ok, Some(response.usage)),
-            Err(error) => (outcome_of(error), None),
+        let (result, outcome, usage) = match sent {
+            Ok(result) => {
+                let (outcome, usage) = match &result {
+                    Ok(response) => (CallOutcome::Ok, Some(response.usage())),
+                    Err(error) => (outcome_of(error), None),
+                };
+                (result.map_err(DispatchError::from), outcome, usage)
+            }
+            Err(error) => (Err(error), CallOutcome::Transport, None),
         };
         let (input_tokens, output_tokens) =
             usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
-        let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
-        zirv_flow_store::finish_ai_call(
-            &mut tx,
-            call,
-            &FinishedAiCall {
-                outcome,
-                input_tokens,
-                output_tokens,
-                estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
-                latency_ms,
-            },
-        )
-        .await?;
-        if let Some(days) = self.settings.transcript_days {
-            zirv_flow_store::insert_ai_transcript(
-                &mut tx,
-                self.workspace,
-                call,
-                self.user,
-                &transcript(request, result.as_ref().ok()),
-                OffsetDateTime::now_utc() + Duration::days(i64::from(days)),
-            )
-            .await?;
-        }
-        zirv_flow_store::commit(tx).await?;
+        let transcript = self.transcript_days.map(|days| NewTranscript {
+            workspace: self.workspace,
+            user: self.user,
+            content: transcript(&self.request, result.as_ref().ok()),
+            expires_at: OffsetDateTime::now_utc() + Duration::days(i64::from(days)),
+        });
+        let finished = FinishedAiCall {
+            outcome,
+            input_tokens,
+            output_tokens,
+            estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
+            latency_ms,
+        };
+        finish(&self.state.pool, self.call, &finished, transcript.as_ref()).await?;
         metrics::counter!(
             "zirv_flow_ai_calls_total",
             "feature" => self.feature,
             "outcome" => outcome.as_str(),
         )
         .increment(1);
-        result.map_err(Into::into)
+        result
     }
 }
 
@@ -332,8 +450,8 @@ fn transcript(request: &ChatRequest, response: Option<&ChatResponse>) -> Value {
             "tools": request.tools().iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
         },
         "response": response.map(|response| json!({
-            "parts": response.parts.iter().collect::<Vec<&Part>>(),
-            "model": response.model,
+            "parts": response.parts().iter().collect::<Vec<&Part>>(),
+            "model": response.model(),
         })),
     })
 }
@@ -388,13 +506,7 @@ mod tests {
             .user(vec![Content::Personal("ada@example.com".into())])
             .unwrap()
             .build();
-        let response = ChatResponse {
-            parts: vec![Part::Text {
-                text: "done".into(),
-            }],
-            usage: Default::default(),
-            model: "m".into(),
-        };
+        let response = zirv_flow_ai::fake::text_response("done", 0, 0);
 
         let stored = transcript(&request, Some(&response));
 

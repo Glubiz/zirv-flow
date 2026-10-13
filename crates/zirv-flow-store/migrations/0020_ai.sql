@@ -39,7 +39,7 @@ CREATE TABLE ai_calls (
     estimated_cost_micros bigint NOT NULL DEFAULT 0 CHECK (estimated_cost_micros >= 0),
     latency_ms            integer NOT NULL DEFAULT 0 CHECK (latency_ms >= 0),
     outcome               text NOT NULL CHECK (outcome IN
-        ('pending', 'ok', 'http_error', 'timeout', 'egress_denied', 'transport', 'malformed',
+        ('pending', 'abandoned', 'ok', 'http_error', 'timeout', 'egress_denied', 'transport', 'malformed',
          'capability')),
     draft_id              uuid,
     created_at            timestamptz NOT NULL DEFAULT now()

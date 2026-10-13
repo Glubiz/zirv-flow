@@ -25,13 +25,14 @@ pub struct Usage {
     pub output_tokens: u32,
 }
 
-/// A provider's answer, the same shape for every adapter.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// A provider's answer, the same shape for every adapter. The fields are private and only this
+/// crate builds one (the adapters and the fake), so a value of this type always came from a
+/// provider: a caller cannot forge one to replay as assistant history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChatResponse {
-    pub parts: Vec<Part>,
-    pub usage: Usage,
-    /// The model that answered, as the provider reports it.
-    pub model: String,
+    parts: Vec<Part>,
+    usage: Usage,
+    model: String,
 }
 
 /// The text parts, joined.
@@ -46,6 +47,27 @@ pub(crate) fn joined_text(parts: &[Part]) -> String {
 }
 
 impl ChatResponse {
+    pub(crate) fn new(parts: Vec<Part>, usage: Usage, model: String) -> Self {
+        Self {
+            parts,
+            usage,
+            model,
+        }
+    }
+
+    pub fn parts(&self) -> &[Part] {
+        &self.parts
+    }
+
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// The model that answered, as the provider reports it.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// The text parts, joined.
     pub fn text(&self) -> String {
         joined_text(&self.parts)
@@ -71,8 +93,8 @@ mod tests {
     use super::*;
 
     fn response() -> ChatResponse {
-        ChatResponse {
-            parts: vec![
+        ChatResponse::new(
+            vec![
                 Part::Text { text: "a".into() },
                 Part::ToolCall {
                     id: "c1".into(),
@@ -81,12 +103,12 @@ mod tests {
                 },
                 Part::Text { text: "b".into() },
             ],
-            usage: Usage {
+            Usage {
                 input_tokens: 3,
                 output_tokens: 4,
             },
-            model: "m".into(),
-        }
+            "m".into(),
+        )
     }
 
     #[test]
@@ -98,11 +120,10 @@ mod tests {
     }
 
     #[test]
-    fn parts_round_trip_through_json_with_a_type_tag() {
+    fn parts_serialize_with_a_type_tag() {
         let json = serde_json::to_value(response()).unwrap();
         assert_eq!(json["parts"][0]["type"], "text");
         assert_eq!(json["parts"][1]["type"], "tool_call");
-        let back: ChatResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(back, response());
+        assert_eq!(json["model"], "m");
     }
 }

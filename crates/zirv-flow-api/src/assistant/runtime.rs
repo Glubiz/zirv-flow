@@ -2,16 +2,21 @@
 //! tests, a replacement provider.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use zirv_flow_ai::{AiError, AiHttp, AiHttpLimits, Provider, ProviderKind, provider_for};
 use zirv_flow_core::egress::EgressPolicy;
 
 use super::config::AiConfig;
 
+/// Added to the client timeout before a pending call counts as abandoned.
+const STALE_MARGIN: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Default)]
 pub(crate) struct AiRuntime {
     pub(crate) config: Arc<AiConfig>,
     http: Arc<OnceLock<AiHttp>>,
+    limits: AiHttpLimits,
     #[cfg(test)]
     replacement: Option<Arc<dyn Provider>>,
 }
@@ -29,8 +34,14 @@ impl AiRuntime {
         if let Some(http) = self.http.get() {
             return Ok(http);
         }
-        let built = AiHttp::new(Arc::clone(policy), AiHttpLimits::default())?;
+        let built = AiHttp::new(Arc::clone(policy), self.limits)?;
         Ok(self.http.get_or_init(|| built))
+    }
+
+    /// How long a reserved call may stay pending before it counts as abandoned: the client's
+    /// whole timeout plus a margin for the bookkeeping after it.
+    pub(crate) fn stale_after(&self) -> Duration {
+        self.limits.timeout + STALE_MARGIN
     }
 
     /// The adapter for a protocol.
@@ -64,6 +75,15 @@ mod tests {
         let second = runtime.clone().http(&policy).unwrap() as *const AiHttp;
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_call_goes_stale_after_the_client_timeout_plus_a_margin() {
+        let runtime = AiRuntime::default();
+        assert_eq!(
+            runtime.stale_after(),
+            AiHttpLimits::default().timeout + STALE_MARGIN
+        );
     }
 
     #[test]

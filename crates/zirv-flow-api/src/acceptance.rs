@@ -9548,13 +9548,14 @@ email,b@example.com,
             &pool,
             &fake,
             ai_config(None, 20),
-            json!({"monthly_budget_micros": 20_000}),
+            json!({"monthly_budget_micros": 38_000}),
         )
         .await;
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
         let user = owner_id(&pool).await;
         let sent = fake.call_count();
-        // 10_500 per call: two calls cross a 20_000 budget.
+        // 10_500 per call, and a call is admitted only while the spend plus its worst case (about
+        // 19_000) fits the budget: two calls fit 38_000, a third would not.
         for _ in 0..2 {
             fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 1_000, 500)));
             crate::dispatch(&state, Some(user), workspace, "mapping", |privacy| {
@@ -9593,7 +9594,7 @@ email,b@example.com,
         )
         .await;
         assert_eq!(usage.body["spent_micros"], 21_000);
-        assert_eq!(usage.body["budget_micros"], 20_000);
+        assert_eq!(usage.body["budget_micros"], 38_000);
         assert_eq!(usage.body["by_feature"][0]["feature"], "mapping");
         assert_eq!(usage.body["by_feature"][0]["calls"], 2);
         assert_eq!(usage.body["by_user"][0]["calls"], 2);
@@ -10007,7 +10008,7 @@ email,b@example.com,
             &pool,
             &fake,
             ai_config(None, 20),
-            json!({"monthly_budget_micros": 10_000}),
+            json!({"monthly_budget_micros": 25_000}),
         )
         .await;
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
@@ -10115,7 +10116,7 @@ email,b@example.com,
         let request = mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false).unwrap();
         let model = config.model("openai", "big").unwrap().1.clone();
         let worst_case = model.cost_micros(
-            u32::try_from(request.text_bytes()).unwrap(),
+            request.input_tokens_upper_bound(),
             request.max_output_tokens(),
         );
         // A budget that three worst-case reservations spend exactly.
@@ -10150,5 +10151,204 @@ email,b@example.com,
             3 * model.cost_micros(10, 10),
             "the actual cost replaced the reserve"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_budget_below_one_worst_case_call_refuses_before_dispatch(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            ai_config(None, 20),
+            json!({"monthly_budget_micros": 1_000}),
+        )
+        .await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let sent = fake.call_count();
+
+        let refused = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert!(matches!(
+            refused,
+            Err(crate::DispatchError::Ai(
+                zirv_flow_ai::AiError::BudgetExceeded
+            ))
+        ));
+        assert_eq!(
+            (fake.call_count(), ai_calls(&pool).await),
+            (sent, 0),
+            "nothing was spent, and still nothing was sent"
+        );
+    }
+
+    /// Waits until no call of the log is pending.
+    async fn settled(pool: &PgPool) {
+        for _ in 0..100 {
+            let pending: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM ai_calls WHERE outcome = 'pending'")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            if pending == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("a call is still pending");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dispatch_dropped_mid_call_still_finishes_its_row_with_the_real_usage(pool: PgPool) {
+        let fake = slow_fake(0);
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+
+        // The client goes away after 100 ms; the provider takes 400 ms.
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+                mapping_request(privacy, false)
+            }),
+        )
+        .await;
+        assert!(dropped.is_err(), "the handler was dropped mid-call");
+        settled(&pool).await;
+
+        let (outcome, input, output, cost): (String, i32, i32, i64) = sqlx::query_as(
+            "SELECT outcome, input_tokens, output_tokens, estimated_cost_micros FROM ai_calls",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((outcome.as_str(), input, output), ("ok", 10, 10));
+        assert_eq!(cost, 3 * 10 + 15 * 10, "the real cost, not the reserve");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transient_database_error_while_finishing_is_retried(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        // The first update of a call row fails, as a dropped connection would.
+        for statement in [
+            "CREATE SEQUENCE fail_once",
+            "CREATE FUNCTION fail_first() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF nextval('fail_once') = 1 THEN RAISE EXCEPTION 'transient'; END IF; \
+             RETURN NEW; END $$",
+            "CREATE TRIGGER fail_first BEFORE UPDATE ON ai_calls FOR EACH ROW \
+             EXECUTE FUNCTION fail_first()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+
+        let response = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert!(response.is_ok(), "{response:?}");
+        let (outcome,): (String,) = sqlx::query_as("SELECT outcome FROM ai_calls")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outcome, "ok");
+        let tries: i64 = sqlx::query_scalar("SELECT last_value FROM fail_once")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tries, 2, "one failure, then the retry");
+    }
+
+    /// A provider that panics, as a bug in an adapter would.
+    struct Panics;
+
+    impl zirv_flow_ai::Provider for Panics {
+        fn kind(&self) -> zirv_flow_ai::ProviderKind {
+            zirv_flow_ai::ProviderKind::OpenAiCompatible
+        }
+
+        fn complete<'a>(
+            &'a self,
+            _http: &'a zirv_flow_ai::AiHttp,
+            _endpoint: &'a zirv_flow_ai::Endpoint,
+            _key: &'a zirv_flow_core::SecretString,
+            _request: &'a zirv_flow_ai::ChatRequest,
+        ) -> zirv_flow_ai::BoxFuture<'a, Result<zirv_flow_ai::ChatResponse, zirv_flow_ai::AiError>>
+        {
+            Box::pin(async { panic!("an adapter bug") })
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_panicking_provider_abandons_the_call_at_its_worst_case_cost(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let mut broken = state.clone();
+        broken.ai = crate::assistant::runtime::AiRuntime::new((*state.ai.config).clone())
+            .with_replacement(Arc::new(Panics));
+        let request = mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false).unwrap();
+        let model = state.ai.config.model("openai", "big").unwrap().1.clone();
+        let worst_case = model.cost_micros(
+            request.input_tokens_upper_bound(),
+            request.max_output_tokens(),
+        );
+
+        let result = crate::dispatch(&broken, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert!(result.is_err());
+        let (outcome, cost): (String, i64) =
+            sqlx::query_as("SELECT outcome, estimated_cost_micros FROM ai_calls")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((outcome.as_str(), cost), ("abandoned", worst_case));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_key_that_cannot_be_opened_finishes_the_row_at_no_cost(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let dispatcher = crate::Dispatcher::open(&state, None, workspace, "mapping")
+            .await
+            .unwrap();
+        let request = mapping_request(dispatcher.privacy(), false).unwrap();
+        let sent = fake.call_count();
+        // The key vanishes after the settings were read.
+        sqlx::query("DELETE FROM encrypted_secrets")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = dispatcher.call(&request).await;
+
+        assert!(matches!(result, Err(crate::DispatchError::KeyUnusable)));
+        assert_eq!(fake.call_count(), sent, "nothing was sent");
+        let (outcome, cost, pending): (String, i64, i64) = sqlx::query_as(
+            "SELECT outcome, estimated_cost_micros, \
+                    count(*) FILTER (WHERE outcome = 'pending') OVER () FROM ai_calls",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((outcome.as_str(), cost, pending), ("transport", 0, 0));
     }
 }

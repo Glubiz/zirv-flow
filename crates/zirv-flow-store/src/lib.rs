@@ -32,8 +32,8 @@ pub use accounts::{
 };
 pub use ai::{
     AiCall, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, FeatureUsage, FinishedAiCall,
-    NewAiCall, ProbeRecord, Reservation, TRANSCRIPT_PURGE_BATCH, UserUsage, ai_usage,
-    calls_in_last_minute, erase_ai_transcripts, find_ai_settings, finish_ai_call,
+    NewAiCall, ProbeRecord, Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage,
+    ai_usage, calls_in_last_minute, erase_ai_transcripts, find_ai_settings, finish_ai_call,
     insert_ai_transcript, lock_ai_settings, month_start, purge_expired_ai_transcripts,
     put_ai_settings, record_ai_call, reserve_ai_call, spent_this_month,
 };

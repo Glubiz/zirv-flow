@@ -128,7 +128,7 @@ pub async fn probe(
             }
         }
     }
-    if response.usage.input_tokens == 0 && response.usage.output_tokens == 0 {
+    if response.usage().input_tokens == 0 && response.usage().output_tokens == 0 {
         missing.push(Missing::new(
             Capability::Usage,
             "the model reported zero token usage",

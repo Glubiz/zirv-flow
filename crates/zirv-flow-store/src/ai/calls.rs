@@ -16,6 +16,9 @@ pub enum CallOutcome {
     /// Reserved before the request and not finished yet. A process that dies mid-call leaves it
     /// at its worst-case cost.
     Pending,
+    /// Given up on while pending: the handler panicked or the process died mid-call. It keeps its
+    /// worst-case cost, because whether the provider billed the call is unknown.
+    Abandoned,
     Ok,
     HttpError,
     Timeout,
@@ -29,6 +32,7 @@ impl CallOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Abandoned => "abandoned",
             Self::Ok => "ok",
             Self::HttpError => "http_error",
             Self::Timeout => "timeout",
@@ -96,6 +100,18 @@ pub enum Reservation {
     BudgetExceeded,
 }
 
+/// What a reservation is checked against.
+#[derive(Clone, Copy, Debug)]
+pub struct ReservationLimits {
+    /// Calls one user may make in the last minute.
+    pub rate_limit: i64,
+    /// The monthly budget. A call is admitted only when the month's spend plus its worst-case cost
+    /// stays within it, so real spend never exceeds the budget.
+    pub budget_micros: i64,
+    /// Seconds after which a still-pending call of the workspace counts as abandoned.
+    pub stale_after_secs: f64,
+}
+
 /// Checks the rate limit and the budget and, when both admit the call, records it as `pending` at
 /// `call.estimated_cost_micros` (its worst-case cost), all under a lock on the workspace that is
 /// held until the transaction ends. Counting pending rows too is what makes the limits hold
@@ -104,8 +120,7 @@ pub enum Reservation {
 pub async fn reserve_ai_call(
     connection: &mut PgConnection,
     call: &NewAiCall<'_>,
-    rate_limit: i64,
-    budget_micros: i64,
+    limits: ReservationLimits,
     now: OffsetDateTime,
 ) -> Result<Reservation, StoreError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -113,11 +128,23 @@ pub async fn reserve_ai_call(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    if calls_in_last_minute(&mut *connection, call.workspace_id, call.user_id).await? >= rate_limit
+    // A call still pending after the client's whole timeout is not in flight any more: its process
+    // died. It is given up on but keeps its cost, since the provider may have billed it.
+    sqlx::query(
+        "UPDATE ai_calls SET outcome = 'abandoned' WHERE workspace_id = $1 AND outcome = 'pending' \n           AND created_at < now() - make_interval(secs => $2)",
+    )
+    .bind(call.workspace_id.as_uuid())
+    .bind(limits.stale_after_secs)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if calls_in_last_minute(&mut *connection, call.workspace_id, call.user_id).await?
+        >= limits.rate_limit
     {
         return Ok(Reservation::RateLimited);
     }
-    if spent_this_month(&mut *connection, call.workspace_id, now).await? >= budget_micros {
+    let spent = spent_this_month(&mut *connection, call.workspace_id, now).await?;
+    if spent.saturating_add(call.estimated_cost_micros) > limits.budget_micros {
         return Ok(Reservation::BudgetExceeded);
     }
     let pending = NewAiCall {
@@ -439,6 +466,7 @@ mod tests {
     fn outcomes_have_stable_names_matching_the_database_check() {
         let names: Vec<&str> = [
             CallOutcome::Pending,
+            CallOutcome::Abandoned,
             CallOutcome::Ok,
             CallOutcome::HttpError,
             CallOutcome::Timeout,
@@ -453,6 +481,7 @@ mod tests {
             names,
             [
                 "pending",
+                "abandoned",
                 "ok",
                 "http_error",
                 "timeout",
@@ -624,9 +653,12 @@ mod tests {
             let pool = pool.clone();
             async move {
                 let mut tx = pool.begin().await.unwrap();
-                let result = reserve_ai_call(&mut tx, &call, rate, budget, now)
-                    .await
-                    .unwrap();
+                let limits = ReservationLimits {
+                    rate_limit: rate,
+                    budget_micros: budget,
+                    stale_after_secs: 3_600.0,
+                };
+                let result = reserve_ai_call(&mut tx, &call, limits, now).await.unwrap();
                 tx.commit().await.unwrap();
                 result
             }
@@ -687,5 +719,71 @@ mod tests {
         )
         .await;
         assert!(again.is_err(), "only a pending row can be finished");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_old_pending_row_is_abandoned_with_its_cost_at_the_next_reservation(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let now = OffsetDateTime::now_utc();
+        let mut stale = Vec::new();
+        for (workspace, age) in [(ws, "2 hours"), (ws, "10 seconds"), (other, "2 hours")] {
+            let call = reservation(workspace, None, 500);
+            let mut connection = pool.acquire().await.unwrap();
+            record_ai_call(
+                &mut connection,
+                &NewAiCall {
+                    outcome: CallOutcome::Pending,
+                    ..call.clone()
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE ai_calls SET created_at = now() - $2::interval WHERE id = $1")
+                .bind(call.id)
+                .bind(age)
+                .execute(&pool)
+                .await
+                .unwrap();
+            stale.push(call.id);
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        let granted = reserve_ai_call(
+            &mut tx,
+            &reservation(ws, None, 100),
+            ReservationLimits {
+                rate_limit: 100,
+                budget_micros: 10_000,
+                stale_after_secs: 90.0,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(granted, Reservation::Granted);
+        let mut outcomes = Vec::new();
+        for id in &stale {
+            let row: (String, i64) =
+                sqlx::query_as("SELECT outcome, estimated_cost_micros FROM ai_calls WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            outcomes.push(row);
+        }
+        assert_eq!(
+            outcomes,
+            [
+                ("abandoned".to_owned(), 500),
+                ("pending".to_owned(), 500),
+                ("pending".to_owned(), 500),
+            ],
+            "only this workspace's old row, and its cost is kept"
+        );
+        assert_eq!(spent_this_month(&pool, ws, now).await.unwrap(), 1_100);
     }
 }

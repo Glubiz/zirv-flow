@@ -437,7 +437,7 @@ pub(crate) struct AiCallBody {
     output_tokens: i32,
     estimated_cost_micros: i64,
     latency_ms: i32,
-    /// `pending` (reserved, not finished), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`.
+    /// `pending` (reserved, not finished), `abandoned` (given up on while pending; keeps its worst-case cost), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`.
     outcome: String,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
