@@ -39,6 +39,45 @@ export const FAKE_KIND: SourceKind = {
   capabilities: { incremental: true, full_refresh: true, emits_deletes: false },
 };
 
+function setting(
+  key: string,
+  label: string,
+  kind: string,
+  extra: { required?: boolean; secret?: boolean; options?: string[]; help?: string } = {},
+) {
+  return {
+    key,
+    label,
+    help: extra.help ?? "",
+    kind,
+    options: extra.options ?? [],
+    required: extra.required ?? false,
+    secret: extra.secret ?? false,
+  };
+}
+
+/** The PostgreSQL source type as `GET /api/v1/source-kinds` lists it. */
+export const POSTGRES_KIND: SourceKind = {
+  kind: "postgres",
+  label: "PostgreSQL",
+  description: "Reads tables and queries of one schema of a PostgreSQL database.",
+  config_fields: [
+    setting("host", "Host", "text", { required: true }),
+    setting("port", "Port", "number"),
+    setting("database", "Database", "text", { required: true }),
+    setting("schema", "Schema", "text"),
+    setting("tls", "TLS", "select", { options: ["verify", "off"] }),
+    setting("ca_certificate", "CA certificate", "long_text", { help: "A PEM certificate to trust." }),
+    setting("statement_timeout_seconds", "Statement timeout (seconds)", "number"),
+    setting("queries", "Queries", "queries", { help: "Named SELECT statements." }),
+  ],
+  credential_fields: [
+    setting("user", "User", "text", { required: true, secret: true }),
+    setting("password", "Password", "text", { required: true, secret: true }),
+  ],
+  capabilities: { incremental: true, full_refresh: true, emits_deletes: false },
+};
+
 export function aSource(change: Partial<Source> = {}): Source {
   return {
     id: "src-1",
