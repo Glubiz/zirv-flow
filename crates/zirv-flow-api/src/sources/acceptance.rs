@@ -2311,7 +2311,7 @@ mod tests {
                 email_rule(),
                 {"column": "name", "target": {"type": "trait", "key": "plan"}}
             ],
-            "event": {"name": "seen", "timestamp": {"column": "updated_at", "transforms": [{"op": "timestamp", "format": "%Y-%m-%d %H:%M:%S%#z"}]},
+            "event": {"name": "seen", "timestamp": {"column": "updated_at"},
                       "properties": [{"property": "who", "column": "name"}]}
         });
         let saved = fx
@@ -2361,25 +2361,8 @@ mod tests {
         assert_eq!(first["traits"]["plan"], "User 1");
         assert_eq!(first["event"]["properties"]["who"], "User 1");
         assert_eq!(first["event"]["occurred_at"], "2024-01-01T00:01:00Z");
-        // PostgreSQL hands a timestamptz over as text ("2024-01-01 00:01:00+00"), which is not RFC 3339,
-        // so an event time from it needs the timestamp transform; the bare column is refused.
-        let bare = fx
-            .as_admin(
-                "POST",
-                &format!("/sources/{id}/streams/items/preview"),
-                Some(json!({"limit": 1, "mapping": {"columns": [email_rule()],
-                    "event": {"name": "seen", "timestamp": {"column": "updated_at"}}}})),
-            )
-            .await;
-        assert_eq!(
-            bare.body["records"][0]["result"], "rejected",
-            "{:?}",
-            bare.body
-        );
-        assert_eq!(
-            bare.body["records"][0]["errors"][0]["reason"],
-            "bad_timestamp"
-        );
+        // PostgreSQL hands the bare timestamptz over as text ("2024-01-01 00:01:00+00"); the mapping
+        // reads it as the event time with no transform.
         assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
         assert_eq!(draft.body["read"], 20);
         assert_eq!(draft.body["truncated"], true, "30 rows, 20 shown");

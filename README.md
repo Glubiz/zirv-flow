@@ -1109,6 +1109,15 @@ and list exists, every trait key exists and is not archived, no trait is filled 
 and every transform is well formed. It can be saved again until the first run starts; saving
 clears an earlier dry run.
 
+**Timestamps.** A value that a mapping reads as a timestamp (a `timestamp` trait target, a
+`cast` to `timestamp`, an event time) is RFC 3339, or the SQL text form that PostgreSQL and MySQL
+produce: `YYYY-MM-DD HH:MM:SS`, a space or a `T` between the date and the time, then optionally
+`.fraction` (1 to 9 digits) and an offset (`+HH`, `-HH`, `+HH:MM`, `-HH:MM` or `+HHMM`). A value
+without an offset is **UTC**, so a MySQL `DATETIME` or a `timestamp without time zone` must hold
+UTC to be right. The date alone, a time without seconds and a value with trailing text are
+`bad_timestamp`; use the `timestamp` transform with a `format` for those. CSV imports read
+timestamps with the same leniency as sync runs.
+
 **Dry run.** `POST .../imports/{id}/dry-run` queues the `import.dry_run` job. It reads the
 whole file with the mapping and writes nothing but the rejected rows (phase `dry_run`) and the
 counters: no person, identifier, field or list changes. Poll `GET .../imports/{id}` for
@@ -1327,7 +1336,7 @@ rules, an optional `key_column` and, for sync runs only, an optional `event`.
   record: `{"name": "order_placed", "timestamp": {"column": "order.at", "transforms": [...]},
   "properties": [{"property": "total", "column": "order.total", "transforms": [...]}]}`. The
   name is a constant, the person is the record's identifiers, the time goes through its
-  transforms and is read as an RFC 3339 timestamp (without one the event happened when the run
+  transforms and is read as a timestamp, RFC 3339 or SQL text, see Timestamps (without one the event happened when the run
   started), and a property is the chain's value (an empty one is left out; at most 50). The
   stream must have a primary key (`event_requires_primary_key`).
 
@@ -1515,7 +1524,8 @@ the key of the last row. Consequences to plan for:
   never report a record as deleted.
 
 **Values.** Every selected column is read as text and arrives as a JSON string, or `null` for SQL
-`NULL`; the mapping's cast transforms turn it into numbers, booleans and timestamps. Timestamps are
+`NULL`; the mapping's cast transforms turn it into numbers, booleans and timestamps (the text
+forms PostgreSQL and MySQL give are read as they are, see Timestamps under the mapping). Timestamps are
 read in UTC. JSON columns arrive as JSON text. Binary columns (`bytea`, `BLOB`, `BINARY`) are not
 text and arrive as `null`.
 
