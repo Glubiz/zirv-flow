@@ -246,3 +246,79 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
     .await
     .map_err(|_| unavailable())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn payload(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn the_dedupe_value_is_a_string_or_number_of_one_to_128_printable_characters() {
+        let object =
+            payload(json!({"id": "o-1", "n": 42, "f": 1.5, "nest": {"id": "deep"}, "list": ["x"]}));
+
+        assert_eq!(dedupe_value(&object, "id").as_deref(), Some("o-1"));
+        assert_eq!(dedupe_value(&object, "n").as_deref(), Some("42"));
+        assert_eq!(dedupe_value(&object, "f").as_deref(), Some("1.5"));
+        assert_eq!(dedupe_value(&object, "nest.id").as_deref(), Some("deep"));
+        assert_eq!(dedupe_value(&object, "list.0").as_deref(), Some("x"));
+        assert_eq!(dedupe_value(&object, "missing"), None);
+        assert_eq!(dedupe_value(&object, "nest"), None);
+    }
+
+    #[test]
+    fn an_unusable_dedupe_value_is_none() {
+        for value in [
+            json!({"id": ""}),
+            json!({"id": true}),
+            json!({"id": null}),
+            json!({"id": "a\nb"}),
+            json!({"id": "x".repeat(129)}),
+        ] {
+            assert_eq!(dedupe_value(&payload(value), "id"), None);
+        }
+        assert!(dedupe_value(&payload(json!({"id": "x".repeat(128)})), "id").is_some());
+    }
+
+    #[test]
+    fn every_signature_cause_is_a_401_with_one_code_and_a_stale_timestamp_says_so() {
+        for error in [
+            SignatureError::MissingSignature,
+            SignatureError::MalformedSignature,
+            SignatureError::MissingTimestamp,
+            SignatureError::MalformedTimestamp,
+            SignatureError::OutsideTolerance,
+            SignatureError::Mismatch,
+        ] {
+            let refusal = invalid_signature(error);
+            assert_eq!(refusal.error.status_code(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            invalid_signature(SignatureError::OutsideTolerance).outcome,
+            "signature_stale"
+        );
+        assert_eq!(
+            invalid_signature(SignatureError::Mismatch).outcome,
+            "signature_mismatch"
+        );
+        assert_eq!(
+            invalid_signature(SignatureError::MissingTimestamp).outcome,
+            "signature_missing"
+        );
+        assert_eq!(
+            invalid_signature(SignatureError::MalformedTimestamp).outcome,
+            "signature_malformed"
+        );
+        assert_eq!(
+            invalid_signature(SignatureError::Mismatch).error.detail(),
+            invalid_signature(SignatureError::MissingSignature)
+                .error
+                .detail()
+        );
+    }
+}
