@@ -1,6 +1,8 @@
 //! What a source type declares about itself: the fields a marketer fills in and what it can do.
 //! The setup wizard renders its form from these.
 
+use crate::runtime::RateLimit;
+
 /// A source type, as the registry lists it.
 #[derive(Debug)]
 pub struct SourceSpec {
@@ -13,6 +15,9 @@ pub struct SourceSpec {
     /// Settings kept only in an encrypted secret. Every field here has `secret` set.
     pub credential_fields: &'static [FieldSpec],
     pub capabilities: Capabilities,
+    /// The request rate the source type tolerates, enforced per process by the runtime;
+    /// `None` is unlimited.
+    pub rate_limit: Option<RateLimit>,
 }
 
 /// What a source type can do.

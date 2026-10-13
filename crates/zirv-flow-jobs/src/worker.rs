@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
+use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
@@ -53,6 +54,8 @@ pub struct WorkerConfig {
     pub ingest_drain_shards: u32,
     /// Which non-public destinations outbound connections may reach.
     pub egress: Arc<EgressPolicy>,
+    /// The rate-limit buckets of outbound source calls, shared by every run in this process.
+    pub rate_limits: Arc<RateLimits>,
 }
 
 impl WorkerConfig {
@@ -71,6 +74,7 @@ impl WorkerConfig {
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 }
@@ -357,6 +361,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_outbound(
                 shared.config.keyring.clone(),
                 Arc::clone(&shared.config.egress),
+                Arc::clone(&shared.config.rate_limits),
             )
             .with_ingest(IngestSettings {
                 pool: shared.pool.clone(),
@@ -582,6 +587,7 @@ mod tests {
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 

@@ -1,6 +1,7 @@
 //! Persistence for zirv-flow.
 
 mod accounts;
+mod ai;
 mod api_keys;
 mod audit;
 mod bounded;
@@ -30,6 +31,13 @@ use std::fmt;
 pub use accounts::{
     User, count_owners, create_user, find_user, find_user_by_email, is_locked, list_users,
     record_failed_sign_in, record_successful_sign_in, set_password,
+};
+pub use ai::{
+    AiCall, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, FeatureUsage, FinishedAiCall,
+    NewAiCall, ProbeRecord, Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage,
+    ai_usage, calls_in_last_minute, erase_ai_transcripts, find_ai_settings, finish_ai_call,
+    insert_ai_transcript, lock_ai_settings, month_start, purge_expired_ai_transcripts,
+    put_ai_settings, record_ai_call, reserve_ai_call, spent_this_month,
 };
 pub use api_keys::{
     ApiKey, StoredApiKey, create_api_key, find_api_key_for_auth, list_api_keys, revoke_api_key,

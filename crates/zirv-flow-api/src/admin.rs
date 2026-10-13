@@ -17,8 +17,8 @@ use zirv_flow_core::{
 };
 use zirv_flow_store::secrets;
 use zirv_flow_store::{
-    Actor, ApiKey, Membership, NewAuditEntry, PgConnection, PgPool, ReplayReport, StoreError, User,
-    Workspace,
+    Actor, ActorKind, AiSettings, AiSettingsUpdate, ApiKey, Membership, NewAuditEntry,
+    PgConnection, PgPool, ReplayReport, StoreError, User, Workspace,
 };
 
 use crate::{credentials, passwords};
@@ -686,6 +686,167 @@ pub(crate) async fn audit_secret_deleted(
     .await
 }
 
+/// The new state of a workspace's assistant settings. A key is sealed into an
+/// `ai_provider_key` secret in the same transaction that stores the settings.
+pub struct AiSettingsChange {
+    pub enabled: bool,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub monthly_budget_micros: i64,
+    pub pii_opt_in: bool,
+    pub transcript_days: Option<i32>,
+    /// A new provider key; `None` keeps the current one.
+    pub provider_key: Option<SecretBytes>,
+    /// The result of the capability probe the caller ran for this change, if it ran one.
+    pub probe: Option<Value>,
+}
+
+impl fmt::Debug for AiSettingsChange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiSettingsChange")
+            .field("enabled", &self.enabled)
+            .field("provider_id", &self.provider_id)
+            .field("model", &self.model)
+            .field(
+                "provider_key",
+                &self.provider_key.as_ref().map(|_| "[redacted]"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Saves a workspace's assistant settings. Audited as `ai.settings.updated` with the names of
+/// the changed fields and their new non-secret values, never the key; a key write also audits
+/// `secret.created` or `secret.replaced`. Settings and key are stored or refused together.
+pub async fn save_ai_settings(
+    pool: &PgPool,
+    context: &Context,
+    keyring: Option<&Keyring>,
+    workspace: WorkspaceId,
+    change: &AiSettingsChange,
+) -> Result<AiSettings, AdminError> {
+    if change.monthly_budget_micros < 0 {
+        return Err(ValidationError::new("monthly_budget_micros", "must not be negative").into());
+    }
+    if change
+        .transcript_days
+        .is_some_and(|days| !(1..=30).contains(&days))
+    {
+        return Err(ValidationError::new("transcript_days", "must be between 1 and 30").into());
+    }
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let current = zirv_flow_store::lock_ai_settings(&mut tx, workspace)
+        .await?
+        .unwrap_or_else(|| AiSettings::defaults(workspace));
+
+    let mut secret_id = current.provider_key_secret_id;
+    if let Some(key) = &change.provider_key {
+        let keyring = keyring.ok_or(AdminError::Conflict(
+            "stored secrets are not configured on this deployment",
+        ))?;
+        let purpose = SecretPurpose::AiProviderKey;
+        let (id, action) = match secret_id {
+            Some(id) => (id, "secret.replaced"),
+            None => (SecretId::new(), "secret.created"),
+        };
+        let sealed = seal(keyring, key.expose(), &secret_aad(workspace, id, purpose));
+        if action == "secret.created" {
+            secrets::insert(&mut tx, &keyring.key_ids(), workspace, purpose, id, &sealed)
+                .await
+                .map_err(write_refusal)?;
+        } else if !secrets::replace(&mut tx, &keyring.key_ids(), workspace, id, &sealed)
+            .await
+            .map_err(write_refusal)?
+        {
+            return Err(AdminError::NotFound("secret"));
+        }
+        audit(
+            &mut tx,
+            context,
+            Some(workspace),
+            action,
+            Some(("secret", id.as_uuid())),
+            json!({"purpose": purpose.as_str(), "key_id": sealed.key_id}),
+        )
+        .await?;
+        secret_id = Some(id);
+    }
+
+    let updated_by = (context.actor.kind == ActorKind::User)
+        .then_some(context.actor.id)
+        .flatten()
+        .map(UserId::from_uuid);
+    let saved = zirv_flow_store::put_ai_settings(
+        &mut *tx,
+        workspace,
+        &AiSettingsUpdate {
+            enabled: change.enabled,
+            provider_id: change.provider_id.clone(),
+            model: change.model.clone(),
+            monthly_budget_micros: change.monthly_budget_micros,
+            pii_opt_in: change.pii_opt_in,
+            transcript_days: change.transcript_days,
+            provider_key_secret_id: secret_id,
+            last_probe: change.probe.clone(),
+            updated_by,
+        },
+    )
+    .await?;
+
+    let mut changed = Vec::new();
+    let mut values = serde_json::Map::new();
+    let mut note = |field: &'static str, differs: bool, value: Value| {
+        if differs {
+            changed.push(field);
+            values.insert(field.to_owned(), value);
+        }
+    };
+    note(
+        "enabled",
+        current.enabled != saved.enabled,
+        json!(saved.enabled),
+    );
+    note(
+        "provider_id",
+        current.provider_id != saved.provider_id,
+        json!(saved.provider_id),
+    );
+    note("model", current.model != saved.model, json!(saved.model));
+    note(
+        "monthly_budget_micros",
+        current.monthly_budget_micros != saved.monthly_budget_micros,
+        json!(saved.monthly_budget_micros),
+    );
+    note(
+        "pii_opt_in",
+        current.pii_opt_in != saved.pii_opt_in,
+        json!(saved.pii_opt_in),
+    );
+    note(
+        "transcript_days",
+        current.transcript_days != saved.transcript_days,
+        json!(saved.transcript_days),
+    );
+    if change.provider_key.is_some() {
+        // The key is a changed field by name only: no value, not even a mask.
+        changed.push("provider_key");
+    }
+    if !changed.is_empty() {
+        audit(
+            &mut tx,
+            context,
+            Some(workspace),
+            "ai.settings.updated",
+            Some(("ai_settings", workspace.as_uuid())),
+            json!({"changed": changed, "values": values}),
+        )
+        .await?;
+    }
+    zirv_flow_store::commit(tx).await?;
+    Ok(saved)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -951,6 +1112,151 @@ mod tests {
     fn keyring(current: &MasterKey, previous: Option<&MasterKey>) -> Keyring {
         let copy = |key: &MasterKey| MasterKey::parse(&key.to_base64()).unwrap();
         Keyring::new(copy(current), previous.map(copy)).unwrap()
+    }
+
+    fn ai_change() -> AiSettingsChange {
+        AiSettingsChange {
+            enabled: true,
+            provider_id: Some("openai".into()),
+            model: Some("gpt-x".into()),
+            monthly_budget_micros: 5_000_000,
+            pii_opt_in: false,
+            transcript_days: Some(7),
+            provider_key: Some(SecretBytes::new(b"sk-live-hunter2".to_vec())),
+            probe: Some(json!({"ok": true, "missing": []})),
+        }
+    }
+
+    #[test]
+    fn a_settings_change_hides_the_key_in_debug_output() {
+        let printed = format!("{:?}", ai_change());
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("[redacted]"), "{printed}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn saving_ai_settings_seals_the_key_and_audits_the_changed_fields_without_it(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let keys = keyring(&MasterKey::generate(), None);
+        seed_root(&pool, &keys).await;
+
+        let saved = save_ai_settings(&pool, &context, Some(&keys), ws.id, &ai_change())
+            .await
+            .unwrap();
+        // A second save with no new key changes only the budget and keeps the sealed key.
+        let second = AiSettingsChange {
+            monthly_budget_micros: 9_000_000,
+            provider_key: None,
+            probe: None,
+            ..ai_change()
+        };
+        let again = save_ai_settings(&pool, &context, Some(&keys), ws.id, &second)
+            .await
+            .unwrap();
+        // The same values again change nothing and audit nothing.
+        save_ai_settings(&pool, &context, Some(&keys), ws.id, &second)
+            .await
+            .unwrap();
+        let replaced = AiSettingsChange {
+            provider_key: Some(SecretBytes::new(b"sk-live-hunter3".to_vec())),
+            ..second
+        };
+        save_ai_settings(&pool, &context, Some(&keys), ws.id, &replaced)
+            .await
+            .unwrap();
+
+        let secret = saved.provider_key_secret_id.unwrap();
+        assert_eq!(again.provider_key_secret_id, Some(secret));
+        let stored = secrets::get(&pool, ws.id, secret).await.unwrap().unwrap();
+        assert_eq!(stored.purpose, SecretPurpose::AiProviderKey);
+        let opened = open(
+            &keys,
+            &stored.sealed,
+            &secret_aad(ws.id, secret, stored.purpose),
+        )
+        .unwrap();
+        assert_eq!(opened.expose(), b"sk-live-hunter3");
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let relevant: Vec<&str> = actions(&entries)
+            .into_iter()
+            .filter(|action| action.starts_with("ai.") || action.starts_with("secret."))
+            .collect();
+        assert_eq!(
+            relevant,
+            [
+                "ai.settings.updated",
+                "secret.replaced",
+                "ai.settings.updated",
+                "ai.settings.updated",
+                "secret.created"
+            ]
+        );
+        let updates: Vec<&Value> = entries
+            .iter()
+            .filter(|entry| entry.action == "ai.settings.updated")
+            .map(|entry| &entry.summary)
+            .collect();
+        // Newest first: the key replacement, the budget change, then the first save.
+        assert_eq!(updates[0]["changed"], json!(["provider_key"]));
+        assert_eq!(updates[1]["changed"], json!(["monthly_budget_micros"]));
+        assert_eq!(updates[1]["values"]["monthly_budget_micros"], 9_000_000);
+        assert!(
+            updates[2]["changed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("transcript_days"))
+        );
+        assert_eq!(updates[2]["values"]["transcript_days"], 7);
+        let text = format!("{entries:?}");
+        assert!(!text.contains("hunter"), "{text}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn invalid_ai_settings_and_a_key_without_a_keyring_store_nothing(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let keys = keyring(&MasterKey::generate(), None);
+        seed_root(&pool, &keys).await;
+
+        for bad in [
+            AiSettingsChange {
+                monthly_budget_micros: -1,
+                ..ai_change()
+            },
+            AiSettingsChange {
+                transcript_days: Some(31),
+                ..ai_change()
+            },
+            AiSettingsChange {
+                transcript_days: Some(0),
+                ..ai_change()
+            },
+        ] {
+            let error = save_ai_settings(&pool, &context, Some(&keys), ws.id, &bad).await;
+            assert!(matches!(error, Err(AdminError::Invalid(_))));
+        }
+        let no_ring = save_ai_settings(&pool, &context, None, ws.id, &ai_change()).await;
+
+        assert!(matches!(no_ring, Err(AdminError::Conflict(_))));
+        assert!(
+            zirv_flow_store::find_ai_settings(&pool, ws.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(!actions(&entries).iter().any(|a| a.starts_with("ai.")));
     }
 
     fn actions(entries: &[zirv_flow_store::AuditEntry]) -> Vec<&str> {

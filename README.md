@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay,, native contacts, and sources with their streams and sync runs, but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams and sync runs, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1166,6 +1166,74 @@ To time a large file, run the ignored test against a PostgreSQL instance with
 `ZIRV_FLOW_BENCH_ROWS=1000000 cargo nextest run -p zirv-flow-jobs a_big_file --run-ignored all --no-capture`;
 it prints the duration and the rows per second.
 
+## AI assistant
+
+Zirv Flow can use a language model to help draft its own artifacts. Everything the assistant
+does goes through a provider layer with gates in front of it; the assistant features themselves
+arrive later. The assistant is off until the operator lists a provider and an admin turns it on
+for a workspace.
+
+**Deployment configuration.** The operator allowlists the providers, models and base URLs a
+workspace can choose from, with each model's context window and prices (in micro-units of your
+currency per million tokens, so `3000000` is 3.00). With no providers the assistant is
+unavailable and the UI says so.
+
+```toml
+[ai]
+rate_limit_per_user_per_minute = 20  # default
+max_repair_attempts = 2              # default; each repair is a separate, gated call
+
+[[ai.providers]]
+id = "openai"
+kind = "openai_compatible"           # or "anthropic"
+base_url = "https://api.openai.com/v1"
+[[ai.providers.models]]
+name = "a-model-name"
+context_window_tokens = 128000
+input_price_per_mtok = 2500000
+output_price_per_mtok = 10000000
+```
+
+Provider ids and the model names within one provider must be unique, and a base URL is an
+http(s) URL without credentials, a query or a fragment. A mistake fails startup and
+`zirv-flow config check` with the key and the reason. The OpenAI-compatible adapter also serves
+local model servers: point `base_url` at the server. **A local server on a private address is
+blocked until its address is in `egress.allow`** (see Egress); the model client never follows
+redirects and ignores proxy environment variables.
+
+**Per workspace.** Open **AI** in the web UI (workspace admins and the owner). An admin chooses
+the provider and model, stores the provider key, sets a monthly budget and turns the assistant
+on. The key is stored encrypted like any other secret (see Secrets) and is never shown again;
+this needs the master key. Turning the assistant on, or changing its provider, model or key while
+it is on, runs a short check: the model must call a tool with valid arguments and report token
+usage, and its configured context window must be at least 32,768 tokens. A model that fails is
+refused with the missing capabilities and their reasons. The settings are
+`GET` and `PUT /api/v1/workspaces/{ws}/ai/settings`; `GET .../ai/models` lists the allowlist and
+`GET .../ai/usage` the month's spend. All three are admin-only, and a settings change is audited
+as `ai.settings.updated` with the changed fields and their new values, never the key.
+
+**Privacy.** By default a request carries only field names, types, descriptions and counts. A
+request that holds the values of people is refused unless an admin turns on *Allow personal data
+in requests*. Pasted documents and samples are fenced and labelled as data, never instructions.
+No transcript of a prompt or an answer is stored by default. An admin can opt in to keeping them
+for 1 to 30 days (7 is suggested); an hourly job, `maintenance.ai_transcripts`, deletes expired
+ones, and erasing a person also deletes the transcripts that name them.
+
+**Budget and rate limit.** Before any request the dispatch checks the assistant is enabled, the
+user is under `ai.rate_limit_per_user_per_minute` and the workspace is under its monthly budget
+(a calendar month in UTC; a budget of 0 allows no calls). A refused call sends nothing, records
+nothing and answers `402` (budget), `429` with `Retry-After` (rate limit), `409` (not enabled) or
+`422` (personal data without opt-in). Both counts are read from the call log in the database, so
+they hold across instances; a burst of simultaneous calls can overshoot either by the calls
+already in flight. The cost of a call is estimated from the reported tokens and the configured
+prices.
+
+**The call log.** Every dispatched call writes a row with the workspace, user, feature,
+provider, model, token counts, estimated cost, latency and outcome, and never a prompt, an
+answer or an error body. The metrics are `zirv_flow_ai_calls_total{feature,outcome}` and
+`zirv_flow_ai_refusals_total{reason}`. The tests never call a real model: they use a fake
+provider and local mock servers.
+
 ## Sources
 
 A source is a configured external system that records are read from. Each source has a
@@ -1258,6 +1326,53 @@ one trace (`GET .../traces/{trace_id}`): each applied, refused or deleted record
 with the `sync_run` cause and a durable id (the source record, the person, or the reject), never
 a value. Metrics: `zirv_flow_sync_runs_total{outcome}`, `zirv_flow_sync_records_total{outcome}`
 and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
+
+## Connector runtime
+
+Every HTTP source makes its calls through the connector runtime in `zirv-flow-connectors`
+(`SourceContext::send`), which adds the pieces below on top of the guarded client, so no source
+type implements them itself. A test connection, a discovery and a sync run of one source all use it.
+
+**Auth.** API key (in a header or a query parameter), basic, bearer, and OAuth2 client
+credentials (the client proves itself in the form body or with basic auth). The plaintext
+credential is borrowed for the duration of a call. An OAuth2 token is fetched when there is none or
+when less than 60 seconds of it remain; a `401` on a token that was already cached refreshes it
+once and retries the call once, and a second `401` is a refused credential. The refreshed token is
+handed back to the caller (`take_refreshed_token`) to store; the runtime never writes to the
+database. The authorization-code grant is not supported yet. Auth is attached only to requests for
+the source's base origin (scheme, host and port); a request for any other origin, such as a
+pagination link that points elsewhere, is refused before it is sent. Redirects are followed only
+within the same origin: a redirect to another origin, including `http` to `https` on the same host,
+ends the call with the same error, so a header or query key never leaves the origin. Give such a
+source its final base URL.
+
+**Retries.** `GET` and `HEAD` (and a request the source marks idempotent) are retried on `429`,
+`500`, `502`, `503`, `504` and on connection failures and timeouts, up to 5 attempts, with an
+exponential backoff from 1 s to 60 s with jitter. On `429` and `503`, `Retry-After` (seconds or an
+HTTP date) is used instead; a `Retry-After` over 300 s ends the call at once without waiting. Other
+`4xx` codes and a `POST` are not retried. A call that runs out of attempts fails with the last
+status.
+
+**Rate limit.** A source type may declare a request rate; the runtime holds a token bucket per
+source and waits for it before each request. The limit is **per process**: it is shared by the sync
+runs, test connections and discoveries of that source in one process, but several workers each have
+their own bucket and can exceed the limit together. Honouring `Retry-After` reduces that overshoot
+and does not prevent it. Enforcing the limit across workers is decided with open question OQ-9 (M6).
+
+**Pagination.** Four drivers read an API to its end as a stream of pages: cursor (the next cursor
+at a JSON pointer, a missing, null or empty cursor ends it), offset (ends on a page shorter than
+the limit), page number (ends on an empty page, or a short one when a page size is set) and the
+`Link: rel="next"` header. A cursor or link that repeats ends with an error rather than looping,
+and so does a response whose records are not an array, or a cursor or link longer than 8 KiB. An
+offset or page stream whose API ignores the parameter and sends the same full-size page three times
+in a row ends with the same error (two identical pages can be genuine, so they are read); with no
+page size set, only the 100,000-page cap ends such a stream.
+
+**Metrics and logs.** `zirv_flow_source_requests_total{source_type,outcome}`,
+`zirv_flow_source_retries_total{source_type,reason}` and
+`zirv_flow_source_rate_limit_wait_seconds_total{source_type}`. The labels are the source type and
+fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
+a header or a response body.
 
 ## Web UI
 

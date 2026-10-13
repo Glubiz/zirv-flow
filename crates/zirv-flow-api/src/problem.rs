@@ -202,6 +202,79 @@ impl ApiError {
     }
 }
 
+impl ApiError {
+    /// The assistant is off for the workspace, or its model is no longer offered.
+    pub(crate) fn ai_disabled() -> Self {
+        Self {
+            code: Some("ai_disabled"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the AI assistant is not enabled for this workspace",
+            )
+        }
+    }
+
+    /// The workspace's monthly AI budget is spent; nothing was sent to the provider.
+    pub(crate) fn ai_budget_exceeded() -> Self {
+        Self {
+            code: Some("ai_budget_exceeded"),
+            ..Self::new(
+                StatusCode::PAYMENT_REQUIRED,
+                "the workspace's monthly AI budget is spent",
+            )
+        }
+    }
+
+    /// A user is over the per-minute AI call limit; nothing was sent to the provider.
+    pub(crate) fn ai_rate_limited() -> Self {
+        Self {
+            code: Some("ai_rate_limited"),
+            ..Self::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many AI calls; try again in a minute",
+            )
+            .with_retry_after(60)
+        }
+    }
+
+    /// A request carried personal data the workspace has not opted in to sending.
+    pub(crate) fn ai_personal_data_not_allowed() -> Self {
+        Self {
+            code: Some("personal_data_not_allowed"),
+            ..Self::unprocessable("personal data is not allowed in this workspace's AI requests")
+        }
+    }
+
+    /// The provider could not be reached or answered unusably. The detail is fixed text, never
+    /// the provider's own message.
+    pub(crate) fn ai_provider_failed(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("ai_provider_error"),
+            ..Self::new(StatusCode::BAD_GATEWAY, detail)
+        }
+    }
+
+    /// The chosen model lacks required capabilities; each is listed with its reason.
+    pub(crate) fn ai_capability_missing(errors: Vec<ItemProblem>) -> Self {
+        Self {
+            code: Some("ai_capability_missing"),
+            ..Self::unprocessable("the model lacks capabilities the assistant requires")
+                .with_errors(errors)
+        }
+    }
+
+    /// Stored secrets need the master key, which this deployment has not been given.
+    pub(crate) fn secrets_unavailable() -> Self {
+        Self {
+            code: Some("secrets_unavailable"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stored secrets are not configured on this deployment",
+            )
+        }
+    }
+}
+
 impl From<zirv_flow_store::ExploreError> for ApiError {
     fn from(error: zirv_flow_store::ExploreError) -> Self {
         use zirv_flow_store::ExploreError;
@@ -322,6 +395,58 @@ mod tests {
         let status = |error| ApiError::from(error).status;
         assert_eq!(status(AdminError::Conflict("taken")), StatusCode::CONFLICT);
         assert_eq!(status(AdminError::NotFound("user")), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_ai_problems_carry_their_status_code_and_retry_hint() {
+        let cases = [
+            (ApiError::ai_disabled(), StatusCode::CONFLICT, "ai_disabled"),
+            (
+                ApiError::ai_budget_exceeded(),
+                StatusCode::PAYMENT_REQUIRED,
+                "ai_budget_exceeded",
+            ),
+            (
+                ApiError::ai_rate_limited(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "ai_rate_limited",
+            ),
+            (
+                ApiError::ai_personal_data_not_allowed(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "personal_data_not_allowed",
+            ),
+            (
+                ApiError::ai_provider_failed("the request timed out"),
+                StatusCode::BAD_GATEWAY,
+                "ai_provider_error",
+            ),
+            (
+                ApiError::ai_capability_missing(vec![ItemProblem {
+                    index: 0,
+                    field: "usage".into(),
+                    reason: "no usage".into(),
+                }]),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ai_capability_missing",
+            ),
+            (
+                ApiError::secrets_unavailable(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "secrets_unavailable",
+            ),
+        ];
+        for (error, status, code) in cases {
+            let response = error.into_response();
+            assert_eq!(response.status(), status, "{code}");
+            let retry = response.headers().get(header::RETRY_AFTER).cloned();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], code);
+            assert_eq!(retry.is_some(), code == "ai_rate_limited", "{code}");
+        }
     }
 
     #[tokio::test]

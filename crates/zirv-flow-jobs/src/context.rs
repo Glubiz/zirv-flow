@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -37,6 +38,7 @@ pub struct JobContext<'a> {
     identifier_key: Option<Arc<HmacKey>>,
     keyring: Option<Arc<Keyring>>,
     egress: Arc<EgressPolicy>,
+    rate_limits: Arc<RateLimits>,
 }
 
 impl<'a> JobContext<'a> {
@@ -49,6 +51,7 @@ impl<'a> JobContext<'a> {
             identifier_key: None,
             keyring: None,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 
@@ -81,9 +84,11 @@ impl<'a> JobContext<'a> {
         mut self,
         keyring: Option<Arc<Keyring>>,
         egress: Arc<EgressPolicy>,
+        rate_limits: Arc<RateLimits>,
     ) -> Self {
         self.keyring = keyring;
         self.egress = egress;
+        self.rate_limits = rate_limits;
         self
     }
 
@@ -93,6 +98,10 @@ impl<'a> JobContext<'a> {
     }
 
     /// Which non-public destinations outbound connections may reach.
+    pub(crate) fn rate_limits(&self) -> &Arc<RateLimits> {
+        &self.rate_limits
+    }
+
     pub(crate) fn egress(&self) -> &Arc<EgressPolicy> {
         &self.egress
     }

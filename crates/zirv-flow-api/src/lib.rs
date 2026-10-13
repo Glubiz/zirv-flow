@@ -1,6 +1,7 @@
 //! HTTP API for zirv-flow.
 
 pub mod admin;
+mod assistant;
 mod auth;
 mod consent;
 mod contacts;
@@ -47,6 +48,9 @@ use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use assistant::{
+    AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, DispatchError, Dispatcher, dispatch,
+};
 pub use events::ExplorerLimits;
 pub use imports::ImportLimits;
 pub use ingest::IngestLimits;
@@ -107,6 +111,18 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/api-keys/{id}",
             axum::routing::delete(keys::revoke),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/settings",
+            get(assistant::settings::get_settings).put(assistant::settings::put_settings),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/models",
+            get(assistant::settings::models),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/ai/usage",
+            get(assistant::settings::usage),
         )
         .route(
             "/api/v1/workspaces/{ws}/traits",

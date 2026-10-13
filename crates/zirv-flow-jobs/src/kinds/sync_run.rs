@@ -15,6 +15,7 @@
 //! Nothing here logs a record value, an identifier, a trait value or a credential.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -488,8 +489,15 @@ async fn run_pass(
         cursor_field: stream.cursor_field.clone(),
         primary_key: stream.primary_key.clone(),
     };
-    let source_context = SourceContext::new(ctx.egress().clone(), HttpLimits::default())
-        .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let source_context = SourceContext::new(
+        ctx.egress().clone(),
+        HttpLimits::default(),
+        driver.spec().kind,
+        ids.source.to_string(),
+        Arc::clone(ctx.rate_limits()),
+    )
+    .map(|context| context.with_rate_limit(driver.spec().rate_limit))
+    .map_err(|_| JobError::new("the outbound client could not be built"))?;
 
     let mut pass = Pass {
         pool,
@@ -662,7 +670,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let context = SourceContext::new(Arc::default(), HttpLimits::default()).unwrap();
+        let context = SourceContext::new(
+            Arc::default(),
+            HttpLimits::default(),
+            "fake",
+            "test",
+            Arc::default(),
+        )
+        .unwrap();
         let found = Registry::built_in()
             .get("fake")
             .unwrap()
@@ -796,7 +811,7 @@ mod tests {
                     batch_size: 500,
                     shards: 1,
                 })
-                .with_outbound(keyring, Arc::default());
+                .with_outbound(keyring, Arc::default(), Arc::default());
             run_sync(&mut ctx, &job.payload, probe).await
         };
         if keep && result.is_ok() {

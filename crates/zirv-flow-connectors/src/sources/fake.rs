@@ -94,6 +94,7 @@ impl Source for Fake {
             required: true,
             secret: true,
         }],
+        rate_limit: None,
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,
@@ -225,7 +226,14 @@ mod tests {
     use crate::http::HttpLimits;
 
     fn context() -> SourceContext {
-        SourceContext::new(Arc::new(EgressPolicy::default()), HttpLimits::default()).unwrap()
+        SourceContext::new(
+            Arc::new(EgressPolicy::default()),
+            HttpLimits::default(),
+            "fake",
+            "source-1",
+            Arc::default(),
+        )
+        .unwrap()
     }
 
     fn credential(token: &str) -> Credential {

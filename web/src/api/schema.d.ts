@@ -306,6 +306,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/ai/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The providers and models this deployment offers, with context windows and prices. */
+        get: operations["list_ai_models"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/ai/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's AI settings. Admins, the owner and `admin` keys only. */
+        get: operations["get_ai_settings"];
+        /**
+         * Replaces the workspace's AI settings. Enabling the assistant, or changing its provider, model
+         *     or key while it is on, first runs a capability probe: the model must call a tool with valid
+         *     arguments and report token usage, and its configured context window must be at least 32768
+         *     tokens. A model that fails is refused with 422 and the missing capabilities. Audited as
+         *     `ai.settings.updated`, with the changed field names and values, never the key.
+         */
+        put: operations["put_ai_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/ai/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The month's AI spend against the budget, by feature and by user, with the latest calls. */
+        get: operations["get_ai_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/api-keys": {
         parameters: {
             query?: never;
@@ -1809,6 +1867,77 @@ export interface components {
             /** @description False when the identifier was suppressed already. */
             added: boolean;
         };
+        AiCallBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int64 */
+            estimated_cost_micros: number;
+            feature: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            input_tokens: number;
+            /** Format: int32 */
+            latency_ms: number;
+            model: string;
+            /** @description `pending` (reserved, not finished), `abandoned` (given up on while pending; keeps its worst-case cost), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`. */
+            outcome: string;
+            /** Format: int32 */
+            output_tokens: number;
+            provider_id: string;
+            /** Format: uuid */
+            user_id?: string | null;
+        };
+        AiModelsBody: {
+            /**
+             * Format: int32
+             * @description The smallest context window a model may have to be enabled.
+             */
+            min_context_window_tokens: number;
+            /** @description The deployment's allowlist; empty means the assistant is unavailable. */
+            providers: components["schemas"]["ProviderBody"][];
+        };
+        AiSettingsBody: {
+            enabled: boolean;
+            last_probe?: null | components["schemas"]["ProbeBody"];
+            model?: string | null;
+            /**
+             * Format: int64
+             * @description Micro-units of the deployment currency per calendar month (UTC); 0 allows no calls.
+             */
+            monthly_budget_micros: number;
+            /** @description Whether requests may carry the values of people. */
+            pii_opt_in: boolean;
+            /** @description The chosen provider's id from `ai/models`. */
+            provider_id?: string | null;
+            /** @description Whether a provider key is stored. The key itself is never returned. */
+            provider_key_set: boolean;
+            /**
+             * Format: int32
+             * @description Days transcripts are kept (1 to 30); null stores none.
+             */
+            transcript_days?: number | null;
+            /** Format: date-time */
+            updated_at?: string | null;
+        };
+        AiUsageBody: {
+            /**
+             * Format: int64
+             * @description The monthly budget in micro-units; 0 allows no calls.
+             */
+            budget_micros: number;
+            by_feature: components["schemas"]["FeatureUsageBody"][];
+            by_user: components["schemas"]["UserUsageBody"][];
+            /** Format: date-time */
+            month_start: string;
+            /** @description The latest calls, newest first. Counts and names only: never a prompt or a response. */
+            recent: components["schemas"]["AiCallBody"][];
+            /**
+             * Format: int64
+             * @description Spent so far this month (UTC), in micro-units.
+             */
+            spent_micros: number;
+        };
         ApiKeyBody: {
             /** Format: date-time */
             created_at: string;
@@ -2672,6 +2801,17 @@ export interface components {
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
         };
+        FeatureUsageBody: {
+            /** Format: int64 */
+            calls: number;
+            /** Format: int64 */
+            cost_micros: number;
+            feature: string;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+        };
         FieldBody: {
             /** @description One of `string`, `number`, `boolean`, `timestamp`, `json`, `unknown`. */
             field_type: string;
@@ -3039,6 +3179,28 @@ export interface components {
             /** @description True when sign-in through the identity provider is configured. */
             oidc: boolean;
         };
+        MissingBody: {
+            /** @description `tool_calls`, `usage` or `context_window`. */
+            capability: string;
+            reason: string;
+        };
+        ModelBody: {
+            /** Format: int32 */
+            context_window_tokens: number;
+            /**
+             * Format: int64
+             * @description Micro-units of the deployment currency per million input tokens.
+             */
+            input_price_per_mtok: number;
+            /** @description Whether the context window meets the assistant's minimum of 32768 tokens. */
+            meets_minimum_context: boolean;
+            name: string;
+            /**
+             * Format: int64
+             * @description Micro-units of the deployment currency per million output tokens.
+             */
+            output_price_per_mtok: number;
+        };
         /** @description An input that named no person. */
         NotFoundBody: {
             /**
@@ -3113,6 +3275,13 @@ export interface components {
              * @example keep
              */
             orphan_policy: string;
+        };
+        ProbeBody: {
+            /** Format: date-time */
+            at: string;
+            missing: components["schemas"]["MissingBody"][];
+            /** @description Whether the model passed the capability probe. */
+            ok: boolean;
         };
         /** @description An RFC 9457 problem document. */
         Problem: {
@@ -3216,6 +3385,40 @@ export interface components {
              * @example number
              */
             type: string;
+        };
+        ProviderBody: {
+            base_url: string;
+            id: string;
+            /** @description `openai_compatible` or `anthropic`. */
+            kind: string;
+            models: components["schemas"]["ModelBody"][];
+        };
+        /** @description The whole settings of the workspace; a PUT replaces them. */
+        PutAiSettingsRequest: {
+            /**
+             * @description Turning this on, or changing the provider, model or key while on, runs a capability probe
+             *     that must pass.
+             */
+            enabled: boolean;
+            model?: string | null;
+            /**
+             * Format: int64
+             * @description At least 0.
+             */
+            monthly_budget_micros: number;
+            pii_opt_in: boolean;
+            /** @description A provider id from `ai/models`; set together with `model`. */
+            provider_id?: string | null;
+            /**
+             * Format: password
+             * @description Creates or replaces the stored provider key. Omit it to keep the current key.
+             */
+            provider_key?: string | null;
+            /**
+             * Format: int32
+             * @description 1 to 30, or null to store no transcripts.
+             */
+            transcript_days?: number | null;
         };
         PutContactDefinitionRequest: {
             /** @description At most 100 fields, each registry key once, each identifier kind once. */
@@ -3910,6 +4113,17 @@ export interface components {
             /** Format: uuid */
             id: string;
             is_owner: boolean;
+        };
+        UserUsageBody: {
+            /** Format: int64 */
+            calls: number;
+            /** Format: int64 */
+            cost_micros: number;
+            /**
+             * Format: uuid
+             * @description Null for calls made with an API key.
+             */
+            user_id?: string | null;
         };
         ValueCountBody: {
             /** Format: int64 */
@@ -4889,6 +5103,237 @@ export interface operations {
                 };
             };
             /** @description The API key lacks the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_ai_models: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The deployment's allowlist */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiModelsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_ai_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The settings; the provider key is never returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiSettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_ai_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutAiSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description The saved settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiSettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid settings, a model that is not offered, or a model that lacks capabilities (code ai_capability_missing, with errors listing each) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The provider could not be reached for the probe (code ai_provider_error) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Stored secrets are not configured on this deployment */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_ai_usage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Month-to-date usage; content-free */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiUsageBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin */
             403: {
                 headers: {
                     [name: string]: unknown;

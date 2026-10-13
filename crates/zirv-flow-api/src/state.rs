@@ -2,11 +2,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::assistant::{AiConfig, runtime::AiRuntime};
 use crate::events::ExplorerLimits;
 use crate::events::debugger::DebuggerHub;
 use crate::imports::ImportLimits;
@@ -49,6 +51,11 @@ pub struct AppState {
     pub(crate) stop: Option<tokio::sync::watch::Receiver<bool>>,
     /// Which non-public destinations outbound connections may reach.
     egress: Arc<EgressPolicy>,
+    /// The request-rate buckets of this process's sources, shared by every call that reaches
+    /// them. Per process: see `zirv_flow_connectors::runtime::RateLimits`.
+    rate_limits: Arc<RateLimits>,
+    /// The deployment's model allowlist and the guarded client for model calls.
+    pub(crate) ai: AiRuntime,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -83,6 +90,8 @@ impl AppState {
             explorer: ExplorerLimits::default(),
             stop: None,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
+            ai: AiRuntime::default(),
         }
     }
 
@@ -112,9 +121,32 @@ impl AppState {
         self
     }
 
+    /// Uses `limits` for the sources' request rates, so the worker pool of the same process draws
+    /// from the buckets the API does.
+    pub fn with_rate_limits(mut self, limits: Arc<RateLimits>) -> Self {
+        self.rate_limits = limits;
+        self
+    }
+
+    /// The request-rate buckets of this process's sources.
+    pub fn rate_limits(&self) -> &Arc<RateLimits> {
+        &self.rate_limits
+    }
+
     /// The egress policy outbound connections are checked against.
     pub fn egress_policy(&self) -> &Arc<EgressPolicy> {
         &self.egress
+    }
+
+    /// The deployment's AI allowlist; with none the assistant is unavailable.
+    pub fn with_ai_config(mut self, config: AiConfig) -> Self {
+        self.ai = AiRuntime::new(config);
+        self
+    }
+
+    /// The deployment's AI allowlist.
+    pub fn ai_config(&self) -> &AiConfig {
+        &self.ai.config
     }
 
     /// The explorer's query timeouts and row limits.
@@ -216,6 +248,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clones_share_the_rate_limit_buckets_and_they_can_be_replaced() {
+        let state = state();
+
+        assert!(Arc::ptr_eq(
+            state.rate_limits(),
+            state.clone().rate_limits()
+        ));
+        let shared = Arc::new(RateLimits::new());
+        let set = state.with_rate_limits(Arc::clone(&shared));
+        assert!(Arc::ptr_eq(set.rate_limits(), &shared));
+    }
+
+    #[tokio::test]
     async fn there_is_no_setup_token_until_one_is_minted_and_clones_share_it() {
         let state = state();
         let clone = state.clone();
@@ -253,6 +298,23 @@ mod tests {
         assert_eq!(
             with.identifier_key.unwrap().digest(b"x"),
             derived.digest(b"x")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ai_allowlist_is_empty_until_given() {
+        let config = AiConfig {
+            max_repair_attempts: 4,
+            ..AiConfig::default()
+        };
+
+        assert!(state().ai_config().providers.is_empty());
+        assert_eq!(
+            state()
+                .with_ai_config(config)
+                .ai_config()
+                .max_repair_attempts,
+            4
         );
     }
 

@@ -1,4 +1,5 @@
-//! The guarded client: the egress policy applied to every request and every redirect hop.
+//! The guarded client: the egress policy applied to every request and every redirect hop, and
+//! redirects followed only within the origin of the request.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -159,9 +160,20 @@ fn redirect_policy(policy: Arc<EgressPolicy>, max_redirects: usize) -> Policy {
             return attempt.error(TooManyRedirects);
         }
         // A name is resolved, and so checked, when the next hop connects.
-        match check_literal(&policy, attempt.url().host()) {
-            Ok(()) => attempt.follow(),
-            Err(denied) => attempt.error(denied),
+        if let Err(denied) = check_literal(&policy, attempt.url().host()) {
+            return attempt.error(denied);
+        }
+        // A hop to another origin (scheme, host or port) is not followed: the 3xx is returned
+        // to the caller. A header or query credential on the request would otherwise travel
+        // with it, whatever reqwest strips on its own.
+        let left_origin = attempt
+            .previous()
+            .last()
+            .is_some_and(|from| from.origin() != attempt.url().origin());
+        if left_origin {
+            attempt.stop()
+        } else {
+            attempt.follow()
         }
     })
 }
@@ -249,6 +261,7 @@ mod tests {
                     "/private",
                     get(|| async { Redirect::temporary("http://private.test/") }),
                 )
+                .route("/hop", get(|| async { Redirect::temporary("/") }))
                 .route("/loop", get(|| async { Redirect::temporary("/loop") }))
                 .route(
                     "/slow",
@@ -405,14 +418,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_redirect_to_a_blocked_hostname_is_refused_at_connect() {
+    async fn a_redirect_to_a_blocked_hostname_is_stopped_and_that_name_is_never_connected_to() {
         let (port, _) = serve().await;
         let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
         let result = get_url(&guarded, &format!("http://local.test:{port}/private")).await;
-        assert_eq!(
-            result.unwrap_err(),
-            denied("private.test", AddressClass::Private)
+        // The name is another origin, so the redirect stops at the 3xx; the egress check of a name
+        // at connect time is covered by the direct requests above.
+        assert_eq!(result.unwrap().status(), 307);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_within_the_origin_is_followed() {
+        let (port, hits) = serve().await;
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+
+        let response = get_url(&guarded, &format!("http://127.0.0.1:{port}/hop"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body().await.unwrap(), "hello");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_origin_is_not_followed_and_the_other_origin_sees_nothing() {
+        let (other_port, other_hits) = serve().await;
+        let target = format!("http://127.0.0.1:{other_port}/");
+        let router = Router::new().route(
+            "/go",
+            get(move || {
+                let target = target.clone();
+                async move { Redirect::temporary(&target) }
+            }),
         );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+        let url = format!("http://127.0.0.1:{port}/go?api_key=k3y");
+        let mut request = reqwest::Request::new(Method::GET, url.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-api-key", "k3y".parse().unwrap());
+
+        let response = guarded.execute(request).await.unwrap();
+
+        assert_eq!(response.status(), 307);
+        assert_eq!(other_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

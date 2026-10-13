@@ -1267,6 +1267,328 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/ai/models": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "The providers and models this deployment offers, with context windows and prices.",
+        "operationId": "list_ai_models",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The deployment's allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiModelsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/ai/settings": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "The workspace's AI settings. Admins, the owner and `admin` keys only.",
+        "operationId": "get_ai_settings",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The settings; the provider key is never returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiSettingsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "Replaces the workspace's AI settings. Enabling the assistant, or changing its provider, model\nor key while it is on, first runs a capability probe: the model must call a tool with valid\narguments and report token usage, and its configured context window must be at least 32768\ntokens. A model that fails is refused with 422 and the missing capabilities. Audited as\n`ai.settings.updated`, with the changed field names and values, never the key.",
+        "operationId": "put_ai_settings",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAiSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The saved settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiSettingsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid settings, a model that is not offered, or a model that lacks capabilities (code ai_capability_missing, with errors listing each)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The provider could not be reached for the probe (code ai_provider_error)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stored secrets are not configured on this deployment",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/ai/usage": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "The month's AI spend against the budget, by feature and by user, with the latest calls.",
+        "operationId": "get_ai_usage",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Month-to-date usage; content-free",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiUsageBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/api-keys": {
       "get": {
         "tags": [
@@ -10866,6 +11188,201 @@
           }
         }
       },
+      "AiCallBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "feature",
+          "provider_id",
+          "model",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_micros",
+          "latency_ms",
+          "outcome",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "estimated_cost_micros": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "feature": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "model": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`pending` (reserved, not finished), `abandoned` (given up on while pending; keeps its worst-case cost), `ok`, `http_error`, `timeout`, `egress_denied`, `transport`, `malformed` or `capability`."
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "AiModelsBody": {
+        "type": "object",
+        "required": [
+          "providers",
+          "min_context_window_tokens"
+        ],
+        "properties": {
+          "min_context_window_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The smallest context window a model may have to be enabled.",
+            "minimum": 0
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderBody"
+            },
+            "description": "The deployment's allowlist; empty means the assistant is unavailable."
+          }
+        }
+      },
+      "AiSettingsBody": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "monthly_budget_micros",
+          "pii_opt_in",
+          "provider_key_set"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "last_probe": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProbeBody",
+                "description": "The last capability probe that passed, if any."
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "monthly_budget_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Micro-units of the deployment currency per calendar month (UTC); 0 allows no calls."
+          },
+          "pii_opt_in": {
+            "type": "boolean",
+            "description": "Whether requests may carry the values of people."
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chosen provider's id from `ai/models`."
+          },
+          "provider_key_set": {
+            "type": "boolean",
+            "description": "Whether a provider key is stored. The key itself is never returned."
+          },
+          "transcript_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days transcripts are kept (1 to 30); null stores none."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "AiUsageBody": {
+        "type": "object",
+        "required": [
+          "month_start",
+          "spent_micros",
+          "budget_micros",
+          "by_feature",
+          "by_user",
+          "recent"
+        ],
+        "properties": {
+          "budget_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The monthly budget in micro-units; 0 allows no calls."
+          },
+          "by_feature": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeatureUsageBody"
+            }
+          },
+          "by_user": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserUsageBody"
+            }
+          },
+          "month_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiCallBody"
+            },
+            "description": "The latest calls, newest first. Counts and names only: never a prompt or a response."
+          },
+          "spent_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Spent so far this month (UTC), in micro-units."
+          }
+        }
+      },
       "ApiKeyBody": {
         "type": "object",
         "required": [
@@ -12837,6 +13354,37 @@
           }
         }
       },
+      "FeatureUsageBody": {
+        "type": "object",
+        "required": [
+          "feature",
+          "calls",
+          "input_tokens",
+          "output_tokens",
+          "cost_micros"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cost_micros": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "feature": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "FieldBody": {
         "type": "object",
         "required": [
@@ -13760,6 +14308,58 @@
           }
         }
       },
+      "MissingBody": {
+        "type": "object",
+        "required": [
+          "capability",
+          "reason"
+        ],
+        "properties": {
+          "capability": {
+            "type": "string",
+            "description": "`tool_calls`, `usage` or `context_window`."
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "context_window_tokens",
+          "input_price_per_mtok",
+          "output_price_per_mtok",
+          "meets_minimum_context"
+        ],
+        "properties": {
+          "context_window_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "input_price_per_mtok": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Micro-units of the deployment currency per million input tokens.",
+            "minimum": 0
+          },
+          "meets_minimum_context": {
+            "type": "boolean",
+            "description": "Whether the context window meets the assistant's minimum of 32768 tokens."
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_price_per_mtok": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Micro-units of the deployment currency per million output tokens.",
+            "minimum": 0
+          }
+        }
+      },
       "NotFoundBody": {
         "type": "object",
         "description": "An input that named no person.",
@@ -13938,6 +14538,30 @@
             "type": "string",
             "description": "What happens to a person left with no source record, event or explicit consent after a\nsource retracts a record: `keep` (the default) or `delete`.",
             "example": "keep"
+          }
+        }
+      },
+      "ProbeBody": {
+        "type": "object",
+        "required": [
+          "ok",
+          "missing",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MissingBody"
+            }
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the model passed the capability probe."
           }
         }
       },
@@ -14197,6 +14821,86 @@
             "example": "number"
           }
         }
+      },
+      "ProviderBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "base_url",
+          "models"
+        ],
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`openai_compatible` or `anthropic`."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelBody"
+            }
+          }
+        }
+      },
+      "PutAiSettingsRequest": {
+        "type": "object",
+        "description": "The whole settings of the workspace; a PUT replaces them.",
+        "required": [
+          "enabled",
+          "monthly_budget_micros",
+          "pii_opt_in"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Turning this on, or changing the provider, model or key while on, runs a capability probe\nthat must pass."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "monthly_budget_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "At least 0."
+          },
+          "pii_opt_in": {
+            "type": "boolean"
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A provider id from `ai/models`; set together with `model`."
+          },
+          "provider_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "password",
+            "description": "Creates or replaces the stored provider key. Omit it to keep the current key."
+          },
+          "transcript_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1 to 30, or null to store no transcripts."
+          }
+        },
+        "additionalProperties": false
       },
       "PutContactDefinitionRequest": {
         "type": "object",
@@ -16167,6 +16871,31 @@
           },
           "is_owner": {
             "type": "boolean"
+          }
+        }
+      },
+      "UserUsageBody": {
+        "type": "object",
+        "required": [
+          "calls",
+          "cost_micros"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cost_micros": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Null for calls made with an API key."
           }
         }
       },
