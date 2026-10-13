@@ -234,6 +234,7 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         .signed_at
         .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok());
     let message_id = format!("wh:{}:{value}", hook.id);
+    let report = state.ingest.report_due(hook.id);
     zirv_flow_store::append_webhook(
         &state.pool,
         &hook,
@@ -241,10 +242,15 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         &Value::Object(payload),
         signed_at,
         &message_id,
-        state.ingest.report_due(hook.id),
+        report,
     )
     .await
-    .map_err(|_| unavailable())
+    .map_err(|_| {
+        if report {
+            state.ingest.release_report(hook.id);
+        }
+        unavailable()
+    })
 }
 
 #[cfg(test)]

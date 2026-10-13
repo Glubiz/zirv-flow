@@ -140,6 +140,15 @@ impl IngestState {
         self.report_due_at(hook, Instant::now())
     }
 
+    /// Gives back the slot [`Self::report_due`] took, when the append it was for failed, so the
+    /// next request reports instead.
+    pub(crate) fn release_report(&self, hook: Uuid) {
+        self.reported
+            .lock()
+            .expect("the report lock is never held across a panic")
+            .remove(&hook);
+    }
+
     fn report_due_at(&self, hook: Uuid, now: Instant) -> bool {
         let mut reported = self
             .reported
@@ -553,6 +562,18 @@ mod tests {
         assert_eq!(Endpoint::Identify.kind(), Some(Kind::Identify));
         assert_eq!(Endpoint::Track.kind(), Some(Kind::Track));
         assert_eq!(Endpoint::Batch.kind(), None);
+    }
+
+    #[test]
+    fn a_released_report_slot_is_due_again_at_once() {
+        let state = IngestState::new(IngestLimits::default());
+        let hook = Uuid::from_u128(1);
+        let now = Instant::now();
+
+        assert!(state.report_due_at(hook, now));
+        assert!(!state.report_due_at(hook, now));
+        state.release_report(hook);
+        assert!(state.report_due_at(hook, now));
     }
 
     use std::time::Duration;
