@@ -13,8 +13,8 @@ mod transform;
 mod validate;
 
 pub use apply::{
-    Cells, CsvRow, Header, HeaderError, MAX_EVENT_PROPERTIES, MAX_KEY_CHARS, Mapped, MappedEvent,
-    RowError, RowErrorReason, apply, is_deleted, map_json,
+    Cells, CsvRow, Deletion, Header, HeaderError, MAX_EVENT_PROPERTIES, MAX_KEY_CHARS, Mapped,
+    MappedEvent, RowError, RowErrorReason, apply, deletion, is_deleted, map_json,
 };
 pub use json_record::JsonRecord;
 pub use model::{

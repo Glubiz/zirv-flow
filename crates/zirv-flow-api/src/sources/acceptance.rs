@@ -1669,6 +1669,36 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_shows_a_record_the_delete_signal_removes_as_deleted_even_without_an_identifier(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        // Record 1 is soft-deleted and has no valid identifier; record 0 is live.
+        sqlx::query("UPDATE sources SET config = config || '{\"records\": 2, \"soft_deleted\": \"1\", \"invalid\": \"1\"}'::jsonb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mapping = json!({
+            "columns": [email_rule()],
+            "delete_when": {"column": "deleted_flag", "rule": "truthy"}
+        });
+        let saved = fx.put_stream(&id, &["id"], Some(mapping)).await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let shown = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+
+        assert_eq!(shown.status, StatusCode::OK, "{:?}", shown.body);
+        assert_eq!(shown.body["records"][0]["key"], "stream_1-0");
+        assert_eq!(shown.body["records"][0]["result"], "mapped");
+        assert_eq!(shown.body["records"][1]["key"], "stream_1-1");
+        assert_eq!(shown.body["records"][1]["result"], "deleted");
+        assert_eq!(shown.body["records"][1]["deleted"], true);
+        assert_eq!(shown.body["records"][1]["errors"], json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_of_a_draft_uses_the_draft_and_a_rejected_record_lists_codes_only(
         pool: PgPool,
     ) {

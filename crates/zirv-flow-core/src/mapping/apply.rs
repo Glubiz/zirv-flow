@@ -255,6 +255,28 @@ pub fn is_deleted(mapping: &Mapping, row: &dyn Cells) -> bool {
     }
 }
 
+/// Why a record of a stream is removed instead of applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Deletion {
+    /// The connector reported it deleted.
+    Source,
+    /// The mapping's delete signal fires on its cells.
+    Signal,
+}
+
+/// Whether a record is deleted: the connector said so, or the mapping's delete signal fires on
+/// `cells`. A sync run and the preview both ask this before they map, so a soft-deleted row is
+/// never validated or rejected.
+pub fn deletion(mapping: &Mapping, cells: &dyn Cells, source_deleted: bool) -> Option<Deletion> {
+    if source_deleted {
+        Some(Deletion::Source)
+    } else if is_deleted(mapping, cells) {
+        Some(Deletion::Signal)
+    } else {
+        None
+    }
+}
+
 /// Maps one JSON record of a stream: reads it as cells (dotted paths included) and applies
 /// `mapping`. This is the one function a sync run and the preview both call, so what the
 /// preview shows is what the run stores. `declared` names the fields the stream's descriptor
@@ -1116,5 +1138,26 @@ mod tests {
         ));
         assert!(!read(json!({"email": "a@example.com", "meta": {}})));
         assert!(!read(json!({"email": "a@example.com", "meta": null})));
+    }
+
+    #[test]
+    fn deletion_names_the_source_before_the_signal_and_reads_a_nested_path() {
+        let mapping = Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "meta.deleted".into(),
+                rule: DeleteRule::Truthy,
+            }),
+            ..mapping(vec![email("email")])
+        };
+        let cells = |data: Value| {
+            JsonRecord::for_mapping(data.as_object().unwrap(), &mapping, ["email", "meta"])
+        };
+        let gone = cells(json!({"meta": {"deleted": true}}));
+        let live = cells(json!({"email": "a@example.com", "meta": {"deleted": false}}));
+
+        assert_eq!(deletion(&mapping, &gone, false), Some(Deletion::Signal));
+        assert_eq!(deletion(&mapping, &gone, true), Some(Deletion::Source));
+        assert_eq!(deletion(&mapping, &live, false), None);
+        assert_eq!(deletion(&mapping, &live, true), Some(Deletion::Source));
     }
 }

@@ -310,13 +310,10 @@ impl Planner<'_> {
     /// on its cells. The signal is checked before the mapping runs, so a soft-deleted row is
     /// never validated or rejected.
     fn deletion(&self, record: &Record, cells: &JsonRecord) -> Option<&'static str> {
-        if record.deleted {
-            Some(SYNC_DELETE_BY_SOURCE)
-        } else if mapping::is_deleted(self.mapping, cells) {
-            Some(SYNC_DELETE_BY_SIGNAL)
-        } else {
-            None
-        }
+        mapping::deletion(self.mapping, cells, record.deleted).map(|why| match why {
+            mapping::Deletion::Source => SYNC_DELETE_BY_SOURCE,
+            mapping::Deletion::Signal => SYNC_DELETE_BY_SIGNAL,
+        })
     }
 
     /// Reads `records` for a reconciliation: only which are deleted and which still exist. The

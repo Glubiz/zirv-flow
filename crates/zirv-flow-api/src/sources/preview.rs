@@ -14,7 +14,7 @@ use time::format_description::well_known::Rfc3339;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::{Record, StreamConfig, StreamDescriptor, SyncMode};
-use zirv_flow_core::mapping::{self, Mapping, TraitState};
+use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState};
 
 use super::actions::{CALL_TIMEOUT, prepare, timed_out, upstream};
 use super::invalid;
@@ -101,7 +101,7 @@ fn preview_record(
 ) -> PreviewRecord {
     let empty = |result: &str| PreviewRecord {
         key: record.key.clone(),
-        deleted: record.deleted,
+        deleted: false,
         result: result.to_owned(),
         identifiers: Vec::new(),
         traits: Map::new(),
@@ -109,11 +109,15 @@ fn preview_record(
         event: None,
         errors: Vec::new(),
     };
-    if record.deleted {
-        return empty("deleted");
-    }
     let declared = descriptor.fields.iter().map(|field| field.name.as_str());
-    match mapping::map_json(mapping, &record.data, declared, catalog) {
+    let cells = JsonRecord::from_value_for_mapping(&record.data, mapping, declared);
+    if mapping::deletion(mapping, &cells, record.deleted).is_some() {
+        return PreviewRecord {
+            deleted: true,
+            ..empty("deleted")
+        };
+    }
+    match mapping::apply(mapping, &cells, catalog) {
         Ok(mapped) => PreviewRecord {
             identifiers: mapped
                 .identifiers
