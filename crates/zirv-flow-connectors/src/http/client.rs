@@ -536,18 +536,33 @@ mod tests {
 
     #[test]
     fn no_source_file_builds_a_client_outside_the_guard() {
-        let sources = [
-            ("lib.rs", include_str!("../lib.rs")),
-            ("http/mod.rs", include_str!("mod.rs")),
-            ("http/body.rs", include_str!("body.rs")),
-            ("http/client.rs", include_str!("client.rs")),
-            ("http/error.rs", include_str!("error.rs")),
-            ("http/resolver.rs", include_str!("resolver.rs")),
-        ];
+        fn rust_files(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 6, "the walk found only {files:?}");
         let mut builders = 0;
-        for (name, source) in sources {
+        for path in files {
+            let name = path.display();
+            let source = std::fs::read_to_string(&path).unwrap();
             let production = source.split("#[cfg(test)]").next().unwrap();
-            assert!(!production.contains("Client::new("), "{name}");
+            // The guarded client has its own `GuardedClient::new`; any other `Client::new` is not it.
+            let unguarded = production
+                .match_indices("Client::new(")
+                .any(|(at, _)| !production[..at].ends_with("Guarded"));
+            assert!(!unguarded, "{name}");
             assert!(!production.contains("pub fn client"), "{name}");
             builders += production.matches("Client::builder(").count();
         }
