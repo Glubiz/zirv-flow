@@ -184,7 +184,7 @@ checkpoints, deletion detection and freshness marketers can see.
 - **Freshness.** Per stream: last success, high-water mark, staleness threshold; stale/failing badges and metrics. Done for pull streams and webhooks (#90); Kafka (#91) reports through `record_stream_outcome`.
 - **Causality.** Each sync record applied, rejected or deleted appends a decision with its trace id, sync-run cause and source-record id.
 - **AI foundation.** `zirv-flow-ai` provider trait with OpenAI-compatible (including configured local base URLs) and Anthropic adapters; deployment provider/model allowlist; encrypted provider keys; per-workspace provider/model, enablement, budget and PII opt-in; per-user rate limits; call audit and configurable transcript retention; bounded repair; golden-prompt evaluation harness and deterministic fake provider for CI. Calls use the egress policy.
-- **Mapping and manifest assistance.** Read-and-draft typed tools create source field mappings and HTTP manifests, validate them with the existing schemas, and show sample dry runs and field diffs before the user accepts an ordinary draft.
+- **Mapping and manifest assistance (done, #93).** Read-and-draft typed tools create source field mappings and HTTP manifests, validate them with the existing schemas, and show sample dry runs and field diffs before the user accepts an ordinary draft.
 - **UI.** Sources list with freshness, setup wizard (test connection, discover, mapping preview and optional assistant), run history with logs, rejects and trace links; manifest assistant; provider, privacy, budget and usage settings.
 - **Decisions.** OQ-4 (custom objects), OQ-5 (mapping expressions), OQ-26 (assistant transcript default), OQ-27 (minimum model capabilities), OQ-31 (Kafka client and value formats).
 
@@ -201,8 +201,8 @@ federated live sources, WASM plugins, destinations (M6).
 - [x] A source past its staleness threshold shows as stale in the UI and in the freshness metric.
 - [x] Killing a worker while it consumes a Kafka fixture topic and restarting it applies every contact upsert and tombstone exactly once from the stored offsets; a malformed message lands in rejects without stopping its partition.
 - [ ] A sync fixture's applied, rejected and deleted records appear under one trace with typed causes and source-record ids.
-- [ ] The fake provider drafts an invalid then repaired mapping and manifest; only validator-approved output can be accepted, and the UI shows the dry-run result and diff.
-- [ ] The fake-provider suite proves the tool registry has no publish, send, delete or consent tools and that no identifier values enter a provider request when PII opt-in is off; crossing the workspace budget stops the call before dispatch with a clear error.
+- [x] The fake provider drafts an invalid then repaired mapping and manifest; only validator-approved output can be accepted, and the UI shows the dry-run result and diff.
+- [x] The fake-provider suite proves the tool registry has no publish, send, delete or consent tools and that no identifier values enter a provider request when PII opt-in is off; crossing the workspace budget stops the call before dispatch with a clear error.
 
 **Dependencies.** M2.
 
