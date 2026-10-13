@@ -125,10 +125,10 @@ fn mentions_tls(error: &tokio_postgres::Error) -> bool {
         if cause.downcast_ref::<rustls::Error>().is_some() {
             return true;
         }
-        if let Some(io) = cause.downcast_ref::<io::Error>() {
-            if io_is_tls(io) {
-                return true;
-            }
+        if let Some(io) = cause.downcast_ref::<io::Error>()
+            && io_is_tls(io)
+        {
+            return true;
         }
         source = cause.source();
     }

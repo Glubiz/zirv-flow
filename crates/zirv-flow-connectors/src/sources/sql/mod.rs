@@ -8,3 +8,6 @@ pub(crate) mod keyset;
 pub(crate) mod metrics;
 pub(crate) mod settings;
 pub(crate) mod tls;
+
+#[cfg(test)]
+pub(crate) mod testing;

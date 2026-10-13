@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn a_source_module_is_reached_only_through_its_registry_line() {
         let production = include_str!("mod.rs");
-        let mentions = production.matches("fake::Fake").count();
+        for module in ["fake::Fake", "postgres::Postgres"] {
+            let mentions = production.matches(module).count();
 
-        assert_eq!(mentions, 1, "one registry line names the fake source");
+            assert_eq!(mentions, 1, "one registry line names {module}");
+        }
     }
 }

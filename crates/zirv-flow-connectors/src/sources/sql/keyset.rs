@@ -8,6 +8,8 @@
 
 use std::future::Future;
 
+use futures_util::stream::BoxStream;
+use futures_util::{StreamExt, TryStreamExt};
 use serde_json::{Map, Value, json};
 
 use super::error::NULL_KEY;
@@ -221,9 +223,33 @@ impl<P: Pager> Paged<P> {
     }
 }
 
+/// The batches of a stream: `open` connects and builds the [`Paged`] lazily, on first poll, and
+/// every batch and failure is metered under `source_type`.
+pub(crate) fn batches<'a, P, F>(
+    source_type: &'static str,
+    open: F,
+) -> BoxStream<'a, Result<Batch, SourceError>>
+where
+    P: Pager + 'a,
+    F: Future<Output = Result<Paged<P>, SourceError>> + Send + 'a,
+{
+    futures_util::stream::once(open)
+        .map_ok(|paged| {
+            futures_util::stream::try_unfold(paged, |mut paged| async move {
+                Ok::<_, SourceError>(paged.next_batch().await?.map(|batch| (batch, paged)))
+            })
+        })
+        .try_flatten()
+        .inspect(move |result| match result {
+            Ok(_) => super::metrics::batch(source_type),
+            Err(error) => super::metrics::error(source_type, error),
+        })
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
-    use futures_util::TryStreamExt;
+
     use futures_util::stream;
 
     use super::*;

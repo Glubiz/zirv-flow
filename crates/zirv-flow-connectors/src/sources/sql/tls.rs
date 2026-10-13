@@ -31,7 +31,7 @@ pub(crate) fn root_store(ca_certificate: Option<&str>) -> Result<RootCertStore, 
     let mut store = RootCertStore::empty();
     match ca_certificate {
         Some(pem) => {
-            let certificates = certificates(pem).ok_or_else(|| ca_error())?;
+            let certificates = certificates(pem).ok_or_else(ca_error)?;
             for certificate in certificates {
                 store.add(certificate).map_err(|_| ca_error())?;
             }
@@ -50,9 +50,7 @@ fn ca_error() -> SourceError {
 
 /// The verifying client configuration, on the ring provider, with the default verifier and
 /// protocol versions (TLS 1.2 and 1.3).
-pub(crate) fn client_config(
-    ca_certificate: Option<&str>,
-) -> Result<Arc<ClientConfig>, SourceError> {
+pub(crate) fn client_config(ca_certificate: Option<&str>) -> Result<ClientConfig, SourceError> {
     let roots = root_store(ca_certificate)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ClientConfig::builder_with_provider(provider)
@@ -60,7 +58,7 @@ pub(crate) fn client_config(
         .map_err(|_| SourceError::Other("the database connection could not be secured".into()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(Arc::new(config))
+    Ok(config)
 }
 
 #[cfg(test)]
