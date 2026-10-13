@@ -28,6 +28,9 @@ pub(super) const IDLE_SLEEP: Duration = Duration::from_secs(1);
 /// Consecutive empty fetches below the high watermark before the reader probes past the gap.
 const GAP_STREAK: u8 = 2;
 
+/// How many offsets after `next` one pass probes for the record that ends a gap.
+const PROBE_SPAN: i64 = 16;
+
 /// The calls a read makes on one partition.
 pub(super) trait PartitionFetch: Send + Sync {
     /// The earliest offset still in the log.
@@ -100,8 +103,9 @@ impl<F: PartitionFetch> Partition<F> {
     }
 
     /// One fetch, with the gap logic: after two empty fetches while the log reaches past `next`
-    /// (a control batch, a compacted-away batch or an open transaction), probes at `next + 1`; a
-    /// record there means everything below it cannot be delivered, so the partition jumps to it.
+    /// (a control batch, a compacted-away batch or an open transaction), probes the offsets after
+    /// `next`; a record at one means everything below it cannot be delivered, so the partition
+    /// jumps to it.
     pub(super) async fn pass(&mut self) -> Result<Vec<RecordAndOffset>, SourceError> {
         let fetched = self.fetcher.fetch(self.next).await;
         metrics::counter!(
@@ -125,21 +129,13 @@ impl<F: PartitionFetch> Partition<F> {
             if high > self.next {
                 self.streak = self.streak.saturating_add(1);
                 if self.streak >= GAP_STREAK {
-                    match self.fetcher.fetch(self.next + 1).await {
-                        Ok((mut probe, probe_high)) => {
-                            self.end = self.end.max(probe_high);
-                            probe.retain(|message| message.offset > self.next);
-                            match probe.first() {
-                                Some(first) => {
-                                    self.next = first.offset;
-                                    self.streak = 0;
-                                    records = probe;
-                                }
-                                None => self.settled = true,
-                            }
+                    match self.probe(high).await? {
+                        Some(probe) => {
+                            self.next = probe[0].offset;
+                            self.streak = 0;
+                            records = probe;
                         }
-                        Err(FetchError::OffsetOutOfRange) => self.settled = true,
-                        Err(error) => return Err(error.into()),
+                        None => self.settled = true,
                     }
                 }
             } else {
@@ -153,6 +149,27 @@ impl<F: PartitionFetch> Partition<F> {
             self.next = last.offset + 1;
         }
         Ok(records)
+    }
+
+    /// Fetches at `next + 1` and on, at most [`PROBE_SPAN`] offsets below `high`, and returns the
+    /// records of the first fetch that holds one above `next`. An empty probe proves nothing (an
+    /// open transaction fetches empty too), so the partition never moves past one.
+    async fn probe(&mut self, high: i64) -> Result<Option<Vec<RecordAndOffset>>, SourceError> {
+        let last = high.min(self.next.saturating_add(PROBE_SPAN + 1));
+        for offset in self.next + 1..last {
+            match self.fetcher.fetch(offset).await {
+                Ok((mut records, probe_high)) => {
+                    self.end = self.end.max(probe_high);
+                    records.retain(|message| message.offset > self.next);
+                    if !records.is_empty() {
+                        return Ok(Some(records));
+                    }
+                }
+                Err(FetchError::OffsetOutOfRange) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(None)
     }
 
     /// The broker refused the offset: retention may have moved the start past it (jump to the
@@ -486,13 +503,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_probe_goes_on_past_a_second_undeliverable_offset() {
+        // Offsets 3 and 4 hold control batches; 5 is a record.
+        let mut log = Log::new(0, 8);
+        log.holes = vec![3, 4];
+        let mut partition = Partition::open(0, log.clone(), Some(3)).await.unwrap();
+
+        assert!(partition.pass().await.unwrap().is_empty());
+        let second = partition.pass().await.unwrap();
+
+        assert_eq!(offsets(&second), [5, 6, 7]);
+        assert_eq!(partition.position().next, 8);
+        assert_eq!(log.calls(), [3, 3, 4, 5]);
+    }
+
+    #[tokio::test]
     async fn a_probe_that_finds_nothing_settles_the_partition_for_this_pass() {
         // An open transaction: the log reaches past `next` but nothing is deliverable.
         let log = Log::new(0, 8);
         log.script
             .lock()
             .unwrap()
-            .extend((0..3).map(|_| Ok((Vec::new(), 8))));
+            .extend((0..7).map(|_| Ok((Vec::new(), 8))));
         let mut partition = Partition::open(0, log.clone(), Some(2)).await.unwrap();
 
         assert!(partition.pass().await.unwrap().is_empty());
@@ -501,7 +533,7 @@ mod tests {
 
         assert!(partition.settled());
         assert_eq!(partition.position().next, 2, "the offset does not move");
-        assert_eq!(log.calls(), [2, 2, 3]);
+        assert_eq!(log.calls(), [2, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]
