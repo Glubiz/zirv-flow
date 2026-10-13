@@ -132,6 +132,17 @@ fn check_discovered(found: &[StreamDescriptor]) -> Result<(), ApiError> {
                 "the source reported the same stream name twice",
             ));
         }
+        // PostgreSQL stores no NUL in `text` or `jsonb`.
+        let mut texts = std::iter::once(stream.name.as_str())
+            .chain(stream.fields.iter().map(|field| field.name.as_str()))
+            .chain(stream.default_cursor_field.as_deref())
+            .chain(stream.default_primary_key.iter().map(String::as_str));
+        if texts.any(|text| text.contains('\0')) {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "the source reported a stream with a NUL character",
+            ));
+        }
     }
     Ok(())
 }
@@ -290,9 +301,20 @@ mod tests {
         assert_eq!(initial(&without_cursor), SyncMode::FullRefresh);
     }
     #[test]
-    fn discovered_names_must_be_1_to_256_characters_and_unique() {
+    fn discovered_streams_need_1_to_256_character_unique_names_and_no_nul() {
         let named = |name: &str| StreamDescriptor {
             name: name.into(),
+            ..descriptor(vec![SyncMode::FullRefresh])
+        };
+        let nul_field = StreamDescriptor {
+            fields: vec![FieldDescriptor {
+                name: "i\0d".into(),
+                field_type: FieldType::Number,
+            }],
+            ..descriptor(vec![SyncMode::FullRefresh])
+        };
+        let nul_key = StreamDescriptor {
+            default_primary_key: vec!["i\0d".into()],
             ..descriptor(vec![SyncMode::FullRefresh])
         };
 
@@ -301,6 +323,9 @@ mod tests {
             vec![named("")],
             vec![named(&"x".repeat(257))],
             vec![named("a"), named("a")],
+            vec![named("a\0b")],
+            vec![nul_field],
+            vec![nul_key],
         ] {
             let error = check_discovered(&bad).unwrap_err();
             assert_eq!(error.status(), StatusCode::BAD_GATEWAY);

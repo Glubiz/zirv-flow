@@ -564,7 +564,8 @@ mod tests {
                 .any(|(at, _)| !production[..at].ends_with("Guarded"));
             assert!(!unguarded, "{name}");
             assert!(!production.contains("pub fn client"), "{name}");
-            builders += production.matches("Client::builder(").count();
+            builders += production.matches("Client::builder(").count()
+                + production.matches("ClientBuilder::new(").count();
         }
         assert_eq!(
             builders, 1,
