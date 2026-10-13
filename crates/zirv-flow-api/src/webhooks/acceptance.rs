@@ -23,6 +23,7 @@ mod tests {
 
     use crate::admin::{self, Context};
     use crate::ingest::IngestLimits;
+    use crate::test_support::{tables_hold_no, the_scan_finds_a_planted};
     use crate::{AppState, router};
 
     const PASSWORD: &str = "correct horse battery";
@@ -869,6 +870,15 @@ mod tests {
                 Auth::Key(&fx.admin),
             )
             .await;
+        let source = created.body["source_id"].as_str().unwrap().to_owned();
+        let mut generic = Vec::new();
+        for tail in [
+            "/sources".to_owned(),
+            format!("/sources/{source}"),
+            format!("/sources/{source}/runs"),
+        ] {
+            generic.push(fx.as_admin("GET", &tail, None).await.text);
+        }
         let audit = serde_json::to_string(
             &zirv_flow_store::list_audit(&pool, 200)
                 .await
@@ -885,7 +895,10 @@ mod tests {
             .map(|e| e.action)
             .collect();
 
-        for shown in [&got.text, &listed.text, &updated.text, &audit] {
+        for shown in [&got.text, &listed.text, &updated.text, &audit]
+            .into_iter()
+            .chain(generic.iter())
+        {
             assert!(!shown.contains(&secret));
             assert!(!shown.contains(&new_secret));
         }
@@ -906,6 +919,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(purposes, ["webhook_secret"]);
+        tables_hold_no(&pool, &[&secret, &new_secret]).await;
+        the_scan_finds_a_planted(&pool, &[&secret, &new_secret]).await;
     }
 
     #[sqlx::test]

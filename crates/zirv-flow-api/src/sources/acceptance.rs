@@ -18,6 +18,7 @@ mod tests {
     use zirv_flow_store::secrets;
 
     use crate::admin::{self, Context};
+    use crate::test_support::{tables_hold_no, the_scan_finds_a_planted};
     use crate::{AppState, router};
 
     const PASSWORD: &str = "correct horse battery";
@@ -93,6 +94,21 @@ mod tests {
 
     async fn fixture_with(pool: &PgPool, keyring: Option<Arc<Keyring>>) -> Fixture {
         fixture_with_egress(pool, keyring, None).await
+    }
+
+    /// A fixture with a keyring whose egress policy allows only loopback addresses.
+    async fn fixture_with_loopback_egress(pool: &PgPool) -> Fixture {
+        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
+            "127.0.0.0/8".to_owned(),
+            "::1/128".to_owned(),
+        ])
+        .unwrap();
+        fixture_with_egress(
+            pool,
+            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
+            Some(policy),
+        )
+        .await
     }
 
     /// `fixture_with`, and the egress policy the server enforces when one is given.
@@ -672,42 +688,6 @@ mod tests {
         assert_eq!(created.summary["credential_fields"], json!(["token"]));
     }
 
-    /// The text of every row of every table, in both bytea encodings, holds no plaintext marker.
-    async fn tables_hold_no(pool: &PgPool, markers: &[&str]) {
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        for encoding in ["hex", "escape"] {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SET bytea_output = '{encoding}'"
-            )))
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-            for table in &tables {
-                let text: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT string_agg(t::text, E'\\n') FROM \"{table}\" t"
-                )))
-                .fetch_one(&mut *connection)
-                .await
-                .unwrap();
-                let text = text.unwrap_or_default();
-                for marker in markers {
-                    let hex: String = marker.bytes().map(|byte| format!("{byte:02x}")).collect();
-                    assert!(!text.contains(marker), "{marker} in {table} ({encoding})");
-                    assert!(
-                        !text.contains(&hex),
-                        "{marker} as hex in {table} ({encoding})"
-                    );
-                }
-            }
-        }
-    }
-
     #[derive(Clone, Default)]
     struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -787,21 +767,135 @@ mod tests {
             "a log line held a credential"
         );
         tables_hold_no(&pool, &[MARKER, REPLACED_MARKER]).await;
-        // Control: the scan does find a plaintext marker.
-        sqlx::query("CREATE TABLE scan_control (note text)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO scan_control (note) VALUES ($1)")
-            .bind(MARKER)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let caught = std::panic::AssertUnwindSafe(tables_hold_no(&pool, &[MARKER]));
-        assert!(
-            futures_util::FutureExt::catch_unwind(caught).await.is_err(),
-            "the scan must detect a marker"
-        );
+        the_scan_finds_a_planted(&pool, &[MARKER]).await;
+    }
+
+    const PG_PASSWORD: &str = "zz-pg-password-5521";
+    const PG_REPLACED_PASSWORD: &str = "zz-pg-replaced-6632";
+    const MYSQL_PASSWORD: &str = "zz-mysql-password-7743";
+    const MYSQL_REPLACED_PASSWORD: &str = "zz-mysql-replaced-8854";
+    const SASL_PASSWORD: &str = "zz-sasl-password-9965";
+    const SASL_REPLACED_PASSWORD: &str = "zz-sasl-replaced-1076";
+
+    impl Fixture {
+        /// Every read, check and write a source offers, with its credential stored.
+        async fn exercise_a_stored_credential(&self, id: &str, replacement: Value) {
+            let one = format!("/sources/{id}");
+            self.as_admin("GET", &one, None).await;
+            self.as_admin("GET", "/sources", None).await;
+            self.send("GET", "/sources", None, Auth::Session(&self.member))
+                .await;
+            self.send("GET", &one, None, Auth::Key(&self.read)).await;
+            self.as_admin("POST", &format!("{one}/test"), None).await;
+            self.as_admin("POST", &format!("{one}/discover"), None)
+                .await;
+            self.as_admin("GET", &format!("{one}/streams"), None).await;
+            let runs = self.as_admin("GET", &format!("{one}/runs"), None).await;
+            assert_eq!(runs.status, StatusCode::OK, "{:?}", runs.body);
+            let patched = self
+                .as_admin("PATCH", &one, Some(json!({"credential": replacement})))
+                .await;
+            assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+            let renamed = self
+                .as_admin("PATCH", &one, Some(json!({"name": "Renamed"})))
+                .await;
+            assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+            self.as_admin("GET", &one, None).await;
+        }
+
+        /// No response seen, audit entry or table row holds any of the secrets, and the table scan
+        /// is able to see them.
+        async fn assert_secrets_hidden(&self, secrets: &[&str]) {
+            let seen = self.seen.lock().unwrap().join("\n");
+            let audit = format!(
+                "{:?}",
+                zirv_flow_store::list_audit(&self.pool, 500).await.unwrap()
+            );
+            for secret in secrets {
+                assert!(!seen.contains(secret), "a response held {secret}");
+                assert!(!audit.contains(secret), "the audit held {secret}");
+            }
+            tables_hold_no(&self.pool, secrets).await;
+            the_scan_finds_a_planted(&self.pool, secrets).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_postgres_source_password_is_ciphertext_at_rest_and_in_no_response_or_audit_entry(
+        pool: PgPool,
+    ) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let options = pool.connect_options();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "postgres",
+                    "name": "warehouse",
+                    "config": {
+                        "host": options.get_host(),
+                        "port": options.get_port(),
+                        "database": options.get_database().unwrap(),
+                        "tls": "off"
+                    },
+                    "credential": {"user": "zz_pg_reader", "password": PG_PASSWORD}
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+
+        fx.exercise_a_stored_credential(
+            &id,
+            json!({"user": "zz_pg_reader", "password": PG_REPLACED_PASSWORD}),
+        )
+        .await;
+
+        fx.assert_secrets_hidden(&[PG_PASSWORD, PG_REPLACED_PASSWORD])
+            .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_mysql_source_password_is_ciphertext_at_rest_and_in_no_response_or_audit_entry(
+        pool: PgPool,
+    ) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let (host, port) = mysql_address();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "mysql",
+                    "name": "shop",
+                    "config": {"host": host, "port": port, "database": "shop", "tls": "off"},
+                    "credential": {"user": "zz_mysql_reader", "password": MYSQL_PASSWORD}
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+
+        fx.exercise_a_stored_credential(
+            &id,
+            json!({"user": "zz_mysql_reader", "password": MYSQL_REPLACED_PASSWORD}),
+        )
+        .await;
+
+        fx.assert_secrets_hidden(&[MYSQL_PASSWORD, MYSQL_REPLACED_PASSWORD])
+            .await;
+    }
+
+    /// The host and port of the test MySQL server, from `ZIRV_FLOW_TEST_MYSQL_URL`.
+    fn mysql_address() -> (String, u16) {
+        let url = std::env::var("ZIRV_FLOW_TEST_MYSQL_URL").expect("set ZIRV_FLOW_TEST_MYSQL_URL");
+        let authority = url.split("://").nth(1).unwrap().split('/').next().unwrap();
+        let address = authority.rsplit('@').next().unwrap();
+        let (host, port) = address.rsplit_once(':').unwrap();
+        (host.to_owned(), port.parse().unwrap())
     }
 
     #[sqlx::test]
@@ -2299,17 +2393,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
-            "127.0.0.0/8".to_owned(),
-            "::1/128".to_owned(),
-        ])
-        .unwrap();
-        let fx = fixture_with_egress(
-            &pool,
-            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
-            Some(policy),
-        )
-        .await;
+        let fx = fixture_with_loopback_egress(&pool).await;
         zirv_flow_store::create_trait_definition(&pool, fx.ws, &trait_definition("plan", false))
             .await
             .unwrap();
@@ -2749,6 +2833,14 @@ mod tests {
         /// A Kafka source (nothing connects at creation) whose one stream `orders` is
         /// discovered in stream mode with the `plan` trait registered.
         async fn kafka_source(&self) -> String {
+            let broker =
+                std::env::var("ZIRV_KAFKA_BROKER").unwrap_or_else(|_| "localhost:9092".to_owned());
+            self.kafka_source_with(json!({"brokers": broker, "security": "plaintext"}), None)
+                .await
+        }
+
+        /// `kafka_source` with its own connection settings and an optional credential.
+        async fn kafka_source_with(&self, connection: Value, credential: Option<Value>) -> String {
             zirv_flow_store::create_trait_definition(
                 &self.pool,
                 self.ws,
@@ -2756,19 +2848,16 @@ mod tests {
             )
             .await
             .unwrap();
-            let broker =
-                std::env::var("ZIRV_KAFKA_BROKER").unwrap_or_else(|_| "localhost:9092".to_owned());
-            let created = self
-                .as_admin(
-                    "POST",
-                    "/sources",
-                    Some(json!({
-                        "kind": "kafka",
-                        "name": "Events",
-                        "config": {"brokers": broker, "topics": "orders", "security": "plaintext"},
-                    })),
-                )
-                .await;
+            let mut config = json!({"topics": "orders"});
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(connection.as_object().unwrap().clone());
+            let mut body = json!({"kind": "kafka", "name": "Events", "config": config});
+            if let Some(credential) = credential {
+                body["credential"] = credential;
+            }
+            let created = self.as_admin("POST", "/sources", Some(body)).await;
             assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
             let id = created.body["id"].as_str().unwrap().to_owned();
             let descriptor = json!({
@@ -2819,6 +2908,41 @@ mod tests {
                 .await
                 .unwrap()
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL and Kafka; set DATABASE_URL, eval scripts/kafka-fixture.sh"]
+    async fn kafka_sasl_credentials_are_ciphertext_at_rest_and_in_no_response_or_audit_entry(
+        pool: PgPool,
+    ) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let broker = std::env::var("ZIRV_KAFKA_SASL_BROKER").expect("run kafka-fixture.sh");
+        let id = fx
+            .kafka_source_with(
+                json!({"brokers": broker, "security": "plaintext", "sasl": "plain"}),
+                Some(json!({"username": "zz-sasl-user", "password": SASL_PASSWORD})),
+            )
+            .await;
+
+        let test = fx
+            .as_admin("POST", &format!("/sources/{id}/test"), None)
+            .await;
+        assert_eq!(test.status, StatusCode::OK, "{:?}", test.body);
+        assert_eq!(test.body["ok"], false, "the broker refuses the password");
+        fx.as_admin(
+            "PUT",
+            &format!("/sources/{id}/streams/orders"),
+            Some(Fixture::consumer_settings(true)),
+        )
+        .await;
+        fx.exercise_a_stored_credential(
+            &id,
+            json!({"username": "zz-sasl-user", "password": SASL_REPLACED_PASSWORD}),
+        )
+        .await;
+
+        fx.assert_secrets_hidden(&[SASL_PASSWORD, SASL_REPLACED_PASSWORD])
+            .await;
     }
 
     #[sqlx::test]
