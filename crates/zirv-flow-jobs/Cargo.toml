@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 futures-util = { workspace = true, features = ["std"] }
 getrandom.workspace = true
-hashbrown = { workspace = true }
+hashbrown.workspace = true
 metrics.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 flate2.workspace = true
-hashbrown = { workspace = true }
+hashbrown.workspace = true
 metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -13,7 +13,7 @@ test-support = ["dep:axum", "dep:chrono", "dep:rand", "dep:rsa", "dep:serde_json
 [dependencies]
 axum = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
-hashbrown = { workspace = true }
+hashbrown.workspace = true
 openidconnect.workspace = true
 rand = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }

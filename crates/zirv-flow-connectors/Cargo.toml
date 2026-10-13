@@ -11,7 +11,7 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
-hashbrown = { workspace = true }
+hashbrown.workspace = true
 metrics.workspace = true
 rand.workspace = true
 reqwest.workspace = true

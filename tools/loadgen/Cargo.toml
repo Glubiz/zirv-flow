@@ -15,7 +15,7 @@ path = "src/main.rs"
 # Deliberately no zirv-flow crate: it talks to a running instance over HTTP only.
 [dependencies]
 clap.workspace = true
-hashbrown = { workspace = true }
+hashbrown.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
