@@ -17,7 +17,7 @@ use zirv_flow_connectors::sources::{
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
 use zirv_flow_store::{
-    PartitionLag, RunKind, RunTrigger, Stream, StreamFreshness, StreamSettings,
+    PartitionLag, RunKind, RunTrigger, Source, Stream, StreamFreshness, StreamSettings,
     cancel_consumer_runs, queue_run, stream_lag,
 };
 
@@ -117,11 +117,7 @@ impl StreamBody {
             reconcile_schedule: stream.reconcile_schedule.clone(),
             sweep_limit: stream.sweep_limit,
             freshness,
-            mapping: stream.mapping.as_ref().and_then(|value| {
-                serde_json::from_value::<Mapping>(value.clone())
-                    .ok()
-                    .and_then(|mapping| MappingBody::from_core(&mapping))
-            }),
+            mapping: saved_mapping_body(stream),
             discovered: DescriptorBody::from(&descriptor),
             updated_at: stream.updated_at,
         })
@@ -241,7 +237,7 @@ pub(super) async fn bodies(
         .collect()
 }
 
-pub(super) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
+pub(crate) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
     serde_json::from_value(stream.discovered.clone()).map_err(|_| ApiError::internal())
 }
 
@@ -335,13 +331,151 @@ fn check_settings(
     })
 }
 
-/// The mapping problem as one line: its code, and the column when it is on one.
-fn mapping_problem(error: &MappingError) -> ApiError {
-    let detail = match error.column() {
-        Some(column) => format!("mapping: {} (column \"{column}\")", error.code()),
-        None => format!("mapping: {}", error.code()),
-    };
-    ApiError::unprocessable(detail)
+/// One problem of a mapping: a stable code, and the column when it is on one. It never holds a
+/// value of a record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MappingIssue {
+    pub(crate) code: &'static str,
+    pub(crate) column: Option<String>,
+}
+
+impl MappingIssue {
+    fn new(code: &'static str) -> Self {
+        Self { code, column: None }
+    }
+
+    fn on(code: &'static str, column: impl Into<String>) -> Self {
+        Self {
+            code,
+            column: Some(column.into()),
+        }
+    }
+}
+
+/// The code and, when there is one, the column: `unknown_column (column "x")`.
+impl std::fmt::Display for MappingIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.column {
+            Some(column) => write!(f, "{} (column \"{column}\")", self.code),
+            None => f.write_str(self.code),
+        }
+    }
+}
+
+/// The 422 a save answers with for this problem.
+impl From<MappingIssue> for ApiError {
+    fn from(issue: MappingIssue) -> Self {
+        match issue.code {
+            KEY_COLUMN_NOT_SUPPORTED => {
+                Self::unprocessable(format!("mapping: {issue}")).with_code(KEY_COLUMN_NOT_SUPPORTED)
+            }
+            DELETE_SIGNAL_UNSUPPORTED => Self::delete_signal_unsupported(),
+            UNREADABLE => Self::internal(),
+            _ => Self::unprocessable(format!("mapping: {issue}")),
+        }
+    }
+}
+
+const KEY_COLUMN_NOT_SUPPORTED: &str = "key_column_not_supported";
+const DELETE_SIGNAL_UNSUPPORTED: &str = "delete_signal_unsupported";
+/// A body that does not convert to a mapping, which a typed body cannot do.
+const UNREADABLE: &str = "mapping_unreadable";
+
+impl From<&MappingError> for MappingIssue {
+    fn from(error: &MappingError) -> Self {
+        Self {
+            code: error.code(),
+            column: error.column().map(str::to_owned),
+        }
+    }
+}
+
+/// Everything a mapping is checked against, loaded once: the stream's field names (or, for a
+/// webhook stream, the keys of a sample), the trait registry, the lists of the workspace and the
+/// stream's primary key. [`MappingCheck::check`] is pure, so a save, a preview and the assistant's
+/// draft tool all apply the same rules.
+pub(crate) struct MappingCheck {
+    /// The fixed header; absent for a webhook stream without a sample, whose fields are the first
+    /// segments of the columns the mapping reads.
+    header: Option<Header>,
+    catalog: HashMap<String, TraitState>,
+    lists: hashbrown::HashSet<Uuid>,
+    primary_key: Vec<String>,
+    push: bool,
+}
+
+impl MappingCheck {
+    /// For a pulled stream: its field names are the header.
+    pub(crate) fn new(
+        header: Header,
+        catalog: HashMap<String, TraitState>,
+        lists: hashbrown::HashSet<Uuid>,
+        primary_key: Vec<String>,
+    ) -> Self {
+        Self {
+            header: Some(header),
+            catalog,
+            lists,
+            primary_key,
+            push: false,
+        }
+    }
+
+    /// For a webhook stream checked against the keys of a pasted sample: the header is those
+    /// keys, so a draft can name only keys that exist. The push rules still apply.
+    pub(crate) fn for_sample_keys(
+        header: Header,
+        catalog: HashMap<String, TraitState>,
+        lists: hashbrown::HashSet<Uuid>,
+        primary_key: Vec<String>,
+    ) -> Self {
+        Self {
+            push: true,
+            ..Self::new(header, catalog, lists, primary_key)
+        }
+    }
+
+    /// The same check with a webhook stream's sample keys as the header.
+    pub(crate) fn with_sample_keys(self, header: Header) -> Self {
+        Self::for_sample_keys(header, self.catalog, self.lists, self.primary_key)
+    }
+
+    /// Checks a mapping against the stream's field names (a column may be a dotted path into a
+    /// field) and the trait registry, that every list it names exists in the workspace, and that
+    /// a mapping with an event has a primary key to hang the event's idempotency on.
+    pub(crate) fn check(&self, body: &MappingBody) -> Result<Mapping, MappingIssue> {
+        let mapping = body.to_core().map_err(|_| MappingIssue::new(UNREADABLE))?;
+        let derived;
+        let header = match &self.header {
+            Some(header) => header,
+            None => {
+                derived = push_header(&mapping)?;
+                &derived
+            }
+        };
+        if self.push {
+            if mapping.key_column.is_some() {
+                return Err(MappingIssue::new(KEY_COLUMN_NOT_SUPPORTED));
+            }
+            if mapping.delete_when.is_some() {
+                return Err(MappingIssue::new(DELETE_SIGNAL_UNSUPPORTED));
+            }
+        }
+        mapping::validate_paths(&mapping, header, &self.catalog)
+            .map_err(|error| MappingIssue::from(&error))?;
+        for rule in &mapping.columns {
+            if let mapping::Target::List { list_id } = &rule.target
+                && !self.lists.contains(list_id)
+            {
+                return Err(MappingIssue::on("unknown_list", rule.column.clone()));
+            }
+        }
+        // A push stream has no key: its event id comes from the hook's dedupe field.
+        if !self.push && mapping.has_event() && self.primary_key.is_empty() {
+            return Err(MappingIssue::new("event_requires_primary_key"));
+        }
+        Ok(mapping)
+    }
 }
 
 /// The trait registry as the mapping sees it.
@@ -380,7 +514,7 @@ fn descriptor_header(descriptor: &StreamDescriptor) -> Result<Header, ApiError> 
 
 /// The header of a push stream: its descriptor lists no fields, so the fields are the first
 /// segments of the columns the mapping reads, and an absent optional field is an empty cell.
-fn push_header(mapping: &Mapping) -> Result<Header, ApiError> {
+fn push_header(mapping: &Mapping) -> Result<Header, MappingIssue> {
     Header::new(
         mapping
             .root_fields()
@@ -388,12 +522,83 @@ fn push_header(mapping: &Mapping) -> Result<Header, ApiError> {
             .map(str::to_owned)
             .collect(),
     )
-    .map_err(|error| ApiError::unprocessable(format!("mapping: {}", error.code())))
+    .map_err(|error| MappingIssue::new(error.code()))
 }
 
-/// Checks a mapping against the stream's field names (a column may be a dotted path into a
-/// field) and the trait registry, that every list it names exists in the workspace, and that a
-/// mapping with an event has a primary key to hang the event's idempotency on.
+/// Loads what a mapping of this stream is checked against. `push` is whether the source's records
+/// arrive by webhook.
+async fn build_check(
+    state: &AppState,
+    workspace: WorkspaceId,
+    descriptor: &StreamDescriptor,
+    primary_key: &[String],
+    push: bool,
+) -> Result<MappingCheck, ApiError> {
+    let header = if push {
+        None
+    } else {
+        Some(descriptor_header(descriptor)?)
+    };
+    let lists = zirv_flow_store::list_lists(&state.pool, workspace)
+        .await?
+        .into_iter()
+        .map(|list| list.id)
+        .collect();
+    Ok(MappingCheck {
+        header,
+        catalog: trait_catalog(state, workspace).await?,
+        lists,
+        primary_key: primary_key.to_vec(),
+        push,
+    })
+}
+
+/// The check for a stored stream, with its saved descriptor and primary key. A missing source or
+/// stream of this workspace is a 404.
+pub(crate) async fn load_mapping_check(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream: &str,
+) -> Result<MappingCheck, ApiError> {
+    let source = zirv_flow_store::find_source(&state.pool, workspace, source_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let stream = zirv_flow_store::find_stream(&state.pool, workspace, source_id, stream)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    mapping_check_of(state, workspace, &source, &stream).await
+}
+
+/// [`load_mapping_check`] for a source and stream the caller has already read.
+pub(crate) async fn mapping_check_of(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source: &Source,
+    stream: &Stream,
+) -> Result<MappingCheck, ApiError> {
+    let descriptor = descriptor_of(stream)?;
+    build_check(
+        state,
+        workspace,
+        &descriptor,
+        &stream.primary_key,
+        super::is_push(&source.kind),
+    )
+    .await
+}
+
+/// The stream's saved mapping in its API form; `None` when it has none or it cannot be shown.
+pub(crate) fn saved_mapping_body(stream: &Stream) -> Option<MappingBody> {
+    stream.mapping.as_ref().and_then(|value| {
+        serde_json::from_value::<Mapping>(value.clone())
+            .ok()
+            .and_then(|mapping| MappingBody::from_core(&mapping))
+    })
+}
+
+/// Checks a mapping as a save does: [`load_mapping_check`]'s rules, with the primary key the
+/// request sets.
 pub(super) async fn checked_mapping(
     state: &AppState,
     workspace: WorkspaceId,
@@ -402,43 +607,8 @@ pub(super) async fn checked_mapping(
     body: &MappingBody,
     push: bool,
 ) -> Result<Mapping, ApiError> {
-    let mapping = body.to_core()?;
-    let header = if push {
-        push_header(&mapping)?
-    } else {
-        descriptor_header(descriptor)?
-    };
-    if push {
-        if mapping.key_column.is_some() {
-            return Err(ApiError::unprocessable("mapping: key_column_not_supported")
-                .with_code("key_column_not_supported"));
-        }
-        if mapping.delete_when.is_some() {
-            return Err(ApiError::delete_signal_unsupported());
-        }
-    }
-    let catalog = trait_catalog(state, workspace).await?;
-    mapping::validate_paths(&mapping, &header, &catalog)
-        .map_err(|error| mapping_problem(&error))?;
-    for rule in &mapping.columns {
-        if let mapping::Target::List { list_id } = &rule.target
-            && zirv_flow_store::find_list(&state.pool, workspace, *list_id)
-                .await?
-                .is_none()
-        {
-            return Err(ApiError::unprocessable(format!(
-                "mapping: unknown_list (column \"{}\")",
-                rule.column
-            )));
-        }
-    }
-    // A push stream has no key: its event id comes from the hook's dedupe field.
-    if !push && mapping.has_event() && primary_key.is_empty() {
-        return Err(ApiError::unprocessable(
-            "mapping: event_requires_primary_key",
-        ));
-    }
-    Ok(mapping)
+    let check = build_check(state, workspace, descriptor, primary_key, push).await?;
+    Ok(check.check(body)?)
 }
 
 /// Stores the settings of a stream and audits `stream.configured`.
@@ -657,6 +827,94 @@ mod tests {
     use zirv_flow_connectors::sources::{FieldDescriptor, FieldType};
 
     use super::*;
+
+    fn body(value: serde_json::Value) -> MappingBody {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn check(push: bool, lists: &[Uuid]) -> MappingCheck {
+        let catalog = HashMap::from([(
+            "plan".to_owned(),
+            TraitState::Active(zirv_flow_core::people::TraitType::String),
+        )]);
+        let lists = lists.iter().copied().collect();
+        let header = Header::new(vec!["id".into(), "plan".into()]).unwrap();
+        if push {
+            MappingCheck::for_sample_keys(header, catalog, lists, Vec::new())
+        } else {
+            MappingCheck::new(header, catalog, lists, vec!["id".into()])
+        }
+    }
+
+    fn email_rule() -> serde_json::Value {
+        json!({"column": "id", "target": {"type": "identifier", "kind": "email"}})
+    }
+
+    #[test]
+    fn a_mapping_check_matches_checked_mapping() {
+        // The rules a save applies, one by one, with the 422 text a save answers with.
+        let list = Uuid::now_v7();
+        let problem = |check: &MappingCheck, mapping: serde_json::Value| {
+            let issue = check.check(&body(mapping)).unwrap_err();
+            let error = ApiError::from(issue.clone());
+            (issue, error.status(), error.detail().to_owned())
+        };
+
+        let pulled = check(false, &[list]);
+        assert!(
+            pulled
+                .check(&body(json!({"columns": [email_rule()]})))
+                .is_ok()
+        );
+        let (issue, status, detail) = problem(
+            &pulled,
+            json!({"columns": [email_rule(),
+                {"column": "ghost", "target": {"type": "trait", "key": "plan"}}]}),
+        );
+        assert_eq!(issue, MappingIssue::on("unknown_column", "ghost"));
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(detail, "mapping: unknown_column (column \"ghost\")");
+        let (issue, _, detail) = problem(
+            &pulled,
+            json!({"columns": [email_rule(),
+                {"column": "plan", "target": {"type": "list", "list_id": Uuid::now_v7()}}]}),
+        );
+        assert_eq!(issue.code, "unknown_list");
+        assert_eq!(detail, "mapping: unknown_list (column \"plan\")");
+        let in_list = json!({"columns": [email_rule(),
+            {"column": "plan", "target": {"type": "list", "list_id": list}}]});
+        assert!(pulled.check(&body(in_list)).is_ok());
+        let mut keyless = check(false, &[]);
+        keyless.primary_key.clear();
+        let (_, _, detail) = problem(
+            &keyless,
+            json!({"columns": [email_rule()], "event": {"name": "seen"}}),
+        );
+        assert_eq!(detail, "mapping: event_requires_primary_key");
+        assert_eq!(
+            MappingIssue::new("no_identifier").to_string(),
+            "no_identifier"
+        );
+
+        // A webhook stream keeps the push rules, and a key it does not have is unknown.
+        let pushed = check(true, &[]);
+        let (_, _, detail) = problem(
+            &pushed,
+            json!({"columns": [email_rule()], "key_column": "id"}),
+        );
+        assert_eq!(detail, "mapping: key_column_not_supported");
+        let (_, _, detail) = problem(
+            &pushed,
+            json!({"columns": [email_rule()], "delete_when": {"column": "id"}}),
+        );
+        assert!(detail.starts_with("mapping: delete_when"), "{detail}");
+        let (issue, _, _) = problem(
+            &pushed,
+            json!({"columns": [{"column": "nokey", "target":
+                {"type": "identifier", "kind": "email"}}]}),
+        );
+        assert_eq!(issue, MappingIssue::on("unknown_column", "nokey"));
+    }
 
     fn descriptor() -> StreamDescriptor {
         StreamDescriptor {

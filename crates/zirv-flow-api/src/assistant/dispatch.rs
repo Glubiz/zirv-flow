@@ -4,16 +4,20 @@
 //! per-minute limit or the workspace's monthly budget is spent. Both counts are read from the
 //! call log in the database, so they hold across instances, and a call is reserved in that log as a
 //! `pending` row at its worst-case cost before the request is sent, so concurrent calls cannot all
-//! pass the gates. The call and its bookkeeping run in a task of their own, so a dropped handler cannot leave
-//! the row pending. A panic, or a process that dies mid-call, leaves the row at the worst-case cost:
-//! a panic marks it `abandoned` at once, and a reservation marks this workspace's `pending` rows
+//! pass the gates. The reservation, the call and the bookkeeping run in one task of their own,
+//! started on the first poll, so a dropped handler cannot leave the row pending or reserved
+//! without a flight. A panic in the provider call is caught in that task and, like a process that
+//! dies mid-call, leaves the row at the worst-case cost: a caught panic marks it `abandoned` at
+//! once, and a reservation marks this workspace's `pending` rows
 //! older than the client timeout plus a margin `abandoned`, keeping their cost, which is
 //! conservative and intended. A dispatched call always leaves a content-free row in `ai_calls`,
 //! finished with the real tokens and cost; a transcript is stored only when an admin opted in. The
 //! key is opened right before the request and dropped after it.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -124,6 +128,7 @@ pub struct Dispatcher<'a> {
     provider: &'a AiProviderConfig,
     model: &'a AiModelConfig,
     key: SecretId,
+    draft_id: Option<Uuid>,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -158,7 +163,13 @@ impl<'a> Dispatcher<'a> {
             provider,
             model,
             key,
+            draft_id: None,
         })
+    }
+
+    /// What a call of `input_tokens` and `output_tokens` costs on the chosen model, in micro-units.
+    pub(crate) fn cost_micros(&self, input_tokens: u32, output_tokens: u32) -> i64 {
+        self.model.cost_micros(input_tokens, output_tokens)
     }
 
     /// The privacy level the workspace's opt-in allows.
@@ -166,103 +177,46 @@ impl<'a> Dispatcher<'a> {
         Privacy::from_opt_in(self.settings.pii_opt_in)
     }
 
-    /// Steps 2 and 3: reserves the call before anything is sent. In one transaction under a lock on
-    /// the workspace it gives up on this workspace's calls that have been pending for longer than
-    /// the client's timeout, then checks the per-user rate limit and the monthly budget, and
-    /// records the call as `pending` at its worst-case cost: the model's price for the request's
-    /// input-token upper bound and the full output cap. A call is admitted only when the month's
-    /// spend plus that cost stays within the budget, so real spend never exceeds it. Pending rows
-    /// count in both limits, so calls still in flight are counted, on this instance and on every
-    /// other. Nothing is sent and nothing is recorded when a limit refuses. Returns the call's id
-    /// and its worst-case cost.
-    async fn reserve(&self, request: &ChatRequest) -> Result<(Uuid, i64), DispatchError> {
-        let call = Uuid::now_v7();
-        let worst_case = self.model.cost_micros(
-            request.input_tokens_upper_bound(),
-            request.max_output_tokens(),
-        );
-        let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
-        let reservation = zirv_flow_store::reserve_ai_call(
-            &mut tx,
-            &NewAiCall {
-                id: call,
-                workspace_id: self.workspace,
-                user_id: self.user,
-                feature: self.feature,
-                provider_id: &self.provider.id,
-                model: &self.model.name,
-                input_tokens: 0,
-                output_tokens: 0,
-                estimated_cost_micros: worst_case,
-                latency_ms: 0,
-                outcome: CallOutcome::Pending,
-                draft_id: None,
-            },
-            ReservationLimits {
-                rate_limit: i64::from(self.state.ai.config.rate_limit_per_user_per_minute),
-                budget_micros: self.settings.monthly_budget_micros,
-                stale_after_secs: self.state.ai.stale_after().as_secs_f64(),
-            },
-            OffsetDateTime::now_utc(),
-        )
-        .await?;
-        match reservation {
-            Reservation::Granted => {
-                zirv_flow_store::commit(tx).await?;
-                Ok((call, worst_case))
-            }
-            Reservation::RateLimited => {
-                refused("rate_limited");
-                Err(AiError::RateLimited.into())
-            }
-            Reservation::BudgetExceeded => {
-                refused("budget_exceeded");
-                Err(AiError::BudgetExceeded.into())
-            }
-        }
+    /// Links the calls of this dispatcher to a draft (`ai_calls.draft_id`). The column has no
+    /// foreign key, so a run that fails part-way leaves calls whose draft has no row.
+    #[must_use]
+    pub fn for_draft(mut self, id: Uuid) -> Self {
+        self.draft_id = Some(id);
+        self
     }
 
-    /// Steps 2 to 8: reserves the call, then, in a task of its own, opens the key, calls the
-    /// provider, finishes the call's row and, when the workspace opted in, stores a transcript. The
-    /// task is not tied to this future, so a handler that is dropped (a client that went away)
-    /// cannot cancel the call or leave its row pending. A refused call sends nothing.
+    /// Steps 2 to 8, all in a task of their own: reserves the call, opens the key, calls the
+    /// provider, finishes the call's row and, when the workspace opted in, stores a transcript.
+    /// The reservation and the flight are one task, started on this future's first poll, so a
+    /// handler that is dropped (a client that went away) at any later point cannot cancel the
+    /// call, leave a reserved row without a flight, or leave the row pending. A refused call sends
+    /// nothing.
     pub async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, DispatchError> {
-        let (call, worst_case) = self.reserve(request).await?;
         let flight = Flight {
             state: self.state.clone(),
             workspace: self.workspace,
             user: self.user,
             feature: self.feature,
+            draft_id: self.draft_id,
             transcript_days: self.settings.transcript_days,
+            budget_micros: self.settings.monthly_budget_micros,
             provider: self.provider.clone(),
             model: self.model.clone(),
             key: self.key,
-            call,
             request: request.clone(),
         };
         match tokio::spawn(flight.run()).await {
             Ok(result) => result,
-            Err(_) => {
-                // The task panicked. Whether the provider billed the call is unknown, so the row
-                // keeps its worst-case cost.
-                let finished = FinishedAiCall {
-                    outcome: CallOutcome::Abandoned,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    estimated_cost_micros: worst_case,
-                    latency_ms: 0,
-                };
-                finish(&self.state.pool, call, &finished, None).await?;
-                metrics::counter!(
-                    "zirv_flow_ai_calls_total",
-                    "feature" => self.feature,
-                    "outcome" => CallOutcome::Abandoned.as_str(),
-                )
-                .increment(1);
-                Err(AiError::Transport("the call was interrupted".to_owned()).into())
-            }
+            // A panic outside the guarded provider call (the reservation or the bookkeeping): the
+            // row, if one was reserved, keeps its worst-case cost until stale recovery.
+            Err(_) => Err(interrupted()),
         }
     }
+}
+
+/// The error for a call that was cut short by a panic.
+fn interrupted() -> DispatchError {
+    AiError::Transport("the call was interrupted".to_owned()).into()
 }
 
 /// How often the bookkeeping of a finished call is tried before it is left to stale recovery.
@@ -318,26 +272,85 @@ async fn finish(
     }
 }
 
-/// Everything a reserved call needs once it runs on its own.
+/// Everything a call needs once it runs on its own, the reservation included.
 struct Flight {
     state: AppState,
     workspace: WorkspaceId,
     user: Option<UserId>,
     feature: &'static str,
+    draft_id: Option<Uuid>,
     transcript_days: Option<i32>,
+    budget_micros: i64,
     provider: AiProviderConfig,
     model: AiModelConfig,
     key: SecretId,
-    call: Uuid,
     request: ChatRequest,
 }
 
 impl Flight {
+    /// Steps 2 and 3: reserves the call before anything is sent. In one transaction under a lock on
+    /// the workspace it gives up on this workspace's calls that have been pending for longer than
+    /// the client's timeout, then checks the per-user rate limit and the monthly budget, and
+    /// records the call as `pending` at its worst-case cost: the model's price for the request's
+    /// input-token upper bound and the full output cap. A call is admitted only when the month's
+    /// spend plus that cost stays within the budget, so real spend never exceeds it. Pending rows
+    /// count in both limits, so calls still in flight are counted, on this instance and on every
+    /// other. Nothing is sent and nothing is recorded when a limit refuses. Returns the call's id
+    /// and its worst-case cost.
+    async fn reserve(&self) -> Result<(Uuid, i64), DispatchError> {
+        let call = Uuid::now_v7();
+        let worst_case = self.model.cost_micros(
+            self.request.input_tokens_upper_bound(),
+            self.request.max_output_tokens(),
+        );
+        let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
+        let reservation = zirv_flow_store::reserve_ai_call(
+            &mut tx,
+            &NewAiCall {
+                id: call,
+                workspace_id: self.workspace,
+                user_id: self.user,
+                feature: self.feature,
+                provider_id: &self.provider.id,
+                model: &self.model.name,
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_micros: worst_case,
+                latency_ms: 0,
+                outcome: CallOutcome::Pending,
+                draft_id: self.draft_id,
+            },
+            ReservationLimits {
+                rate_limit: i64::from(self.state.ai.config.rate_limit_per_user_per_minute),
+                budget_micros: self.budget_micros,
+                stale_after_secs: self.state.ai.stale_after().as_secs_f64(),
+            },
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+        match reservation {
+            Reservation::Granted => {
+                zirv_flow_store::commit(tx).await?;
+                Ok((call, worst_case))
+            }
+            Reservation::RateLimited => {
+                refused("rate_limited");
+                Err(AiError::RateLimited.into())
+            }
+            Reservation::BudgetExceeded => {
+                refused("budget_exceeded");
+                Err(AiError::BudgetExceeded.into())
+            }
+        }
+    }
+
     async fn run(self) -> Result<ChatResponse, DispatchError> {
+        let (call, worst_case) = self.reserve().await?;
         let started = Instant::now();
         // The key is opened right before the request. When it cannot be, nothing was sent: the
-        // row is finished at no cost.
-        let sent = async {
+        // row is finished at no cost. The whole section is guarded, so a panic in a provider
+        // adapter finishes the row here, whether or not the handler is still waiting.
+        let guarded = AssertUnwindSafe(async {
             let key = open_provider_key(&self.state, self.workspace, self.key).await?;
             let http = self.state.ai.http(self.state.egress_policy())?;
             let provider = self.state.ai.provider(self.provider.kind);
@@ -350,8 +363,30 @@ impl Flight {
                     .complete(http, &endpoint, &key, &self.request)
                     .await,
             )
-        }
+        })
+        .catch_unwind()
         .await;
+        let Ok(sent) = guarded else {
+            // Whether the provider billed the call is unknown, so the row keeps its worst-case
+            // cost.
+            let finished = FinishedAiCall {
+                outcome: CallOutcome::Abandoned,
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_micros: worst_case,
+                latency_ms: 0,
+            };
+            if let Err(error) = finish(&self.state.pool, call, &finished, None).await {
+                tracing::warn!("finishing an abandoned AI call failed: {error}");
+            }
+            metrics::counter!(
+                "zirv_flow_ai_calls_total",
+                "feature" => self.feature,
+                "outcome" => CallOutcome::Abandoned.as_str(),
+            )
+            .increment(1);
+            return Err(interrupted());
+        };
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
         let (result, outcome, usage) = match sent {
             Ok(result) => {
@@ -378,7 +413,7 @@ impl Flight {
             estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
             latency_ms,
         };
-        finish(&self.state.pool, self.call, &finished, transcript.as_ref()).await?;
+        finish(&self.state.pool, call, &finished, transcript.as_ref()).await?;
         metrics::counter!(
             "zirv_flow_ai_calls_total",
             "feature" => self.feature,
@@ -510,10 +545,18 @@ mod tests {
 
         let stored = transcript(&request, Some(&response));
 
-        assert_eq!(stored["request"]["system"], "Map columns.");
+        // Personal text is fenced as data, so the notice comes first.
+        let system = stored["request"]["system"].as_str().unwrap();
+        assert!(
+            system.starts_with(zirv_flow_ai::UNTRUSTED_NOTICE),
+            "{system}"
+        );
+        assert!(system.ends_with("Map columns."), "{system}");
         assert_eq!(
             stored["request"]["messages"][0]["content"][0],
-            "ada@example.com"
+            "<untrusted_data>
+ada@example.com
+</untrusted_data>"
         );
         assert_eq!(stored["response"]["parts"][0]["text"], "done");
         assert!(transcript(&request, None)["response"].is_null());

@@ -1326,6 +1326,258 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/ai/drafts": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "Drafts a mapping or a manifest with the assistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
+        "operationId": "create_ai_draft",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The draft run: a validated draft with its changes and dry run, or the problems of the last attempt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or an API key (`ai_user_required`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or stream, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The assistant is off (`ai_disabled`), or the source does not use a manifest",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 160 KiB",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many AI calls (`ai_rate_limited`); try again in a minute",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The model provider failed (`ai_provider_error`), or the source did",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the provider key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not\nchanged since and that it still passes the rules a save applies, then returns it for the\neditor to load as its unsaved draft. Nothing is written to the stream or the source; saving\nstays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.",
+        "operationId": "accept_ai_draft",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Draft id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The draft, to load into the editor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedDraftBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or an API key (`ai_user_required`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft of this user in this workspace, or it expired",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The draft never validated (`ai_draft_invalid`), or the saved version changed since (`ai_draft_outdated`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/ai/models": {
       "get": {
         "tags": [
@@ -12321,6 +12573,40 @@
           }
         }
       },
+      "AcceptedDraftBody": {
+        "type": "object",
+        "description": "An accepted draft, for the editor to load.",
+        "required": [
+          "id",
+          "kind",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DraftKindBody"
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "AddMembersBody": {
         "type": "object",
         "required": [
@@ -12855,6 +13141,46 @@
             "example": "api"
           }
         }
+      },
+      "Change": {
+        "type": "object",
+        "description": "One difference.",
+        "required": [
+          "path",
+          "change"
+        ],
+        "properties": {
+          "after": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The drafted value; absent for a removed field."
+          },
+          "before": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The saved value; absent for an added field."
+          },
+          "change": {
+            "$ref": "#/components/schemas/ChangeKind"
+          },
+          "path": {
+            "type": "string",
+            "description": "A JSON pointer into the artifact, with the key of a rule in place of its position. A\nrepeated key reads `key#2`."
+          }
+        }
+      },
+      "ChangeKind": {
+        "type": "string",
+        "description": "What happened to a field.",
+        "enum": [
+          "added",
+          "removed",
+          "changed"
+        ]
       },
       "CheckBody": {
         "type": "object",
@@ -14083,6 +14409,231 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "DraftBody": {
+        "type": "object",
+        "description": "The result of a draft run.",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "attempts",
+          "issues",
+          "changes"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times the model was asked.",
+            "minimum": 0
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            },
+            "description": "The draft against the saved mapping or manifest, field by field."
+          },
+          "content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The validated draft, in the form the editor takes."
+          },
+          "dry_run": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DryRunBody"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DraftIssue"
+            },
+            "description": "For an invalid draft, the problems of the last attempt."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DraftKindBody"
+          },
+          "status": {
+            "type": "string",
+            "description": "`valid`, or `invalid` when no attempt passed validation: then there is no `content` and\nthe draft cannot be accepted."
+          }
+        }
+      },
+      "DraftIssue": {
+        "type": "object",
+        "description": "One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in\na manifest. It never holds a value.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A column name or a JSON pointer; absent when the problem is on the whole draft."
+          },
+          "code": {
+            "type": "string",
+            "description": "A stable code such as `unknown_column`, `unknown_list` or `path_invalid`."
+          }
+        }
+      },
+      "DraftKindBody": {
+        "type": "string",
+        "description": "What a draft is of.",
+        "enum": [
+          "mapping",
+          "manifest"
+        ]
+      },
+      "DraftRequest": {
+        "type": "object",
+        "description": "What to draft.",
+        "required": [
+          "kind",
+          "prompt"
+        ],
+        "properties": {
+          "documentation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a manifest: the API documentation to base it on, at most 32 KiB. It is sent to the\nmodel as data, never as instructions."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DraftKindBody"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "What the user wants, 1 to 2000 characters. It is sent as written: do not paste personal\ndata into it."
+          },
+          "sample": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "additionalProperties": {},
+              "propertyNames": {
+                "type": "string"
+              }
+            },
+            "description": "For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all).\nIts top-level keys are the stream's fields for this draft. Required for a webhook stream\nand refused for any other."
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The source. Required for a mapping. For a manifest it is the `http` source being edited;\nabsent for a source not yet saved."
+          },
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stream whose mapping is drafted. Required for a mapping, refused for a manifest."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DryRunBody": {
+        "type": "object",
+        "description": "What the draft does on real data: the #87 preview of a mapping, or the sample of a manifest.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "preview": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PreviewBody"
+              }
+            ]
+          },
+          "problem": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DryRunProblem"
+              }
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `unavailable`: `source_not_saved` or `connection_changed`."
+          },
+          "sample": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SampleBody"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok`, `unavailable` (it cannot run, see `reason`) or `failed` (see `problem`)."
+          },
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stream the manifest sample read."
+          }
+        }
+      },
+      "DryRunProblem": {
+        "type": "object",
+        "description": "Why a dry run did not show records.",
+        "required": [
+          "status",
+          "title"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
           }
         }
       },

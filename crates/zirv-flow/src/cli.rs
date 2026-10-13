@@ -91,6 +91,17 @@ pub(crate) enum AdminCommand {
     /// secrets.previous_master_key_file, restart, run this, then remove the previous key.
     /// Needs the master keys and no password.
     RotateMasterKey,
+    /// Runs the assistant's golden prompts against the workspace's configured model. Every prompt
+    /// is a gated call that counts against the workspace's budget. Prints a JSON report; never
+    /// fails on a low score. Needs the master key and no password.
+    EvaluateAssistant {
+        /// The workspace, by slug.
+        #[arg(long, value_name = "SLUG")]
+        workspace: String,
+        /// Only this case, by name. Every case when omitted.
+        #[arg(long, value_name = "NAME")]
+        case: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -219,6 +230,43 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn evaluate_assistant_parses_workspace_and_case() {
+        let all = Cli::try_parse_from([
+            "zirv-flow",
+            "admin",
+            "evaluate-assistant",
+            "--workspace",
+            "acme",
+        ])
+        .unwrap();
+        let one = Cli::try_parse_from([
+            "zirv-flow",
+            "admin",
+            "evaluate-assistant",
+            "--workspace",
+            "acme",
+            "--case",
+            "csv-contacts",
+        ])
+        .unwrap();
+
+        match all.command {
+            Some(Command::Admin(AdminCommand::EvaluateAssistant { workspace, case })) => {
+                assert_eq!((workspace.as_str(), case), ("acme", None));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match one.command {
+            Some(Command::Admin(AdminCommand::EvaluateAssistant { case, .. })) => {
+                assert_eq!(case.as_deref(), Some("csv-contacts"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // The workspace is required, and there is no password argument.
+        assert!(Cli::try_parse_from(["zirv-flow", "admin", "evaluate-assistant"]).is_err());
+    }
+
     #[test]
     fn help_lists_every_role() {
         let error = Cli::try_parse_from(["zirv-flow", "--help"]).unwrap_err();

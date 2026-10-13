@@ -1,0 +1,230 @@
+{
+  "cases": [
+    {
+      "name": "csv-contacts",
+      "kind": "mapping",
+      "prompt": "The file has a header row. Identify the person by Email, keep First name, Last name and Plan as traits, and add everyone whose Newsletter column is truthy to the Newsletter list.",
+      "fields": [
+        {"name": "Email", "type": "string"},
+        {"name": "First name", "type": "string"},
+        {"name": "Last name", "type": "string"},
+        {"name": "Plan", "type": "string"},
+        {"name": "Newsletter", "type": "string"}
+      ],
+      "traits": [
+        {"key": "first_name", "type": "string", "description": "Given name"},
+        {"key": "last_name", "type": "string", "description": "Family name"},
+        {"key": "plan", "type": "string", "description": "Subscription plan"}
+      ],
+      "lists": [{"id": "0190d0f2-0000-7000-8000-0000000000a1", "name": "Newsletter"}],
+      "expect": [
+        {"path": "/columns/*/column", "equals": "Email"},
+        {"path": "/columns/*/target/kind", "equals": "email"},
+        {"path": "/columns/*/target/key", "equals": "first_name"},
+        {"path": "/columns/*/target/key", "equals": "plan"},
+        {"path": "/columns/*/target/type", "equals": "list"},
+        {"path": "/columns/*/target/list_id", "equals": "0190d0f2-0000-7000-8000-0000000000a1"},
+        {"path": "/event", "absent": true}
+      ],
+      "replay": [
+        {"columns": [
+          {"column": "Email", "target": {"type": "identifier", "kind": "email"},
+           "transforms": [{"op": "trim"}, {"op": "lower"}]},
+          {"column": "First name", "target": {"type": "trait", "key": "first_name"}},
+          {"column": "Last name", "target": {"type": "trait", "key": "last_name"}},
+          {"column": "Plan", "target": {"type": "trait", "key": "plan"},
+           "transforms": [{"op": "lower"}]},
+          {"column": "Newsletter",
+           "target": {"type": "list", "list_id": "0190d0f2-0000-7000-8000-0000000000a1"}}
+        ]}
+      ]
+    },
+    {
+      "name": "nested-json-orders",
+      "kind": "mapping",
+      "prompt": "Each record is a customer with one order. Identify the person by profile.email, keep profile.name as the display name, add them to the Newsletter list when flags.news is set, and record an order_placed event with the total from order.total and the time from order.at.",
+      "fields": [
+        {"name": "id", "type": "string"},
+        {"name": "profile", "type": "json"},
+        {"name": "order", "type": "json"},
+        {"name": "flags", "type": "json"}
+      ],
+      "primary_key": ["id"],
+      "traits": [
+        {"key": "display_name", "type": "string", "description": "The name to greet a person by"}
+      ],
+      "lists": [{"id": "0190d0f2-0000-7000-8000-0000000000a1", "name": "Newsletter"}],
+      "expect": [
+        {"path": "/columns/*/column", "equals": "profile.email"},
+        {"path": "/columns/*/target/key", "equals": "display_name"},
+        {"path": "/columns/*/target/type", "equals": "list"},
+        {"path": "/event/name", "equals": "order_placed"},
+        {"path": "/event/properties/*/column", "equals": "order.total"},
+        {"path": "/event/timestamp/column", "equals": "order.at"},
+        {"path": "/key_column", "absent": true}
+      ],
+      "replay": [
+        {
+          "columns": [
+            {"column": "profile.email", "target": {"type": "identifier", "kind": "email"},
+             "transforms": [{"op": "trim"}, {"op": "lower"}]},
+            {"column": "profile.name", "target": {"type": "trait", "key": "display_name"}},
+            {"column": "flags.news",
+             "target": {"type": "list", "list_id": "0190d0f2-0000-7000-8000-0000000000a1"}}
+          ],
+          "event": {
+            "name": "order_placed",
+            "timestamp": {"column": "order.at",
+                          "transforms": [{"op": "timestamp", "format": "%Y-%m-%d"}]},
+            "properties": [{"property": "total", "column": "order.total",
+                            "transforms": [{"op": "cast", "to": "number"}]}]
+          }
+        }
+      ]
+    },
+    {
+      "name": "repairs-a-field-that-does-not-exist",
+      "kind": "mapping",
+      "prompt": "Identify the person by their email address and keep their name.",
+      "fields": [
+        {"name": "Email", "type": "string"},
+        {"name": "Name", "type": "string"}
+      ],
+      "traits": [
+        {"key": "display_name", "type": "string", "description": "The name to greet a person by"}
+      ],
+      "expect": [
+        {"path": "/columns/*/column", "equals": "Email"},
+        {"path": "/columns/*/target/key", "equals": "display_name"}
+      ],
+      "replay": [
+        {"columns": [
+          {"column": "E-mail", "target": {"type": "identifier", "kind": "email"}}
+        ]},
+        {"columns": [
+          {"column": "Email", "target": {"type": "identifier", "kind": "email"}},
+          {"column": "Name", "target": {"type": "trait", "key": "display_name"}}
+        ]}
+      ]
+    },
+    {
+      "name": "cursor-pagination-bearer-token",
+      "kind": "manifest",
+      "prompt": "Read the contacts of our CRM and keep them up to date.",
+      "documentation": "Acme CRM API v2\n\nBase URL: https://api.acme.example/v2\nAuthentication: send your token as a Bearer token in the Authorization header.\n\nGET /contacts\nReturns {\"data\": [...], \"meta\": {\"next_cursor\": \"abc\"}}. Pass the value of meta.next_cursor as the cursor query parameter to get the next page; it is null on the last page. The limit query parameter sets the page size (up to 100). The updated_since parameter returns only contacts changed after the given RFC 3339 time.\nEach contact has id (string), email (string) and updated_at (RFC 3339 timestamp).",
+      "expect": [
+        {"path": "/base_url", "equals": "https://api.acme.example/v2"},
+        {"path": "/auth/type", "equals": "bearer"},
+        {"path": "/streams/*/name", "equals": "contacts"},
+        {"path": "/streams/*/records_path", "equals": "/data"},
+        {"path": "/streams/*/pagination/type", "equals": "cursor"},
+        {"path": "/streams/*/pagination/next", "equals": "/meta/next_cursor"},
+        {"path": "/streams/*/primary_key", "contains": "id"},
+        {"path": "/streams/*/incremental/request_param", "equals": "updated_since"}
+      ],
+      "replay": [
+        {"manifest": {
+          "version": "v1",
+          "base_url": "https://api.acme.example/v2",
+          "auth": {"type": "bearer"},
+          "streams": [{
+            "name": "contacts",
+            "path": "/contacts",
+            "query": {"limit": 100},
+            "records_path": "/data",
+            "pagination": {"type": "cursor", "param": "cursor", "next": "/meta/next_cursor"},
+            "fields": [
+              {"name": "id", "type": "string"},
+              {"name": "email", "type": "string"},
+              {"name": "updated_at", "type": "timestamp"}
+            ],
+            "primary_key": ["id"],
+            "incremental": {"cursor_field": "updated_at", "request_param": "updated_since",
+                            "cursor_type": "timestamp"}
+          }]
+        }}
+      ]
+    },
+    {
+      "name": "link-header-pagination-api-key",
+      "kind": "manifest",
+      "prompt": "Read the people from this API.",
+      "documentation": "People directory API\n\nBase URL: https://people.example.org/v1\nAuthenticate by sending your key in the X-Api-Key request header.\n\nGET /people\nReturns a JSON array of people, each with id (string), email (string) and name (string). The response has a Link header with rel=\"next\" while more pages remain.",
+      "expect": [
+        {"path": "/auth/type", "equals": "api_key"},
+        {"path": "/auth/in", "equals": "header"},
+        {"path": "/auth/name", "equals": "X-Api-Key"},
+        {"path": "/streams/*/name", "equals": "people"},
+        {"path": "/streams/*/records_path", "equals": ""},
+        {"path": "/streams/*/pagination/type", "equals": "link_header"}
+      ],
+      "replay": [
+        {"manifest": {
+          "version": "v1",
+          "base_url": "https://people.example.org/v1",
+          "auth": {"type": "api_key", "in": "header", "name": "X-Api-Key"},
+          "streams": [{
+            "name": "people",
+            "path": "/people",
+            "records_path": "",
+            "pagination": {"type": "link_header"},
+            "fields": [
+              {"name": "id", "type": "string"},
+              {"name": "email", "type": "string"},
+              {"name": "name", "type": "string"}
+            ],
+            "primary_key": ["id"]
+          }]
+        }}
+      ]
+    },
+    {
+      "name": "repairs-an-unknown-key",
+      "kind": "manifest",
+      "prompt": "Read the products of this public API.",
+      "documentation": "Public catalog API. No authentication.\n\nBase URL: https://catalog.example.net/api\n\nGET /products?offset=0&limit=50\nReturns {\"items\": [...]}. Increase offset by the limit to get the next page; the largest limit is 200. Each product has sku (string) and title (string).",
+      "expect": [
+        {"path": "/auth/type", "equals": "none"},
+        {"path": "/streams/*/records_path", "equals": "/items"},
+        {"path": "/streams/*/pagination/type", "equals": "offset"},
+        {"path": "/streams/*/primary_key", "contains": "sku"},
+        {"path": "/retries", "absent": true}
+      ],
+      "replay": [
+        {"manifest": {
+          "version": "v1",
+          "base_url": "https://catalog.example.net/api",
+          "auth": {"type": "none"},
+          "retries": 3,
+          "streams": [{
+            "name": "products",
+            "path": "/products",
+            "records_path": "/items",
+            "pagination": {"type": "offset", "param": "offset", "limit_param": "limit", "limit": 50},
+            "fields": [
+              {"name": "sku", "type": "string"},
+              {"name": "title", "type": "string"}
+            ],
+            "primary_key": ["sku"]
+          }]
+        }},
+        {"manifest": {
+          "version": "v1",
+          "base_url": "https://catalog.example.net/api",
+          "auth": {"type": "none"},
+          "streams": [{
+            "name": "products",
+            "path": "/products",
+            "records_path": "/items",
+            "pagination": {"type": "offset", "param": "offset", "limit_param": "limit", "limit": 50},
+            "fields": [
+              {"name": "sku", "type": "string"},
+              {"name": "title", "type": "string"}
+            ],
+            "primary_key": ["sku"]
+          }]
+        }}
+      ]
+    }
+  ]
+}

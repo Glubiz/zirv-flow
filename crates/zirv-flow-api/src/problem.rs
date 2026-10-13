@@ -88,7 +88,11 @@ impl ApiError {
         self.status
     }
 
-    #[cfg(test)]
+    /// The stable code of the problem, when it has one.
+    pub(crate) fn code(&self) -> Option<&'static str> {
+        self.code
+    }
+
     pub(crate) fn detail(&self) -> &str {
         &self.detail
     }
@@ -353,6 +357,36 @@ impl ApiError {
         }
     }
 
+    /// An assistant draft is run by and for a signed-in person; an API key is refused.
+    pub(crate) fn ai_user_required() -> Self {
+        Self {
+            code: Some("ai_user_required"),
+            ..Self::forbidden("the assistant needs a signed-in user; an API key cannot use it")
+        }
+    }
+
+    /// A draft that never validated has no content to accept.
+    pub(crate) fn ai_draft_invalid() -> Self {
+        Self {
+            code: Some("ai_draft_invalid"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "this draft did not pass validation and cannot be accepted",
+            )
+        }
+    }
+
+    /// The saved mapping or manifest changed after the draft was made.
+    pub(crate) fn ai_draft_outdated() -> Self {
+        Self {
+            code: Some("ai_draft_outdated"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the saved version changed since this draft was made; draft again",
+            )
+        }
+    }
+
     /// The chosen model lacks required capabilities; each is listed with its reason.
     pub(crate) fn ai_capability_missing(errors: Vec<ItemProblem>) -> Self {
         Self {
@@ -516,6 +550,21 @@ mod tests {
     async fn the_ai_problems_carry_their_status_code_and_retry_hint() {
         let cases = [
             (ApiError::ai_disabled(), StatusCode::CONFLICT, "ai_disabled"),
+            (
+                ApiError::ai_user_required(),
+                StatusCode::FORBIDDEN,
+                "ai_user_required",
+            ),
+            (
+                ApiError::ai_draft_invalid(),
+                StatusCode::CONFLICT,
+                "ai_draft_invalid",
+            ),
+            (
+                ApiError::ai_draft_outdated(),
+                StatusCode::CONFLICT,
+                "ai_draft_outdated",
+            ),
             (
                 ApiError::ai_budget_exceeded(),
                 StatusCode::PAYMENT_REQUIRED,

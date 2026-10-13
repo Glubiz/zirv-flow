@@ -1348,3 +1348,21 @@ main:focus {
     stroke: CanvasText;
   }
 }
+
+/* A main column and a secondary one, as in the mapping dialog with the assistant; one column when narrow. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+  gap: 24px;
+  align-items: start;
+}
+
+.dialog-wide:has(.split) {
+  max-width: 1180px;
+}
+
+@media (max-width: 1000px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -440,6 +440,15 @@ pub async fn revoke_api_key(
     Ok(())
 }
 
+/// The id of the workspace with this slug.
+pub async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<WorkspaceId, AdminError> {
+    let slug = Slug::parse(slug)?;
+    Ok(zirv_flow_store::find_workspace_by_slug(pool, &slug)
+        .await?
+        .ok_or(AdminError::NotFound("workspace"))?
+        .id)
+}
+
 /// Re-applies the completed erasure ledger of one workspace (by slug) or of all of them after a
 /// backup restore: re-adds the `erased` suppressions, erases every ledger person that exists
 /// again, and removes pending inbox rows that name an erased identifier. Returns counts only,

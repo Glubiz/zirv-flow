@@ -12,11 +12,13 @@ use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{Record, StreamConfig, SyncMode};
+use zirv_flow_connectors::sources::Record;
+use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState};
+use zirv_flow_store::Stream;
 
-use super::actions::{prepare, read_sample};
-use super::streams::{checked_mapping, descriptor_of, trait_catalog};
+use super::actions::read_stream;
+use super::streams::{checked_mapping, descriptor_of, saved_mapping_body, trait_catalog};
 use super::{invalid, is_push};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -217,11 +219,7 @@ pub(crate) async fn preview(
     }
     let draft = match request.mapping {
         Some(body) => body,
-        None => stream
-            .mapping
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<Mapping>(value.clone()).ok())
-            .and_then(|saved| MappingBody::from_core(&saved))
+        None => saved_mapping_body(&stream)
             .ok_or_else(|| ApiError::unprocessable("stream_not_mapped"))?,
     };
     let mapping = checked_mapping(
@@ -233,10 +231,36 @@ pub(crate) async fn preview(
         push,
     )
     .await?;
-    let catalog = trait_catalog(&state, workspace.id).await?;
+    let body = preview_mapping(
+        &state,
+        workspace.id,
+        source_id,
+        &stream,
+        &mapping,
+        limit,
+        request.sample.as_deref(),
+    )
+    .await?;
+    Ok(Json(body))
+}
 
-    if let Some(sample) = &request.sample {
-        let objects = checked_sample(sample)?;
+/// Maps the first `limit` records of `stream` with an already checked `mapping`: the records a
+/// pulled source gives from the start of the stream, or the pasted `sample` of a webhook stream.
+/// Reads nothing but those records and writes nothing. The answer holds record values, so only
+/// a caller that is allowed to see them may be given it.
+pub(crate) async fn preview_mapping(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream: &Stream,
+    mapping: &Mapping,
+    limit: u32,
+    sample: Option<&[Value]>,
+) -> Result<PreviewBody, ApiError> {
+    let catalog = trait_catalog(state, workspace).await?;
+
+    if let Some(sample) = sample {
+        let objects = check_sample(sample)?;
         let declared = mapping.root_fields();
         let shown: Vec<PreviewRecord> = objects
             .iter()
@@ -248,26 +272,19 @@ pub(crate) async fn preview(
                     deleted: false,
                     occurrence: None,
                 };
-                preview_record(&mapping, &declared, &catalog, &record)
+                preview_record(mapping, &declared, &catalog, &record)
             })
             .collect();
-        return Ok(Json(PreviewBody {
+        return Ok(PreviewBody {
             read: u32::try_from(shown.len()).unwrap_or(u32::MAX),
             records: shown,
             truncated: false,
-        }));
+        });
     }
 
-    // The credential is opened right before the read and dropped with it.
-    let call = prepare(&state, workspace.id, source_id).await?;
-    let config = StreamConfig {
-        name: stream.name.clone(),
-        sync_mode: SyncMode::parse(&stream.sync_mode).unwrap_or(SyncMode::FullRefresh),
-        cursor_field: None,
-        primary_key: stream.primary_key.clone(),
-    };
+    let descriptor = descriptor_of(stream)?;
     let (records, truncated) =
-        read_sample(&call, &call.source.config, &config, limit as usize).await?;
+        read_stream(state, workspace, source_id, stream, limit as usize).await?;
     let declared: Vec<&str> = descriptor
         .fields
         .iter()
@@ -275,17 +292,17 @@ pub(crate) async fn preview(
         .collect();
     let shown: Vec<PreviewRecord> = records
         .iter()
-        .map(|record| preview_record(&mapping, &declared, &catalog, record))
+        .map(|record| preview_record(mapping, &declared, &catalog, record))
         .collect();
-    Ok(Json(PreviewBody {
+    Ok(PreviewBody {
         read: u32::try_from(shown.len()).unwrap_or(u32::MAX),
         records: shown,
         truncated,
-    }))
+    })
 }
 
 /// The sample payloads of a preview: 1 to 20 JSON objects, 64 KiB in all.
-fn checked_sample(sample: &[Value]) -> Result<&[Value], ApiError> {
+pub(crate) fn check_sample(sample: &[Value]) -> Result<&[Value], ApiError> {
     if !(1..=MAX_LIMIT as usize).contains(&sample.len()) {
         return Err(invalid("sample", "must hold 1 to 20 objects"));
     }

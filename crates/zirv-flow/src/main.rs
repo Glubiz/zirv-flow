@@ -113,6 +113,37 @@ async fn run(
             };
             return run_replay_erasures(workspace.as_deref(), &root, &pool, stdout, stderr).await;
         }
+        if let AdminCommand::EvaluateAssistant { workspace, case } = admin_command {
+            // Evaluating opens the provider key, so it needs the keyring, and no password.
+            let keyring = match load_keyring(&config) {
+                Ok(keyring) => keyring,
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: admin: {message}");
+                    return 2;
+                }
+            };
+            let pool = match open_database(&config).await {
+                Ok(pool) => pool,
+                Err(message) => return database_error(stderr, message),
+            };
+            let secrets = match load_secrets(&pool, keyring).await {
+                Ok(secrets) => secrets,
+                Err(message) => {
+                    let _ = writeln!(stderr, "error: admin: {message}");
+                    return 2;
+                }
+            };
+            return run_evaluate_assistant(
+                &config,
+                pool,
+                &secrets,
+                workspace,
+                case.as_deref(),
+                stdout,
+                stderr,
+            )
+            .await;
+        }
         if matches!(admin_command, AdminCommand::RotateMasterKey) {
             // Rotating needs the keyring and the database, and no password.
             let keyring = match load_keyring(&config) {
@@ -815,6 +846,9 @@ async fn run_admin(
         AdminCommand::RotateMasterKey => {
             unreachable!("rotate-master-key is handled before the password is read")
         }
+        AdminCommand::EvaluateAssistant { .. } => {
+            unreachable!("evaluate-assistant is handled before the password is read")
+        }
     };
     match result {
         Ok(message) => {
@@ -853,6 +887,40 @@ async fn run_rotate_master_key(
 }
 
 /// Re-applies the erasure ledger after a restore and prints counts only.
+/// Runs the assistant's golden prompts against the workspace's model and prints one JSON line per
+/// case. The exit code is 0 whatever the scores; only a run that could not happen fails.
+async fn run_evaluate_assistant(
+    config: &Config,
+    pool: PgPool,
+    secrets: &Secrets,
+    workspace: &str,
+    case: Option<&str>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let mut fail = |message: String| {
+        let _ = writeln!(stderr, "error: admin: {message}");
+        1
+    };
+    let found = match zirv_flow_api::admin::workspace_by_slug(&pool, workspace).await {
+        Ok(found) => found,
+        Err(error) => return fail(error.to_string()),
+    };
+    let state = match http_state(config, pool, Arc::new(String::new), Some(secrets)) {
+        Ok(state) => state,
+        Err(code) => return code,
+    };
+    match zirv_flow_api::evaluate_assistant(&state, found, case).await {
+        Ok(reports) => {
+            for report in reports {
+                let _ = writeln!(stdout, "{}", report.to_json_line());
+            }
+            0
+        }
+        Err(error) => fail(error.to_string()),
+    }
+}
+
 async fn run_replay_erasures(
     workspace: Option<&str>,
     root: &zirv_flow_store::HmacRoot,
