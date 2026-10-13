@@ -22,10 +22,14 @@ mod validation;
 mod workspace;
 
 pub use email::Email;
-pub use ids::{ApiKeyId, UserId, WorkspaceId};
+pub use ids::{ApiKeyId, SecretId, UserId, WorkspaceId};
 pub use role::Role;
 pub use scope::Scope;
-pub use secrets::{HmacKey, HmacPurpose, MasterKey, MasterKeyError};
+pub use secrets::{
+    HmacKey, HmacPurpose, HmacRoot, Keyring, KeyringError, MasterKey, MasterKeyError, Sealed,
+    SecretBytes, SecretError, SecretPurpose, SecretString, deployment_key_aad, open, rewrap, seal,
+    secret_aad,
+};
 pub use trace::{Cause, CauseKind, TraceContext, TraceId};
 pub use validation::ValidationError;
 pub use workspace::{OrphanPolicy, Slug, WorkspaceName};

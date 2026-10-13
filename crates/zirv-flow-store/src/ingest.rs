@@ -790,13 +790,13 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
-    use zirv_flow_core::{CauseKind, HmacPurpose, MasterKey, Slug, WorkspaceName};
+    use zirv_flow_core::{CauseKind, HmacPurpose, HmacRoot, MasterKey, Slug, WorkspaceName};
 
     use super::*;
     use crate::{create_workspace, list_trace};
 
     fn key() -> HmacKey {
-        MasterKey::generate().hmac_key(HmacPurpose::Redaction)
+        HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction)
     }
 
     fn object(value: Value) -> Map<String, Value> {

@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use zirv_flow_core::egress::EgressPolicy;
-use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
+use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
 
@@ -38,6 +38,8 @@ pub struct AppState {
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
     pub(crate) identifier_key: Option<Arc<HmacKey>>,
+    /// The master keys that open stored secrets; absent until given.
+    keyring: Option<Arc<Keyring>>,
     /// The explorer's time and row limits.
     pub(crate) explorer: ExplorerLimits,
     /// The shared listener and the viewers of the event debugger.
@@ -77,6 +79,7 @@ impl AppState {
             imports: ImportLimits::default(),
             setup_token: Arc::default(),
             identifier_key: None,
+            keyring: None,
             explorer: ExplorerLimits::default(),
             stop: None,
             egress: Arc::default(),
@@ -127,11 +130,22 @@ impl AppState {
         self
     }
 
-    /// Derives the identifier-hashing key from the operator's master key. Without it the
+    /// Derives the identifier-hashing key from the deployment's HMAC root. Without it the
     /// suppression endpoints answer 503.
-    pub fn with_master_key(mut self, key: &MasterKey) -> Self {
-        self.identifier_key = Some(Arc::new(key.hmac_key(HmacPurpose::Identifier)));
+    pub fn with_hmac_root(mut self, root: &HmacRoot) -> Self {
+        self.identifier_key = Some(Arc::new(root.hmac_key(HmacPurpose::Identifier)));
         self
+    }
+
+    /// The master keys that open stored secrets.
+    pub fn with_keyring(mut self, keyring: Arc<Keyring>) -> Self {
+        self.keyring = Some(keyring);
+        self
+    }
+
+    /// The master keys that open stored secrets, when they were given.
+    pub fn keyring(&self) -> Option<&Arc<Keyring>> {
+        self.keyring.as_ref()
     }
 
     /// The ingestion limits: body size, batch size and the per-key rate, per process.
@@ -173,6 +187,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zirv_flow_core::MasterKey;
 
     fn state() -> AppState {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -229,16 +244,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_identifier_key_comes_from_the_master_key_and_is_off_until_given() {
-        let key = MasterKey::generate();
+    async fn the_identifier_key_comes_from_the_hmac_root_and_is_off_until_given() {
+        let root = HmacRoot::bootstrap_from(&MasterKey::generate());
 
         assert!(state().identifier_key.is_none());
-        let with = state().with_master_key(&key);
-        let derived = key.hmac_key(HmacPurpose::Identifier);
+        let with = state().with_hmac_root(&root);
+        let derived = root.hmac_key(HmacPurpose::Identifier);
         assert_eq!(
             with.identifier_key.unwrap().digest(b"x"),
             derived.digest(b"x")
         );
+    }
+
+    #[tokio::test]
+    async fn the_keyring_is_off_until_given() {
+        let keyring = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+
+        assert!(state().keyring().is_none());
+        assert!(state().with_keyring(keyring).keyring().is_some());
     }
 
     #[tokio::test]

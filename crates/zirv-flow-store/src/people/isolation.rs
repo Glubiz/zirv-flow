@@ -208,7 +208,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_event_read_returns_only_its_own_workspaces_rows(pool: PgPool) {
         use zirv_flow_core::events::{EventMode, PropertyType, SchemaProperty};
-        use zirv_flow_core::{HmacPurpose, MasterKey};
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
 
         use crate::{
             EventPolicy, EventRecord, NewEventSchema, RejectFilter, apply_event_batch, begin,
@@ -218,7 +218,7 @@ mod tests {
 
         let one = workspace(&pool, "one").await;
         let two = workspace(&pool, "two").await;
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         for (ws, name) in [(one, "order"), (two, "order")] {
             create_event_schema(
                 &pool,
@@ -559,7 +559,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn draining_the_inbox_touches_only_its_own_workspaces_rows(pool: PgPool) {
-        use zirv_flow_core::{HmacPurpose, MasterKey};
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
 
         use crate::{IngestItem, IngestPayload, Shard, append_inbox, drain_batch, inbox_heads};
 
@@ -586,7 +586,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
 
         let outcome = drain_batch(&pool, one, Shard::ALL, &key, 100)
             .await

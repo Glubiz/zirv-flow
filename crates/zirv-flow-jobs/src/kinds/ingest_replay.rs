@@ -77,7 +77,9 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
     use zirv_flow_core::events::{EventMode, PropertyType, SchemaProperty};
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
     use zirv_flow_store::{
         EventOutcome, EventRecord, NewEventSchema, apply_event_batch, create_event_schema,
         enqueue_replay, publish_schema_draft, save_schema_draft,
@@ -142,7 +144,9 @@ mod tests {
             .await
             .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
-        let key = std::sync::Arc::new(MasterKey::generate().hmac_key(HmacPurpose::Redaction));
+        let key = std::sync::Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
+        );
         let record = |message: &str, total: Value| EventRecord {
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],

@@ -190,8 +190,8 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_scan_finds_the_rows_the_event_store_wrote(pool: PgPool) {
         use crate::{
-            EventOutcome, EventPolicy, EventRecord, HmacPurpose, MasterKey, apply_event_batch,
-            set_event_policy,
+            EventOutcome, EventPolicy, EventRecord, HmacPurpose, HmacRoot, MasterKey,
+            apply_event_batch, set_event_policy,
         };
         use zirv_flow_core::events::UnplannedPolicy;
 
@@ -208,7 +208,7 @@ mod tests {
             message_id: Some(message_id.into()),
             trace: TraceContext::root(Cause::api("t")),
         };
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         let accepted = apply_event_batch(&pool, ws, &key, &[record("seen", "m-1")])
             .await
             .unwrap();

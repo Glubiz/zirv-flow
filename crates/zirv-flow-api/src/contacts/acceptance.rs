@@ -11,7 +11,9 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tower::ServiceExt;
-    use zirv_flow_core::{HmacPurpose, MasterKey, Role, Scope, Slug, WorkspaceId, WorkspaceName};
+    use zirv_flow_core::{
+        HmacPurpose, HmacRoot, MasterKey, Role, Scope, Slug, WorkspaceId, WorkspaceName,
+    };
 
     use crate::admin::{self, Context};
     use crate::{AppState, IngestLimits, router};
@@ -101,7 +103,7 @@ mod tests {
             .unwrap()
             .id;
         let state = AppState::new(pool.clone(), Arc::new(String::new))
-            .with_master_key(&MasterKey::generate())
+            .with_hmac_root(&HmacRoot::bootstrap_from(&MasterKey::generate()))
             .with_ingest_limits(limits);
         Fixture {
             router: router(state),
@@ -715,7 +717,8 @@ mod tests {
         let not_yet = fx.send("GET", "/contacts/b-1", None, &fx.admin, &[]).await;
         assert_eq!(not_yet.status, StatusCode::NOT_FOUND);
 
-        let hmac = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let hmac =
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         zirv_flow_store::drain_batch(&pool, fx.ws, zirv_flow_store::Shard::ALL, &hmac, 100)
             .await
             .unwrap();

@@ -2212,7 +2212,7 @@ mod tests {
         pool: PgPool,
     ) {
         use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
-        use zirv_flow_core::{HmacPurpose, MasterKey};
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
 
         use crate::privacy::testing::profile;
         use crate::{ConsentChange, EventRecord, apply_event_batch, set_consent};
@@ -2234,7 +2234,7 @@ mod tests {
         .await
         .unwrap();
         let [two, with_event, with_consent] = [0, 2, 3].map(|index| person_of(&outcomes[index]));
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         apply_event_batch(
             &pool,
             ws,

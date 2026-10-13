@@ -834,8 +834,8 @@ mod tests {
         name: &str,
         message_id: &str,
     ) -> crate::EventOutcome {
-        let key =
-            zirv_flow_core::MasterKey::generate().hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
         let event = crate::EventRecord {
             source: "web".into(),
             identifiers: vec![("email".into(), email.into())],

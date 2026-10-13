@@ -317,7 +317,9 @@ mod tests {
     use time::macros::datetime;
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::people::{Identifier, identifier_hash};
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
 
     use super::*;
     use crate::consent::{ConsentChange, set_consent};
@@ -332,7 +334,7 @@ mod tests {
 
     fn hash(value: &str) -> [u8; 32] {
         let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
-        let key = master.hmac_key(HmacPurpose::Identifier);
+        let key = HmacRoot::bootstrap_from(&master).hmac_key(HmacPurpose::Identifier);
         identifier_hash(&key, &Identifier::parse("email", value).unwrap())
     }
 

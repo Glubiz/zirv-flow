@@ -36,7 +36,9 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
     use time::OffsetDateTime;
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
     use zirv_flow_store::{EventRecord, EventRetention, NewJob, apply_event_batch};
 
     use super::*;
@@ -56,7 +58,7 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         let now = OffsetDateTime::now_utc();
         for days in [1_i64, 400] {
             let record = EventRecord {

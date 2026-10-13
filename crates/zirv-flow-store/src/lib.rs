@@ -17,6 +17,7 @@ mod migrations;
 mod people;
 mod pool;
 mod privacy;
+pub mod secrets;
 mod sessions;
 mod suppressions;
 mod workspaces;
@@ -131,9 +132,12 @@ pub use workspaces::{
     list_members, list_workspaces_for_user, membership_role, orphan_policy, remove_membership,
     set_membership, set_orphan_policy,
 };
-/// The operator master key and its derived keys, re-exported so the binary reaches them
-/// through the store.
-pub use zirv_flow_core::{HmacKey, HmacPurpose, MasterKey};
+/// The operator master key, its derived keys and the sealing of secrets, re-exported so the
+/// binary reaches them through the store.
+pub use zirv_flow_core::{
+    HmacKey, HmacPurpose, HmacRoot, Keyring, MasterKey, SecretBytes, SecretId, SecretPurpose,
+    deployment_key_aad, open as open_secret, seal as seal_secret, secret_aad,
+};
 
 #[derive(Debug)]
 pub struct StoreError {
@@ -357,13 +361,14 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 7] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 8] = [
         "users",
         "user_identities",
         "oidc_logins",
         "workspaces",
         "sessions",
         "audit_log",
+        "deployment_keys",
         "_sqlx_migrations",
     ];
 

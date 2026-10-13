@@ -807,7 +807,7 @@ mod tests {
     use sqlx::PgPool;
     use time::macros::datetime;
     use zirv_flow_core::events::{EventMode, RedactionRules, SchemaProperty};
-    use zirv_flow_core::{Cause, HmacPurpose, MasterKey, Slug, WorkspaceName};
+    use zirv_flow_core::{Cause, HmacPurpose, HmacRoot, MasterKey, Slug, WorkspaceName};
 
     use super::*;
     use crate::events::{
@@ -861,7 +861,7 @@ mod tests {
     }
 
     fn key() -> zirv_flow_core::HmacKey {
-        MasterKey::generate().hmac_key(HmacPurpose::Redaction)
+        HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction)
     }
 
     /// A workspace whose block-mode schema requires a number `total`, and one reject of an

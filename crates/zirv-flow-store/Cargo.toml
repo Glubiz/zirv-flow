@@ -24,6 +24,9 @@ zirv-flow-core.workspace = true
 # fails CI if they do, and it does not compile without ZIRV_FLOW_BENCH_BUILD=1. Tests that read
 # decisions fail with it on, by design.
 bench-no-decisions = []
+# TEST ONLY: exposes `secrets::insert_unchecked` and `replace_unchecked`, which plant secret rows
+# without the writer check. Enabled by dev-dependencies only; never in a normal build.
+test-support = []
 
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true

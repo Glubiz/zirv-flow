@@ -216,7 +216,7 @@ mod tests {
     use uuid::Uuid;
     use zirv_flow_core::events::EventMode;
     use zirv_flow_core::{
-        Cause, HmacPurpose, MasterKey, Slug, TraceContext, WorkspaceId, WorkspaceName,
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceId, WorkspaceName,
     };
 
     use super::*;
@@ -259,7 +259,7 @@ mod tests {
             message_id: message_id.map(str::to_owned),
             trace: TraceContext::root(Cause::api("t")),
         };
-        let key = MasterKey::generate().hmac_key(HmacPurpose::Redaction);
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
         let outcome = apply_event_batch(pool, ws, &key, &[record])
             .await
             .unwrap()

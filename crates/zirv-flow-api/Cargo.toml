@@ -35,3 +35,4 @@ sqlx.workspace = true
 tower.workspace = true
 tracing-subscriber.workspace = true
 zirv-flow-identity = { workspace = true, features = ["test-support"] }
+zirv-flow-store = { workspace = true, features = ["test-support"] }
