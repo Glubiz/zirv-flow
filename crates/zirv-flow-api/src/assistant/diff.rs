@@ -49,6 +49,10 @@ pub(crate) struct Change {
 /// What differs between `before` (none when nothing is saved: every field is then added) and
 /// `after`: object keys in sorted order, rules in their order in `after`, removed ones last.
 pub(crate) fn changes(before: Option<&Value>, after: &Value, keys: &[(&str, &str)]) -> Vec<Change> {
+    // A null member is an unset option, the same as an absent one.
+    let before = before.map(without_nulls);
+    let before = before.as_ref();
+    let after = &without_nulls(after);
     let mut found = Vec::new();
     let walker = Walker { keys };
     match before {
@@ -56,6 +60,20 @@ pub(crate) fn changes(before: Option<&Value>, after: &Value, keys: &[(&str, &str
         None => walker.added_fields(after, &mut found),
     }
     found
+}
+
+/// The value without its null object members, at every depth.
+fn without_nulls(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(_, member)| !member.is_null())
+                .map(|(key, member)| (key.clone(), without_nulls(member)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_nulls).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Escapes a key for a JSON pointer.
@@ -325,6 +343,14 @@ mod tests {
         assert_eq!(found[0].path, "/columns/a~1b~0c/target/type");
         let objects = changes(Some(&json!({"a/b": 1})), &json!({"a/b": 2}), MAPPING_KEYS);
         assert_eq!(objects[0].path, "/a~1b");
+    }
+
+    #[test]
+    fn a_null_member_is_the_same_as_an_absent_one() {
+        let saved = json!({"columns": [], "key_column": null});
+        let draft = json!({"columns": []});
+        assert!(changes(Some(&saved), &draft, MAPPING_KEYS).is_empty());
+        assert!(changes(None, &json!({"key_column": null}), MAPPING_KEYS).is_empty());
     }
 
     #[test]
