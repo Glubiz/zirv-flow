@@ -13,6 +13,7 @@ mod source;
 mod spec;
 mod types;
 mod validate;
+mod webhook;
 
 pub use context::SourceContext;
 pub use credential::{Credential, CredentialFormatError};
@@ -26,6 +27,7 @@ pub use types::{
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
 };
+pub use webhook::PAYLOAD_STREAM;
 
 /// The token the fake source's connection test accepts.
 #[cfg(feature = "test-support")]
@@ -35,4 +37,5 @@ pub(crate) static ALL: &[&dyn ErasedSource] = &[
     #[cfg(feature = "test-support")]
     &fake::Fake,
     &file::File,
+    &webhook::Webhook,
 ];

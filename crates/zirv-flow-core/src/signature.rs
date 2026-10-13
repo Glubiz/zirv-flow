@@ -465,5 +465,6 @@ mod tests {
         assert_eq!(digest, README_EXAMPLE_DIGEST);
     }
 
-    const README_EXAMPLE_DIGEST: &str = "c8447361d430f2281aef6579aec897c4930f3d15af1920d3da1f83ff8e4f4d56";
+    const README_EXAMPLE_DIGEST: &str =
+        "c8447361d430f2281aef6579aec897c4930f3d15af1920d3da1f83ff8e4f4d56";
 }

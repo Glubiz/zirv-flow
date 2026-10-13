@@ -91,4 +91,26 @@ mod tests {
 
         assert_eq!(production.matches("file::File").count(), 1);
     }
+
+    #[test]
+    fn the_webhook_source_is_registered_in_every_build_and_is_the_only_push_kind() {
+        let registry = Registry::built_in();
+
+        assert_eq!(registry.get("webhook").unwrap().spec().kind, "webhook");
+        for spec in registry.specs() {
+            assert_eq!(
+                spec.capabilities.push,
+                spec.kind == "webhook",
+                "{}",
+                spec.kind
+            );
+        }
+    }
+
+    #[test]
+    fn the_webhook_source_is_named_once_in_its_registry_line() {
+        let production = include_str!("mod.rs");
+
+        assert_eq!(production.matches("webhook::Webhook").count(), 1);
+    }
 }

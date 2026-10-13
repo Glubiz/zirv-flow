@@ -104,6 +104,7 @@ impl Source for Fake {
         }],
         rate_limit: None,
         capabilities: Capabilities {
+            push: false,
             incremental: true,
             full_refresh: true,
             emits_deletes: true,

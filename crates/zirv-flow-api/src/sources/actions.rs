@@ -378,6 +378,7 @@ mod tests {
         config_fields: &[],
         credential_fields: &[],
         capabilities: zirv_flow_connectors::sources::Capabilities {
+            push: false,
             incremental: false,
             full_refresh: true,
             emits_deletes: false,

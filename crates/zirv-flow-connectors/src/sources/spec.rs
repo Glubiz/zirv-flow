@@ -23,6 +23,9 @@ pub struct SourceSpec {
 /// What a source type can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
+    /// Whether records arrive by push (an inbound webhook) instead of being read. A push source
+    /// has no schedule and no run.
+    pub push: bool,
     pub incremental: bool,
     pub full_refresh: bool,
     /// Whether it reports deleted records.

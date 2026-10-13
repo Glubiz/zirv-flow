@@ -230,6 +230,7 @@ mod tests {
         ],
         rate_limit: None,
         capabilities: Capabilities {
+            push: false,
             incremental: false,
             full_refresh: true,
             emits_deletes: false,
