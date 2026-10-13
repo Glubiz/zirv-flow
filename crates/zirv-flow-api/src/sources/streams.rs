@@ -237,7 +237,7 @@ pub(super) async fn bodies(
         .collect()
 }
 
-pub(super) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
+pub(crate) fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
     serde_json::from_value(stream.discovered.clone()).map_err(|_| ApiError::internal())
 }
 

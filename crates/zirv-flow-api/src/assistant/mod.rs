@@ -9,6 +9,7 @@ pub(crate) mod prompt;
 pub(crate) mod runtime;
 pub(crate) mod schema;
 pub(crate) mod settings;
+pub(crate) mod tools;
 
 pub use config::{AiConfig, AiConfigError, AiModelConfig, AiProviderConfig};
 pub use dispatch::{DispatchError, Dispatcher, dispatch};
