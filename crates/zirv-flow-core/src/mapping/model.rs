@@ -19,6 +19,10 @@ pub struct Mapping {
     /// The one event each record yields, when the mapping describes one. Sync runs only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<EventRule>,
+    /// The column that marks a record as deleted in the source. A synced record whose cell
+    /// satisfies the rule is removed instead of applied. Optional, and refused for CSV imports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_when: Option<DeleteWhen>,
 }
 
 impl Mapping {
@@ -28,7 +32,7 @@ impl Mapping {
     }
 
     /// Every column or path the mapping reads, with repeats: the rule columns, the key column,
-    /// the columns a `concat` joins and the columns of the event.
+    /// the columns a `concat` joins, the columns of the event and the delete column.
     pub fn referenced_columns(&self) -> Vec<&str> {
         fn chain<'a>(columns: &mut Vec<&'a str>, transforms: &'a [Transform]) {
             for transform in transforms {
@@ -54,6 +58,9 @@ impl Mapping {
                 columns.push(&property.column);
                 chain(&mut columns, &property.transforms);
             }
+        }
+        if let Some(signal) = &self.delete_when {
+            columns.push(&signal.column);
         }
         columns
     }
@@ -90,6 +97,27 @@ pub struct PropertyRule {
     pub column: String,
     #[serde(default)]
     pub transforms: Vec<Transform>,
+}
+
+/// The delete signal of a mapping: a column and the rule that reads its cell.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteWhen {
+    pub column: String,
+    #[serde(default)]
+    pub rule: DeleteRule,
+}
+
+/// How a delete column's cell is read. The set is closed: no expressions.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteRule {
+    /// A soft-delete flag: `true`, `1`, `yes`, `x` and so on. A cell that is not a flag is
+    /// not a delete.
+    #[default]
+    Truthy,
+    /// A soft-delete timestamp: any non-empty cell.
+    Present,
 }
 
 /// What one column becomes.
@@ -192,6 +220,39 @@ mod tests {
 
         assert_eq!(mapping.key_column, None);
         assert!(mapping.columns[0].transforms.is_empty());
+    }
+
+    #[test]
+    fn the_delete_signal_defaults_to_truthy_and_old_mappings_still_load() {
+        let old: Mapping = serde_json::from_value(json!({
+            "columns": [{"column": "a", "target": {"type": "ignore"}}]
+        }))
+        .unwrap();
+        assert_eq!(old.delete_when, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("delete_when"));
+
+        let bare: Mapping = serde_json::from_value(json!({
+            "columns": [], "delete_when": {"column": "gone"}
+        }))
+        .unwrap();
+        assert_eq!(
+            bare.delete_when,
+            Some(DeleteWhen {
+                column: "gone".into(),
+                rule: DeleteRule::Truthy
+            })
+        );
+        let present: DeleteWhen =
+            serde_json::from_value(json!({"column": "deleted_at", "rule": "present"})).unwrap();
+        assert_eq!(present.rule, DeleteRule::Present);
+        assert_eq!(
+            serde_json::to_value(&present).unwrap(),
+            json!({"column": "deleted_at", "rule": "present"})
+        );
+        assert!(
+            serde_json::from_value::<DeleteWhen>(json!({"column": "x", "rule": "regex"})).is_err()
+        );
+        assert!(serde_json::from_value::<DeleteWhen>(json!({"column": "x", "extra": 1})).is_err());
     }
 
     #[test]

@@ -496,8 +496,18 @@ transaction except for a batch that fails the run on its rejects. The reject che
 100 records read (`SYNC_REJECT_CHECK_MIN_RECORDS`) at 5%, stored per run. A source's cron is
 mirrored to a `schedules` row (`schedules.source_id`, cascading); the leader's firing queues
 one run per enabled, mapped stream without an active run, each with its own job
-(`sync:run:<run_id>`) under the run's trace. The sweep for full refresh is not built yet:
-runs only set `last_seen_run`.
+(`sync:run:<run_id>`) under the run's trace. The sweep is the last phase of the same `sync.run`
+job for a full refresh and for a reconciliation (`sync_runs.run_kind`, `sync` or `reconcile`; the
+payload, queueing, the one-active-run index, fencing and metrics are the same): after the stream
+is exhausted and the last unit committed, and before `finish_run`, `store::sync_runs::sweep`
+removes the live ledger rows of the stream whose `last_seen_run` is not the run, 200 per fenced
+transaction (lease locked, run locked `running`), through `remove_contribution_in`, with a
+`deleted` decision per removal. A record read but not applied (refused by the mapping or the
+store, or only listed by a reconciliation) is marked seen, so it is never swept. Before the first
+unit, one statement compares the unseen share of the live rows with `streams.sweep_limit`
+(default 0.5) and a run over it ends `failed` with `sweep_limit` and removes nothing. A reconcile
+run reads from the beginning, maps records only to split deleted from seen keys, and never writes
+`streams.checkpoint`; its cron is a `schedules` row keyed by `stream_id`.
 
 **Mapping** is declarative: field path to identifier kind, trait, event field or
 list, with a bounded transform set (trim, case, cast, timestamp parse,
@@ -609,8 +619,16 @@ person dirty, appends `contribution.removed` and then applies `workspaces.orphan
 `store::privacy::delete_person` is the one function that owns the list of person-scoped tables;
 it deletes the person and the people merged into them, and every milestone that adds a table
 extends it. It is exposed as `DELETE /people/{id}`, as a step of erasure and as the orphan
-policy's action, and it adds no suppression. Event-linked removal waits for record-linked
-events (M3).
+policy's action, and it adds no suppression. As built (M3): `events.source_record_id` (nullable,
+no foreign key, a partial index on the partitioned parent) names the ledger row an event came from,
+and `remove_contribution_in` deletes those events, with their `event_dedupe` and `debugger_feed`
+rows, in the removal's transaction, before the orphan check, so an event-only person left with
+nothing follows the policy. A merge moves a record's person, not its link. No sync path writes
+record-linked events until the events target of the mapping (#87); first-party events carry no
+link and stay. As built (M3, file sources and deletion together): a sync batch marks its records
+seen first, then hands each record's ledger id through `EventRecord.source_record_id` to the
+event path, so the event a mapping yields is deleted with its record by a sweep, a delete signal, a
+connector delete or a reconciliation. Lists only add: a removed record's list memberships stay.
 
 ### 7.5 Freshness and connector concerns
 

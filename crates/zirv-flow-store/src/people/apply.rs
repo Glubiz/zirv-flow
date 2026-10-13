@@ -129,8 +129,11 @@ pub(crate) async fn apply_profile_records_singly(
 /// - when the workspace's orphan policy is `delete` and the person is left with no live
 ///   record, no event and no explicit consent, the person is deleted.
 ///
-/// Returns false when no live record matched. Events are not ledger records in M2, so they
-/// stay.
+/// - the events that name the record (`source_record_id`) are deleted with the rows that refer
+///   to them, so a record-linked event goes with its record; first-party events and the events
+///   of other records stay.
+///
+/// Returns false when no live record matched.
 pub async fn remove_contribution(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -142,10 +145,16 @@ pub async fn remove_contribution(
     let mut tx = begin(pool).await?;
     let removed =
         remove_contribution_in(&mut tx, workspace, source, stream, record_key, trace).await?;
-    if removed {
+    if removed.is_some() {
         commit(tx).await?;
     }
-    Ok(removed)
+    Ok(removed.is_some())
+}
+
+/// The ledger row [`remove_contribution_in`] removed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RemovedRecord {
+    pub(crate) record_id: Uuid,
 }
 
 /// [`remove_contribution`] inside the caller's transaction, which the caller commits.
@@ -156,7 +165,7 @@ pub(crate) async fn remove_contribution_in(
     stream: &str,
     record_key: &str,
     trace: &TraceContext,
-) -> Result<bool, StoreError> {
+) -> Result<Option<RemovedRecord>, StoreError> {
     // The record is locked first, then its person: the order the drain's existing-record path
     // uses. With the record locked a merge cannot move it, so the owner cannot change.
     let record: Option<(Uuid, Uuid)> = sqlx::query_as(
@@ -172,7 +181,7 @@ pub(crate) async fn remove_contribution_in(
     .await
     .map_err(StoreError::query)?;
     let Some((locked_id, owner)) = record else {
-        return Ok(false);
+        return Ok(None);
     };
     sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
         .bind(workspace.as_uuid())
@@ -212,6 +221,7 @@ pub(crate) async fn remove_contribution_in(
         &identifiers,
     )
     .await?;
+    remove_record_events(&mut *connection, workspace, record_id).await?;
     mark_dirty(&mut *connection, workspace, person_id).await?;
     record_decision(
         &mut *connection,
@@ -235,7 +245,39 @@ pub(crate) async fn remove_contribution_in(
         )
         .await?;
     }
-    Ok(true)
+    Ok(Some(RemovedRecord { record_id }))
+}
+
+/// Deletes the events of one ledger record, and the dedupe and debugger rows that name them, in
+/// the removal's transaction.
+async fn remove_record_events(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record_id: Uuid,
+) -> Result<(), StoreError> {
+    let events: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 RETURNING id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(record_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if events.is_empty() {
+        return Ok(());
+    }
+    for statement in [
+        "DELETE FROM debugger_feed WHERE workspace_id = $1 AND event_id = ANY($2)",
+        "DELETE FROM event_dedupe WHERE workspace_id = $1 AND event_id = ANY($2)",
+    ] {
+        sqlx::query(statement)
+            .bind(workspace.as_uuid())
+            .bind(&events)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    Ok(())
 }
 
 /// Deletes each identity in `identifiers` (the removed record's `[{kind, value}]`) that
@@ -1056,6 +1098,217 @@ mod tests {
     async fn trait_of(pool: &PgPool, ws: WorkspaceId, person: Uuid, key: &str) -> Option<Value> {
         let person = find_person(pool, ws, person).await.unwrap().unwrap();
         person.traits.get(key).cloned()
+    }
+
+    /// Stores one event of `person`, linked to `record` when given, with its dedupe row and a
+    /// debugger feed row, and returns its id.
+    async fn linked_event(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+        record: Option<Uuid>,
+        occurred_at: OffsetDateTime,
+        message_id: &str,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        crate::events::insert_event(
+            &mut connection,
+            ws,
+            &crate::events::NewEvent {
+                id,
+                person_id: person,
+                name: "seen",
+                schema_version: None,
+                occurred_at,
+                received_at: occurred_at,
+                properties: &serde_json::Map::new(),
+                source: "web",
+                message_id: Some(message_id),
+                trace_id: Uuid::now_v7(),
+                state: zirv_flow_core::events::ValidationState::Valid,
+                reasons: &[],
+                flags: &[],
+                late: false,
+                source_record_id: record,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO event_dedupe (workspace_id, message_id, event_id, event_occurred_at, \
+                person_id) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(ws.as_uuid())
+        .bind(message_id)
+        .bind(id)
+        .bind(occurred_at)
+        .bind(person)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO debugger_feed (workspace_id, source, name, outcome, event_id, trace_id) \
+             VALUES ($1, 'web', 'seen', 'accepted', $2, $3)",
+        )
+        .bind(ws.as_uuid())
+        .bind(id)
+        .bind(Uuid::now_v7())
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn event_ids(pool: &PgPool) -> Vec<Uuid> {
+        sqlx::query_scalar("SELECT id FROM events ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_a_record_deletes_the_events_that_name_it_in_every_partition_and_nothing_else(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let other_ws = workspace(&pool, "two").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record("crm", "1", "a@example.com", json!({}), at),
+                record("crm", "2", "a@example.com", json!({}), at),
+                record("crm", "3", "b@example.com", json!({}), at),
+            ],
+        )
+        .await
+        .unwrap();
+        let (person, other_person) = (person_of(&outcomes[0]), person_of(&outcomes[2]));
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM source_records WHERE workspace_id = $1 ORDER BY record_key",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let (first, second, third) = (ids[0], ids[1], ids[2]);
+
+        // Events of the first record in the current month, an old month (its own partition) and
+        // a year no partition covers (the default partition).
+        let now = OffsetDateTime::now_utc();
+        let mut doomed = Vec::new();
+        for (n, when) in [
+            now,
+            now - time::Duration::days(70),
+            datetime!(2001-01-01 00:00 UTC),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            doomed.push(linked_event(&pool, ws, person, Some(first), when, &format!("d{n}")).await);
+        }
+        let partitions: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT tableoid) FROM events WHERE source_record_id = $1",
+        )
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(partitions, 3, "the events sit in three partitions");
+        // Kept: a first-party event of the same person, an event of the person's other record, an
+        // event of another person's record.
+        let first_party = linked_event(&pool, ws, person, None, now, "k0").await;
+        let sibling = linked_event(&pool, ws, person, Some(second), now, "k1").await;
+        let stranger = linked_event(&pool, ws, other_person, Some(third), now, "k2").await;
+        // The same record id in another workspace is not this record.
+        let foreign_person = person_of(
+            &apply_profile_batch(
+                &pool,
+                other_ws,
+                &[record("crm", "1", "c@example.com", json!({}), at)],
+            )
+            .await
+            .unwrap()[0],
+        );
+        let foreign = linked_event(&pool, other_ws, foreign_person, Some(first), now, "k3").await;
+
+        let removed = remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+
+        assert!(removed);
+        let mut kept = vec![first_party, sibling, stranger, foreign];
+        kept.sort();
+        assert_eq!(event_ids(&pool).await, kept);
+        for id in &doomed {
+            let dedupe: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM event_dedupe WHERE event_id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let feed: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM debugger_feed WHERE event_id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((dedupe, feed), (0, 0), "{id}");
+        }
+        let dedupe_left: i64 = sqlx::query_scalar("SELECT count(*) FROM event_dedupe")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(dedupe_left, 4);
+        assert!(find_person(&pool, ws, person).await.unwrap().is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_orphan_policy_decides_a_person_whose_only_record_and_events_went(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record("crm", "1", "keep@example.com", json!({}), at),
+                record("crm", "2", "gone@example.com", json!({}), at),
+            ],
+        )
+        .await
+        .unwrap();
+        let (keep, gone) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        let records: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM source_records WHERE workspace_id = $1 ORDER BY record_key",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let now = OffsetDateTime::now_utc();
+        linked_event(&pool, ws, keep, Some(records[0]), now, "e1").await;
+        linked_event(&pool, ws, gone, Some(records[1]), now, "e2").await;
+
+        // Under `keep` the person stays, without the record and the event.
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        assert!(find_person(&pool, ws, keep).await.unwrap().is_some());
+        assert_eq!(event_ids(&pool).await.len(), 1);
+
+        // Under `delete` the event does not keep the person alive: it went with its record.
+        crate::set_orphan_policy(&pool, ws, OrphanPolicy::Delete)
+            .await
+            .unwrap();
+        remove_contribution(&pool, ws, "crm", "contacts", "2", &trace())
+            .await
+            .unwrap();
+        assert!(find_person(&pool, ws, gone).await.unwrap().is_none());
+        assert!(event_ids(&pool).await.is_empty());
     }
 
     #[test]
@@ -2266,6 +2519,7 @@ mod tests {
             ws,
             &key,
             &[EventRecord {
+                source_record_id: None,
                 source: "web".into(),
                 identifiers: vec![("email".into(), "event@example.com".into())],
                 name: "seen".into(),

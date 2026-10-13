@@ -40,9 +40,19 @@ export interface EventDraft {
   properties: PropertyDraft[];
 }
 
+export type DeleteRule = "truthy" | "present";
+
+type ApiRule = Mapping["columns"][number];
+
 export interface MappingDraft {
   rules: RuleDraft[];
   event: EventDraft;
+  /** The column that marks a record as deleted; empty for none. A field or a dotted path. */
+  deleteColumn: string;
+  deleteRule: DeleteRule;
+  /** What the editor does not show but must send back as it was: the record key column, and rules it cannot edit. */
+  keyColumn: string | null;
+  kept: ApiRule[];
 }
 
 let nextId = 1;
@@ -69,7 +79,7 @@ export function startingDraft(fields: readonly string[]): MappingDraft {
   const guess = fields.find((name) => /e-?mail/i.test(name));
   const rule = newRule(guess ?? "");
   rule.transforms = guess ? [newTransform("trim"), newTransform("lower")] : [];
-  return { rules: [rule], event: emptyEvent() };
+  return { rules: [rule], event: emptyEvent(), deleteColumn: "", deleteRule: "truthy", keyColumn: null, kept: [] };
 }
 
 export function identifierKind(choice: Extract<TargetChoice, { kind: "identifier" }>): string | null {
@@ -115,14 +125,22 @@ function targetFromApi(target: Target): TargetChoice | null {
 export function mappingToDraft(fields: readonly string[], mapping: Mapping | null | undefined): MappingDraft {
   if (!mapping) return startingDraft(fields);
   const rules: RuleDraft[] = [];
+  const kept: ApiRule[] = [];
   for (const rule of mapping.columns) {
     const target = targetFromApi(rule.target);
-    if (target === null) continue;
+    if (target === null) {
+      kept.push(rule);
+      continue;
+    }
     rules.push({ id: nextId++, column: rule.column, target, transforms: (rule.transforms ?? []).map(transformFromApi) });
   }
   const event = mapping.event;
   return {
     rules,
+    deleteColumn: mapping.delete_when?.column ?? "",
+    deleteRule: mapping.delete_when?.rule ?? "truthy",
+    keyColumn: mapping.key_column ?? null,
+    kept,
     event: event
       ? {
           enabled: true,
@@ -140,7 +158,7 @@ export function mappingToDraft(fields: readonly string[], mapping: Mapping | nul
   };
 }
 
-/** The mapping to send: complete rules in order, and the event when it is switched on. */
+/** The mapping to send: complete rules in order, the event when it is switched on, the delete signal when one is set. */
 export function draftToMapping(draft: MappingDraft): Mapping {
   const columns: Mapping["columns"] = [];
   for (const rule of draft.rules) {
@@ -148,7 +166,11 @@ export function draftToMapping(draft: MappingDraft): Mapping {
     if (target === null || rule.column.trim() === "") continue;
     columns.push({ column: rule.column.trim(), target, transforms: chainToApi(rule.transforms) });
   }
-  const mapping: Mapping = { key_column: null, columns };
+  columns.push(...draft.kept);
+  const mapping: Mapping = { key_column: draft.keyColumn, columns };
+  if (draft.deleteColumn.trim() !== "") {
+    mapping.delete_when = { column: draft.deleteColumn.trim(), rule: draft.deleteRule };
+  }
   if (draft.event.enabled) {
     const event: EventRule = {
       name: draft.event.name.trim(),

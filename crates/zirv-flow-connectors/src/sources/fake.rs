@@ -70,6 +70,14 @@ impl Source for Fake {
                 secret: false,
             },
             FieldSpec {
+                key: "soft_deleted",
+                label: "Soft-deleted ids",
+                help: "Comma-separated record ids whose deleted_flag is true and whose deleted_at is set.",
+                kind: FieldKind::Text,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
                 key: "invalid",
                 label: "Invalid ids",
                 help: "Comma-separated record ids whose email is not an email.",
@@ -144,6 +152,14 @@ impl Source for Fake {
                         name: "updated_at".into(),
                         field_type: FieldType::Timestamp,
                     },
+                    FieldDescriptor {
+                        name: "deleted_flag".into(),
+                        field_type: FieldType::String,
+                    },
+                    FieldDescriptor {
+                        name: "deleted_at".into(),
+                        field_type: FieldType::Timestamp,
+                    },
                 ],
                 sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
                 default_cursor_field: Some("updated_at".into()),
@@ -164,6 +180,7 @@ impl Source for Fake {
         let batch = config["batch"].as_u64().unwrap_or(BATCH).clamp(1, 100_000);
         let deleted = id_set(&config["deleted"]);
         let invalid = id_set(&config["invalid"]);
+        let soft_deleted = id_set(&config["soft_deleted"]);
         let fail_after = config["fail_after_batches"].as_u64();
         let start = checkpoint
             .and_then(|checkpoint| checkpoint.0["offset"].as_u64())
@@ -189,6 +206,8 @@ impl Source for Fake {
                             format!("{}-{id}@example.com", stream.name)
                         },
                         "updated_at": format!("2026-01-{:02}T00:00:00Z", id % 28 + 1),
+                        "deleted_flag": if soft_deleted.contains(&id) { "true" } else { "false" },
+                        "deleted_at": if soft_deleted.contains(&id) { "2026-02-01T00:00:00Z" } else { "" },
                     }),
                     deleted: deleted.contains(&id),
                 })
@@ -350,6 +369,19 @@ mod tests {
         assert_eq!(deleted, ["stream_1-1", "stream_1-4"]);
         assert_eq!(all[2].data["email"], "not-an-email");
         assert_eq!(all[0].data["email"], "stream_1-0@example.com");
+
+        let soft = json!({"records": 3, "soft_deleted": "1"});
+        let batches: Vec<Batch> = Fake
+            .read(&ctx, &soft, &credential, &stream, None)
+            .map(|batch| batch.unwrap())
+            .collect()
+            .await;
+        let all: Vec<&Record> = batches.iter().flat_map(|b| &b.records).collect();
+        assert_eq!(all[1].data["deleted_flag"], "true");
+        assert_eq!(all[1].data["deleted_at"], "2026-02-01T00:00:00Z");
+        assert_eq!(all[0].data["deleted_flag"], "false");
+        assert_eq!(all[0].data["deleted_at"], "");
+        assert!(all.iter().all(|record| !record.deleted));
 
         let failing = json!({"fail_after_batches": 1});
         let results: Vec<_> = Fake

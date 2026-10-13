@@ -243,6 +243,7 @@ mod tests {
             publish_schema_draft(&mut tx, ws, name, None).await.unwrap();
             commit(tx).await.unwrap();
             let rejected = EventRecord {
+                source_record_id: None,
                 source: "web".into(),
                 identifiers: vec![("email".into(), "a@example.com".into())],
                 name: name.into(),
@@ -729,6 +730,8 @@ mod tests {
                     .is_none()
             );
             let settings = StreamSettings {
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
                 enabled: true,
                 sync_mode: "full_refresh",
                 cursor_field: None,
@@ -769,7 +772,7 @@ mod tests {
     async fn sync_runs_are_read_and_changed_only_in_their_own_workspace(pool: PgPool) {
         use crate::sync_runs::testing::{batch, source_with_stream, started_run, upsert};
         use crate::{
-            CancelOutcome, RunTrigger, cancel_run, commit_sync_batch, fail_run, find_run,
+            CancelOutcome, RunKind, RunTrigger, cancel_run, commit_sync_batch, fail_run, find_run,
             finish_run, list_run_rejects, list_runs, queue_run, queue_runs_for_source, start_run,
             sync_schedule,
         };
@@ -812,6 +815,7 @@ mod tests {
                 two,
                 source,
                 stream,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 None
             )
@@ -1017,5 +1021,107 @@ mod tests {
         let own = stream_freshness(&pool, Some(one), None, now).await.unwrap();
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].state, zirv_flow_core::Freshness::Fresh);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_in_one_workspace_leaves_the_records_and_events_of_another(pool: PgPool) {
+        use crate::sync_runs::testing::{commit_records, fixture, next_run, upsert};
+        use crate::{
+            ReconcileQueued, RunTrigger, SweepOutcome, SweepUnit, queue_reconcile_run,
+            sweep_exceeds_limit, sweep_unreached,
+        };
+
+        let first = fixture(&pool, "one", "incremental").await;
+        commit_records(&pool, &first, 3).await;
+        let fx = next_run(&pool, &first).await;
+        let two = workspace(&pool, "two").await;
+        let source = fx.source_id.to_string();
+        // Workspace two holds records of the same source and stream names, each with an event.
+        for n in 0..3 {
+            let mut record = upsert(&fx, &format!("k{n}"), &format!("b{n}@example.com")).record;
+            record.source = source.clone();
+            let outcome = apply_profile_batch(&pool, two, &[record]).await.unwrap();
+            let person = match &outcome[0] {
+                crate::ProfileOutcome::Applied { person_id, .. } => *person_id,
+                other => panic!("{other:?}"),
+            };
+            let record_id: Uuid = sqlx::query_scalar(
+                "SELECT id FROM source_records WHERE workspace_id = $1 AND record_key = $2",
+            )
+            .bind(two.as_uuid())
+            .bind(format!("k{n}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                    source, trace_id, validation_state, source_record_id) \
+                 VALUES ($1, $2, $3, 'seen', now(), now(), 'web', $4, 'valid', $5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(two.as_uuid())
+            .bind(person)
+            .bind(Uuid::now_v7())
+            .bind(record_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let unit = |workspace| SweepUnit {
+            workspace,
+            run_id: fx.run.id,
+            source: &source,
+            stream: "contacts",
+            job_id: fx.job.id,
+            lease_token: fx.job.lease_token,
+            attempt: fx.job.attempts,
+            trace: &fx.trace,
+            after: None,
+        };
+
+        // Aimed at the run through the other workspace, the sweep finds no run and removes
+        // nothing; the guard counts only that workspace's own rows.
+        assert_eq!(
+            sweep_unreached(&pool, &unit(two)).await.unwrap(),
+            SweepOutcome::Cancelled
+        );
+        assert!(
+            !sweep_exceeds_limit(&pool, two, Uuid::now_v7(), "nobody", "contacts", 0.1)
+                .await
+                .unwrap()
+        );
+        let mut connection = pool.acquire().await.unwrap();
+        assert_eq!(
+            queue_reconcile_run(
+                &mut connection,
+                two,
+                fx.source_id,
+                fx.stream_id,
+                RunTrigger::Schedule,
+                None,
+                true
+            )
+            .await
+            .unwrap(),
+            ReconcileQueued::Ineligible
+        );
+        drop(connection);
+
+        // The real sweep removes workspace one's three records and none of workspace two's.
+        let outcome = sweep_unreached(&pool, &unit(fx.ws)).await.unwrap();
+        assert!(matches!(outcome, SweepOutcome::Swept { removed: 3, .. }));
+        let per_workspace: Vec<(Uuid, i64, i64)> = sqlx::query_as(
+            "SELECT r.workspace_id, count(*) FILTER (WHERE r.deleted_at IS NULL), \
+                    (SELECT count(*) FROM events e WHERE e.workspace_id = r.workspace_id) \
+             FROM source_records r GROUP BY r.workspace_id ORDER BY 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            per_workspace,
+            [(fx.ws.as_uuid(), 0, 0), (two.as_uuid(), 3, 3)]
+        );
     }
 }

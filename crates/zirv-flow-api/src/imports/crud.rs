@@ -189,6 +189,9 @@ pub(crate) async fn put_mapping(
     let import = find_import(&state.pool, workspace.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if body.has_delete_signal() {
+        return Err(ApiError::delete_signal_unsupported());
+    }
     let mapping = body.to_core()?;
     if mapping.has_event() {
         return Err(ApiError::unprocessable("mapping: event_not_supported"));

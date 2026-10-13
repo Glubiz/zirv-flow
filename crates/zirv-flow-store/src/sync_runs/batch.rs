@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::Connection;
+use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
@@ -31,6 +31,13 @@ use crate::{
 /// A run is judged on its reject rate only once this many records have been read. Smaller than
 /// the 1,000 rows of a CSV import because incremental runs are usually small.
 pub const SYNC_REJECT_CHECK_MIN_RECORDS: i64 = 100;
+
+/// Why a record was removed because the source reported it deleted.
+pub const DELETE_BY_SOURCE: &str = "source";
+/// Why a record was removed because the mapping's delete signal fired.
+pub const DELETE_BY_SIGNAL: &str = "signal";
+/// Why a record was removed because the run did not see it.
+pub(crate) const DELETE_BY_SWEEP: &str = "swept";
 
 /// A record the mapping accepted, with the masked sample to keep should the store refuse it.
 #[derive(Clone, Debug)]
@@ -55,6 +62,9 @@ pub struct SyncEvent {
 /// A record the mapping refused: codes and a masked sample, never a value.
 #[derive(Clone, Debug)]
 pub struct SyncReject {
+    /// The record's key. It still exists in the source, so the run counts it as seen and the
+    /// sweep leaves its earlier contribution alone.
+    pub record_key: String,
     /// `(field, code)` pairs; the field is empty when no one field is at fault.
     pub reasons: Vec<(String, &'static str)>,
     /// `{properties, masked}`.
@@ -79,9 +89,16 @@ pub struct SyncBatch<'a> {
     /// Redacts the events' properties. Needed when any upsert has an event.
     pub redaction_key: Option<&'a HmacKey>,
     pub upserts: &'a [SyncUpsert],
-    /// The keys of the records the source reports as deleted.
-    pub deleted: &'a [String],
+    /// The keys of the records the source or the mapping's delete signal marks as deleted, each
+    /// with why: [`DELETE_BY_SOURCE`] or [`DELETE_BY_SIGNAL`].
+    pub deleted: &'a [(String, &'static str)],
+    /// The keys of records the run read and that still exist, but applies nothing for (a
+    /// reconciliation reads keys only). They count as seen.
+    pub seen: &'a [String],
     pub rejected: &'a [SyncReject],
+    /// Records the unit read and dropped as an earlier occurrence of a key it carries again. They
+    /// count as read, and as nothing else.
+    pub duplicates: usize,
     /// Where the source resumes after this batch.
     pub checkpoint: &'a Value,
     /// Also write the checkpoint to the stream, for the next run.
@@ -142,52 +159,90 @@ struct Refusal {
     sample: Value,
 }
 
+/// Why a unit of work on a run may not proceed.
+pub(super) enum Unfenced {
+    /// The job's lease is gone.
+    LeaseLost,
+    /// The run is no longer running.
+    Cancelled,
+}
+
+/// Fences a unit of work on a run: locks the job's lease, then the run, which must be running.
+/// Nothing has been written when it refuses.
+pub(super) async fn fence_run(
+    tx: &mut PgConnection,
+    workspace: WorkspaceId,
+    run_id: Uuid,
+    job_id: Uuid,
+    lease_token: Uuid,
+) -> Result<Option<Unfenced>, StoreError> {
+    if !lock_lease(tx, job_id, lease_token).await? {
+        return Ok(Some(Unfenced::LeaseLost));
+    }
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM sync_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    Ok((state.as_deref() != Some("running")).then_some(Unfenced::Cancelled))
+}
+
 /// Commits one batch of a run.
 pub async fn commit_sync_batch(
     pool: &PgPool,
     batch: &SyncBatch<'_>,
 ) -> Result<BatchOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    if !lock_lease(&mut tx, batch.job_id, batch.lease_token).await? {
-        return Ok(BatchOutcome::LeaseLost);
-    }
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT state FROM sync_runs WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    match fence_run(
+        &mut tx,
+        batch.workspace,
+        batch.run_id,
+        batch.job_id,
+        batch.lease_token,
     )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    if state.as_deref() != Some("running") {
-        return Ok(BatchOutcome::Cancelled);
+    .await?
+    {
+        Some(Unfenced::LeaseLost) => return Ok(BatchOutcome::LeaseLost),
+        Some(Unfenced::Cancelled) => return Ok(BatchOutcome::Cancelled),
+        None => {}
     }
 
     let results = apply_upserts(&mut tx, batch).await?;
-    let events = apply_events(&mut tx, batch, &results).await?;
+    // Every record the run read that still exists in the source is marked as seen: the applied
+    // and unchanged ones, and the ones the mapping or the store refused, whose earlier
+    // contribution a sweep must not take away (a broken mapping cannot cascade into deletions).
+    // A record flagged deleted is not seen.
+    let seen_keys: Vec<&str> = batch
+        .upserts
+        .iter()
+        .map(|upsert| upsert.record.record_key.as_str())
+        .chain(
+            batch
+                .rejected
+                .iter()
+                .map(|reject| reject.record_key.as_str()),
+        )
+        .chain(batch.seen.iter().map(String::as_str))
+        .collect();
+    let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
+    let events = apply_events(&mut tx, batch, &results, &seen).await?;
     link_event_rejects(&mut tx, batch, &events).await?;
     if !join_lists(&mut tx, batch, &results).await? {
         return Ok(BatchOutcome::ListMissing);
     }
 
-    // The ledger rows of the records that are now current, marked as seen by this run.
-    let seen_keys: Vec<&str> = batch
-        .upserts
-        .iter()
-        .zip(&results)
-        .filter(|(_, result)| {
-            matches!(
-                result,
-                Some(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
-            )
-        })
-        .map(|(upsert, _)| upsert.record.record_key.as_str())
-        .collect();
-    let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
-
     let mut counts = Counts {
-        read: i64::try_from(batch.upserts.len() + batch.deleted.len() + batch.rejected.len())
-            .unwrap_or(i64::MAX),
+        read: i64::try_from(
+            batch.upserts.len()
+                + batch.deleted.len()
+                + batch.rejected.len()
+                + batch.seen.len()
+                + batch.duplicates,
+        )
+        .unwrap_or(i64::MAX),
         ..Counts::default()
     };
     let mut decisions = Vec::new();
@@ -234,8 +289,9 @@ pub async fn commit_sync_batch(
         });
     }
 
-    // The store's own `contribution.removed` decision says what happened to a deleted record.
-    for key in batch.deleted {
+    // The store's own `contribution.removed` decision says what happened to the person; the
+    // `deleted` decision names the ledger row, as the person may go with it.
+    for (key, why) in batch.deleted {
         let removed = remove_contribution_in(
             &mut tx,
             batch.workspace,
@@ -245,8 +301,14 @@ pub async fn commit_sync_batch(
             batch.trace,
         )
         .await?;
-        if removed {
+        if let Some(removed) = removed {
             counts.deleted += 1;
+            decisions.push(decision(
+                batch,
+                "deleted",
+                Some(why),
+                vec![("source_record", removed.record_id)],
+            ));
         } else {
             counts.unchanged += 1;
         }
@@ -432,6 +494,7 @@ async fn apply_events(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
     results: &[Option<ProfileOutcome>],
+    seen: &HashMap<String, Uuid>,
 ) -> Result<EventsApplied, StoreError> {
     let mut applied = EventsApplied::default();
     if batch.upserts.iter().all(|upsert| upsert.event.is_none()) {
@@ -460,6 +523,8 @@ async fn apply_events(
             received_at: batch.received_at,
             message_id: Some(message_id.clone()),
             trace: batch.trace.clone(),
+            // The event goes with the record: removing the record removes it.
+            source_record_id: seen.get(upsert.record.record_key.as_str()).copied(),
         };
         let outcome = if batch.singly {
             let outcome = apply_event_singly(tx, batch, key, &record, &message_id).await?;
@@ -726,6 +791,7 @@ mod tests {
 
     fn reject() -> SyncReject {
         SyncReject {
+            record_key: "rej".into(),
             reasons: vec![("email".into(), "invalid_identifier")],
             sample: json!({"properties": {"email": null}, "masked": ["email"]}),
         }
@@ -796,7 +862,7 @@ mod tests {
             upsert(&fx, "k1", "a1@example.com"),
             upsert(&fx, "kbad", "not-an-email"),
         ];
-        let deleted = ["k0".to_owned()];
+        let deleted = [("k0".to_owned(), DELETE_BY_SOURCE)];
         let rejected = [reject()];
         let cp2 = json!({"offset": 6});
         let two = commit_sync_batch(
@@ -927,6 +993,7 @@ mod tests {
         let upserts = [upsert(&fx, "k0", "a0@example.com")];
         // PostgreSQL refuses a NUL in jsonb, after the record was applied and before the commit.
         let poison = [SyncReject {
+            record_key: "poison".into(),
             reasons: vec![("\u{0}".into(), "invalid_identifier")],
             sample: json!({}),
         }];
@@ -1061,6 +1128,51 @@ mod tests {
         (from..to)
             .map(|n| upsert(fx, &format!("k{n}"), &format!("a{n}@example.com")))
             .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dropped_duplicate_counts_as_read_and_in_the_reject_check_only(pool: PgPool) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        // 90 applied, 6 rejected and 4 duplicates dropped by the planner: 100 records read, and
+        // 6 of them rejected is over the 5% threshold. Without the duplicates only 96 were read
+        // and the check would not apply yet.
+        let upserts = many(&fx, 0, 90);
+        let rejects: Vec<SyncReject> = (0..6).map(|_| reject()).collect();
+        let cp = json!({"offset": 100});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                rejected: &rejects,
+                duplicates: 4,
+                incremental: true,
+                ..batch(&fx, &source, &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(progress.batch.read, 100);
+        assert_eq!(
+            (
+                progress.batch.applied,
+                progress.batch.unchanged,
+                progress.batch.rejected,
+                progress.batch.deleted
+            ),
+            (90, 0, 6, 0)
+        );
+        assert!(progress.threshold_exceeded);
+        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.records_read, 100);
     }
 
     #[sqlx::test]
@@ -1220,6 +1332,7 @@ mod tests {
         let fx = fixture(&pool, "one", "full_refresh").await;
         let source = fx.source_id.to_string();
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             event: None,
             columns: vec![ColumnRule {
@@ -1231,6 +1344,7 @@ mod tests {
         let data = json!({"plan": "pr\0o", "e\0mail": "a@b.c"});
         let sample = reject_sample(&mapping, &data, |_| true);
         let rejected = [SyncReject {
+            record_key: "kwrong".into(),
             reasons: vec![("plan".into(), "wrong_type")],
             sample: json!({"properties": sample.properties, "masked": sample.masked}),
         }];
@@ -1367,7 +1481,9 @@ mod tests {
             redaction_key: None,
             upserts: &[],
             deleted: &[],
+            seen: &[],
             rejected: &[],
+            duplicates: 0,
             checkpoint: &checkpoint,
             incremental: false,
             singly: false,
@@ -1700,6 +1816,7 @@ mod tests {
         let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
         // PostgreSQL refuses a NUL in jsonb, after everything else was written.
         let poison = [SyncReject {
+            record_key: "poison".into(),
             reasons: vec![("\u{0}".into(), "invalid_identifier")],
             sample: json!({}),
         }];
@@ -1851,5 +1968,105 @@ mod tests {
             .unwrap();
         assert!(after.last_run_failed);
         assert_eq!(after.last_success_at, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removed_record_appends_a_deleted_decision_with_the_reason_it_was_removed_for(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        let first = many(&fx, 0, 3);
+        let cp1 = json!({"offset": 3});
+        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+            .await
+            .unwrap();
+
+        let deleted = [
+            ("k0".to_owned(), DELETE_BY_SOURCE),
+            ("k1".to_owned(), DELETE_BY_SIGNAL),
+            ("ghost".to_owned(), DELETE_BY_SOURCE),
+        ];
+        let cp2 = json!({"offset": 6});
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                deleted: &deleted,
+                ..batch(&fx, &source, &[], &cp2)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        // The key that has no live record is unchanged, as before.
+        assert_eq!((progress.batch.deleted, progress.batch.unchanged), (2, 1));
+        let rows: Vec<(String, Option<String>, Value, uuid::Uuid)> = sqlx::query_as(
+            "SELECT outcome, reason, subject_ids, trace_id FROM decision_records \
+             WHERE action = 'sync.record' AND outcome = 'deleted' ORDER BY reason",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let reasons: Vec<_> = rows.iter().map(|row| row.1.as_deref()).collect();
+        assert_eq!(reasons, [Some("signal"), Some("source")]);
+        for row in &rows {
+            assert_eq!(row.2.as_object().unwrap().len(), 1);
+            assert!(row.2["source_record"].is_string());
+            assert_eq!(row.3, fx.run.trace_id);
+        }
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+            )
+            .await,
+            2
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_flagged_deleted_is_not_marked_seen_and_listed_keys_are_counted_as_read(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        let first = many(&fx, 0, 2);
+        let cp1 = json!({"offset": 2});
+        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+            .await
+            .unwrap();
+        // A second attempt of the same run: k0 is listed, k1 is deleted.
+        let listed = ["k0".to_owned()];
+        let deleted = [("k1".to_owned(), DELETE_BY_SOURCE)];
+        let cp2 = json!({"offset": 4});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                seen: &listed,
+                deleted: &deleted,
+                ..batch(&fx, &source, &[], &cp2)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.read, progress.batch.deleted), (2, 1));
+        assert_eq!(progress.batch.applied, 0);
+        let live: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+            "SELECT record_key, last_seen_run FROM source_records WHERE deleted_at IS NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
     }
 }

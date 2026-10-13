@@ -379,6 +379,7 @@ mod tests {
 
     async fn track(pool: &PgPool, ws: WorkspaceId, name: &str, email: &str) -> Uuid {
         let record = EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), email.into())],
             name: name.into(),

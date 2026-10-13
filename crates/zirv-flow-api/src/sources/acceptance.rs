@@ -1669,6 +1669,36 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_shows_a_record_the_delete_signal_removes_as_deleted_even_without_an_identifier(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        // Record 1 is soft-deleted and has no valid identifier; record 0 is live.
+        sqlx::query("UPDATE sources SET config = config || '{\"records\": 2, \"soft_deleted\": \"1\", \"invalid\": \"1\"}'::jsonb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mapping = json!({
+            "columns": [email_rule()],
+            "delete_when": {"column": "deleted_flag", "rule": "truthy"}
+        });
+        let saved = fx.put_stream(&id, &["id"], Some(mapping)).await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let shown = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+
+        assert_eq!(shown.status, StatusCode::OK, "{:?}", shown.body);
+        assert_eq!(shown.body["records"][0]["key"], "stream_1-0");
+        assert_eq!(shown.body["records"][0]["result"], "mapped");
+        assert_eq!(shown.body["records"][1]["key"], "stream_1-1");
+        assert_eq!(shown.body["records"][1]["result"], "deleted");
+        assert_eq!(shown.body["records"][1]["deleted"], true);
+        assert_eq!(shown.body["records"][1]["errors"], json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_of_a_draft_uses_the_draft_and_a_rejected_record_lists_codes_only(
         pool: PgPool,
     ) {
@@ -2079,5 +2109,333 @@ mod tests {
             fx.stream_freshness(&id, Auth::Key(&fx.admin)).await[0]["freshness"]["high_water_mark"],
             json!({"after": "zz-cursor-marker@example.com"})
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_stores_and_returns_its_delete_signal_reconcile_schedule_and_sweep_limit(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let mut mapping = mapping_body();
+        mapping["delete_when"] = json!({"column": "updated_at", "rule": "present"});
+        let settings = json!({
+            "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+            "reconcile_schedule": "0 3 * * *", "sweep_limit": 0.25, "mapping": mapping
+        });
+
+        let saved = fx.as_admin("PUT", &tail, Some(settings)).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["reconcile_schedule"], "0 3 * * *");
+        assert_eq!(saved.body["sweep_limit"], 0.25);
+        assert_eq!(
+            saved.body["mapping"]["delete_when"],
+            json!({"column": "updated_at", "rule": "present"})
+        );
+        // The cron is mirrored to the row the leader fires, keyed by the stream.
+        let rows: Vec<(String, serde_json::Value, bool)> = sqlx::query_as(
+            "SELECT cron, payload, enabled FROM schedules WHERE stream_id IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "0 3 * * *");
+        assert_eq!(rows[0].1["reconcile"], true);
+        assert!(rows[0].2);
+        // The audit entry says that they were set and holds no column or cron text.
+        let entry = zirv_flow_store::list_audit(&pool, 5)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "stream.configured")
+            .unwrap();
+        assert_eq!(entry.summary["delete_signal_set"], true);
+        assert_eq!(entry.summary["reconcile_schedule_set"], true);
+        assert_eq!(entry.summary["sweep_limit"], 0.25);
+        assert!(!entry.summary.to_string().contains("updated_at"));
+        assert!(!entry.summary.to_string().contains("0 3"));
+
+        // Absent settings clear the cron and reset the limit; the mapping stays.
+        let cleared = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "incremental",
+                    "cursor_field": "updated_at"})),
+            )
+            .await;
+        assert_eq!(cleared.body["reconcile_schedule"], Value::Null);
+        assert_eq!(cleared.body["sweep_limit"], 0.5);
+        assert_eq!(cleared.body["mapping"], saved.body["mapping"]);
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedules WHERE stream_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+        let member = fx
+            .send(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh", "sweep_limit": 1})),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enabling_or_disabling_a_source_re_mirrors_its_streams_reconcile_schedules(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let source = format!("/sources/{id}");
+        let tail = format!("{source}/streams/stream_1");
+        let enabled_of = || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT enabled FROM schedules WHERE stream_id IS NOT NULL",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // The cron is set while the source is disabled, so the row is stored disabled.
+        let off = fx
+            .as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "incremental",
+                    "cursor_field": "updated_at", "reconcile_schedule": "0 3 * * *"})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert!(!enabled_of().await);
+
+        let on = fx
+            .as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        assert_eq!(on.status, StatusCode::OK, "{:?}", on.body);
+        assert!(enabled_of().await, "enabling the source enables the row");
+
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        assert!(
+            !enabled_of().await,
+            "disabling the source disables it again"
+        );
+
+        // A disabled stream stays disabled whatever the source does.
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        assert!(!enabled_of().await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn bad_deletion_settings_are_refused_and_store_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let incremental = |extra: Value| {
+            let mut body = json!({"enabled": true, "sync_mode": "incremental",
+                "cursor_field": "updated_at"});
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+
+        let bad_cron = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(incremental(json!({"reconcile_schedule": "nope"}))),
+            )
+            .await;
+        let full = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "reconcile_schedule": "0 3 * * *"})),
+            )
+            .await;
+        let ghost = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(incremental(json!({"mapping": {
+                    "columns": [{"column": "email", "target": {"type": "identifier", "kind": "email"}}],
+                    "delete_when": {"column": "ghost"}}}))),
+            )
+            .await;
+        let mut limits = Vec::new();
+        for limit in [json!(0), json!(-0.5), json!(1.5)] {
+            limits.push(
+                fx.as_admin(
+                    "PUT",
+                    &tail,
+                    Some(incremental(json!({"sweep_limit": limit}))),
+                )
+                .await,
+            );
+        }
+
+        assert_eq!(bad_cron.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            bad_cron.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("reconcile_schedule")
+        );
+        assert_eq!(full.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(full.body["code"], "reconcile_needs_incremental");
+        assert_eq!(ghost.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"ghost\")"
+        );
+        for limit in &limits {
+            assert_eq!(limit.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(limit.body["code"], "invalid_sweep_limit");
+        }
+        // Nothing changed: still the full refresh set up by the fixture, with the defaults.
+        let streams = fx
+            .as_admin("GET", &format!("/sources/{id}/streams"), None)
+            .await;
+        assert_eq!(streams.body[0]["sync_mode"], "full_refresh");
+        assert_eq!(streams.body[0]["sweep_limit"], 0.5);
+        assert_eq!(streams.body[0]["reconcile_schedule"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_delete_signal_may_be_a_path_into_a_declared_field_and_an_undeclared_one_is_refused(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let settings = |column: &str| {
+            let mut mapping = mapping_body();
+            mapping["delete_when"] = json!({"column": column, "rule": "truthy"});
+            json!({"enabled": true, "sync_mode": "full_refresh", "mapping": mapping})
+        };
+
+        let ghost = fx
+            .as_admin("PUT", &tail, Some(settings("ghost.deleted")))
+            .await;
+        let nested = fx
+            .as_admin("PUT", &tail, Some(settings("email.deleted")))
+            .await;
+
+        assert_eq!(ghost.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"ghost.deleted\")"
+        );
+        assert_eq!(nested.status, StatusCode::OK, "{:?}", nested.body);
+        assert_eq!(
+            nested.body["mapping"]["delete_when"],
+            json!({"column": "email.deleted", "rule": "truthy"})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconciliation_is_started_by_admins_on_an_incremental_stream_and_shows_its_kind(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let runs = format!("/sources/{id}/runs");
+        let reconcile = json!({"stream": "stream_1", "kind": "reconcile"});
+
+        // stream_1 is a full refresh: nothing to reconcile.
+        let full = fx.as_admin("POST", &runs, Some(reconcile.clone())).await;
+        let no_stream = fx
+            .as_admin("POST", &runs, Some(json!({"kind": "reconcile"})))
+            .await;
+        fx.as_admin(
+            "PUT",
+            &format!("/sources/{id}/streams/stream_1"),
+            Some(json!({"enabled": true, "sync_mode": "incremental",
+                "cursor_field": "updated_at"})),
+        )
+        .await;
+        let member = fx
+            .send(
+                "POST",
+                &runs,
+                Some(reconcile.clone()),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        let started = fx.as_admin("POST", &runs, Some(reconcile.clone())).await;
+        let again = fx.as_admin("POST", &runs, Some(reconcile)).await;
+
+        assert_eq!(full.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(full.body["code"], "reconcile_needs_incremental");
+        assert_eq!(no_stream.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(started.status, StatusCode::ACCEPTED, "{:?}", started.body);
+        assert_eq!(started.body[0]["kind"], "reconcile");
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(again.body["code"], "sync_run_active");
+        let run_id = started.body[0]["id"].as_str().unwrap();
+        let read = fx
+            .send(
+                "GET",
+                &format!("{runs}/{run_id}"),
+                None,
+                Auth::Session(&fx.member),
+            )
+            .await;
+        assert_eq!(read.body["kind"], "reconcile");
+        let listed = fx.send("GET", &runs, None, Auth::Session(&fx.member)).await;
+        assert_eq!(listed.body["runs"][0]["kind"], "reconcile");
+        let entry = zirv_flow_store::list_audit(&pool, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "sync_run.started")
+            .unwrap();
+        assert_eq!(entry.summary["kind"], "reconcile");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_normal_run_reports_the_kind_sync(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+
+        let started = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "stream_1"})),
+            )
+            .await;
+
+        assert_eq!(started.body[0]["kind"], "sync");
     }
 }

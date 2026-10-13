@@ -65,6 +65,8 @@ export function aStream(change: Partial<Stream> = {}): Stream {
     cursor_field: "updated_at",
     primary_key: ["id"],
     staleness_threshold_seconds: null,
+    reconcile_schedule: null,
+    sweep_limit: 0.5,
     freshness: null,
     mapping: null,
     discovered: {
@@ -90,6 +92,7 @@ export function aRun(change: Partial<Run> = {}): Run {
     stream: "stream_1",
     state: "succeeded",
     trigger: "manual",
+    kind: "sync",
     sync_mode: "full_refresh",
     records_read: 7,
     records_applied: 5,

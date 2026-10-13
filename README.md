@@ -1303,13 +1303,14 @@ is its value, or several values joined as a JSON array. Without a primary key th
 record's position in the file (`row:<n>`), which holds only while the file is not reordered.
 
 **Full refresh only.** A file has no cursor, so every run reads it from the start; the content
-hashes make an unchanged row cost nothing, and a row removed from the file stays until a later
-change sweeps it.
+hashes make an unchanged row cost nothing, and a row removed from the file is removed, with its
+event, by the sweep at the end of the next run (see Sync runs).
 
 ### Mapping reference
 
 One mapping language serves the CSV import and the sync runs. A mapping is a list of `columns`
-rules, an optional `key_column` and, for sync runs only, an optional `event`.
+rules, an optional `key_column` and, for sync runs only, an optional `event` and an optional
+`delete_when` (see Sync runs); a CSV import refuses both.
 
 - **Fields and paths.** A rule's `column` is a field name. For a JSON stream it may also be a
   dotted path: `address.city` selects a key, and a segment of digits indexes an array, as in
@@ -1375,9 +1376,51 @@ commits a unit of at least 500 records (a source batch is never split) in one tr
 profile changes, the retracted records, the rejects, one decision per record, the counters and
 the checkpoint. The transaction is fenced twice. It locks the job's lease, so a worker whose
 lease was taken over commits nothing, and it locks the run, so a cancelled run is not applied.
-Records are kept under the source id and the stream name, with `last_seen_run` set to the run;
-nothing is swept (deleting what a full refresh no longer lists is a later change). A record the
-source reports as deleted retracts its contribution.
+Records are kept under the source id and the stream name, with `last_seen_run` set to the run.
+A record the source reports as deleted retracts its contribution.
+
+**Deleting what the source dropped.** A **full refresh** ends with a **sweep**: once the whole
+stream is read and committed, the stream's live records that the run did not see are removed
+(the person's traits are recomputed, and the person follows the workspace's orphan policy), in
+bounded transactions of 200 records, each fenced on the lease and on the run like a unit. A
+record counts as seen if the run read it and it still exists in the source: applied, unchanged,
+and also refused by the mapping or the store, so a broken mapping never cascades into
+deletions. A run that fails, is cancelled, or stops on the reject threshold sweeps nothing, and
+an incremental run never sweeps, since it cannot tell a dropped record from an unchanged one.
+The sweep runs inside the run, before it is `succeeded`; a crash mid-sweep resumes on the next
+attempt and removes each record once. Every removal appends a `sync.record` decision with
+outcome `deleted` (reason `source`, `signal` or `swept`; it names the record, never a value)
+next to the store's `contribution.removed`, and removing a record deletes the events that were
+linked to it (`events.source_record_id`) in the same transaction. The event a mapping yields for a
+record is linked to that record's ledger row, so a sweep, a delete signal, a connector delete or a
+reconciliation removes it with the record; first-party, ingest and contact events carry no link
+and stay. List membership added by a sync is not removed with the record (lists add only), so a
+removed record's person stays on its lists until someone removes them.
+
+**Deleted records.** Besides the source's own delete flag, a mapping can name a column that
+marks a record as deleted: `"delete_when": {"column": "is_deleted", "rule": "truthy"}` in the
+mapping of `PUT .../streams/{name}`. `truthy` reads a flag (`true`, `1`, `yes`, `x`, ...; a cell
+that is not a flag is not a delete), `present` treats any non-empty cell as a delete (a
+`deleted_at` time). The column must be a field of the stream, or a dotted path into one such as `meta.deleted` (422
+when its first segment is not a field), the signal is read
+before the mapping runs so a soft-deleted row is never refused, and a CSV import refuses a
+mapping with one (422 `delete_signal_unsupported`), as it does an `event`. The web UI edits it under
+**Map**, with the rest of the mapping; **Set up** keeps the mapping as it is.
+
+**Reconciliation.** An incremental stream can also be reconciled: a run of kind `reconcile`
+(`POST .../runs` with `{"stream": "name", "kind": "reconcile"}`, **Reconcile now** on the
+page, or the stream's `reconcile_schedule`, a UTC cron set in `PUT .../streams/{name}`) reads the
+stream from the beginning for its keys only, applies nothing, never moves the stream's cursor,
+and then sweeps like a full refresh. A full-refresh stream is refused (422
+`reconcile_needs_incremental`), and a firing skips a stream that has an active run.
+
+**Sweep limit.** A sweep that would remove more than `sweep_limit` of the stream's live records that existed before the
+run (default 0.5, set per stream in `PUT .../streams/{name}`, above 0 and at most 1; absent resets
+it) removes nothing and fails the run with `sweep_limit`. This stops an upstream outage that
+returns an empty list, a partial answer, or a changed primary key from deleting people whose
+state a later read cannot bring back. A drop at exactly the limit sweeps. An admin authorizes a
+genuinely large deletion by raising the stream's limit (1 turns the guard off) and running again;
+the change is audited with the limit.
 
 **Events and lists.** A mapping's list rules add the people of the unit to their lists (source
 `sync`, with the usual history row and `list.membership` decision), and its event rule applies

@@ -1197,6 +1197,8 @@ mod tests {
                 source.id,
                 name,
                 &StreamSettings {
+                    reconcile_schedule: None,
+                    sweep_limit: 0.5,
                     enabled,
                     sync_mode: "full_refresh",
                     cursor_field: None,
@@ -1384,6 +1386,8 @@ mod tests {
             source,
             "fresh",
             &StreamSettings {
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
                 enabled: false,
                 sync_mode: "full_refresh",
                 cursor_field: None,

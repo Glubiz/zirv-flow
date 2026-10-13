@@ -203,6 +203,8 @@ mod tests {
             source,
             "contacts",
             &StreamSettings {
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
                 enabled: false,
                 sync_mode: "full_refresh",
                 cursor_field: None,

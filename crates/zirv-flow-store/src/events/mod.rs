@@ -12,6 +12,8 @@ mod schemas;
 
 pub(crate) use apply::{EventBatch, FailedItem, apply_event_record, reject_apply_failed};
 pub use apply::{EventOutcome, EventRecord, apply_event_batch};
+#[cfg(test)]
+pub(crate) use apply::{NewEvent, insert_event};
 pub use debugger::{
     DEBUGGER_CHANNEL, DebuggerListener, FEED_RETENTION_MINUTES, FeedFilter, FeedItem,
     WATCH_SECONDS, debugger_feed_head, debugger_feed_position, debugger_feed_seqs,

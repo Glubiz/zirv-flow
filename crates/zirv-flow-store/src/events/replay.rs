@@ -756,6 +756,7 @@ async fn store_replayed(
             reasons,
             flags: &flags,
             late: timing.is_late(),
+            source_record_id: None,
         },
     )
     .await?;
@@ -849,6 +850,7 @@ mod tests {
 
     fn record(who: &str, message: &str, properties: Value) -> EventRecord {
         EventRecord {
+            source_record_id: None,
             source: "web".to_owned(),
             identifiers: vec![("email".to_owned(), who.to_owned())],
             name: "order".to_owned(),

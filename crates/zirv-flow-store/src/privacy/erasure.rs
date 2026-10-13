@@ -627,8 +627,8 @@ mod tests {
     use super::*;
     use crate::people::erasure::rows_referencing_person;
     use crate::privacy::testing::{
-        BYSTANDER_EMAIL, EMAIL, Seeded, identifier_key, person_of, profile, seed_everything, trace,
-        workspace,
+        BYSTANDER_EMAIL, EMAIL, Seeded, identifier_key, person_of, profile, rows_naming_records,
+        seed_everything, trace, workspace,
     };
     use crate::{is_suppressed, remove_suppression};
 
@@ -820,6 +820,23 @@ mod tests {
             ..
         } = seed_everything(&pool).await;
         let request = request(&pool, ws, person).await;
+        // The records of the two people, and the rows that name them before the erasure: one
+        // event carries a record link.
+        let records: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = ANY($2)",
+        )
+        .bind(ws.as_uuid())
+        .bind(vec![person, merged])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let before = rows_naming_records(&pool, &records).await;
+        let linked = |scan: &[(String, i64)], table: &str| {
+            scan.iter()
+                .find(|(name, _)| name == table)
+                .map_or(0, |(_, count)| *count)
+        };
+        assert_eq!(linked(&before, "events"), 1, "{before:?}");
 
         let outcome = erase(&pool, ws, request.id).await;
 
@@ -832,6 +849,12 @@ mod tests {
         );
         assert_eq!(rows_referencing_person(&pool, person).await, []);
         assert_eq!(rows_referencing_person(&pool, merged).await, []);
+        // No table with a `source_record_id` column still names a record of the erased people.
+        let after = rows_naming_records(&pool, &records).await;
+        assert!(
+            after.iter().all(|(_, count)| *count == 0) && after.len() == before.len(),
+            "{after:?}"
+        );
         // Only the ledger names the person.
         let ledger: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM erasure_requests WHERE person_id = $1 AND status = 'completed'",

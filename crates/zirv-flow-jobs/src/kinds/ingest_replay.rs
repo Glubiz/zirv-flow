@@ -148,6 +148,7 @@ mod tests {
             HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
         );
         let record = |message: &str, total: Value| EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],
             name: "order".into(),

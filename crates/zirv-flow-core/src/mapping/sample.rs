@@ -80,6 +80,7 @@ mod tests {
 
     fn mapping() -> Mapping {
         Mapping {
+            delete_when: None,
             key_column: Some("id".into()),
             event: None,
             columns: vec![
@@ -131,6 +132,7 @@ mod tests {
     #[test]
     fn numbers_and_booleans_stay_and_long_strings_are_cut() {
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             event: None,
             columns: vec![
@@ -155,6 +157,7 @@ mod tests {
     #[test]
     fn a_nul_in_a_name_or_a_kept_value_becomes_a_replacement_character() {
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             event: None,
             columns: vec![rule("pl\0an", Target::Trait { key: "plan".into() })],
@@ -181,6 +184,7 @@ mod tests {
         let mut mapping = Mapping {
             key_column: None,
             event: None,
+            delete_when: None,
             columns: vec![rule("profile.plan", Target::Trait { key: "plan".into() })],
         };
         mapping.event = Some(super::super::model::EventRule {

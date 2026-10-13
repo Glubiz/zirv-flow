@@ -147,6 +147,11 @@ fn validate_with(
     {
         return Err(MappingError::UnknownColumn(key.clone()));
     }
+    if let Some(signal) = &mapping.delete_when
+        && !known(&signal.column)
+    {
+        return Err(MappingError::UnknownColumn(signal.column.clone()));
+    }
     let mut identifiers = 0;
     let mut traits = HashSet::new();
     for rule in &mapping.columns {
@@ -272,7 +277,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::super::model::{ColumnRule, PropertyRule, ValueRule};
+    use super::super::model::{ColumnRule, DeleteRule, DeleteWhen, PropertyRule, ValueRule};
     use super::*;
 
     fn header() -> Header {
@@ -317,6 +322,7 @@ mod tests {
                 key_column: None,
                 event: None,
                 columns,
+                delete_when: None,
             },
             &header(),
             &catalog(),
@@ -360,6 +366,7 @@ mod tests {
             Err(MappingError::UnknownColumn("Ghost".into()))
         );
         let mapping = Mapping {
+            delete_when: None,
             key_column: Some("Ghost".into()),
             event: None,
             columns: vec![email()],
@@ -516,10 +523,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_delete_column_must_be_in_the_header() {
+        let mut mapping = Mapping {
+            key_column: None,
+            event: None,
+            columns: vec![email()],
+            delete_when: Some(DeleteWhen {
+                column: "Ghost".into(),
+                rule: DeleteRule::Truthy,
+            }),
+        };
+        assert_eq!(
+            validate(&mapping, &header(), &catalog()),
+            Err(MappingError::UnknownColumn("Ghost".into()))
+        );
+        mapping.delete_when.as_mut().unwrap().column = "Last".into();
+        assert_eq!(validate(&mapping, &header(), &catalog()), Ok(()));
+    }
+
     fn with_event(event: EventRule) -> Mapping {
         Mapping {
             key_column: None,
             event: Some(event),
+            delete_when: None,
             columns: vec![email()],
         }
     }
@@ -630,6 +657,7 @@ mod tests {
         let nested = Mapping {
             key_column: Some("Plan.id".into()),
             event: None,
+            delete_when: None,
             columns: vec![
                 rule(
                     "Email.address",

@@ -3260,6 +3260,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, value, minute)| EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],
             name: name.into(),
@@ -5445,6 +5446,7 @@ email,b@example.com,
         .await;
         let merged = apply(&[("anonymous_id", "anon-1")], "2", json!({})).await;
         let event = zirv_flow_store::EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "ada@example.com".into())],
             name: "page_view".into(),
@@ -7594,6 +7596,7 @@ email,b@example.com,
     ) -> zirv_flow_store::EventRecord {
         let now = time::OffsetDateTime::now_utc();
         zirv_flow_store::EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), who.into())],
             name: name.into(),
@@ -10350,6 +10353,48 @@ email,b@example.com,
         .await
         .unwrap();
         assert_eq!((outcome.as_str(), cost, pending), ("transport", 0, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_csv_import_refuses_a_mapping_with_a_delete_signal(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers",
+            CUSTOMERS,
+            Auth::Session(&owner),
+        )
+        .await;
+        let id = body["id"].as_str().unwrap();
+        let uri = imports_uri(&ws, &format!("/{id}/mapping"));
+
+        let refused = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}],
+                "delete_when": {"column": "Email"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let accepted = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"}}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "delete_signal_unsupported");
+        assert_eq!(accepted.status, StatusCode::OK);
     }
 
     #[sqlx::test]

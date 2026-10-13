@@ -199,6 +199,7 @@ mod tests {
         let slug = Slug::parse("one").unwrap();
         let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
         let record = |event: &str, message_id: &str| EventRecord {
+            source_record_id: None,
             source: "web".into(),
             identifiers: vec![("email".into(), "a@example.com".into())],
             name: event.into(),
