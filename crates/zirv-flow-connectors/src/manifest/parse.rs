@@ -3,7 +3,8 @@
 //! Nothing is copied from a value into an issue, because `serde`'s errors quote names and
 //! values. Pure: no clock, no I/O, no name resolution.
 
-use std::collections::{BTreeSet, HashSet};
+use hashbrown::HashSet;
+use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 use url::Url;

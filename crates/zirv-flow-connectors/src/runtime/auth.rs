@@ -1172,7 +1172,7 @@ mod tests {
     // The authorization-code grant: a provider that rotates the refresh token on every use and
     // refuses one it has already seen.
 
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     struct CodeIdp {
         mock: Mock,
