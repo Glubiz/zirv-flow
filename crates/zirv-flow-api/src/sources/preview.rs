@@ -70,7 +70,8 @@ pub(crate) struct PreviewEvent {
 pub(crate) struct PreviewRecord {
     /// The record's key within the stream.
     key: String,
-    /// The source reports the record as deleted.
+    /// A run would remove the record: the source reports it deleted or the mapping's delete signal
+    /// holds.
     deleted: bool,
     /// `mapped`, `rejected` or `deleted`.
     result: String,

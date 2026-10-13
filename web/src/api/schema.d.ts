@@ -3374,7 +3374,10 @@ export interface components {
         };
         /** @description One record of the sample and what the mapping makes of it. */
         PreviewRecord: {
-            /** @description The source reports the record as deleted. */
+            /**
+             * @description A run would remove the record: the source reports it deleted or the mapping's delete signal
+             *     holds.
+             */
             deleted: boolean;
             errors: components["schemas"]["PreviewError"][];
             event?: null | components["schemas"]["PreviewEvent"];

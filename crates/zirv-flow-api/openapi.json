@@ -14901,7 +14901,7 @@
         "properties": {
           "deleted": {
             "type": "boolean",
-            "description": "The source reports the record as deleted."
+            "description": "A run would remove the record: the source reports it deleted or the mapping's delete signal\nholds."
           },
           "errors": {
             "type": "array",
