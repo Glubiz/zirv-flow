@@ -625,7 +625,10 @@ and `remove_contribution_in` deletes those events, with their `event_dedupe` and
 rows, in the removal's transaction, before the orphan check, so an event-only person left with
 nothing follows the policy. A merge moves a record's person, not its link. No sync path writes
 record-linked events until the events target of the mapping (#87); first-party events carry no
-link and stay.
+link and stay. As built (M3, file sources and deletion together): a sync batch marks its records
+seen first, then hands each record's ledger id through `EventRecord.source_record_id` to the
+event path, so the event a mapping yields is deleted with its record by a sweep, a delete signal, a
+connector delete or a reconciliation. Lists only add: a removed record's list memberships stay.
 
 ### 7.5 Freshness and connector concerns
 

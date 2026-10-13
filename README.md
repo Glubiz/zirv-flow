@@ -1303,13 +1303,14 @@ is its value, or several values joined as a JSON array. Without a primary key th
 record's position in the file (`row:<n>`), which holds only while the file is not reordered.
 
 **Full refresh only.** A file has no cursor, so every run reads it from the start; the content
-hashes make an unchanged row cost nothing, and a row removed from the file stays until a later
-change sweeps it.
+hashes make an unchanged row cost nothing, and a row removed from the file is removed, with its
+event, by the sweep at the end of the next run (see Sync runs).
 
 ### Mapping reference
 
 One mapping language serves the CSV import and the sync runs. A mapping is a list of `columns`
-rules, an optional `key_column` and, for sync runs only, an optional `event`.
+rules, an optional `key_column` and, for sync runs only, an optional `event` and an optional
+`delete_when` (see Sync runs); a CSV import refuses both.
 
 - **Fields and paths.** A rule's `column` is a field name. For a JSON stream it may also be a
   dotted path: `address.city` selects a key, and a segment of digits indexes an array, as in
@@ -1390,16 +1391,21 @@ The sweep runs inside the run, before it is `succeeded`; a crash mid-sweep resum
 attempt and removes each record once. Every removal appends a `sync.record` decision with
 outcome `deleted` (reason `source`, `signal` or `swept`; it names the record, never a value)
 next to the store's `contribution.removed`, and removing a record deletes the events that were
-linked to it (`events.source_record_id`) in the same transaction. No sync path writes
-record-linked events until the events target of the mapping exists; first-party events stay.
+linked to it (`events.source_record_id`) in the same transaction. The event a mapping yields for a
+record is linked to that record's ledger row, so a sweep, a delete signal, a connector delete or a
+reconciliation removes it with the record; first-party, ingest and contact events carry no link
+and stay. List membership added by a sync is not removed with the record (lists add only), so a
+removed record's person stays on its lists until someone removes them.
 
 **Deleted records.** Besides the source's own delete flag, a mapping can name a column that
 marks a record as deleted: `"delete_when": {"column": "is_deleted", "rule": "truthy"}` in the
 mapping of `PUT .../streams/{name}`. `truthy` reads a flag (`true`, `1`, `yes`, `x`, ...; a cell
 that is not a flag is not a delete), `present` treats any non-empty cell as a delete (a
-`deleted_at` time). The column must be a field of the stream (422 otherwise), the signal is read
+`deleted_at` time). The column must be a field of the stream, or a dotted path into one such as `meta.deleted` (422
+when its first segment is not a field), the signal is read
 before the mapping runs so a soft-deleted row is never refused, and a CSV import refuses a
-mapping with one (422 `delete_signal_unsupported`). The stream dialog edits it.
+mapping with one (422 `delete_signal_unsupported`), as it does an `event`. The web UI edits it under
+**Map**, with the rest of the mapping; **Set up** keeps the mapping as it is.
 
 **Reconciliation.** An incremental stream can also be reconciled: a run of kind `reconcile`
 (`POST .../runs` with `{"stream": "name", "kind": "reconcile"}`, **Reconcile now** on the
