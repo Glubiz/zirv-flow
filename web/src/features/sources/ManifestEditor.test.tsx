@@ -230,4 +230,31 @@ describe("the sample", () => {
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(screen.getByLabelText<HTMLTextAreaElement>("Manifest").value).toContain("https://drafted.example.test");
   });
+
+  it("asks before an accepted draft replaces edited text, and a refusal accepts nothing", async () => {
+    const manifest = JSON.parse(starterManifest("none")) as Record<string, unknown>;
+    manifest["base_url"] = "https://drafted.example.test";
+    const calls = mockApi({
+      ...BASE,
+      "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(true)),
+      [VALIDATE]: () => json(VALID),
+      "POST /api/v1/workspaces/ws1/ai/drafts": () =>
+        json({ id: "d1", kind: "manifest", status: "valid", attempts: 1, content: manifest, issues: [], changes: [], dry_run: null }),
+      "POST /api/v1/workspaces/ws1/ai/drafts/d1/accept": () =>
+        json({ id: "d1", kind: "manifest", source_id: null, stream: null, content: manifest }),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+    mount(starterManifest("none"));
+
+    await user.type(await screen.findByLabelText("Manifest"), "x");
+    await user.type(await screen.findByLabelText("What do you want?"), "Read my contacts");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Accept" }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Manifest").value).not.toContain("drafted.example.test");
+    confirm.mockRestore();
+  });
 });

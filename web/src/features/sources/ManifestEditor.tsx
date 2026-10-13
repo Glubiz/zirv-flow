@@ -73,6 +73,8 @@ export function ManifestEditor({
   const [limit, setLimit] = useState("10");
   const [sample, setSample] = useState<Sample>({ status: "idle" });
   const blank = value.trim() === "";
+  // The text the editor opened with, or last loaded from a draft: edits since are unsaved.
+  const baseline = useRef(value);
 
   useEffect(() => {
     if (blank || !analysis.ok) return;
@@ -295,7 +297,12 @@ export function ManifestEditor({
           workspaceId={workspaceId}
           kind="manifest"
           sourceId={sourceId}
-          onAccept={(content) => onChange(JSON.stringify(content, null, 2))}
+          onAccept={(content) => {
+            const next = JSON.stringify(content, null, 2);
+            baseline.current = next;
+            onChange(next);
+          }}
+          confirmAccept={() => value === baseline.current || window.confirm("Replace the manifest you have edited with the assistant's draft?")}
         />
       )}
     </div>
