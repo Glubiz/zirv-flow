@@ -1,6 +1,6 @@
 //! Save-time checks of a mapping against the file's header and the trait registry.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 
 use super::apply::{Header, MAX_EVENT_PROPERTIES};
 use super::model::{EventRule, Mapping, Target, Transform};

@@ -2,7 +2,8 @@
 //! the transaction that stores the source, and comes back only as the names of its fields.
 //! Each change is audited with ids, names and field names, never a value.
 
-use std::collections::{BTreeMap, HashMap};
+use hashbrown::HashMap;
+use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};

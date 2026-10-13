@@ -272,7 +272,7 @@ async fn read_body(mut response: reqwest::Response, max_bytes: u64) -> Result<Ve
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

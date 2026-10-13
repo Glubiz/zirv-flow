@@ -1,6 +1,6 @@
 //! The schema registry and the workspace event policy (architecture section 12.1).
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use serde_json::Value;
 use sqlx::prelude::FromRow;

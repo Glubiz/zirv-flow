@@ -6,7 +6,8 @@
 //!
 //! Nothing here logs a record value, an identifier or a trait value.
 
-use std::collections::{BTreeMap, HashMap};
+use hashbrown::HashMap;
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};

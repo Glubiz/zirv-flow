@@ -16,7 +16,8 @@
 
 mod filter;
 
-use std::collections::{BTreeSet, HashMap};
+use hashbrown::HashMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;

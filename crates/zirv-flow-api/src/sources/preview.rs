@@ -3,7 +3,7 @@
 //! written. The answer holds the values of the sample, so only workspace admins may ask, as for
 //! discovery and a connection test; nothing of it reaches a log, a metric or the audit trail.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, State};

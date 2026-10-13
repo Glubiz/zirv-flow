@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(reply.status, StatusCode::SEE_OTHER);
         let location = reply.headers[header::LOCATION].to_str().unwrap().to_owned();
         let url = url::Url::parse(&location).unwrap();
-        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let query: hashbrown::HashMap<_, _> = url.query_pairs().into_owned().collect();
         Started {
             state: query["state"].clone(),
             nonce: query["nonce"].clone(),
