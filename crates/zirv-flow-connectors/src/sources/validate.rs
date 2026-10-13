@@ -139,6 +139,7 @@ mod tests {
             field("token", FieldKind::Text, true, true),
             field("extra", FieldKind::Text, false, true),
         ],
+        rate_limit: None,
         capabilities: Capabilities {
             incremental: false,
             full_refresh: true,

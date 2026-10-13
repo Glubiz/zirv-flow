@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1269,6 +1269,53 @@ on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `
 `sync_mode`, `cursor_field`, `primary_key` and `staleness_threshold_seconds`. Settings are
 checked against the type and, for streams, against what discovery reported; a refusal is a 422
 that names each field, for example `incremental` without a `cursor_field`.
+
+## Connector runtime
+
+Every HTTP source makes its calls through the connector runtime in `zirv-flow-connectors`
+(`SourceContext::send`), which adds the pieces below on top of the guarded client, so no source
+type implements them itself. A test connection, a discovery and a sync run of one source all use it.
+
+**Auth.** API key (in a header or a query parameter), basic, bearer, and OAuth2 client
+credentials (the client proves itself in the form body or with basic auth). The plaintext
+credential is borrowed for the duration of a call. An OAuth2 token is fetched when there is none or
+when less than 60 seconds of it remain; a `401` on a token that was already cached refreshes it
+once and retries the call once, and a second `401` is a refused credential. The refreshed token is
+handed back to the caller (`take_refreshed_token`) to store; the runtime never writes to the
+database. The authorization-code grant is not supported yet. Auth is attached only to requests for
+the source's base origin (scheme, host and port); a request for any other origin, such as a
+pagination link that points elsewhere, is refused before it is sent. Redirects are followed only
+within the same origin: a redirect to another origin, including `http` to `https` on the same host,
+ends the call with the same error, so a header or query key never leaves the origin. Give such a
+source its final base URL.
+
+**Retries.** `GET` and `HEAD` (and a request the source marks idempotent) are retried on `429`,
+`500`, `502`, `503`, `504` and on connection failures and timeouts, up to 5 attempts, with an
+exponential backoff from 1 s to 60 s with jitter. On `429` and `503`, `Retry-After` (seconds or an
+HTTP date) is used instead; a `Retry-After` over 300 s ends the call at once without waiting. Other
+`4xx` codes and a `POST` are not retried. A call that runs out of attempts fails with the last
+status.
+
+**Rate limit.** A source type may declare a request rate; the runtime holds a token bucket per
+source and waits for it before each request. The limit is **per process**: it is shared by the sync
+runs, test connections and discoveries of that source in one process, but several workers each have
+their own bucket and can exceed the limit together. Honouring `Retry-After` reduces that overshoot
+and does not prevent it. Enforcing the limit across workers is decided with open question OQ-9 (M6).
+
+**Pagination.** Four drivers read an API to its end as a stream of pages: cursor (the next cursor
+at a JSON pointer, a missing, null or empty cursor ends it), offset (ends on a page shorter than
+the limit), page number (ends on an empty page, or a short one when a page size is set) and the
+`Link: rel="next"` header. A cursor or link that repeats ends with an error rather than looping,
+and so does a response whose records are not an array, or a cursor or link longer than 8 KiB. An
+offset or page stream whose API ignores the parameter and sends the same full-size page three times
+in a row ends with the same error (two identical pages can be genuine, so they are read); with no
+page size set, only the 100,000-page cap ends such a stream.
+
+**Metrics and logs.** `zirv_flow_source_requests_total{source_type,outcome}`,
+`zirv_flow_source_retries_total{source_type,reason}` and
+`zirv_flow_source_rate_limit_wait_seconds_total{source_type}`. The labels are the source type and
+fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
+a header or a response body.
 
 ## Web UI
 

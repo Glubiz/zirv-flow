@@ -1,6 +1,7 @@
 //! Calls into a source: testing its connection and discovering its streams. Both open the
 //! stored credential right before the call and pass it to the connector as a typed credential.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -12,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::{
-    Credential, ErasedSource, SourceContext, SourceError, StreamDescriptor, SyncMode,
+    Credential, ErasedSource, SourceContext, SourceError, SourceSpec, StreamDescriptor, SyncMode,
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{DiscoveredStream, Source};
@@ -43,14 +44,33 @@ struct Prepared {
     context: SourceContext,
 }
 
+/// The network context of a call for source `id` of type `spec`. Its requests are counted by the
+/// source type and limited by the process-wide bucket of `id`, so a test, a discovery and a sync
+/// run of the same source draw from one bucket. A token the call refreshes is dropped: it is
+/// short-lived, and the next call fetches its own.
+fn network_context(
+    state: &AppState,
+    spec: &'static SourceSpec,
+    id: Uuid,
+) -> Result<SourceContext, ApiError> {
+    SourceContext::new(
+        state.egress_policy().clone(),
+        HttpLimits::default(),
+        spec.kind,
+        id.to_string(),
+        Arc::clone(state.rate_limits()),
+    )
+    .map(|context| context.with_rate_limit(spec.rate_limit))
+    .map_err(|_| ApiError::internal())
+}
+
 async fn prepare(state: &AppState, workspace: WorkspaceId, id: Uuid) -> Result<Prepared, ApiError> {
     let source = zirv_flow_store::find_source(&state.pool, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let driver = registry().get(&source.kind).ok_or_else(kind_unavailable)?;
     let credential = credential::load(state, workspace, source.credential_secret_id).await?;
-    let context = SourceContext::new(state.egress_policy().clone(), HttpLimits::default())
-        .map_err(|_| ApiError::internal())?;
+    let context = network_context(state, driver.spec(), id)?;
     Ok(Prepared {
         source,
         driver,
@@ -344,5 +364,100 @@ mod tests {
     #[test]
     fn a_timeout_is_a_gateway_timeout() {
         assert_eq!(timed_out().status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    static LIMITED: SourceSpec = SourceSpec {
+        kind: "limited",
+        label: "Limited",
+        description: "",
+        config_fields: &[],
+        credential_fields: &[],
+        capabilities: zirv_flow_connectors::sources::Capabilities {
+            incremental: false,
+            full_refresh: true,
+            emits_deletes: false,
+        },
+        rate_limit: Some(zirv_flow_connectors::runtime::RateLimit {
+            requests: 2,
+            per: Duration::from_secs(1),
+        }),
+    };
+
+    fn state() -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        AppState::new(pool, Arc::new(String::new))
+    }
+
+    /// A request the default egress policy refuses, so it never leaves the process; it still
+    /// waits for the source's rate limit first.
+    async fn refused_call(context: &SourceContext) {
+        use zirv_flow_connectors::runtime::{Auth, RequestSpec};
+        let base: url::Url = "http://127.0.0.1:9/".parse().unwrap();
+        let result = context
+            .send(&Auth::None, RequestSpec::get(&base, base.clone()))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_and_discovery_contexts_of_one_source_share_its_rate_limit_bucket() {
+        let state = state();
+        let id = Uuid::new_v4();
+        let test = network_context(&state, &LIMITED, id).unwrap();
+        let discovery = network_context(&state, &LIMITED, id).unwrap();
+        let started = std::time::Instant::now();
+
+        for round in 0..5 {
+            refused_call(if round % 2 == 0 { &test } else { &discovery }).await;
+        }
+
+        // Two requests per second: the first two go at once, the other three take 1.5 s.
+        assert!(
+            started.elapsed() >= Duration::from_millis(1450),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The rendered wait metric for the `limited` source type.
+    fn wait_metric(handle: &metrics_exporter_prometheus::PrometheusHandle) -> Vec<String> {
+        handle
+            .render()
+            .lines()
+            .filter(|line| line.starts_with("zirv_flow_source_rate_limit_wait_seconds_total"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn two_sources_get_separate_buckets_so_a_fresh_one_records_no_wait() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The recorder is local to this thread, and the current-thread runtime stays on it.
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let state = state();
+                let busy = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
+                let fresh = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
+                // Two requests per second: the third and fourth calls wait.
+                for _ in 0..4 {
+                    refused_call(&busy).await;
+                }
+                let after_busy = wait_metric(&handle);
+                assert_eq!(after_busy.len(), 1, "{after_busy:?}");
+
+                // The fresh source is inside its own burst, so it waits for nothing.
+                refused_call(&fresh).await;
+                refused_call(&fresh).await;
+
+                assert_eq!(wait_metric(&handle), after_busy);
+            });
+        });
     }
 }
