@@ -16,7 +16,7 @@ pub use apply::{
     Cells, CsvRow, Deletion, Header, HeaderError, MAX_EVENT_PROPERTIES, MAX_KEY_CHARS, Mapped,
     MappedEvent, RowError, RowErrorReason, apply, deletion, is_deleted, map_json,
 };
-pub use json_record::JsonRecord;
+pub use json_record::{JsonRecord, resolve_path};
 pub use model::{
     ColumnRule, DeleteRule, DeleteWhen, EventRule, Mapping, PropertyRule, Target, Transform,
     ValueRule,

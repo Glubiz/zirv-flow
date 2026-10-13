@@ -150,6 +150,10 @@ const ALLOWED_SCHEMES_HTTPS: &[&str] = &["https"];
 
 /// Why `text` is not an absolute URL of one of `schemes` with a host, no user info and no
 /// fragment; none when it is.
+pub(crate) fn url_problem_https(text: &str) -> Option<&'static str> {
+    url_problem(text, ALLOWED_SCHEMES_HTTPS)
+}
+
 fn url_problem(text: &str, schemes: &[&str]) -> Option<&'static str> {
     let Ok(url) = Url::parse(text) else {
         return Some(scheme_reason(schemes));

@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "base_url": "https://api.example.test/api",
+  "auth": { "type": "basic" },
+  "streams": [
+    {
+      "name": "members",
+      "path": "/members",
+      "query": { "active_only": false },
+      "records_path": "/members",
+      "pagination": { "type": "page", "param": "page", "first": 1, "size_param": "per_page", "size": 2 },
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "email", "type": "string" },
+        { "name": "profile", "type": "json" },
+        { "name": "removed", "type": "boolean" }
+      ],
+      "primary_key": ["id"],
+      "delete_signal": { "path": "removed", "equals": true }
+    }
+  ]
+}

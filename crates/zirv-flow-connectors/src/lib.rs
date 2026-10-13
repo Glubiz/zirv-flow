@@ -8,5 +8,6 @@
 //! the machinery behind it: auth, retries, a rate limit and pagination.
 
 pub mod http;
+pub mod manifest;
 pub mod runtime;
 pub mod sources;

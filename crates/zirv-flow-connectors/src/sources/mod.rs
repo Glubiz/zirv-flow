@@ -23,6 +23,7 @@ pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 pub use types::{
     Batch, Checkpoint, FieldDescriptor, FieldType, Record, StreamConfig, StreamDescriptor, SyncMode,
 };
+pub(crate) use validate::url_problem_https;
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
 };
