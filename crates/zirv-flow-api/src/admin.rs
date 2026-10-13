@@ -562,18 +562,33 @@ pub async fn create_secret(
     purpose: SecretPurpose,
     plaintext: &SecretBytes,
 ) -> Result<SecretId, AdminError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let id = create_secret_in(&mut tx, context, keyring, workspace, purpose, plaintext).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(id)
+}
+
+/// As [`create_secret`], inside the caller's transaction, so the secret and the row that
+/// refers to it commit or roll back together.
+pub(crate) async fn create_secret_in(
+    tx: &mut PgConnection,
+    context: &Context,
+    keyring: &Keyring,
+    workspace: WorkspaceId,
+    purpose: SecretPurpose,
+    plaintext: &SecretBytes,
+) -> Result<SecretId, AdminError> {
     let id = SecretId::new();
     let sealed = seal(
         keyring,
         plaintext.expose(),
         &secret_aad(workspace, id, purpose),
     );
-    let mut tx = zirv_flow_store::begin(pool).await?;
-    secrets::insert(&mut tx, &keyring.key_ids(), workspace, purpose, id, &sealed)
+    secrets::insert(tx, &keyring.key_ids(), workspace, purpose, id, &sealed)
         .await
         .map_err(write_refusal)?;
     audit(
-        &mut tx,
+        tx,
         context,
         Some(workspace),
         "secret.created",
@@ -581,7 +596,6 @@ pub async fn create_secret(
         json!({"purpose": purpose.as_str(), "key_id": sealed.key_id}),
     )
     .await?;
-    zirv_flow_store::commit(tx).await?;
     Ok(id)
 }
 
@@ -595,6 +609,20 @@ pub async fn replace_secret(
     plaintext: &SecretBytes,
 ) -> Result<(), AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
+    replace_secret_in(&mut tx, context, keyring, workspace, id, plaintext).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(())
+}
+
+/// As [`replace_secret`], inside the caller's transaction.
+pub(crate) async fn replace_secret_in(
+    tx: &mut PgConnection,
+    context: &Context,
+    keyring: &Keyring,
+    workspace: WorkspaceId,
+    id: SecretId,
+    plaintext: &SecretBytes,
+) -> Result<(), AdminError> {
     let stored = secrets::get(&mut *tx, workspace, id)
         .await?
         .ok_or(AdminError::NotFound("secret"))?;
@@ -605,14 +633,14 @@ pub async fn replace_secret(
     );
     // A replace that matched no row (the secret vanished since the read) is not a success: the
     // transaction rolls back and nothing is audited.
-    if !secrets::replace(&mut tx, &keyring.key_ids(), workspace, id, &sealed)
+    if !secrets::replace(tx, &keyring.key_ids(), workspace, id, &sealed)
         .await
         .map_err(write_refusal)?
     {
         return Err(AdminError::NotFound("secret"));
     }
     audit(
-        &mut tx,
+        tx,
         context,
         Some(workspace),
         "secret.replaced",
@@ -620,7 +648,6 @@ pub async fn replace_secret(
         json!({"purpose": stored.purpose.as_str(), "key_id": sealed.key_id}),
     )
     .await?;
-    zirv_flow_store::commit(tx).await?;
     Ok(())
 }
 
@@ -635,17 +662,28 @@ pub async fn delete_secret(
     if !secrets::delete(&mut *tx, workspace, id).await? {
         return Err(AdminError::NotFound("secret"));
     }
+    audit_secret_deleted(&mut tx, context, workspace, id).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(())
+}
+
+/// The audit entry of a secret deleted in the caller's transaction by another store path, such
+/// as deleting the source that owned it.
+pub(crate) async fn audit_secret_deleted(
+    tx: &mut PgConnection,
+    context: &Context,
+    workspace: WorkspaceId,
+    id: SecretId,
+) -> Result<(), StoreError> {
     audit(
-        &mut tx,
+        tx,
         context,
         Some(workspace),
         "secret.deleted",
         Some(("secret", id.as_uuid())),
         json!({}),
     )
-    .await?;
-    zirv_flow_store::commit(tx).await?;
-    Ok(())
+    .await
 }
 
 #[cfg(test)]

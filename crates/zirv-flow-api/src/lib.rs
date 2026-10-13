@@ -26,6 +26,7 @@ mod problem;
 mod request_id;
 mod session;
 mod setup;
+mod sources;
 mod state;
 mod trace;
 mod traces;
@@ -245,6 +246,33 @@ fn routes() -> Router<AppState> {
                 .put(contacts::crud::replace)
                 .patch(contacts::crud::patch)
                 .delete(contacts::crud::remove),
+        )
+        .route("/api/v1/source-kinds", get(sources::kinds::list))
+        .route(
+            "/api/v1/workspaces/{ws}/sources",
+            get(sources::crud::list).post(sources::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}",
+            get(sources::crud::get)
+                .patch(sources::crud::update)
+                .delete(sources::crud::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/test",
+            post(sources::actions::test),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/discover",
+            post(sources::actions::discover),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/streams",
+            get(sources::streams::list),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}",
+            put(sources::streams::put),
         )
         .route(
             "/api/v1/workspaces/{ws}/lists",

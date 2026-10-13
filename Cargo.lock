@@ -4577,6 +4577,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "zirv-flow-connectors",
  "zirv-flow-core",
  "zirv-flow-identity",
  "zirv-flow-store",
