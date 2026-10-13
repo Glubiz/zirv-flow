@@ -109,3 +109,24 @@ pub(crate) fn context_sharing(
         .unwrap()
         .with_retry_policy(fast_retries())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_mock_logs_what_it_served_and_the_context_may_reach_it() {
+        let mock = serve(Router::new().route("/p", axum::routing::get(|| async { "ok" }))).await;
+        let url = mock.url("/p?a=1");
+
+        let response = context("probe", "s")
+            .http()
+            .execute(reqwest::Request::new(reqwest::Method::GET, url))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(mock.hits(), 1);
+        assert_eq!(mock.seen()[0].path_and_query, "/p?a=1");
+    }
+}
