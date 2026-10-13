@@ -401,13 +401,19 @@ mod tests {
     #[tokio::test]
     async fn a_retry_after_beyond_the_cap_ends_the_call_without_sleeping() {
         let calls = counter();
+        let handle = recorder();
         let mock = serve(flaky(&calls, StatusCode::TOO_MANY_REQUESTS, "900".into())).await;
-        let started = Instant::now();
 
-        let error = get_r(&context("probe", "s"), &mock).await.unwrap_err();
+        let error = get_r(&context("toolong", "s"), &mock).await.unwrap_err();
 
         assert_eq!(error, RuntimeError::RetryAfterTooLong { seconds: 900 });
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // A retry is counted just before its sleep, so none counted means none slept.
+        let retries = lines(
+            &handle.render(),
+            "zirv_flow_source_retries_total",
+            "toolong",
+        );
+        assert!(retries.is_empty(), "{retries:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -872,13 +878,18 @@ mod tests {
     #[tokio::test]
     async fn a_source_with_no_rate_limit_is_never_delayed() {
         let mock = serve(Router::new().route("/r", get(|| async { "ok" }))).await;
+        let handle = recorder();
         let ctx = context("unlimited", "s");
-        let started = Instant::now();
 
         for _ in 0..5 {
             get_r(&ctx, &mock).await.unwrap();
         }
 
-        assert!(started.elapsed() < Duration::from_millis(1000));
+        let waits = lines(
+            &handle.render(),
+            "zirv_flow_source_rate_limit_wait_seconds_total",
+            "unlimited",
+        );
+        assert!(waits.is_empty(), "{waits:?}");
     }
 }

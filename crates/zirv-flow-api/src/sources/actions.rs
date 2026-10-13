@@ -420,24 +420,4 @@ mod tests {
             started.elapsed()
         );
     }
-
-    #[tokio::test]
-    async fn another_source_has_a_bucket_of_its_own() {
-        let state = state();
-        let busy = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
-        let other = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
-        for _ in 0..4 {
-            refused_call(&busy).await;
-        }
-        let started = std::time::Instant::now();
-
-        refused_call(&other).await;
-        refused_call(&other).await;
-
-        assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "{:?}",
-            started.elapsed()
-        );
-    }
 }

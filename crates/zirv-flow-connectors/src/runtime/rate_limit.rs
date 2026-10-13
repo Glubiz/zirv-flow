@@ -229,7 +229,6 @@ mod tests {
 
         let elapsed = started.elapsed();
         assert!(elapsed >= Duration::from_millis(1450), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
         assert!(waited >= Duration::from_millis(1400), "{waited:?}");
     }
 

@@ -296,7 +296,7 @@ fn sensitive(text: &str) -> Result<HeaderValue, RuntimeError> {
 fn basic_value(username: &str, password: &SecretString) -> Result<HeaderValue, RuntimeError> {
     let pair = Zeroizing::new(format!("{username}:{}", password.expose()));
     let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
-    sensitive(&Zeroizing::new(format!("Basic {}", &*encoded)))
+    sensitive(&Zeroizing::new(format!("Basic {}", *encoded)))
 }
 
 fn bearer(request: &mut Request, token: &SecretString) -> Result<(), RuntimeError> {
