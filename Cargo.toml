@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen"]
 resolver = "3"
 
 [workspace.package]
-version = "0.40.0"
+version = "0.41.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -37,7 +37,14 @@ rand = "0.8.5"
 # Only here to choose the TLS stack for the OTLP exporter's HTTP client: rustls on the ring provider
 # the tree already uses, never aws-lc or OpenSSL.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1.0.9"
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
+mysql_async = { version = "0.37.1", default-features = false, features = ["rustls-tls", "ring", "tls12", "minimal-rust"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 rskafka = { version = "0.6.0", default-features = false, features = ["compression-gzip", "compression-snappy", "compression-lz4", "compression-zstd", "transport-tls", "transport-socks5"] }
 rust-embed = { version = "8.13.0", default-features = false, features = ["interpolate-folder-path", "mime-guess"] }

@@ -135,7 +135,7 @@ impl Session {
         connect: &Connect<'_>,
     ) -> Result<Arc<Self>, SourceError> {
         let tls = connect.tls.as_ref().map(tls_config).transpose()?;
-        let relay = Relay::start(Arc::clone(ctx.egress_policy()), ctx.lookup())
+        let relay = Relay::start(ctx.clone())
             .await
             .map_err(|_| code(CONNECT_FAILED))?;
         let denial = relay.slot();

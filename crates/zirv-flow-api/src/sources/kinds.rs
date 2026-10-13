@@ -15,7 +15,7 @@ pub(crate) struct FieldSpecBody {
     key: String,
     label: String,
     help: String,
-    /// One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `textarea`.
+    /// One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `long_text`, `queries`.
     kind: String,
     /// The allowed values of a `select` field; empty for the other kinds.
     options: Vec<String>,
@@ -140,7 +140,7 @@ mod tests {
                 .map(|field| field["kind"].clone())
         };
         assert_eq!(kind_of("config_fields", "brokers"), Some("hosts".into()));
-        assert_eq!(kind_of("config_fields", "tls_ca"), Some("textarea".into()));
+        assert_eq!(kind_of("config_fields", "tls_ca"), Some("long_text".into()));
         assert_eq!(kind_of("config_fields", "max_lag"), Some("number".into()));
         assert!(
             json["credential_fields"]

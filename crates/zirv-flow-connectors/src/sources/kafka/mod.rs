@@ -33,7 +33,7 @@ use super::spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 use super::types::{
     Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor, SyncMode,
 };
-use super::validate::validate_config;
+use super::validate::{FieldError, validate_config};
 
 /// The messages discovery samples per topic.
 const SAMPLE_MESSAGES: usize = 50;
@@ -91,7 +91,7 @@ impl Source for Kafka {
                 key: "tls_ca",
                 label: "Certificate authority",
                 help: "PEM of the authority that signed the brokers' certificates, for a private authority. Empty trusts the system roots.",
-                kind: FieldKind::Multiline,
+                kind: FieldKind::LongText,
                 required: false,
                 secret: false,
             },
@@ -139,6 +139,7 @@ impl Source for Kafka {
             },
         ],
         rate_limit: None,
+        config_check: Some(config_check),
         capabilities: Capabilities {
             incremental: false,
             full_refresh: false,
@@ -247,6 +248,23 @@ fn config_error(field: &str, reason: &str) -> SourceError {
     }
 }
 
+/// The rules that refine a field: the topics are one to twenty legal topic names.
+fn config_check(config: &Value) -> Vec<FieldError> {
+    let Some(text) = config.get("topics").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let topics: Vec<&str> = text.split(',').map(str::trim).collect();
+    if topics.len() > MAX_TOPICS || !topics.iter().all(|topic| topic_is_valid(topic)) {
+        return vec![FieldError {
+            field: "topics".to_owned(),
+            reason:
+                "must be one to twenty topic names of letters, digits, dots, dashes and underscores"
+                    .to_owned(),
+        }];
+    }
+    Vec::new()
+}
+
 /// Whether `name` is a legal Kafka topic name.
 fn topic_is_valid(name: &str) -> bool {
     !name.is_empty()
@@ -277,12 +295,6 @@ impl Settings {
                 .collect()
         };
         let topics = list("topics");
-        if topics.len() > MAX_TOPICS || !topics.iter().all(|topic| topic_is_valid(topic)) {
-            return Err(config_error(
-                "topics",
-                "must be one to twenty topic names of letters, digits, dots, dashes and underscores",
-            ));
-        }
         let sasl = match text("sasl").unwrap_or("none") {
             "plain" => Some(Mechanism::Plain),
             "scram_sha_256" => Some(Mechanism::ScramSha256),

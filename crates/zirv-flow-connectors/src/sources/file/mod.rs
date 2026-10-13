@@ -114,6 +114,7 @@ impl Source for File {
             },
         ],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             incremental: false,
             full_refresh: true,

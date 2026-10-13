@@ -601,7 +601,7 @@ mod tests {
 
         assert_eq!(
             error.detail(),
-            "sync_mode must be full_refresh or incremental; \
+            "sync_mode must be full_refresh, incremental or stream; \
              cursor_field is not a field of this stream; \
              primary_key names a field this stream does not have; \
              staleness_threshold_seconds must be positive"

@@ -13640,7 +13640,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "One of `text`, `url`, `number`, `bool`, `select`."
+            "description": "One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `long_text`, `queries`."
           },
           "label": {
             "type": "string"

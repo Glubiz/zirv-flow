@@ -1,6 +1,8 @@
 //! The transforms, one function each over a JSON value (a cell starts as a string).
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use std::borrow::Cow;
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{Number, Value};
 
 use super::apply::{Cells, RowErrorReason};
@@ -68,7 +70,8 @@ fn display(value: &Value) -> String {
     }
 }
 
-/// Converts `value` to `kind`. An empty text stays empty: it is an absent value, not an error.
+/// Converts `value` to `kind`. An empty text stays empty: it is an absent value, not an error. A
+/// timestamp is RFC 3339 or the SQL text form (see [`sql_timestamp`]).
 pub(super) fn cast(kind: TraitType, value: Value) -> Result<Value, RowErrorReason> {
     let typed = match &value {
         Value::String(raw) => {
@@ -77,9 +80,8 @@ pub(super) fn cast(kind: TraitType, value: Value) -> Result<Value, RowErrorReaso
                 return Ok(Value::String(String::new()));
             }
             match kind {
-                TraitType::String | TraitType::Timestamp | TraitType::Date => {
-                    Value::String(raw.to_owned())
-                }
+                TraitType::String | TraitType::Date => Value::String(raw.to_owned()),
+                TraitType::Timestamp => Value::String(sql_timestamp(raw).into_owned()),
                 TraitType::Number => parse_number(raw).ok_or(RowErrorReason::WrongType)?,
                 TraitType::Boolean => {
                     Value::Bool(parse_flag(raw).ok_or(RowErrorReason::WrongType)?)
@@ -95,6 +97,81 @@ pub(super) fn cast(kind: TraitType, value: Value) -> Result<Value, RowErrorReaso
         RowErrorReason::WrongType
     };
     coerce(kind, &typed).map(into_json).map_err(|_| failure)
+}
+
+/// The text of a timestamp cell as RFC 3339 in UTC. Text that is already RFC 3339 is left for
+/// the strict parser. The SQL forms the database sources produce are accepted as well:
+/// `YYYY-MM-DD HH:MM:SS`, a space or a `T` between the date and the time, then optionally
+/// `.fraction` (1 to 9 digits) and an offset (`+HH`, `-HH`, `+HH:MM`, `-HH:MM` or `+HHMM`). A
+/// value without an offset is UTC. Anything else, or a value that is not a real instant, comes
+/// back unchanged.
+pub(super) fn sql_timestamp(raw: &str) -> Cow<'_, str> {
+    if DateTime::parse_from_rfc3339(raw).is_ok() {
+        return Cow::Borrowed(raw);
+    }
+    match parse_sql_timestamp(raw) {
+        Some(instant) => Cow::Owned(instant.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
+        None => Cow::Borrowed(raw),
+    }
+}
+
+fn parse_sql_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    let bytes = raw.as_bytes();
+    // `YYYY-MM-DD`, the separator, `HH:MM:SS`.
+    if bytes.len() < 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b' ' | b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let digits = |from: usize, to: usize| -> Option<u32> {
+        let part = bytes.get(from..to)?;
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+    };
+    let date = NaiveDate::from_ymd_opt(
+        i32::try_from(digits(0, 4)?).ok()?,
+        digits(5, 7)?,
+        digits(8, 10)?,
+    )?;
+    let (hour, minute, second) = (digits(11, 13)?, digits(14, 16)?, digits(17, 19)?);
+    let mut at = 19;
+    let mut nanos = 0;
+    if bytes.get(at) == Some(&b'.') {
+        let end = (at + 1..bytes.len())
+            .find(|&i| !bytes[i].is_ascii_digit())
+            .unwrap_or(bytes.len());
+        let count = end - (at + 1);
+        if !(1..=9).contains(&count) {
+            return None;
+        }
+        nanos = digits(at + 1, end)? * 10u32.pow(u32::try_from(9 - count).ok()?);
+        at = end;
+    }
+    let offset_seconds = match bytes.get(at) {
+        None => 0,
+        Some(&sign @ (b'+' | b'-')) => {
+            let offset_hours = digits(at + 1, at + 3)?;
+            let offset_minutes = match bytes.len() - (at + 3) {
+                0 => 0,
+                2 => digits(at + 3, at + 5)?,
+                3 if bytes[at + 3] == b':' => digits(at + 4, at + 6)?,
+                _ => return None,
+            };
+            if offset_hours > 23 || offset_minutes > 59 {
+                return None;
+            }
+            let seconds = i64::from(offset_hours * 3600 + offset_minutes * 60);
+            if sign == b'-' { -seconds } else { seconds }
+        }
+        Some(_) => return None,
+    };
+    let local = date.and_time(NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)?);
+    Some(local.and_utc() - chrono::Duration::seconds(offset_seconds))
 }
 
 fn parse_number(raw: &str) -> Option<Value> {
@@ -252,6 +329,103 @@ mod tests {
             cast(TraitType::StringList, "a,b"),
             Err(RowErrorReason::WrongType)
         );
+    }
+
+    fn stamp(raw: &str) -> Result<Value, RowErrorReason> {
+        cast(TraitType::Timestamp, json!(raw))
+    }
+
+    #[test]
+    fn sql_timestamp_text_is_read_as_utc_unless_it_names_an_offset() {
+        // PostgreSQL timestamptz under a UTC session, and MySQL DATETIME.
+        assert_eq!(
+            stamp("2024-01-01 00:01:00+00"),
+            Ok(json!("2024-01-01T00:01:00Z"))
+        );
+        assert_eq!(
+            stamp("2024-01-01 00:01:00"),
+            Ok(json!("2024-01-01T00:01:00Z"))
+        );
+        assert_eq!(
+            stamp("2024-01-01T00:01:00"),
+            Ok(json!("2024-01-01T00:01:00Z"))
+        );
+        assert_eq!(
+            stamp("2024-01-01 00:01:00.000000"),
+            Ok(json!("2024-01-01T00:01:00Z"))
+        );
+        // Every offset form, and a negative one.
+        for (raw, expected) in [
+            ("2024-01-01 12:00:00+02", "2024-01-01T10:00:00Z"),
+            ("2024-01-01 12:00:00-02", "2024-01-01T14:00:00Z"),
+            ("2024-01-01 12:00:00+05:30", "2024-01-01T06:30:00Z"),
+            ("2024-01-01 12:00:00-05:30", "2024-01-01T17:30:00Z"),
+            ("2024-01-01 12:00:00+0530", "2024-01-01T06:30:00Z"),
+            ("2024-01-01T12:00:00+0530", "2024-01-01T06:30:00Z"),
+            ("2024-01-01 00:30:00+01", "2023-12-31T23:30:00Z"),
+        ] {
+            assert_eq!(stamp(raw), Ok(json!(expected)), "{raw}");
+        }
+    }
+
+    #[test]
+    fn sql_timestamp_fractions_of_one_to_nine_digits_are_kept() {
+        // Rendered in groups of three digits, as an RFC 3339 input is.
+        for (digits, expected) in [
+            ("5", "2024-01-01T00:01:00.500Z"),
+            ("12", "2024-01-01T00:01:00.120Z"),
+            ("123", "2024-01-01T00:01:00.123Z"),
+            ("123456", "2024-01-01T00:01:00.123456Z"),
+            ("123456789", "2024-01-01T00:01:00.123456789Z"),
+        ] {
+            assert_eq!(
+                stamp(&format!("2024-01-01 00:01:00.{digits}")),
+                Ok(json!(expected)),
+                "{digits}"
+            );
+            assert_eq!(
+                stamp(&format!("2024-01-01 02:01:00.{digits}+02")),
+                Ok(json!(expected)),
+                "{digits} with an offset"
+            );
+        }
+        assert!(stamp("2024-01-01 00:01:00.1234567890").is_err());
+        assert!(stamp("2024-01-01 00:01:00.").is_err());
+    }
+
+    #[test]
+    fn rfc_3339_timestamps_read_as_before() {
+        for (raw, expected) in [
+            ("2026-05-01T12:00:00+02:00", "2026-05-01T10:00:00Z"),
+            ("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z"),
+            ("2026-05-01T12:00:00.250-07:00", "2026-05-01T19:00:00.250Z"),
+            ("2026-05-01t12:00:00z", "2026-05-01T12:00:00Z"),
+        ] {
+            assert_eq!(stamp(raw), Ok(json!(expected)), "{raw}");
+        }
+    }
+
+    #[test]
+    fn malformed_sql_timestamp_text_is_still_a_bad_timestamp() {
+        for raw in [
+            "2024-13-01 00:00:00",
+            "2024-01-01 25:00:00",
+            "2024-01-01 00:60:00",
+            "2024-01-01 00:00:60",
+            "2024-02-30 00:00:00",
+            "2024-01-01",
+            "2024-01-01 00:01",
+            "2024-01-01 00:01:00x",
+            "2024-01-01 00:01:00+25",
+            "2024-01-01 00:01:00+01:60",
+            "2024-01-01 00:01:00+1",
+            "2024-01-01 00:01:00+01:0",
+            "2024-01-01  00:01:00",
+            "2024-1-1 00:01:00",
+            "2024-01-01 00:01:00 +00",
+        ] {
+            assert_eq!(stamp(raw), Err(RowErrorReason::BadTimestamp), "{raw}");
+        }
     }
 
     #[test]

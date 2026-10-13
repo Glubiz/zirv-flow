@@ -19,9 +19,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
-use zirv_flow_core::egress::{AddressClass, EgressPolicy};
+use zirv_flow_core::egress::AddressClass;
 
-use crate::http::{Lookup, check_all};
+use crate::http::HttpError;
+
+use super::super::context::SourceContext;
+use super::super::error::SourceError;
 
 /// How long one upstream connection attempt, and the SOCKS handshake, may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,10 +64,7 @@ pub(super) struct Relay {
 
 impl Relay {
     /// Binds a loopback port and starts serving.
-    pub(super) async fn start(
-        policy: Arc<EgressPolicy>,
-        lookup: Arc<dyn Lookup>,
-    ) -> io::Result<Self> {
+    pub(super) async fn start(ctx: SourceContext) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let denial = DenialSlot::default();
@@ -74,11 +74,10 @@ impl Relay {
             let mut connections = JoinSet::new();
             while let Ok((client, _)) = listener.accept().await {
                 while connections.try_join_next().is_some() {}
-                let policy = Arc::clone(&policy);
-                let lookup = Arc::clone(&lookup);
+                let ctx = ctx.clone();
                 let slot = slot.clone();
                 connections.spawn(async move {
-                    let _ = serve(client, &policy, lookup.as_ref(), &slot).await;
+                    let _ = serve(client, &ctx, &slot).await;
                 });
             }
         });
@@ -174,29 +173,23 @@ async fn handshake(client: &mut TcpStream) -> io::Result<Option<Target>> {
     Ok(Some(Target { host, port }))
 }
 
-async fn serve(
-    mut client: TcpStream,
-    policy: &EgressPolicy,
-    lookup: &dyn Lookup,
-    denial: &DenialSlot,
-) -> io::Result<()> {
+async fn serve(mut client: TcpStream, ctx: &SourceContext, denial: &DenialSlot) -> io::Result<()> {
     let Some(target) = timeout(STEP_TIMEOUT, handshake(&mut client))
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??
     else {
         return Ok(());
     };
-    let addresses: Vec<IpAddr> = match target.host.parse::<IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => lookup.lookup(&target.host).await.unwrap_or_default(),
+    // Resolved and checked at every connect: a changed answer is checked again, an IP literal
+    // is decided as it is, and one denied address refuses the host.
+    let addresses = match ctx.resolve_checked(&target.host).await {
+        Ok(addresses) => addresses,
+        Err(SourceError::Egress(HttpError::EgressDenied { class, .. })) => {
+            denial.set(class);
+            return reply(&mut client, REPLY_RULESET).await;
+        }
+        Err(_) => return reply(&mut client, REPLY_UNREACHABLE).await,
     };
-    if addresses.is_empty() {
-        return reply(&mut client, REPLY_UNREACHABLE).await;
-    }
-    if let Err(denied) = check_all(policy, &target.host, &addresses) {
-        denial.set(denied.class);
-        return reply(&mut client, REPLY_RULESET).await;
-    }
     let mut upstream = None;
     for ip in addresses {
         if let Ok(Ok(stream)) = timeout(STEP_TIMEOUT, TcpStream::connect((ip, target.port))).await {
@@ -222,6 +215,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::http::Lookup;
+    use zirv_flow_core::egress::EgressPolicy;
 
     struct Table(BTreeMap<String, Vec<IpAddr>>);
 
@@ -293,7 +288,16 @@ mod tests {
     async fn relay(allow: &[&str], lookup: Arc<dyn Lookup>) -> Relay {
         let entries: Vec<String> = allow.iter().map(|entry| (*entry).to_owned()).collect();
         let policy = Arc::new(EgressPolicy::parse(&entries).unwrap());
-        Relay::start(policy, lookup).await.unwrap()
+        let ctx = SourceContext::new(
+            policy,
+            crate::http::HttpLimits::default(),
+            "kafka",
+            "source-1",
+            Arc::default(),
+        )
+        .unwrap()
+        .with_lookup(lookup);
+        Relay::start(ctx).await.unwrap()
     }
 
     #[tokio::test]
