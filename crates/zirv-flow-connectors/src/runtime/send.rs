@@ -191,13 +191,14 @@ pub(crate) async fn send(
     let policy = ctx.retry_policy();
     // Attempts that failed in a way worth retrying.
     let mut failed = 0_u32;
-    // Whether this call has fetched a token, so a 401 after it is final.
+    // Whether this call has a token that is new to it, so a 401 after it is final.
     let mut fetched = false;
-    let mut force_refresh = false;
+    // The token the upstream answered 401 to, not to be sent again.
+    let mut rejected: Option<auth::AccessToken> = None;
     loop {
         let token = if auth.is_oauth() {
-            let (token, new) = auth::ensure_token(ctx, auth, force_refresh).await?;
-            force_refresh = false;
+            let (token, new) = auth::ensure_token(ctx, auth, rejected.as_ref()).await?;
+            rejected = None;
             fetched |= new;
             Some(token)
         } else {
@@ -230,7 +231,7 @@ pub(crate) async fn send(
                 }
                 if status == StatusCode::UNAUTHORIZED {
                     if auth.is_oauth() && !fetched {
-                        force_refresh = true;
+                        rejected = token;
                         continue;
                     }
                     return Err(RuntimeError::Unauthorized);

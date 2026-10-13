@@ -16,7 +16,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 use reqwest::{Method, Request};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
+use zeroize::Zeroizing;
 use zirv_flow_core::SecretString;
 
 use super::error::RuntimeError;
@@ -89,11 +91,13 @@ impl Auth<'_> {
 }
 
 /// An OAuth2 access token and when it lapses. The caller stores it between runs (through
-/// `encrypted_secrets`) and seeds the next context with it. `Debug` shows no token.
+/// `encrypted_secrets`, with [`AccessToken::binding`]) and seeds the next context with it.
+/// `Debug` shows no token.
 #[derive(Clone)]
 pub struct AccessToken {
     token: Arc<SecretString>,
     expires_at: Option<DateTime<Utc>>,
+    binding: Option<String>,
 }
 
 impl AccessToken {
@@ -103,6 +107,7 @@ impl AccessToken {
         Self {
             token: Arc::new(token),
             expires_at,
+            binding: None,
         }
     }
 
@@ -114,9 +119,34 @@ impl AccessToken {
         self.expires_at
     }
 
+    /// A fingerprint of the token URL, the client id and the scopes the token was fetched for,
+    /// never of the secret. A token is used only with the configuration it is bound to. Store it
+    /// with the token and give it back with [`AccessToken::with_binding`]; a token without one
+    /// is bound to the configuration it is first used with.
+    pub fn binding(&self) -> Option<&str> {
+        self.binding.as_deref()
+    }
+
+    pub fn with_binding(mut self, binding: impl Into<String>) -> Self {
+        self.binding = Some(binding.into());
+        self
+    }
+
     fn is_expired(&self, now: DateTime<Utc>) -> bool {
         let skew = TimeDelta::from_std(EXPIRY_SKEW).unwrap_or(TimeDelta::zero());
         self.expires_at.is_some_and(|at| at - skew <= now)
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.token, &other.token) || self.token.expose() == other.token.expose()
+    }
+
+    /// Whether the token can go on the next request: unexpired, bound to `binding` (or to
+    /// nothing yet), and not the one the upstream just refused.
+    pub(crate) fn is_usable(&self, binding: &str, rejected: Option<&Self>) -> bool {
+        !self.is_expired(Utc::now())
+            && self.binding.as_deref().is_none_or(|bound| bound == binding)
+            && rejected.is_none_or(|refused| !self.same_as(refused))
     }
 }
 
@@ -133,20 +163,57 @@ pub(crate) struct TokenSlot {
     pub(crate) refreshed: Option<AccessToken>,
 }
 
-/// The token for the next request: the cached one while it is good, else a fresh one. `force`
-/// skips the cache (after a 401). The flag says whether the token was fetched now.
+/// The binding of a token fetched with this configuration: a truncated SHA-256 over the token
+/// URL, the client id and the scopes, each length-prefixed. The client secret is not in it.
+fn binding_of(token_url: &Url, client_id: &str, scopes: &[String]) -> String {
+    let mut hash = Sha256::new();
+    let mut field = |text: &str| {
+        hash.update((text.len() as u64).to_be_bytes());
+        hash.update(text.as_bytes());
+    };
+    field("zirv-flow/oauth-binding/v1");
+    field(token_url.as_str());
+    field(client_id);
+    for scope in scopes {
+        field(scope);
+    }
+    hash.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The token for the next request: the cached one while it is usable for this configuration,
+/// else a fresh one. `rejected` is the token the upstream just answered 401 to, which is not
+/// reused. The flag says whether the token is new to this call: fetched, or adopted from another
+/// call that refreshed first.
+///
+/// Fetches are single-flight per context (and its clones): callers wait for the one that is in
+/// progress and then find its token in the slot, so an expiry or a revoked token causes one
+/// request to the token endpoint, not one per concurrent call.
 pub(crate) async fn ensure_token(
     ctx: &SourceContext,
     auth: &Auth<'_>,
-    force: bool,
+    rejected: Option<&AccessToken>,
 ) -> Result<(AccessToken, bool), RuntimeError> {
-    if !force
-        && let Some(token) = ctx.cached_token()
-        && !token.is_expired(Utc::now())
-    {
-        return Ok((token, false));
+    let Auth::OAuth2ClientCredentials {
+        token_url,
+        client_id,
+        scopes,
+        ..
+    } = auth
+    else {
+        return Err(RuntimeError::InvalidRequest);
+    };
+    let binding = binding_of(token_url, client_id, scopes);
+    if let Some(token) = ctx.reusable_token(&binding, rejected) {
+        return Ok((token, rejected.is_some()));
     }
-    let token = fetch_token(ctx, auth).await?;
+    let _flight = ctx.token_flight().await;
+    if let Some(token) = ctx.reusable_token(&binding, rejected) {
+        return Ok((token, true));
+    }
+    let token = fetch_token(ctx, auth).await?.with_binding(binding);
     ctx.store_token(token.clone());
     Ok((token, true))
 }
@@ -173,7 +240,7 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
             form.append_pair("client_id", client_id);
             form.append_pair("client_secret", client_secret.expose());
         }
-        form.finish()
+        Zeroizing::new(form.finish())
     };
     let mut request = Request::new(Method::POST, token_url.clone());
     let headers = request.headers_mut();
@@ -185,7 +252,7 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
     if *client_auth == ClientAuth::Basic {
         headers.insert(AUTHORIZATION, basic_value(client_id, client_secret)?);
     }
-    *request.body_mut() = Some(Bytes::from(body).into());
+    *request.body_mut() = Some(Bytes::copy_from_slice(body.as_bytes()).into());
 
     let response = ctx.http().execute(request).await?;
     let status = response.status();
@@ -218,19 +285,22 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
 /// A token's stated lifetime is capped at a year, so an absurd value cannot overflow the date.
 const MAX_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
 
-fn sensitive(text: String) -> Result<HeaderValue, RuntimeError> {
-    let mut value = HeaderValue::from_str(&text).map_err(|_| RuntimeError::InvalidRequest)?;
+/// A header value marked sensitive, so it is kept out of debug output. The header map holds its
+/// own copy, which cannot be zeroized; the temporaries built on the way are.
+fn sensitive(text: &str) -> Result<HeaderValue, RuntimeError> {
+    let mut value = HeaderValue::from_str(text).map_err(|_| RuntimeError::InvalidRequest)?;
     value.set_sensitive(true);
     Ok(value)
 }
 
 fn basic_value(username: &str, password: &SecretString) -> Result<HeaderValue, RuntimeError> {
-    let encoded = STANDARD.encode(format!("{username}:{}", password.expose()));
-    sensitive(format!("Basic {encoded}"))
+    let pair = Zeroizing::new(format!("{username}:{}", password.expose()));
+    let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
+    sensitive(&Zeroizing::new(format!("Basic {}", &*encoded)))
 }
 
 fn bearer(request: &mut Request, token: &SecretString) -> Result<(), RuntimeError> {
-    let value = sensitive(format!("Bearer {}", token.expose()))?;
+    let value = sensitive(&Zeroizing::new(format!("Bearer {}", token.expose())))?;
     request.headers_mut().insert(AUTHORIZATION, value);
     Ok(())
 }
@@ -252,7 +322,7 @@ pub(crate) fn apply(
                 .map_err(|_| RuntimeError::InvalidRequest)?;
             request
                 .headers_mut()
-                .insert(name, sensitive(value.expose().to_owned())?);
+                .insert(name, sensitive(value.expose())?);
         }
         Auth::ApiKey {
             placement: ApiKeyPlacement::Query(name),
@@ -691,5 +761,137 @@ mod tests {
         );
         assert_eq!(header(4, "authorization"), None);
         assert_eq!(seen[4].path_and_query, "/r?page=2");
+    }
+
+    fn auth_for<'a>(
+        token_url: Url,
+        client_id: &'a str,
+        scopes: &'a [String],
+        client_secret: &'a SecretString,
+    ) -> Auth<'a> {
+        Auth::OAuth2ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            scopes,
+            client_auth: ClientAuth::Body,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_is_used_only_with_the_configuration_it_was_fetched_for() {
+        let valid = Arc::default();
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(Arc::clone(&valid), false).await;
+        let secret = SecretString::new("client-secret".into());
+        let ctx = context("oauth", "s");
+        let read = vec!["read".to_owned()];
+        let url = idp.mock.url("/token");
+        let other_url = idp.mock.url("/token?tenant=2");
+        let issued = || idp.issued.load(Ordering::SeqCst);
+
+        let first = auth_for(url.clone(), "client-a", &[], &secret);
+        call(&ctx, &api, &first).await.unwrap();
+        call(&ctx, &api, &first).await.unwrap();
+        assert_eq!(issued(), 1, "the same configuration reuses it");
+
+        let other_client = auth_for(url.clone(), "client-b", &[], &secret);
+        call(&ctx, &api, &other_client).await.unwrap();
+        assert_eq!(issued(), 2, "another client id");
+
+        let other_scopes = auth_for(url, "client-b", &read, &secret);
+        call(&ctx, &api, &other_scopes).await.unwrap();
+        assert_eq!(issued(), 3, "other scopes");
+
+        let other_endpoint = auth_for(other_url, "client-b", &read, &secret);
+        call(&ctx, &api, &other_endpoint).await.unwrap();
+        assert_eq!(issued(), 4, "another token URL");
+    }
+
+    #[tokio::test]
+    async fn a_stored_binding_keeps_a_token_from_another_configuration_and_the_secret_is_not_in_it()
+    {
+        let valid = Arc::new(Mutex::new("stored".to_owned()));
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(valid, false).await;
+        let secret = SecretString::new("client-secret".into());
+        let auth = oauth(&idp, &secret, ClientAuth::Body);
+
+        // Fetched by one context, stored by the caller with its binding, seeded into the next.
+        let first = context("oauth", "s");
+        call(&first, &api, &auth).await.unwrap();
+        let stored = first.take_refreshed_token().unwrap();
+        let binding = stored.binding().unwrap().to_owned();
+        assert!(!binding.contains("client-secret"));
+        assert_eq!(binding.len(), 32);
+
+        let same = context("oauth", "s").with_access_token(stored.clone());
+        call(&same, &api, &auth).await.unwrap();
+        assert_eq!(idp.issued.load(Ordering::SeqCst), 1);
+
+        let other = Auth::OAuth2ClientCredentials {
+            token_url: idp.mock.url("/token"),
+            client_id: "someone-else",
+            client_secret: &secret,
+            scopes: &[],
+            client_auth: ClientAuth::Body,
+        };
+        let changed = context("oauth", "s").with_access_token(stored);
+        call(&changed, &api, &other).await.unwrap();
+        assert_eq!(idp.issued.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_on_an_expired_token_make_one_token_request() {
+        let valid = Arc::default();
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(valid, false).await;
+        let secret = SecretString::new("client-secret".into());
+        let auth = oauth(&idp, &secret, ClientAuth::Body);
+        let ctx = context("oauth", "s").with_access_token(token("old", 30));
+
+        let calls = (0..8).map(|_| {
+            let ctx = ctx.clone();
+            let (api, auth) = (&api, &auth);
+            async move { call(&ctx, api, auth).await }
+        });
+        let results = futures_util::future::join_all(calls).await;
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(
+            idp.issued.load(Ordering::SeqCst),
+            1,
+            "one fetch for eight calls"
+        );
+        assert_eq!(api.hits(), 8);
+    }
+
+    #[tokio::test]
+    async fn concurrent_401s_on_a_revoked_token_cause_one_refresh_and_each_call_retries_once() {
+        let valid = Arc::default();
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(valid, false).await;
+        let secret = SecretString::new("client-secret".into());
+        let auth = oauth(&idp, &secret, ClientAuth::Body);
+        let ctx = context("oauth", "s").with_access_token(token("revoked", 3600));
+
+        let calls = (0..8).map(|_| {
+            let ctx = ctx.clone();
+            let (api, auth) = (&api, &auth);
+            async move { call(&ctx, api, auth).await }
+        });
+        let results = futures_util::future::join_all(calls).await;
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(
+            idp.issued.load(Ordering::SeqCst),
+            1,
+            "one refresh for eight 401s"
+        );
+        assert_eq!(
+            api.hits(),
+            16,
+            "each call: the revoked token, then the new one"
+        );
     }
 }

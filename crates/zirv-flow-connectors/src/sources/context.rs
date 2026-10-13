@@ -28,6 +28,8 @@ pub struct SourceContext {
     rate_limit: Option<RateLimit>,
     retry: RetryPolicy,
     token: Arc<Mutex<TokenSlot>>,
+    /// Held while a token is fetched, so concurrent calls make one request between them.
+    flight: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SourceContext {
@@ -67,6 +69,7 @@ impl SourceContext {
             rate_limit: None,
             retry: RetryPolicy::default(),
             token: Arc::default(),
+            flight: Arc::default(),
         }
     }
 
@@ -123,8 +126,26 @@ impl SourceContext {
         self.retry
     }
 
-    pub(crate) fn cached_token(&self) -> Option<AccessToken> {
-        self.slot().current.clone()
+    /// The cached token if it can go on a request for the configuration `binding`. A token that
+    /// carries no binding yet is bound to this one.
+    pub(crate) fn reusable_token(
+        &self,
+        binding: &str,
+        rejected: Option<&AccessToken>,
+    ) -> Option<AccessToken> {
+        let mut slot = self.slot();
+        let token = slot.current.as_ref()?;
+        if !token.is_usable(binding, rejected) {
+            return None;
+        }
+        let token = token.clone().with_binding(binding);
+        slot.current = Some(token.clone());
+        Some(token)
+    }
+
+    /// Waits for the token fetch in progress, if any, and holds the right to start the next.
+    pub(crate) async fn token_flight(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.flight.lock().await
     }
 
     pub(crate) fn store_token(&self, token: AccessToken) {
