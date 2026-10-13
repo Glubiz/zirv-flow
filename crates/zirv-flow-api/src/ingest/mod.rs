@@ -101,7 +101,7 @@ impl IngestState {
 
     /// Charges `items` against the bucket of `id` (an API key id, or a user id for a session):
     /// a 429 with `Retry-After` when they do not fit.
-    pub(crate) fn charge(&self, id: uuid::Uuid, items: usize) -> Result<(), ApiError> {
+    pub(crate) fn charge(&self, id: Uuid, items: usize) -> Result<(), ApiError> {
         self.limiter
             .take(id, items, Instant::now())
             .map_err(|seconds| {
@@ -112,9 +112,7 @@ impl IngestState {
                 .with_retry_after(seconds)
             })
     }
-}
 
-impl IngestState {
     /// Charges one request against the bucket of a hook that exists: a 429 with `Retry-After`
     /// when it does not fit. Only ids that resolved to a stored hook get a bucket, so a flood of
     /// random ids cannot grow the limiter.
