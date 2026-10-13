@@ -8,7 +8,10 @@ use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
 use super::job::{RUN_JOB_KIND, run_trace};
-use crate::{NewJob, PgPool, StoreError, begin, commit, enqueue, lock_lease};
+use crate::{
+    NewJob, PgPool, StoreError, StreamOutcome, begin, commit, database_now, enqueue, lock_lease,
+    record_stream_outcome,
+};
 
 /// What started a run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -389,19 +392,30 @@ pub enum RunEnd {
 }
 
 /// Runs `end` in a transaction that first locks the job's lease, as a batch does, so a worker
-/// that lost its lease cannot end the run.
+/// that lost its lease cannot end the run. `end` returns the stream of the run it ended, and
+/// the stream's freshness records `outcome` in the same transaction; a run that had ended
+/// already records nothing, so a replay changes nothing.
 async fn fenced_end(
     pool: &PgPool,
+    workspace: WorkspaceId,
     lease: Lease,
-    end: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    end: sqlx::query::QueryScalar<'_, sqlx::Postgres, Uuid, sqlx::postgres::PgArguments>,
+    outcome: StreamOutcome,
 ) -> Result<RunEnd, StoreError> {
     let mut tx = begin(pool).await?;
     if !lock_lease(&mut tx, lease.job_id, lease.token).await? {
         return Ok(RunEnd::LeaseLost);
     }
-    let done = end.execute(&mut *tx).await.map_err(StoreError::query)?;
+    let ended = end
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    if let Some(stream_id) = ended {
+        let at = database_now(&mut *tx).await?;
+        record_stream_outcome(&mut tx, workspace, stream_id, outcome, at).await?;
+    }
     commit(tx).await?;
-    Ok(if done.rows_affected() == 1 {
+    Ok(if ended.is_some() {
         RunEnd::Ended
     } else {
         RunEnd::Over
@@ -416,15 +430,16 @@ pub async fn fail_run(
     lease: Lease,
     code: &str,
 ) -> Result<RunEnd, StoreError> {
-    let end = sqlx::query(
+    let end = sqlx::query_scalar(
         "UPDATE sync_runs SET state = 'failed', error_code = $3, finished_at = now(), \
             updated_at = now() \
-         WHERE workspace_id = $1 AND id = $2 AND state IN ('queued', 'running')",
+         WHERE workspace_id = $1 AND id = $2 AND state IN ('queued', 'running') \
+         RETURNING stream_id",
     )
     .bind(workspace.as_uuid())
     .bind(run_id)
     .bind(code);
-    fenced_end(pool, lease, end).await
+    fenced_end(pool, workspace, lease, end, StreamOutcome::Failed).await
 }
 
 /// Ends a running run as `succeeded`, fenced on the job's lease.
@@ -434,13 +449,13 @@ pub async fn finish_run(
     run_id: Uuid,
     lease: Lease,
 ) -> Result<RunEnd, StoreError> {
-    let end = sqlx::query(
+    let end = sqlx::query_scalar(
         "UPDATE sync_runs SET state = 'succeeded', finished_at = now(), updated_at = now() \
-         WHERE workspace_id = $1 AND id = $2 AND state = 'running'",
+         WHERE workspace_id = $1 AND id = $2 AND state = 'running' RETURNING stream_id",
     )
     .bind(workspace.as_uuid())
     .bind(run_id);
-    fenced_end(pool, lease, end).await
+    fenced_end(pool, workspace, lease, end, StreamOutcome::Succeeded).await
 }
 
 /// Fails every active run whose job is dead or gone, with `job_failed`, and returns the ids.
@@ -451,13 +466,20 @@ pub async fn finish_run(
 /// are inserted in one transaction, so a run without a job row is never one still being
 /// queued.
 pub async fn fail_orphaned_runs(pool: &PgPool) -> Result<Vec<Uuid>, StoreError> {
+    // The streams of the failed runs are marked failing in the same statement.
     sqlx::query_scalar(
-        "UPDATE sync_runs r SET state = 'failed', error_code = 'job_failed', \
-            finished_at = now(), updated_at = now() \
-         WHERE r.state IN ('queued', 'running') \
-           AND NOT EXISTS (SELECT 1 FROM jobs j \
-                           WHERE j.unique_key = 'sync:run:' || r.id::text AND j.state <> 'dead') \
-         RETURNING r.id",
+        "WITH failed AS ( \
+            UPDATE sync_runs r SET state = 'failed', error_code = 'job_failed', \
+                finished_at = now(), updated_at = now() \
+            WHERE r.state IN ('queued', 'running') \
+              AND NOT EXISTS (SELECT 1 FROM jobs j \
+                              WHERE j.unique_key = 'sync:run:' || r.id::text \
+                                AND j.state <> 'dead') \
+            RETURNING r.id, r.workspace_id, r.stream_id), \
+         marked AS ( \
+            UPDATE streams s SET last_run_failed = true \
+            FROM failed f WHERE s.workspace_id = f.workspace_id AND s.id = f.stream_id) \
+         SELECT id FROM failed",
     )
     .fetch_all(pool)
     .await
@@ -1013,5 +1035,170 @@ pub(super) mod tests {
         let stream = found.iter().find(|stream| stream.name == "dead").unwrap();
         assert!(queue(&pool, ws, source, stream.id).await.is_some());
         assert!(fail_orphaned_runs(&pool).await.unwrap().is_empty());
+    }
+
+    async fn stream_of(pool: &PgPool, fx: &crate::sync_runs::testing::Fixture) -> crate::Stream {
+        crate::find_stream_by_id(pool, fx.ws, fx.source_id, fx.stream_id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn lease_of(fx: &crate::sync_runs::testing::Fixture) -> Lease {
+        Lease {
+            job_id: fx.job.id,
+            token: fx.job.lease_token,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cancelled_run_records_nothing_a_finished_one_a_success_and_a_failed_one_a_failure(
+        pool: PgPool,
+    ) {
+        use crate::sync_runs::testing::started_run;
+
+        let cancelled = fixture(&pool, "one", "full_refresh").await;
+        let mut connection = pool.acquire().await.unwrap();
+        cancel_run(
+            &mut connection,
+            cancelled.ws,
+            cancelled.source_id,
+            cancelled.run.id,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let stream = stream_of(&pool, &cancelled).await;
+        assert_eq!(
+            (stream.last_success_at, stream.last_run_failed),
+            (None, false)
+        );
+
+        let finished = started_run(
+            &pool,
+            cancelled.ws,
+            cancelled.source_id,
+            cancelled.stream_id,
+        )
+        .await;
+        let lease = lease_of(&finished);
+        assert_eq!(
+            finish_run(&pool, finished.ws, finished.run.id, lease)
+                .await
+                .unwrap(),
+            RunEnd::Ended
+        );
+        let stream = stream_of(&pool, &finished).await;
+        let success = stream
+            .last_success_at
+            .expect("a finished run records a success");
+        assert!(!stream.last_run_failed);
+        // A replay ends nothing and records nothing.
+        assert_eq!(
+            finish_run(&pool, finished.ws, finished.run.id, lease)
+                .await
+                .unwrap(),
+            RunEnd::Over
+        );
+        assert_eq!(
+            stream_of(&pool, &finished).await.last_success_at,
+            Some(success)
+        );
+
+        let failed = started_run(
+            &pool,
+            cancelled.ws,
+            cancelled.source_id,
+            cancelled.stream_id,
+        )
+        .await;
+        assert_eq!(
+            fail_run(
+                &pool,
+                failed.ws,
+                failed.run.id,
+                lease_of(&failed),
+                "connector_error"
+            )
+            .await
+            .unwrap(),
+            RunEnd::Ended
+        );
+        let stream = stream_of(&pool, &failed).await;
+        assert!(
+            stream.last_run_failed,
+            "a failed run marks the stream failing"
+        );
+        assert_eq!(stream.last_success_at, Some(success), "the success stays");
+
+        // A cancel after a failure changes neither column.
+        let after = started_run(
+            &pool,
+            cancelled.ws,
+            cancelled.source_id,
+            cancelled.stream_id,
+        )
+        .await;
+        let mut connection = pool.acquire().await.unwrap();
+        cancel_run(&mut connection, after.ws, after.source_id, after.run.id)
+            .await
+            .unwrap();
+        drop(connection);
+        let stream = stream_of(&pool, &after).await;
+        assert!(stream.last_run_failed);
+        assert_eq!(stream.last_success_at, Some(success));
+
+        // A success after a failure recovers the stream.
+        let recovered = started_run(
+            &pool,
+            cancelled.ws,
+            cancelled.source_id,
+            cancelled.stream_id,
+        )
+        .await;
+        finish_run(&pool, recovered.ws, recovered.run.id, lease_of(&recovered))
+            .await
+            .unwrap();
+        let stream = stream_of(&pool, &recovered).await;
+        assert!(!stream.last_run_failed);
+        assert!(stream.last_success_at > Some(success));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_that_lost_its_lease_records_no_outcome(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let stale = Lease {
+            token: Uuid::new_v4(),
+            ..lease_of(&fx)
+        };
+
+        finish_run(&pool, fx.ws, fx.run.id, stale).await.unwrap();
+        fail_run(&pool, fx.ws, fx.run.id, stale, "x").await.unwrap();
+
+        let stream = stream_of(&pool, &fx).await;
+        assert_eq!(
+            (stream.last_success_at, stream.last_run_failed),
+            (None, false)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_orphaned_run_marks_its_stream_failing_and_a_live_one_does_not(pool: PgPool) {
+        let orphan = fixture(&pool, "one", "full_refresh").await;
+        sqlx::query("DELETE FROM jobs WHERE unique_key = $1")
+            .bind(format!("sync:run:{}", orphan.run.id))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let live = fixture(&pool, "two", "full_refresh").await;
+
+        let failed = fail_orphaned_runs(&pool).await.unwrap();
+
+        assert_eq!(failed, vec![orphan.run.id]);
+        assert!(stream_of(&pool, &orphan).await.last_run_failed);
+        assert!(!stream_of(&pool, &live).await.last_run_failed);
     }
 }

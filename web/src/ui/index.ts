@@ -15,4 +15,4 @@ export { Stepper } from "./Stepper";
 export type { StepEntry } from "./Stepper";
 export { EmptyState, ErrorState, InlineError, LoadingState } from "./States";
 export { kindLabel } from "./identityKinds";
-export { formatDate, formatDateTime, formatDuration, shortId } from "./format";
+export { formatAgo, formatDate, formatDateTime, formatDuration, shortId } from "./format";

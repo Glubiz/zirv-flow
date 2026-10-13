@@ -2,6 +2,8 @@
 //! checked against the descriptor discovery last reported, so a stream cannot be set up in a way
 //! its source cannot serve.
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
@@ -14,12 +16,12 @@ use zirv_flow_connectors::sources::{
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
-use zirv_flow_store::{Stream, StreamSettings};
+use zirv_flow_store::{Stream, StreamFreshness, StreamSettings};
 
 use super::problems;
 use crate::AppState;
 use crate::admin::{self, Context};
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -76,8 +78,12 @@ pub(crate) struct StreamBody {
     sync_mode: String,
     cursor_field: Option<String>,
     primary_key: Vec<String>,
-    /// How long without new data before the stream counts as stale, in seconds.
+    /// The stream's own threshold: seconds without a successful run before the stream counts as
+    /// stale. Absent means twice the source schedule's interval, or never stale when the source
+    /// has no schedule. `freshness.threshold_seconds` is the one in force.
     staleness_threshold_seconds: Option<i32>,
+    /// Whether the data is current; null while the stream, or its source, is disabled.
+    freshness: Option<FreshnessBody>,
     /// How a record of the stream becomes a person; null until one is set.
     mapping: Option<MappingBody>,
     discovered: DescriptorBody,
@@ -86,10 +92,8 @@ pub(crate) struct StreamBody {
     updated_at: OffsetDateTime,
 }
 
-impl TryFrom<&Stream> for StreamBody {
-    type Error = ApiError;
-
-    fn try_from(stream: &Stream) -> Result<Self, ApiError> {
+impl StreamBody {
+    fn new(stream: &Stream, freshness: Option<FreshnessBody>) -> Result<Self, ApiError> {
         let descriptor = descriptor_of(stream)?;
         Ok(Self {
             id: stream.id,
@@ -99,6 +103,7 @@ impl TryFrom<&Stream> for StreamBody {
             cursor_field: stream.cursor_field.clone(),
             primary_key: stream.primary_key.clone(),
             staleness_threshold_seconds: stream.staleness_threshold_seconds,
+            freshness,
             mapping: stream.mapping.as_ref().and_then(|value| {
                 serde_json::from_value::<Mapping>(value.clone())
                     .ok()
@@ -110,8 +115,70 @@ impl TryFrom<&Stream> for StreamBody {
     }
 }
 
-pub(super) fn bodies(streams: &[Stream]) -> Result<Vec<StreamBody>, ApiError> {
-    streams.iter().map(StreamBody::try_from).collect()
+/// Whether a stream's data is current (architecture 7.5). The state is derived on every read.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct FreshnessBody {
+    /// `fresh`, `stale` (past the threshold since the last success) or `failing` (the last run
+    /// failed).
+    #[schema(example = "fresh")]
+    state: String,
+    /// When the stream last succeeded; null if it never has.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    last_success_at: Option<OffsetDateTime>,
+    /// The stream's checkpoint, opaque connector state that may hold a value of a record.
+    /// Workspace admins only; null for everyone else, for a full refresh and before the first
+    /// batch.
+    #[schema(value_type = Option<serde_json::Value>)]
+    high_water_mark: Option<serde_json::Value>,
+    /// Seconds without a success before the stream counts as stale; null when it never turns
+    /// stale (no explicit threshold and no schedule).
+    threshold_seconds: Option<i64>,
+    /// Whether `threshold_seconds` is the default of twice the schedule interval and not the
+    /// stream's own.
+    threshold_is_default: bool,
+}
+
+impl FreshnessBody {
+    fn new(freshness: &StreamFreshness, show_high_water_mark: bool) -> Self {
+        Self {
+            state: freshness.state.as_str().to_owned(),
+            last_success_at: freshness.last_success_at,
+            high_water_mark: freshness
+                .high_water_mark
+                .clone()
+                .filter(|_| show_high_water_mark),
+            threshold_seconds: freshness.threshold_seconds,
+            threshold_is_default: freshness.threshold_is_default,
+        }
+    }
+}
+
+/// The bodies of `streams`, each with its freshness. `show_high_water_mark` is for workspace
+/// admins only.
+pub(super) async fn bodies(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source: Uuid,
+    streams: &[Stream],
+    show_high_water_mark: bool,
+) -> Result<Vec<StreamBody>, ApiError> {
+    let now = zirv_flow_store::database_now(&state.pool).await?;
+    let freshness =
+        zirv_flow_store::stream_freshness(&state.pool, Some(workspace), Some(source), now).await?;
+    let by_id: HashMap<Uuid, &StreamFreshness> = freshness
+        .iter()
+        .map(|found| (found.stream_id, found))
+        .collect();
+    streams
+        .iter()
+        .map(|stream| {
+            let found = by_id
+                .get(&stream.id)
+                .map(|found| FreshnessBody::new(found, show_high_water_mark));
+            StreamBody::new(stream, found)
+        })
+        .collect()
 }
 
 fn descriptor_of(stream: &Stream) -> Result<StreamDescriptor, ApiError> {
@@ -269,6 +336,7 @@ pub(crate) async fn configure(
             "enabled": stream.enabled,
             "sync_mode": stream.sync_mode,
             "mapping_set": mapping.is_some(),
+            "staleness_threshold_seconds": stream.staleness_threshold_seconds,
         }),
     )
     .await?;
@@ -305,7 +373,10 @@ pub(crate) async fn list(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let streams = zirv_flow_store::list_streams(&state.pool, workspace.id, source).await?;
-    Ok(Json(bodies(&streams)?))
+    let admin = may_see_values(&state, &principal, workspace.id).await;
+    Ok(Json(
+        bodies(&state, workspace.id, source, &streams, admin).await?,
+    ))
 }
 
 /// Sets whether a stream is read and how: sync mode, cursor field, primary key and staleness
@@ -338,16 +409,19 @@ pub(crate) async fn put(
     ApiJson(body): ApiJson<StreamSettingsRequest>,
 ) -> Result<Json<StreamBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let source = path_id(&id)?;
     let stream = configure(
         &state,
         &principal.context(),
         workspace.id,
-        path_id(&id)?,
+        source,
         &name,
         &body,
     )
     .await?;
-    Ok(Json(StreamBody::try_from(&stream)?))
+    // Only an admin gets here, so the high-water mark is shown.
+    let mut bodies = bodies(&state, workspace.id, source, &[stream], true).await?;
+    Ok(Json(bodies.remove(0)))
 }
 
 #[cfg(test)]

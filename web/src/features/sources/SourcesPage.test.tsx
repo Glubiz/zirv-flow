@@ -38,6 +38,27 @@ describe("sources", () => {
     expect(screen.getByText("2 sources in all.")).toBeInTheDocument();
   });
 
+  it("shows a freshness badge per source, and says when a source has no enabled streams", async () => {
+    mockAsAdmin(() =>
+      json([
+        aSource({ freshness: "fresh" }),
+        aSource({ id: "src-2", name: "Warehouse", freshness: "stale" }),
+        aSource({ id: "src-3", name: "Billing", freshness: "failing" }),
+        aSource({ id: "src-4", name: "Idle", freshness: null }),
+      ]),
+    );
+    mount();
+
+    const table = await screen.findByRole("table", { name: "Sources of this workspace" });
+    expect(within(table).getByRole("columnheader", { name: "Freshness" })).toBeInTheDocument();
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[1]!).getByText("Fresh")).toBeInTheDocument();
+    expect(within(rows[2]!).getByText("Stale")).toBeInTheDocument();
+    expect(within(rows[3]!).getByText("Failing")).toBeInTheDocument();
+    expect(within(rows[4]!).getByText("No enabled streams")).toBeInTheDocument();
+    expect(within(rows[4]!).queryByText("Fresh")).not.toBeInTheDocument();
+  });
+
   it("shows a loading state while the sources load", async () => {
     mockAsAdmin(() => new Promise<Response>(() => undefined));
     mount();
