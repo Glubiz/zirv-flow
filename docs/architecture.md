@@ -1231,6 +1231,26 @@ model is refused while a requirement is missing. Provider-specific responses
 are reduced to one internal stream of text, usage and structured tool calls, so
 product code does not branch on provider.
 
+As built (M3, AI provider layer): `zirv-flow-ai` depends on `core` only. Its `Provider` trait is
+`complete(http, endpoint, key, request) -> ChatResponse`, and a response is reduced to `Text` and
+`ToolCall` parts plus `Usage`. An answer from an OpenAI-compatible server without a `usage` object,
+or a tool call whose arguments are not JSON, is a `Capability` error; the probe turns these into
+missing capabilities. `AiHttp` is the crate's one HTTP client: a resolver hook calls
+`EgressPolicy::decide_all` and hands reqwest only the checked addresses, IP literals are decided
+before sending, redirects are never followed, environment proxies are ignored, the total timeout is
+60 s and a response body is capped at 4 MiB; a source-scan test allows exactly one client builder.
+It duplicates the small guard of `zirv-flow-connectors` because 5.1 forbids the edge; both delegate
+every decision to `core::egress`. Tool parameter schemas are a validated subset (`JsonSchema`), so no
+provider sees a keyword it may reject. Generating tool schemas from the API types is #93's.
+
+The deployment allowlist is `[ai]` in the configuration (`ai.providers` with models, context
+windows and prices in micro-units per million tokens, `ai.rate_limit_per_user_per_minute`,
+`ai.max_repair_attempts`), validated at startup and by `config check`. Workspace settings are
+`ai_settings`; the provider key is an `encrypted_secrets` row of purpose `ai_provider_key`, written
+in the same transaction as the settings. `PUT ai/settings` runs the probe before it stores anything,
+checks the configured window against 32,768 tokens without calling the model, and stores only a
+passing probe. Streaming is not built; #93 adds it if its UI needs it.
+
 ### 13.2 Typed tools and the draft loop
 
 Tool JSON schemas are generated from the same Rust types that produce the API
@@ -1283,6 +1303,33 @@ kept. Per-workspace budgets stop
 new calls before dispatch with a clear error, and per-user rate limits bound
 abuse and accidental loops. Audit records never contain prompt or response
 content.
+
+As built (M3, AI provider layer): `api::assistant::dispatch` is the only way product code calls a
+model. In order it loads the settings (refusing with `Disabled` when the workspace is off, has no
+key or its model left the allowlist), refuses over the per-user per-minute limit (429), refuses when
+the month's spend has reached the budget (402; a budget of 0 allows no calls), builds the request
+under the workspace's `Privacy`, opens the key, reserves the call, calls the provider, then finishes
+the `ai_calls` row and, if the workspace opted in, adds an `ai_transcripts` row. A refusal at a gate
+sends and records nothing. Spend and rate are read from `ai_calls` (the sum of
+`estimated_cost_micros` since the first of the month in UTC; the calls of the last minute by the
+database clock), so they hold across instances. The reservation is one transaction under an advisory
+lock on the workspace: it counts every row, `pending` ones included, and inserts a `pending` row
+whose cost is the worst case (one input token per byte of the request text plus framing, the full
+output cap), and admits the call only when the month's spend plus that cost stays within the budget,
+so concurrent calls cannot all pass the gates and real spend never exceeds the budget. The call then
+runs in a task of its own, so a dropped handler cannot leave the row pending, and the row is
+finished with the real tokens and cost. A panic marks it `abandoned`; a process that dies mid-call
+leaves it `pending`, and the next reservation of the workspace marks `pending` rows older than the
+client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is conservative and
+intended. Personal data is a
+distinct request content type (`Personal`), and a request builder at `SchemaOnly` privacy returns
+`PersonalDataNotAllowed` for it, so the check does not depend on the caller. Untrusted content is
+fenced in `<untrusted_data>` delimiters, with a system notice added whenever it appears. Bounded
+repair sends each attempt through the same gates. `ai_calls` has no column that can hold content
+(a test lists its columns); `ai_transcripts` carries `expires_at`, and the
+`maintenance.ai_transcripts` job, scheduled hourly by the migration, deletes expired rows in batches.
+Erasing a person deletes the workspace's transcripts whose text contains their ids or identifier
+values, ignoring case, in the erase transaction.
 
 ### 13.5 Evaluation and later MCP exposure
 

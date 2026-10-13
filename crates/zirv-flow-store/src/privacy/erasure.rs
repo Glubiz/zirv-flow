@@ -269,6 +269,7 @@ pub async fn erase_person(
     // a key-share lock on its person, so once the group is locked a concurrent attach waits, and
     // after this commits the drain finds its locked person gone, which is a retryable race, and the
     // batch retries into a new person.
+    let mut values: Vec<String> = Vec::new();
     let inbox = lock_inbox(connection, workspace, key).await?;
     if let Some(group) = lock_group(connection, workspace, person).await? {
         for &id in &group.ids {
@@ -277,6 +278,7 @@ pub async fn erase_person(
             }
         }
         for (kind, value) in group_identities(connection, workspace, group.current).await? {
+            values.push(value.clone());
             // Stored identities are normalized already; one that no longer parses has no hash.
             if let Ok(identifier) = Identifier::parse(&kind, &value) {
                 let hash = identifier_hash(key, &identifier).to_vec();
@@ -304,6 +306,13 @@ pub async fn erase_person(
     let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
     let inbox_rows =
         delete_inbox_rows(connection, workspace, &matching_rows(&inbox, &wanted)).await?;
+    // Transcripts are free text, so they are found by the person's ids and identifier values.
+    let needles: Vec<String> = std::iter::once(person)
+        .chain(people.iter().copied())
+        .map(|id| id.to_string())
+        .chain(values)
+        .collect();
+    crate::ai::erase_ai_transcripts(connection, workspace, &needles).await?;
     let mut person_found = false;
     for id in std::iter::once(person).chain(people) {
         person_found |=
@@ -678,6 +687,78 @@ mod tests {
         );
         assert!(item_identifiers(&json!({"identifiers": 5})).is_empty());
         assert!(item_identifiers(&json!({})).is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_deletes_the_ai_transcripts_that_name_them_and_no_others(
+        pool: PgPool,
+    ) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let other = crate::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("elsewhere").unwrap(),
+            &zirv_flow_core::Slug::parse("elsewhere").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let later = time::OffsetDateTime::now_utc() + time::Duration::days(7);
+        let mut connection = pool.acquire().await.unwrap();
+        for (workspace, content) in [
+            (
+                ws,
+                json!({"prompt": format!("map {}", EMAIL.to_uppercase())}),
+            ),
+            (ws, json!({"prompt": format!("person {person}")})),
+            (ws, json!({"prompt": format!("also {BYSTANDER_EMAIL}")})),
+            (other, json!({"prompt": format!("map {EMAIL}")})),
+        ] {
+            let call = Uuid::now_v7();
+            crate::record_ai_call(
+                &mut connection,
+                &crate::NewAiCall {
+                    id: call,
+                    workspace_id: workspace,
+                    user_id: None,
+                    feature: "mapping",
+                    provider_id: "p",
+                    model: "m",
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    estimated_cost_micros: 1,
+                    latency_ms: 1,
+                    outcome: crate::CallOutcome::Ok,
+                    draft_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            crate::insert_ai_transcript(&mut connection, workspace, call, None, &content, later)
+                .await
+                .unwrap();
+        }
+        drop(connection);
+        let request = request(&pool, ws, person).await;
+
+        erase(&pool, ws, request.id).await;
+
+        let left: Vec<(Uuid, Value)> =
+            sqlx::query_as("SELECT workspace_id, content FROM ai_transcripts ORDER BY created_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let texts: Vec<String> = left
+            .iter()
+            .map(|(_, content)| content.to_string())
+            .collect();
+        assert_eq!(left.len(), 2, "{texts:?}");
+        assert!(texts.iter().any(|text| text.contains(BYSTANDER_EMAIL)));
+        assert!(
+            left.iter()
+                .any(|(workspace, _)| *workspace == other.as_uuid())
+        );
+        assert!(texts.iter().all(|text| !text.contains(&person.to_string())));
     }
 
     #[sqlx::test]

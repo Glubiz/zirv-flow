@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, useLocation } from "react-router";
 
+import { AiSettingsPage } from "../features/assistant";
 import { ApiKeysPage } from "../features/api-keys";
 import { ContactDefinitionPage, ContactPage, ContactsPage } from "../features/contacts";
 import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
@@ -138,6 +139,7 @@ export function AppRoutes() {
           <Route path="w/:ws/topics" element={<TopicsPage />} />
           <Route path="w/:ws/suppressions" element={<SuppressionsPage />} />
           <Route path="w/:ws/privacy" element={<PrivacyPage />} />
+          <Route path="w/:ws/ai" element={<AiSettingsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />
