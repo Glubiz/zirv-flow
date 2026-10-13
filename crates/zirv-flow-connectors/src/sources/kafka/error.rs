@@ -52,12 +52,10 @@ pub(super) fn classify(error: &(dyn Error + 'static)) -> FetchError {
         if let Some(ClientError::ServerError { protocol_error, .. }) =
             error.downcast_ref::<ClientError>()
         {
-            match protocol_error {
-                ProtocolError::OffsetOutOfRange => return FetchError::OffsetOutOfRange,
-                ProtocolError::UnknownTopicOrPartition => {
-                    return FetchError::Failed(TOPIC_MISSING);
-                }
-                _ => {}
+            // UnknownTopicOrPartition is not named here: a broker answers it briefly during a
+            // leader move, so it is a connect failure. A missing topic is told by the topic list.
+            if matches!(protocol_error, ProtocolError::OffsetOutOfRange) {
+                return FetchError::OffsetOutOfRange;
             }
         }
         if error.is::<rskafka::SaslError>() {
@@ -128,7 +126,8 @@ mod tests {
     }
 
     #[test]
-    fn a_server_error_for_the_offset_or_the_topic_is_named() {
+    fn a_server_error_for_the_offset_is_named_and_an_unknown_topic_is_a_retryable_connect_failure()
+    {
         let server = |protocol_error| ClientError::ServerError {
             protocol_error,
             error_message: Some("secret broker text".into()),
@@ -143,7 +142,7 @@ mod tests {
         );
         assert_eq!(
             classify(&server(ProtocolError::UnknownTopicOrPartition)),
-            FetchError::Failed(TOPIC_MISSING)
+            FetchError::Failed(CONNECT_FAILED)
         );
     }
 
