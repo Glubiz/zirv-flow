@@ -9,12 +9,14 @@ interface StreamDialogProps {
   workspaceId: string;
   sourceId: string;
   stream: Stream;
+  /** The stream of a webhook: only whether it receives and when it counts as stale are set here. */
+  push?: boolean;
   onClose: () => void;
   onSaved: (stream: Stream) => void;
 }
 
 /** Whether a stream is read, and how: the sync mode, cursor field, primary key and staleness. */
-export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }: StreamDialogProps) {
+export function StreamDialog({ workspaceId, sourceId, stream, push = false, onClose, onSaved }: StreamDialogProps) {
   const modes = stream.discovered.sync_modes;
   const fields = stream.discovered.fields;
   const [enabled, setEnabled] = useState(stream.enabled);
@@ -69,6 +71,36 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
       setFailure(describeError(error));
       setBusy(false);
     }
+  }
+
+  if (push) {
+    return (
+      <Dialog title={`Set up ${stream.name}`} onClose={onClose}>
+        <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
+          <label className="check">
+            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <span>Receive payloads</span>
+          </label>
+          <p className="muted">The webhook answers 404 until this is on and the stream has a mapping.</p>
+          <TextField
+            label="Expect a payload at least every (seconds)"
+            hint="Optional. Without it the webhook never counts as stale."
+            type="number"
+            min={1}
+            value={staleness}
+            onChange={(event) => setStaleness(event.target.value)}
+            error={stalenessOk ? undefined : "Use a whole number above zero."}
+          />
+          {failure ? <InlineError {...failure} /> : null}
+          <div className="dialog-actions">
+            <Button onClick={onClose}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={busy || !stalenessOk}>
+              {busy ? "Saving" : "Save stream"}
+            </Button>
+          </div>
+        </form>
+      </Dialog>
+    );
   }
 
   return (

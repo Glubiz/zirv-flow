@@ -1816,6 +1816,72 @@ export interface paths {
         patch: operations["update_trait"];
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's webhooks, ordered by name. */
+        get: operations["list_webhooks"];
+        put?: never;
+        /**
+         * Creates a webhook with its source, its stream `payload` (disabled until mapped) and a shared
+         *     secret, returned once. Workspace admins only. Audited as `webhook.created`.
+         */
+        post: operations["create_webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/webhooks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One webhook. */
+        get: operations["get_webhook"];
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a webhook with its source, stream, queued payloads and secret. Workspace admins
+         *     only. Audited as `webhook.deleted`.
+         */
+        delete: operations["delete_webhook"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes a webhook: its name, its signature scheme, its dedupe field, or whether it receives.
+         *     Workspace admins only. Audited as `webhook.updated`.
+         */
+        patch: operations["update_webhook"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/webhooks/{id}/rotate-secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issues a new shared secret, returned once. The old secret stops working at once. Workspace
+         *     admins only. Audited as `webhook.secret_rotated`.
+         */
+        post: operations["rotate_webhook_secret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -1827,6 +1893,29 @@ export interface paths {
         get: operations["get_healthz"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hooks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Receives one JSON document for a webhook. The request carries the hook's signature header
+         *     (and timestamp header, unless the hook signs the body alone); the names, the prefix and the
+         *     tolerance are the hook's, shown in the sources UI. The signed message is `"{timestamp}.{body}"`
+         *     for a timestamped hook and the raw body otherwise, signed with HMAC-SHA256 under the hook's
+         *     secret and sent as the prefix followed by 64 hex digits.
+         */
+        post: operations["receive_webhook"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2040,6 +2129,8 @@ export interface components {
             emits_deletes: boolean;
             full_refresh: boolean;
             incremental: boolean;
+            /** @description Records arrive by push (a webhook): no schedule, no run. */
+            push: boolean;
         };
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
@@ -2339,6 +2430,39 @@ export interface components {
             /** @description 12 to 1024 characters. */
             password: string;
         };
+        CreateWebhookRequest: {
+            /**
+             * @description A dotted path into the payload whose value (a string or a number of 1 to 128
+             *     characters) identifies it, such as `id` or `data.order.id`.
+             * @example id
+             */
+            dedupe_field: string;
+            /**
+             * @description 1 to 128 characters after trimming; unique among the workspace's sources.
+             * @example Orders
+             */
+            name: string;
+            /** @description Default `X-Zirv-Signature`. */
+            signature_header?: string | null;
+            /** @description The text before the 64 hex digits; default `sha256=`, may be empty. */
+            signature_prefix?: string | null;
+            /**
+             * Format: int32
+             * @description Expect a payload at least this often, in seconds, or the hook is stale. Absent: never
+             *     stale.
+             */
+            staleness_threshold_seconds?: number | null;
+            /**
+             * @description Default `X-Zirv-Timestamp`; null selects the body-only scheme, whose only replay
+             *     defense is the dedupe field.
+             */
+            timestamp_header?: string | null;
+            /**
+             * Format: int32
+             * @description 1 to 86400; default 300.
+             */
+            tolerance_seconds?: number | null;
+        };
         CreateWorkspaceRequest: {
             /**
              * @description 1 to 100 characters.
@@ -2357,6 +2481,11 @@ export interface components {
              *     of its secret is stored.
              */
             key: string;
+        };
+        /** @description A hook with its shared secret, shown once. */
+        CreatedWebhookBody: components["schemas"]["WebhookBody"] & {
+            /** @description The shared secret. Shown only in this response; keep it. */
+            secret: string;
         };
         /** @description An import: its file, mapping, state and counters. */
         CsvImportBody: {
@@ -3397,6 +3526,13 @@ export interface components {
              */
             limit?: number | null;
             mapping?: null | components["schemas"]["MappingBody"];
+            /**
+             * @description For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all)
+             *     to map as the drain would. Required for a webhook stream and refused for any other.
+             */
+            sample?: {
+                [key: string]: unknown;
+            }[] | null;
         };
         PrivacySettingsBody: {
             /**
@@ -3667,6 +3803,11 @@ export interface components {
             role: string;
             /** Format: uuid */
             user_id: string;
+        };
+        /** @description A new shared secret, shown once. */
+        RotatedSecretBody: {
+            /** @description The new shared secret. The old one stopped working when this was issued. */
+            secret: string;
         };
         /** @description One sync run: a read of one stream. */
         RunBody: {
@@ -4287,6 +4428,18 @@ export interface components {
             precedence?: string | null;
             source_order?: string[] | null;
         };
+        UpdateWebhookRequest: {
+            dedupe_field?: string | null;
+            /** @description Stops or resumes receiving without losing the setup. */
+            enabled?: boolean | null;
+            name?: string | null;
+            signature_header?: string | null;
+            signature_prefix?: string | null;
+            /** @description null selects the body-only scheme. */
+            timestamp_header?: string | null;
+            /** Format: int32 */
+            tolerance_seconds?: number | null;
+        };
         /** @description A user as shown to API callers; never includes the password hash. */
         UserBody: {
             email: string;
@@ -4319,6 +4472,44 @@ export interface components {
         VersionBody: {
             /** @description The running zirv-flow version. */
             version: string;
+        };
+        WebhookAccepted: {
+            /** @description Payloads appended to the inbox: always 1. They are durable, not yet applied. */
+            accepted: number;
+        };
+        /** @description A hook as the API shows it. Never holds the secret. */
+        WebhookBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The path in the payload whose value identifies it; a replay of the same value is
+             *     recognised.
+             */
+            dedupe_field: string;
+            /** Format: uuid */
+            id: string;
+            /** @description The source's name. */
+            name: string;
+            /**
+             * @description The path to send payloads to, relative to the server's origin.
+             * @example /hooks/3f2a9c1e-0b7d-4e55-9c1a-7d4e2b6a8f10
+             */
+            path: string;
+            /** @description Whether the hook accepts payloads: the source and the stream are enabled and mapped. */
+            receiving: boolean;
+            signature_header: string;
+            signature_prefix: string;
+            /** Format: uuid */
+            source_id: string;
+            /** Format: uuid */
+            stream_id: string;
+            /**
+             * @description The header holding the unix seconds the sender signed; null for a hook that signs the
+             *     body alone.
+             */
+            timestamp_header?: string | null;
+            /** Format: int32 */
+            tolerance_seconds: number;
         };
         WorkspaceBody: {
             /** Format: date-time */
@@ -11944,6 +12135,374 @@ export interface operations {
             };
         };
     };
+    list_webhooks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The webhooks */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWebhookRequest"];
+            };
+        };
+        responses: {
+            /** @description The new webhook and its secret, shown only now */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedWebhookBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A source with that name exists, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, header name, prefix, tolerance, dedupe field or threshold */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Webhook id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The webhook */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or webhook, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Webhook id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or webhook, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Webhook id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWebhookRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated webhook */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or webhook, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another source has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    rotate_webhook_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Webhook id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret, shown only now */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotatedSecretBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or webhook, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_healthz: {
         parameters: {
             query?: never;
@@ -11960,6 +12519,99 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StatusBody"];
+                };
+            };
+        };
+    };
+    receive_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The id in the hook's URL */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description One JSON object, at most ingest.max_webhook_bytes */
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Appended to the inbox: durable, not yet applied */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookAccepted"];
+                };
+            };
+            /** @description The body is not a JSON object (code invalid_payload) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The signature or timestamp is missing, malformed, outside the tolerance or wrong (code invalid_signature) */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such hook, or it is not receiving (disabled or unmapped) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_webhook_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The payload has no usable value at the hook's dedupe field (code dedupe_missing) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The hook is over its rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until a request fits */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database or the secret keyring is unavailable; nothing was stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };

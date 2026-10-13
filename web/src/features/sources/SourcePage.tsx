@@ -2,11 +2,12 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
-import { Button, Dialog, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
+import { Button, Dialog, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useSourceAccess } from "./access";
 import { EditSourceDialog } from "./EditSourceDialog";
 import { FreshnessBadge } from "./FreshnessBadge";
-import { kindName, plural, showValue, type Stream } from "./labels";
+import { isPush, kindName, plural, showValue, type Stream } from "./labels";
+import { WebhookPanel } from "./WebhookPanel";
 import { RunsPanel } from "./RunsPanel";
 import { StreamsPanel } from "./StreamsPanel";
 
@@ -108,13 +109,15 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
         {(data) => {
           const known = kinds.status === "ready" ? kinds.data : null;
           const kind = known?.find((entry) => entry.kind === data.kind) ?? null;
+          const push = isPush(kind);
+          const payload = streams.status === "ready" ? (streams.data.find((entry) => entry.name === "payload") ?? null) : null;
           return (
             <>
               <PageHeader
                 title={data.name}
                 lede={`${kindName(known, data.kind)} source, updated ${formatDateTime(data.updated_at)}.`}
                 actions={
-                  canManage ? (
+                  canManage && !push ? (
                     <>
                       <Button onClick={() => void test()} disabled={busy}>
                         Test connection
@@ -140,6 +143,19 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                 </p>
               ) : null}
               {failure && !deleting ? <InlineError {...failure} /> : null}
+              {push ? (
+                <WebhookPanel
+                  workspaceId={workspaceId}
+                  sourceId={sourceId}
+                  canManage={canManage}
+                  stream={payload}
+                  onChanged={(message) => {
+                    setNotice(message);
+                    source.reload();
+                    streams.reload();
+                  }}
+                />
+              ) : (
               <Panel title="Settings">
                 <dl className="facts">
                   <div className="fact">
@@ -172,6 +188,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                   ))}
                 </dl>
               </Panel>
+              )}
               <Panel title="Streams" flush>
                 <ResourceView resource={streams} loadingLabel="Loading streams">
                   {(list) => (
@@ -182,11 +199,12 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                         streams={list}
                         canManage={canManage}
                         onChanged={streamChanged}
-                        onRun={(stream) => void startRuns(stream.name)}
-                        onReconcile={(stream) => void startRuns(stream.name, "reconcile")}
+                        push={push}
+                        onRun={push ? undefined : (stream) => void startRuns(stream.name)}
+                        onReconcile={push ? undefined : (stream) => void startRuns(stream.name, "reconcile")}
                         busy={busy}
                       />
-                      {canManage ? (
+                      {canManage && !push ? (
                         <div className="panel-footer">
                           <Button onClick={() => void discover()} disabled={busy}>
                             {list.length === 0 ? "Discover streams" : "Discover streams again"}
@@ -198,14 +216,21 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                 </ResourceView>
               </Panel>
               <Panel title="Runs" flush>
-                {canManage ? (
+                {push ? (
+                  <EmptyState title="A webhook has no runs">
+                    Payloads are applied as they arrive. Its freshness above shows when the last one came.
+                  </EmptyState>
+                ) : null}
+                {canManage && !push ? (
                   <div className="panel-footer">
                     <Button onClick={() => void startRuns(null)} disabled={busy}>
                       Run now
                     </Button>
                   </div>
                 ) : null}
-                <RunsPanel workspaceId={workspaceId} sourceId={sourceId} canManage={canManage} version={runsVersion} />
+                {push ? null : (
+                  <RunsPanel workspaceId={workspaceId} sourceId={sourceId} canManage={canManage} version={runsVersion} />
+                )}
               </Panel>
               {!canManage ? <p className="muted">You can look at this source but not change it.</p> : null}
               <p>
