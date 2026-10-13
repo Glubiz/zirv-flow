@@ -250,6 +250,13 @@ pub async fn commit_sync_batch(
         ..Counts::default()
     };
     let mut decisions = Vec::new();
+    // The ledger row of each refused record, when an earlier run left one: a record refused on
+    // first sight has none.
+    let mut refused_records: Vec<Option<Uuid>> = batch
+        .rejected
+        .iter()
+        .map(|reject| seen.get(reject.record_key.as_str()).copied())
+        .collect();
     let mut refusals: Vec<Refusal> = batch
         .rejected
         .iter()
@@ -291,6 +298,7 @@ pub async fn commit_sync_batch(
             reasons: vec![(String::new(), reason)],
             sample: upsert.sample.clone(),
         });
+        refused_records.push(seen.get(upsert.record.record_key.as_str()).copied());
     }
 
     // The store's own `contribution.removed` decision says what happened to the person; the
@@ -332,17 +340,14 @@ pub async fn commit_sync_batch(
         &refusals,
     )
     .await?;
-    for refusal in &refusals {
+    for (refusal, record) in refusals.iter().zip(refused_records) {
+        let mut subjects = vec![("ingest_reject", refusal.id)];
+        subjects.extend(record.map(|id| ("source_record", id)));
         let code = refusal
             .reasons
             .first()
             .map_or("rejected", |(_, code)| *code);
-        decisions.push(decision(
-            batch,
-            "rejected",
-            Some(code),
-            vec![("ingest_reject", refusal.id)],
-        ));
+        decisions.push(decision(batch, "rejected", Some(code), subjects));
     }
     append_decisions(&mut tx, &decisions).await?;
 

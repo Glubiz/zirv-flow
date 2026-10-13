@@ -26,6 +26,7 @@ mod tests {
     use zirv_flow_store::secrets;
 
     use crate::admin::{self, Context};
+    use crate::test_support::{tables_hold_no, the_scan_finds_a_planted};
     use crate::{AppState, router};
 
     const PASSWORD: &str = "correct horse battery";
@@ -34,6 +35,7 @@ mod tests {
     );
     const CODE: &str = "zz-authorization-code-4711";
     const CLIENT_SECRET: &str = "zz-client-secret-0815";
+    const REPLACED_CLIENT_SECRET: &str = "zz-client-secret-replaced-2648";
     const PUBLIC_URL: &str = "http://flow.test";
 
     /// What the identity provider does with the next code exchange.
@@ -1354,11 +1356,18 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn nothing_secret_reaches_a_response_or_the_audit_trail(pool: PgPool) {
+    async fn the_oauth_tokens_and_the_client_secret_reach_no_response_audit_entry_or_table_row(
+        pool: PgPool,
+    ) {
         let fx = fixture(&pool).await;
         let id = fx.create_source(fx.manifest()).await;
         fx.connect(&id).await;
+        let sample = json!({"stream": "contacts"});
         let mut seen = Vec::new();
+        let ask = |method: &'static str, tail: String, body: Option<Value>| {
+            let fx = &fx;
+            async move { fx.as_key(method, &tail, body).await.body.to_string() }
+        };
         for (method, tail, body) in [
             ("GET", format!("/sources/{id}"), None),
             ("GET", "/sources".to_owned(), None),
@@ -1367,16 +1376,50 @@ mod tests {
             (
                 "POST",
                 format!("/sources/{id}/manifest/sample"),
-                Some(json!({"stream": "contacts"})),
+                Some(sample.clone()),
             ),
+            ("GET", format!("/sources/{id}/runs"), None),
         ] {
-            seen.push(fx.as_key(method, &tail, body).await.body.to_string());
+            seen.push(ask(method, tail, body).await);
         }
+        // The provider revokes the access token: the call refreshes and the rotated pair is stored.
+        *fx.upstream.valid_access.lock().unwrap() = "revoked".to_owned();
+        seen.push(
+            ask(
+                "POST",
+                format!("/sources/{id}/manifest/sample"),
+                Some(sample),
+            )
+            .await,
+        );
+        assert_eq!(fx.upstream.refreshes.load(Ordering::SeqCst), 1);
+        seen.push(
+            ask(
+                "PATCH",
+                format!("/sources/{id}"),
+                Some(json!({"credential":
+                    {"client_id": "client", "client_secret": REPLACED_CLIENT_SECRET}})),
+            )
+            .await,
+        );
+        seen.push(ask("GET", format!("/sources/{id}"), None).await);
+        seen.push(ask("GET", format!("/sources/{id}/runs"), None).await);
         seen.push(serde_json::to_string(&fx.audit_details().await).unwrap());
         let everything = seen.join("\n");
 
-        for secret in [CODE, CLIENT_SECRET, "acc-0", "rt-0"] {
+        let secrets = [
+            CODE,
+            CLIENT_SECRET,
+            REPLACED_CLIENT_SECRET,
+            "acc-0",
+            "rt-0",
+            "acc-1",
+            "rt-1",
+        ];
+        for secret in secrets {
             assert!(!everything.contains(secret), "{secret} leaked");
         }
+        tables_hold_no(&pool, &secrets).await;
+        the_scan_finds_a_planted(&pool, &secrets).await;
     }
 }

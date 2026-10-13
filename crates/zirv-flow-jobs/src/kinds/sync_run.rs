@@ -1269,6 +1269,22 @@ mod tests {
             )
             .await
             .unwrap();
+            // Record 2 was synced earlier too, so its refusal below has a ledger row to name.
+            apply_profile_batch(
+                &pool,
+                env.ws,
+                &[ProfileRecord {
+                    source: env.source.to_string(),
+                    stream: "stream_1".into(),
+                    record_key: "stream_1-2".into(),
+                    identifiers: vec![("email".into(), "two@example.com".into())],
+                    traits: serde_json::Map::new(),
+                    observed_at: OffsetDateTime::now_utc(),
+                    trace: TraceContext::root(Cause::api("seed")),
+                }],
+            )
+            .await
+            .unwrap();
             // A record the source no longer lists is swept when the read is complete.
             apply_profile_batch(
                 &pool,
@@ -1363,6 +1379,54 @@ mod tests {
             .find(|d| d.3 == "sync.record" && d.4 == "rejected")
             .unwrap();
         assert_eq!(rejected.5["ingest_reject"], json!(reject_id));
+        // The reject's typed code is on the decision and on the reject row, and the decision
+        // names the record's ledger row as it does for an applied or deleted record.
+        let (reject_code, reject_reasons): (String, Value) =
+            sqlx::query_as("SELECT reason, reasons FROM ingest_rejects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let decided: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM decision_records WHERE action = 'sync.record' AND outcome = 'rejected'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decided.as_deref(), Some(reject_code.as_str()));
+        assert_eq!(reject_reasons[0]["reason"], json!(reject_code));
+        assert_eq!(reject_code, "invalid_identifier");
+        let record_of = |key: &str| {
+            let key = key.to_owned();
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id::text FROM source_records WHERE record_key = $1",
+                )
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            rejected.5["source_record"],
+            json!(record_of("stream_1-2").await)
+        );
+        let deleted_records: Vec<(Option<String>, Value)> = sqlx::query_as(
+            "SELECT reason, subject_ids FROM decision_records WHERE outcome = 'deleted' ORDER BY reason",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(deleted_records.len(), 2);
+        assert_eq!(
+            deleted_records[0].1["source_record"],
+            json!(record_of("stream_1-1").await)
+        );
+        assert_eq!(
+            deleted_records[1].1["source_record"],
+            json!(record_of("stale").await)
+        );
         // The reject carries the run and a sample that keeps only the non-PII trait value.
         let (sync_run, sample, person): (Uuid, Value, Option<Uuid>) =
             sqlx::query_as("SELECT sync_run_id, sample, person_id FROM ingest_rejects")
@@ -1393,6 +1457,7 @@ mod tests {
             live,
             [
                 "stream_1-0",
+                "stream_1-2",
                 "stream_1-3",
                 "stream_1-4",
                 "stream_1-5",

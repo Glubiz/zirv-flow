@@ -40,6 +40,9 @@ mod workspaces;
 #[cfg(test)]
 mod acceptance;
 
+#[cfg(test)]
+mod test_support;
+
 use std::future::Future;
 use std::io;
 
