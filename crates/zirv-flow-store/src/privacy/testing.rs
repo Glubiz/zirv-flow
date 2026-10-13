@@ -164,6 +164,18 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
             .all(|outcome| matches!(outcome, EventOutcome::Accepted { .. })),
         "{accepted:?}"
     );
+    // One event came from the person's CRM record, as a synced event will: removing or erasing
+    // the record's person must take it along.
+    sqlx::query(
+        "UPDATE events SET source_record_id = \
+            (SELECT id FROM source_records \
+             WHERE workspace_id = $1 AND source = 'crm' AND record_key = '1') \
+         WHERE workspace_id = $1 AND message_id = 'm-2'",
+    )
+    .bind(ws.as_uuid())
+    .execute(pool)
+    .await
+    .unwrap();
     set_event_policy(
         pool,
         ws,
@@ -303,6 +315,37 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         merged,
         bystander,
     }
+}
+
+/// The rows, per table with a `source_record_id` column, that name one of `records`. A table that
+/// gains such a column is scanned without a change here.
+pub(crate) async fn rows_naming_records(pool: &PgPool, records: &[Uuid]) -> Vec<(String, i64)> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND column_name = 'source_record_id' \
+           AND data_type = 'uuid' \
+           AND NOT EXISTS (SELECT 1 FROM pg_class c \
+                           JOIN pg_namespace n ON n.oid = c.relnamespace \
+                           WHERE n.nspname = table_schema::text \
+                             AND c.relname = table_name::text AND c.relispartition) \
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut found = Vec::new();
+    for table in tables {
+        // Names come from the catalog, never from input.
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE source_record_id = ANY($1)"
+        )))
+        .bind(records)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        found.push((table, count));
+    }
+    found
 }
 
 #[cfg(test)]

@@ -32,10 +32,10 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState, reject_sample};
 use zirv_flow_store::secrets::{self, OpenError};
 use zirv_flow_store::{
-    PgPool, ProfileRecord, RunEnd, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
-    SyncBatch, SyncBatchOutcome, SyncLease, SyncReject, SyncUpsert, commit_sync_batch, fail_run,
-    find_source, find_stream_by_id, finish_run, list_trait_definitions, queue_runs_for_source,
-    run_trace, start_run,
+    PgPool, ProfileRecord, RunEnd, SYNC_DELETE_BY_SOURCE, SYNC_RUN_JOB_KIND, SecretId,
+    SecretPurpose, StoreError, Stream, SyncBatch, SyncBatchOutcome, SyncLease, SyncReject,
+    SyncUpsert, commit_sync_batch, fail_run, find_source, find_stream_by_id, finish_run,
+    list_trait_definitions, queue_runs_for_source, run_trace, start_run,
 };
 
 use super::import_rows::Probe;
@@ -221,7 +221,7 @@ struct Planner<'a> {
 #[derive(Default)]
 struct Planned {
     upserts: Vec<SyncUpsert>,
-    deleted: Vec<String>,
+    deleted: Vec<(String, &'static str)>,
     rejected: Vec<SyncReject>,
 }
 
@@ -232,7 +232,7 @@ impl Planner<'_> {
         let mut planned = Planned::default();
         for record in records {
             if record.deleted {
-                planned.deleted.push(record.key);
+                planned.deleted.push((record.key, SYNC_DELETE_BY_SOURCE));
                 continue;
             }
             let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
@@ -255,6 +255,7 @@ impl Planner<'_> {
                     },
                 }),
                 Err(errors) => planned.rejected.push(SyncReject {
+                    record_key: record.key,
                     reasons: errors
                         .into_iter()
                         .map(|error| (error.column, error.reason.as_str()))
@@ -368,6 +369,7 @@ impl Pass<'_> {
             trace: self.planner.trace,
             upserts: &planned.upserts,
             deleted: &planned.deleted,
+            seen: &[],
             rejected: &planned.rejected,
             checkpoint: &checkpoint.0,
             incremental: self.stream.sync_mode == SyncMode::Incremental.as_str(),
@@ -575,8 +577,8 @@ mod tests {
         Cause, Keyring, MasterKey, Slug, TraceContext, WorkspaceName, seal, secret_aad,
     };
     use zirv_flow_store::{
-        CancelOutcome, ClaimedJob, DiscoveredStream, NewSource, NewTraitDefinition, RunTrigger,
-        StreamSettings, apply_profile_batch, begin, cancel_run, claim_job, commit,
+        CancelOutcome, ClaimedJob, DiscoveredStream, NewSource, NewTraitDefinition, RunKind,
+        RunTrigger, StreamSettings, apply_profile_batch, begin, cancel_run, claim_job, commit,
         configure_stream, create_source, create_trait_definition, create_workspace, find_run,
         queue_run, set_stream_mapping, upsert_discovered_streams,
     };
@@ -722,6 +724,8 @@ mod tests {
                     cursor_field: cursor,
                     primary_key: &key,
                     staleness_threshold_seconds: None,
+                    reconcile_schedule: None,
+                    sweep_limit: 0.5,
                 },
             )
             .await
@@ -747,6 +751,7 @@ mod tests {
                 self.ws,
                 self.source,
                 self.stream,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 None,
             )
@@ -1357,6 +1362,7 @@ mod tests {
                 env.ws,
                 env.source,
                 env.stream,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 None,
             )
@@ -1388,6 +1394,7 @@ mod tests {
             env.ws,
             env.source,
             streams[1].id,
+            RunKind::Sync,
             RunTrigger::Manual,
             None,
         )

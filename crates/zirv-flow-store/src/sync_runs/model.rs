@@ -26,6 +26,25 @@ impl RunTrigger {
     }
 }
 
+/// What a run is for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunKind {
+    /// Reads the stream and applies its records; a full refresh then sweeps.
+    Sync,
+    /// Reads an incremental stream from the beginning for its keys only, applies nothing and
+    /// sweeps the live records it did not see.
+    Reconcile,
+}
+
+impl RunKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Reconcile => "reconcile",
+        }
+    }
+}
+
 /// A sync run: one read of one stream. It holds counters and codes, never a record.
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct SyncRun {
@@ -39,6 +58,8 @@ pub struct SyncRun {
     pub trigger: String,
     /// The stream's sync mode when the run was queued.
     pub sync_mode: String,
+    /// `sync` or `reconcile`.
+    pub run_kind: String,
     pub records_read: i64,
     pub records_applied: i64,
     pub records_unchanged: i64,
@@ -63,6 +84,11 @@ impl SyncRun {
     pub fn is_active(&self) -> bool {
         matches!(self.state.as_str(), "queued" | "running")
     }
+
+    /// Whether the run is a reconciliation.
+    pub fn is_reconcile(&self) -> bool {
+        self.run_kind == RunKind::Reconcile.as_str()
+    }
 }
 
 /// The columns of [`SyncRun`], read from the row aliased `$a` of `sync_runs`, with the stream's
@@ -82,6 +108,8 @@ macro_rules! run_columns {
             ".trigger, ",
             $a,
             ".sync_mode, ",
+            $a,
+            ".run_kind, ",
             $a,
             ".records_read, ",
             $a,
@@ -126,12 +154,14 @@ pub struct FanOut {
 
 /// Queues a run of one stream of a source, with the job that works it, in the caller's
 /// transaction. `None` when the stream has an active run already (or there is no such stream).
-/// The job carries the run's trace and the `sync_run` cause.
+/// The job carries the run's trace and the `sync_run` cause. A reconciliation is queued only for
+/// an incremental stream.
 pub async fn queue_run(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     source_id: Uuid,
     stream_id: Uuid,
+    kind: RunKind,
     trigger: RunTrigger,
     created_by: Option<UserId>,
 ) -> Result<Option<SyncRun>, StoreError> {
@@ -147,9 +177,11 @@ pub async fn queue_run(
     let run: Option<SyncRun> = sqlx::query_as(concat!(
         "WITH r AS ( \
             INSERT INTO sync_runs \
-                (id, workspace_id, source_id, stream_id, trigger, sync_mode, trace_id, created_by) \
-            SELECT $1, $2, $3, s.id, $5, s.sync_mode, $6, $7 FROM streams s \
+                (id, workspace_id, source_id, stream_id, trigger, sync_mode, trace_id, \
+                 created_by, run_kind) \
+            SELECT $1, $2, $3, s.id, $5, s.sync_mode, $6, $7, $8::text FROM streams s \
             WHERE s.workspace_id = $2 AND s.source_id = $3 AND s.id = $4 \
+              AND ($8::text = 'sync' OR s.sync_mode = 'incremental') \
             ON CONFLICT (stream_id) WHERE state IN ('queued', 'running') DO NOTHING \
             RETURNING *) \
          SELECT ",
@@ -163,6 +195,7 @@ pub async fn queue_run(
     .bind(trigger.as_str())
     .bind(Uuid::new_v4())
     .bind(created_by.map(|user| user.as_uuid()))
+    .bind(kind.as_str())
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -220,7 +253,13 @@ pub async fn queue_runs_for_source(
     let mut fan = FanOut::default();
     for stream in streams {
         match queue_run(
-            connection, workspace, source_id, stream, trigger, created_by,
+            connection,
+            workspace,
+            source_id,
+            stream,
+            RunKind::Sync,
+            trigger,
+            created_by,
         )
         .await?
         {
@@ -229,6 +268,69 @@ pub async fn queue_runs_for_source(
         }
     }
     Ok(Some(fan))
+}
+
+/// What a scheduled reconciliation came to.
+#[derive(Debug, PartialEq)]
+pub enum ReconcileQueued {
+    Queued(Box<SyncRun>),
+    /// The stream has an active run already: this firing is skipped.
+    SkippedActive,
+    /// There is nothing to reconcile: no such source or stream, a disabled source (when
+    /// `only_enabled`), a disabled or unmapped stream, or a stream that is not incremental.
+    Ineligible,
+}
+
+/// Queues a reconciliation of one stream if the source and the stream are eligible, in the
+/// caller's transaction: the source exists (and is enabled, when `only_enabled`), the stream is
+/// enabled, mapped and incremental. The eligibility is read under a key-share lock on the
+/// source, as [`queue_runs_for_source`] does.
+pub async fn queue_reconcile_run(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream_id: Uuid,
+    trigger: RunTrigger,
+    created_by: Option<UserId>,
+    only_enabled: bool,
+) -> Result<ReconcileQueued, StoreError> {
+    let enabled: Option<bool> = sqlx::query_scalar(
+        "SELECT enabled FROM sources WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if enabled.is_none() || (only_enabled && enabled == Some(false)) {
+        return Ok(ReconcileQueued::Ineligible);
+    }
+    let eligible: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM streams \n                        WHERE workspace_id = $1 AND source_id = $2 AND id = $3 AND enabled \n                          AND mapping IS NOT NULL AND sync_mode = 'incremental')",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(stream_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if !eligible {
+        return Ok(ReconcileQueued::Ineligible);
+    }
+    let queued = queue_run(
+        connection,
+        workspace,
+        source_id,
+        stream_id,
+        RunKind::Reconcile,
+        trigger,
+        created_by,
+    )
+    .await?;
+    Ok(match queued {
+        Some(run) => ReconcileQueued::Queued(Box::new(run)),
+        None => ReconcileQueued::SkippedActive,
+    })
 }
 
 pub async fn find_run<'e>(
@@ -509,6 +611,7 @@ pub(super) mod tests {
             state: "queued".into(),
             trigger: "manual".into(),
             sync_mode: "full_refresh".into(),
+            run_kind: "sync".into(),
             records_read: 0,
             records_applied: 0,
             records_unchanged: 0,
@@ -566,6 +669,7 @@ pub(super) mod tests {
             fx_ws,
             source,
             stream,
+            RunKind::Sync,
             RunTrigger::Schedule,
             None,
         )
@@ -723,6 +827,8 @@ pub(super) mod tests {
         crate::commit(tx).await.unwrap();
         // `unmapped` is enabled without a mapping; `disabled` has a mapping and is disabled.
         let enable = StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: true,
             sync_mode: "full_refresh",
             cursor_field: None,
@@ -1013,5 +1119,184 @@ pub(super) mod tests {
         let stream = found.iter().find(|stream| stream.name == "dead").unwrap();
         assert!(queue(&pool, ws, source, stream.id).await.is_some());
         assert!(fail_orphaned_runs(&pool).await.unwrap().is_empty());
+    }
+
+    async fn fire_reconcile(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        source: Uuid,
+        stream: Uuid,
+        only_enabled: bool,
+    ) -> ReconcileQueued {
+        let mut connection = pool.acquire().await.unwrap();
+        queue_reconcile_run(
+            &mut connection,
+            ws,
+            source,
+            stream,
+            RunTrigger::Schedule,
+            None,
+            only_enabled,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn queue_kind(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        source: Uuid,
+        stream: Uuid,
+        kind: RunKind,
+    ) -> Option<SyncRun> {
+        let mut connection = pool.acquire().await.unwrap();
+        queue_run(
+            &mut connection,
+            ws,
+            source,
+            stream,
+            kind,
+            RunTrigger::Manual,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_has_a_kind_that_defaults_to_sync_and_only_an_incremental_stream_reconciles(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (full_source, full) = source_with_stream(&pool, ws, "full", "full_refresh").await;
+        let (inc_source, inc) = source_with_stream(&pool, ws, "inc", "incremental").await;
+
+        let refused = queue_kind(&pool, ws, full_source, full, RunKind::Reconcile).await;
+        let reconcile = queue_kind(&pool, ws, inc_source, inc, RunKind::Reconcile)
+            .await
+            .unwrap();
+        let sync = queue_kind(&pool, ws, full_source, full, RunKind::Sync)
+            .await
+            .unwrap();
+
+        assert!(refused.is_none(), "a full refresh already sweeps");
+        assert_eq!(reconcile.run_kind, "reconcile");
+        assert!(reconcile.is_reconcile());
+        assert_eq!(sync.run_kind, "sync");
+        assert!(!sync.is_reconcile());
+        // A reconciliation is the same job as a run, with the same payload.
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE unique_key = $1")
+            .bind(format!("sync:run:{}", reconcile.id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            payload,
+            json!({"source_id": inc_source, "stream_id": inc, "run_id": reconcile.id})
+        );
+        // And it takes the stream's one active-run slot.
+        assert!(
+            queue_kind(&pool, ws, inc_source, inc, RunKind::Sync)
+                .await
+                .is_none()
+        );
+        let read = find_run(&pool, ws, inc_source, reconcile.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.run_kind, "reconcile");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_scheduled_reconciliation_is_queued_skipped_or_refused_by_what_it_finds(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "inc", "incremental").await;
+        let (full_source, full) = source_with_stream(&pool, ws, "full", "full_refresh").await;
+        let fire = |source: Uuid, stream: Uuid, only_enabled: bool| {
+            fire_reconcile(&pool, ws, source, stream, only_enabled)
+        };
+
+        let first = fire(source, stream, true).await;
+        let ReconcileQueued::Queued(run) = first else {
+            panic!("{first:?}");
+        };
+        assert_eq!(
+            (run.run_kind.as_str(), run.trigger.as_str()),
+            ("reconcile", "schedule")
+        );
+        // An active run skips the next firing.
+        assert_eq!(
+            fire(source, stream, true).await,
+            ReconcileQueued::SkippedActive
+        );
+        // A full-refresh stream, an unknown stream and an unknown source have nothing to do.
+        assert_eq!(
+            fire(full_source, full, true).await,
+            ReconcileQueued::Ineligible
+        );
+        assert_eq!(
+            fire(source, Uuid::now_v7(), true).await,
+            ReconcileQueued::Ineligible
+        );
+        assert_eq!(
+            fire(Uuid::now_v7(), stream, true).await,
+            ReconcileQueued::Ineligible
+        );
+        // A stream of another source is not this source's.
+        assert_eq!(
+            fire(full_source, stream, true).await,
+            ReconcileQueued::Ineligible
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_scheduled_reconciliation_needs_an_enabled_source_and_an_enabled_mapped_stream(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "inc", "incremental").await;
+        let pool = &pool;
+        let fire = |only_enabled: bool| async move {
+            let queued = fire_reconcile(pool, ws, source, stream, only_enabled).await;
+            if let ReconcileQueued::Queued(run) = &queued {
+                sqlx::query("UPDATE sync_runs SET state = 'cancelled' WHERE id = $1")
+                    .bind(run.id)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            matches!(queued, ReconcileQueued::Queued(_))
+        };
+
+        sqlx::query("UPDATE sources SET enabled = false WHERE id = $1")
+            .bind(source)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(!fire(true).await, "a disabled source does not fire");
+        assert!(fire(false).await, "a person may still start it by hand");
+        sqlx::query("UPDATE sources SET enabled = true WHERE id = $1")
+            .bind(source)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE streams SET enabled = false WHERE id = $1")
+            .bind(stream)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(!fire(true).await, "a disabled stream does not fire");
+        sqlx::query("UPDATE streams SET enabled = true, mapping = NULL WHERE id = $1")
+            .bind(stream)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(!fire(true).await, "an unmapped stream does not fire");
     }
 }

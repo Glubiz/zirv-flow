@@ -13,8 +13,8 @@ use uuid::Uuid;
 use zirv_flow_core::mapping::{Mapping, reject_sample};
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
-    CancelOutcome, RunCursor, RunReject, RunTrigger, SyncRun, cancel_run, find_run, find_source,
-    find_stream, list_run_rejects, list_runs, list_trait_definitions, queue_run,
+    CancelOutcome, RunCursor, RunKind, RunReject, RunTrigger, SyncRun, cancel_run, find_run,
+    find_source, find_stream, list_run_rejects, list_runs, list_trait_definitions, queue_run,
     queue_runs_for_source,
 };
 
@@ -231,6 +231,7 @@ pub(crate) async fn start_runs(
                 workspace,
                 source_id,
                 stream.id,
+                RunKind::Sync,
                 RunTrigger::Manual,
                 user,
             )

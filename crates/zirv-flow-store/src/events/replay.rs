@@ -756,6 +756,7 @@ async fn store_replayed(
             reasons,
             flags: &flags,
             late: timing.is_late(),
+            source_record_id: None,
         },
     )
     .await?;

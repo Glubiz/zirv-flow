@@ -11,7 +11,7 @@ use zirv_flow_core::{Slug, TraceContext, WorkspaceId, WorkspaceName};
 
 use super::batch::{SyncBatch, SyncUpsert};
 use super::job::run_trace;
-use super::model::{Lease, RunTrigger, SyncRun, queue_run, start_run};
+use super::model::{Lease, RunKind, RunTrigger, SyncRun, finish_run, queue_run, start_run};
 use crate::{
     ClaimedJob, DiscoveredStream, NewSource, ProfileRecord, begin, claim_job, commit,
     configure_stream, create_source, create_workspace, set_stream_mapping,
@@ -88,6 +88,8 @@ pub(crate) async fn source_with_stream(
         source.id,
         "contacts",
         &crate::StreamSettings {
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
             enabled: true,
             sync_mode,
             cursor_field: cursor,
@@ -118,6 +120,7 @@ pub(crate) async fn started_run(
         ws,
         source_id,
         stream_id,
+        RunKind::Sync,
         RunTrigger::Manual,
         None,
     )
@@ -193,11 +196,45 @@ pub(crate) fn batch<'a>(
         trace: &fixture.trace,
         upserts,
         deleted: &[],
+        seen: &[],
         rejected: &[],
         checkpoint,
         incremental: false,
         singly: false,
     }
+}
+
+/// Ends the fixture's run as succeeded and starts the next run of the same stream with its own
+/// claimed job, as the next firing of a schedule would.
+pub(crate) async fn next_run(pool: &PgPool, previous: &Fixture) -> Fixture {
+    let ended = finish_run(
+        pool,
+        previous.ws,
+        previous.run.id,
+        Lease {
+            job_id: previous.job.id,
+            token: previous.job.lease_token,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ended, super::model::RunEnd::Ended);
+    started_run(pool, previous.ws, previous.source_id, previous.stream_id).await
+}
+
+/// Commits `n` records `k0..` of the fixture's run in one batch, and returns their keys.
+pub(crate) async fn commit_records(pool: &PgPool, fixture: &Fixture, n: usize) -> Vec<String> {
+    let upserts: Vec<SyncUpsert> = (0..n)
+        .map(|i| upsert(fixture, &format!("k{i}"), &format!("a{i}@example.com")))
+        .collect();
+    let source = fixture.source_id.to_string();
+    let checkpoint = json!({"offset": n});
+    let outcome =
+        super::batch::commit_sync_batch(pool, &batch(fixture, &source, &upserts, &checkpoint))
+            .await
+            .unwrap();
+    assert!(matches!(outcome, super::batch::BatchOutcome::Committed(_)));
+    (0..n).map(|i| format!("k{i}")).collect()
 }
 
 #[cfg(test)]

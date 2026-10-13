@@ -134,8 +134,8 @@ pub use sessions::{
 pub use sources::{
     DiscoveredStream, NewSource, Source, SourceUpdate, Stream, StreamSettings, configure_stream,
     create_source, delete_source, find_source, find_source_for_update, find_stream,
-    find_stream_by_id, list_sources, list_streams, set_stream_mapping, sync_schedule,
-    update_source, upsert_discovered_streams,
+    find_stream_by_id, list_sources, list_streams, set_stream_mapping, sync_reconcile_schedule,
+    sync_schedule, update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{
@@ -145,10 +145,13 @@ pub use suppressions::{
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
-    Counts as SyncCounts, FanOut, Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, RunCursor,
-    RunEnd, RunReject, RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncRun,
-    SyncUpsert, cancel_run, commit_sync_batch, fail_orphaned_runs, fail_run, find_run, finish_run,
-    list_run_rejects, list_runs, queue_run, queue_runs_for_source, run_trace, start_run,
+    Counts as SyncCounts, DELETE_BY_SIGNAL as SYNC_DELETE_BY_SIGNAL,
+    DELETE_BY_SOURCE as SYNC_DELETE_BY_SOURCE, FanOut, Lease as SyncLease,
+    RUN_JOB_KIND as SYNC_RUN_JOB_KIND, ReconcileQueued, RunCursor, RunEnd, RunKind, RunReject,
+    RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome, SweepUnit,
+    SyncBatch, SyncReject, SyncRun, SyncUpsert, cancel_run, commit_sync_batch, fail_orphaned_runs,
+    fail_run, find_run, finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run,
+    queue_runs_for_source, run_trace, start_run, sweep_exceeds_limit, sweep_unreached,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

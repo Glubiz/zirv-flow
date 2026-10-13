@@ -244,6 +244,8 @@ pub(crate) async fn configure(
             cursor_field: request.cursor_field.as_deref(),
             primary_key: &request.primary_key,
             staleness_threshold_seconds: request.staleness_threshold_seconds,
+            reconcile_schedule: None,
+            sweep_limit: 0.5,
         },
     )
     .await?

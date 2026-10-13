@@ -22,6 +22,13 @@ use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit, lo
 /// the 1,000 rows of a CSV import because incremental runs are usually small.
 pub const SYNC_REJECT_CHECK_MIN_RECORDS: i64 = 100;
 
+/// Why a record was removed because the source reported it deleted.
+pub const DELETE_BY_SOURCE: &str = "source";
+/// Why a record was removed because the mapping's delete signal fired.
+pub const DELETE_BY_SIGNAL: &str = "signal";
+/// Why a record was removed because the run did not see it.
+pub(crate) const DELETE_BY_SWEEP: &str = "swept";
+
 /// A record the mapping accepted, with the masked sample to keep should the store refuse it.
 #[derive(Clone, Debug)]
 pub struct SyncUpsert {
@@ -32,6 +39,9 @@ pub struct SyncUpsert {
 /// A record the mapping refused: codes and a masked sample, never a value.
 #[derive(Clone, Debug)]
 pub struct SyncReject {
+    /// The record's key. It still exists in the source, so the run counts it as seen and the
+    /// sweep leaves its earlier contribution alone.
+    pub record_key: String,
     /// `(field, code)` pairs; the field is empty when no one field is at fault.
     pub reasons: Vec<(String, &'static str)>,
     /// `{properties, masked}`.
@@ -52,8 +62,12 @@ pub struct SyncBatch<'a> {
     pub attempt: i32,
     pub trace: &'a TraceContext,
     pub upserts: &'a [SyncUpsert],
-    /// The keys of the records the source reports as deleted.
-    pub deleted: &'a [String],
+    /// The keys of the records the source or the mapping's delete signal marks as deleted, each
+    /// with why: [`DELETE_BY_SOURCE`] or [`DELETE_BY_SIGNAL`].
+    pub deleted: &'a [(String, &'static str)],
+    /// The keys of records the run read and that still exist, but applies nothing for (a
+    /// reconciliation reads keys only). They count as seen.
+    pub seen: &'a [String],
     pub rejected: &'a [SyncReject],
     /// Where the source resumes after this batch.
     pub checkpoint: &'a Value,
@@ -126,24 +140,29 @@ pub async fn commit_sync_batch(
 
     let results = apply_upserts(&mut tx, batch).await?;
 
-    // The ledger rows of the records that are now current, marked as seen by this run.
+    // Every record the run read that still exists in the source is marked as seen: the applied
+    // and unchanged ones, and the ones the mapping or the store refused, whose earlier
+    // contribution a sweep must not take away (a broken mapping cannot cascade into deletions).
+    // A record flagged deleted is not seen.
     let seen_keys: Vec<&str> = batch
         .upserts
         .iter()
-        .zip(&results)
-        .filter(|(_, result)| {
-            matches!(
-                result,
-                Some(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
-            )
-        })
-        .map(|(upsert, _)| upsert.record.record_key.as_str())
+        .map(|upsert| upsert.record.record_key.as_str())
+        .chain(
+            batch
+                .rejected
+                .iter()
+                .map(|reject| reject.record_key.as_str()),
+        )
+        .chain(batch.seen.iter().map(String::as_str))
         .collect();
     let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
 
     let mut counts = Counts {
-        read: i64::try_from(batch.upserts.len() + batch.deleted.len() + batch.rejected.len())
-            .unwrap_or(i64::MAX),
+        read: i64::try_from(
+            batch.upserts.len() + batch.deleted.len() + batch.rejected.len() + batch.seen.len(),
+        )
+        .unwrap_or(i64::MAX),
         ..Counts::default()
     };
     let mut decisions = Vec::new();
@@ -182,8 +201,9 @@ pub async fn commit_sync_batch(
         });
     }
 
-    // The store's own `contribution.removed` decision says what happened to a deleted record.
-    for key in batch.deleted {
+    // The store's own `contribution.removed` decision says what happened to the person; the
+    // `deleted` decision names the ledger row, as the person may go with it.
+    for (key, why) in batch.deleted {
         let removed = remove_contribution_in(
             &mut tx,
             batch.workspace,
@@ -193,8 +213,14 @@ pub async fn commit_sync_batch(
             batch.trace,
         )
         .await?;
-        if removed {
+        if let Some(removed) = removed {
             counts.deleted += 1;
+            decisions.push(decision(
+                batch,
+                "deleted",
+                Some(why),
+                vec![("source_record", removed.record_id)],
+            ));
         } else {
             counts.unchanged += 1;
         }
@@ -430,6 +456,7 @@ mod tests {
 
     fn reject() -> SyncReject {
         SyncReject {
+            record_key: "rej".into(),
             reasons: vec![("email".into(), "invalid_identifier")],
             sample: json!({"properties": {"email": null}, "masked": ["email"]}),
         }
@@ -500,7 +527,7 @@ mod tests {
             upsert(&fx, "k1", "a1@example.com"),
             upsert(&fx, "kbad", "not-an-email"),
         ];
-        let deleted = ["k0".to_owned()];
+        let deleted = [("k0".to_owned(), DELETE_BY_SOURCE)];
         let rejected = [reject()];
         let cp2 = json!({"offset": 6});
         let two = commit_sync_batch(
@@ -631,6 +658,7 @@ mod tests {
         let upserts = [upsert(&fx, "k0", "a0@example.com")];
         // PostgreSQL refuses a NUL in jsonb, after the record was applied and before the commit.
         let poison = [SyncReject {
+            record_key: "poison".into(),
             reasons: vec![("\u{0}".into(), "invalid_identifier")],
             sample: json!({}),
         }];
@@ -935,6 +963,7 @@ mod tests {
         let data = json!({"plan": "pr\0o", "e\0mail": "a@b.c"});
         let sample = reject_sample(&mapping, &data, |_| true);
         let rejected = [SyncReject {
+            record_key: "kwrong".into(),
             reasons: vec![("plan".into(), "wrong_type")],
             sample: json!({"properties": sample.properties, "masked": sample.masked}),
         }];
@@ -957,5 +986,105 @@ mod tests {
             .unwrap();
         assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
         assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removed_record_appends_a_deleted_decision_with_the_reason_it_was_removed_for(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        let first = many(&fx, 0, 3);
+        let cp1 = json!({"offset": 3});
+        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+            .await
+            .unwrap();
+
+        let deleted = [
+            ("k0".to_owned(), DELETE_BY_SOURCE),
+            ("k1".to_owned(), DELETE_BY_SIGNAL),
+            ("ghost".to_owned(), DELETE_BY_SOURCE),
+        ];
+        let cp2 = json!({"offset": 6});
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                deleted: &deleted,
+                ..batch(&fx, &source, &[], &cp2)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        // The key that has no live record is unchanged, as before.
+        assert_eq!((progress.batch.deleted, progress.batch.unchanged), (2, 1));
+        let rows: Vec<(String, Option<String>, Value, uuid::Uuid)> = sqlx::query_as(
+            "SELECT outcome, reason, subject_ids, trace_id FROM decision_records \
+             WHERE action = 'sync.record' AND outcome = 'deleted' ORDER BY reason",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let reasons: Vec<_> = rows.iter().map(|row| row.1.as_deref()).collect();
+        assert_eq!(reasons, [Some("signal"), Some("source")]);
+        for row in &rows {
+            assert_eq!(row.2.as_object().unwrap().len(), 1);
+            assert!(row.2["source_record"].is_string());
+            assert_eq!(row.3, fx.run.trace_id);
+        }
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+            )
+            .await,
+            2
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_flagged_deleted_is_not_marked_seen_and_listed_keys_are_counted_as_read(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        let first = many(&fx, 0, 2);
+        let cp1 = json!({"offset": 2});
+        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+            .await
+            .unwrap();
+        // A second attempt of the same run: k0 is listed, k1 is deleted.
+        let listed = ["k0".to_owned()];
+        let deleted = [("k1".to_owned(), DELETE_BY_SOURCE)];
+        let cp2 = json!({"offset": 4});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                seen: &listed,
+                deleted: &deleted,
+                ..batch(&fx, &source, &[], &cp2)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.read, progress.batch.deleted), (2, 1));
+        assert_eq!(progress.batch.applied, 0);
+        let live: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+            "SELECT record_key, last_seen_run FROM source_records WHERE deleted_at IS NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
     }
 }
