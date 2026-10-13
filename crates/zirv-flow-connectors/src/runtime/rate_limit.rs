@@ -33,6 +33,8 @@ struct Bucket {
     /// May go negative: a caller that has to wait has already taken its token.
     tokens: f64,
     updated: Instant,
+    /// The number of the latest reservation, so a cancelled one can tell whether it is the tail.
+    latest: u64,
 }
 
 impl Bucket {
@@ -41,6 +43,7 @@ impl Bucket {
             rate,
             tokens: capacity(rate),
             updated: now,
+            latest: 0,
         }
     }
 
@@ -51,6 +54,7 @@ impl Bucket {
         self.tokens = (self.tokens + elapsed * per_second).min(capacity(self.rate));
         self.updated = now;
         self.tokens -= 1.0;
+        self.latest += 1;
         if self.tokens >= 0.0 {
             Duration::ZERO
         } else {
@@ -75,10 +79,12 @@ impl RateLimits {
     /// Waits for a token of `source`'s bucket and returns how long it waited. A rate that
     /// differs from the bucket's replaces the bucket, so a changed setting takes effect.
     ///
-    /// Cancelling the wait (a timeout, a dropped request) gives the token back, so a call that
-    /// never made its request does not leave a debt for the calls behind it.
+    /// Cancelling the wait (a timeout, a dropped request) gives the token back when no other call
+    /// queued behind it, so a call that never made its request does not leave a debt. When others
+    /// did queue, its slot stays idle, so the rate is never exceeded; the debt is bounded by the
+    /// number of queued waiters.
     pub(crate) async fn acquire(&self, source: &str, rate: RateLimit) -> Duration {
-        let wait = self.reserve(source, rate, Instant::now());
+        let (wait, number) = self.reserve_numbered(source, rate, Instant::now());
         if wait.is_zero() {
             return wait;
         }
@@ -86,6 +92,7 @@ impl RateLimits {
             limits: self,
             source,
             rate,
+            number,
             used: false,
         };
         tokio::time::sleep(wait).await;
@@ -93,18 +100,30 @@ impl RateLimits {
         wait
     }
 
-    /// Gives back a token that was taken and not used.
-    fn refund(&self, source: &str, rate: RateLimit) {
+    /// Gives back the token of reservation `number` if it was never used and no reservation came
+    /// after it. A later one is already scheduled behind it, so the token cannot be handed out
+    /// again without two callers sharing a slot: the abandoned slot is idle time instead.
+    fn refund(&self, source: &str, rate: RateLimit, number: u64) {
         let mut buckets = self
             .buckets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(bucket) = buckets.get_mut(source).filter(|bucket| bucket.rate == rate) {
+        if let Some(bucket) = buckets
+            .get_mut(source)
+            .filter(|bucket| bucket.rate == rate && bucket.latest == number)
+        {
             bucket.tokens = (bucket.tokens + 1.0).min(capacity(rate));
+            // The next reservation is the tail's successor, not a replacement for it.
+            bucket.latest = bucket.latest.wrapping_add(1);
         }
     }
 
     fn reserve(&self, source: &str, rate: RateLimit, now: Instant) -> Duration {
+        self.reserve_numbered(source, rate, now).0
+    }
+
+    /// As `reserve`, with the number of the reservation for `refund`.
+    fn reserve_numbered(&self, source: &str, rate: RateLimit, now: Instant) -> (Duration, u64) {
         let mut buckets = self
             .buckets
             .lock()
@@ -115,22 +134,25 @@ impl RateLimits {
         if bucket.rate != rate {
             *bucket = Bucket::new(rate, now);
         }
-        bucket.take(now)
+        let wait = bucket.take(now);
+        (wait, bucket.latest)
     }
 }
 
-/// A token taken for a wait in progress. Dropped before the wait ended, it is refunded.
+/// A token taken for a wait in progress. Dropped before the wait ended, it is refunded if no
+/// reservation was made after it.
 struct Reservation<'a> {
     limits: &'a RateLimits,
     source: &'a str,
     rate: RateLimit,
+    number: u64,
     used: bool,
 }
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         if !self.used {
-            self.limits.refund(self.source, self.rate);
+            self.limits.refund(self.source, self.rate, self.number);
         }
     }
 }
@@ -254,5 +276,48 @@ mod tests {
         // The wait is computed from the bucket, never longer than for a bucket nobody queued on.
         let wait = limits.reserve("a", one_per_second, Instant::now());
         assert!(wait <= Duration::from_secs(1), "{wait:?}");
+    }
+
+    #[test]
+    fn a_cancelled_wait_with_waiters_behind_it_leaves_an_idle_slot_not_a_shared_one() {
+        let one_per_second = RateLimit {
+            requests: 1,
+            per: Duration::from_secs(1),
+        };
+        let limits = RateLimits::new();
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        limits.reserve("a", one_per_second, start);
+        let (a, a_number) = limits.reserve_numbered("a", one_per_second, start);
+        let (b, _) = limits.reserve_numbered("a", one_per_second, start);
+        assert_eq!((a, b), (second, 2 * second));
+
+        // A gives up while B is queued behind it, then C asks one second later.
+        limits.refund("a", one_per_second, a_number);
+        let (c, _) = limits.reserve_numbered("a", one_per_second, start + second);
+
+        // B goes at t=2 and C a full interval after it, at t=3: they do not share a slot.
+        assert!(start + second + c >= start + b + second);
+    }
+
+    #[test]
+    fn the_tail_reservation_gives_its_token_back_once() {
+        let one_per_second = RateLimit {
+            requests: 1,
+            per: Duration::from_secs(1),
+        };
+        let limits = RateLimits::new();
+        let start = Instant::now();
+        limits.reserve("a", one_per_second, start);
+        let (_, number) = limits.reserve_numbered("a", one_per_second, start);
+
+        limits.refund("a", one_per_second, number);
+        limits.refund("a", one_per_second, number);
+
+        // One refund, not two: the next caller waits one interval, as if the tail never came.
+        assert_eq!(
+            limits.reserve("a", one_per_second, start),
+            Duration::from_secs(1)
+        );
     }
 }
