@@ -1323,6 +1323,502 @@ mod tests {
         assert_eq!(after.body["sync_mode"], "incremental");
     }
 
+    // Mapping lists, paths and events on a stream, and the preview.
+
+    impl Fixture {
+        /// A source whose `stream_1` is discovered, keyed by `id`, with the `plan` trait.
+        async fn keyed_source(&self) -> String {
+            zirv_flow_store::create_trait_definition(
+                &self.pool,
+                self.ws,
+                &trait_definition("plan", false),
+            )
+            .await
+            .unwrap();
+            let id = self.create_ok("CRM", "ok", 1).await;
+            self.as_admin("POST", &format!("/sources/{id}/discover"), None)
+                .await;
+            id
+        }
+
+        async fn put_stream(&self, id: &str, key: &[&str], mapping: Option<Value>) -> Reply {
+            let mut body =
+                json!({"enabled": true, "sync_mode": "full_refresh", "primary_key": key});
+            if let Some(mapping) = mapping {
+                body["mapping"] = mapping;
+            }
+            self.as_admin(
+                "PUT",
+                &format!("/sources/{id}/streams/stream_1"),
+                Some(body),
+            )
+            .await
+        }
+
+        async fn preview(&self, id: &str, body: Value, auth: Auth<'_>) -> Reply {
+            self.send(
+                "POST",
+                &format!("/sources/{id}/streams/stream_1/preview"),
+                Some(body),
+                auth,
+            )
+            .await
+        }
+
+        /// A session of a workspace admin.
+        async fn admin_session(&self) -> Login {
+            let user =
+                admin::create_user(&self.pool, &Context::system(), "boss@example.com", PASSWORD)
+                    .await
+                    .unwrap();
+            admin::set_member(
+                &self.pool,
+                &Context::system(),
+                self.ws,
+                user.id,
+                Role::Admin,
+            )
+            .await
+            .unwrap();
+            let reply = call(
+                &self.router,
+                "POST",
+                "/api/v1/session",
+                Some(json!({"email": "boss@example.com", "password": PASSWORD})),
+                Auth::Anonymous,
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            Login {
+                cookie: reply.headers[header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+                csrf: reply.body["csrf_token"].as_str().unwrap().to_owned(),
+            }
+        }
+    }
+
+    fn email_rule() -> Value {
+        json!({"column": "email", "target": {"type": "identifier", "kind": "email"}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_list_target_is_accepted_when_the_list_exists_and_refused_when_it_does_not(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let list = zirv_flow_store::create_list(&pool, fx.ws, "news", "", None)
+            .await
+            .unwrap();
+        let with_list = |list: &str| {
+            json!({"columns": [email_rule(),
+                {"column": "name", "target": {"type": "list", "list_id": list}}]})
+        };
+
+        let saved = fx
+            .put_stream(&id, &["id"], Some(with_list(&list.id.to_string())))
+            .await;
+        let missing = fx
+            .put_stream(
+                &id,
+                &["id"],
+                Some(with_list("00000000-0000-7000-8000-000000000000")),
+            )
+            .await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(
+            saved.body["mapping"]["columns"][1]["target"]["list_id"],
+            list.id.to_string()
+        );
+        assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            missing.body["detail"],
+            "mapping: unknown_list (column \"name\")"
+        );
+        // A list of another workspace is as good as none.
+        let other = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("theirs").unwrap(),
+            &Slug::parse("theirs").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let foreign = zirv_flow_store::create_list(&pool, other, "news", "", None)
+            .await
+            .unwrap();
+        let refused = fx
+            .put_stream(&id, &["id"], Some(with_list(&foreign.id.to_string())))
+            .await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_mapping_needs_a_primary_key_a_valid_name_and_columns_the_stream_has(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let with_event = |event: Value| json!({"columns": [email_rule()], "event": event});
+        let good = with_event(json!({
+            "name": "seen",
+            "timestamp": {"column": "updated_at"},
+            "properties": [{"property": "who", "column": "name"}]
+        }));
+
+        let keyless = fx.put_stream(&id, &[], Some(good.clone())).await;
+        let saved = fx.put_stream(&id, &["id"], Some(good)).await;
+        let keyless_later = fx.put_stream(&id, &[], None).await;
+        let bad_name = fx
+            .put_stream(&id, &["id"], Some(with_event(json!({"name": "."}))))
+            .await;
+        let bad_property = fx
+            .put_stream(
+                &id,
+                &["id"],
+                Some(with_event(json!({"name": "e", "properties": [
+                    {"property": "", "column": "name"}]}))),
+            )
+            .await;
+        let ghost = fx
+            .put_stream(
+                &id,
+                &["id"],
+                Some(with_event(json!({"name": "e", "properties": [
+                    {"property": "p", "column": "ghost"}]}))),
+            )
+            .await;
+
+        assert_eq!(keyless.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            keyless.body["detail"],
+            "mapping: event_requires_primary_key"
+        );
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["mapping"]["event"]["name"], "seen");
+        assert_eq!(keyless_later.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad_name.body["detail"], "mapping: invalid_event_name");
+        assert_eq!(
+            bad_property.body["detail"],
+            "mapping: invalid_event_property (column \"\")"
+        );
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"ghost\")"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_column_may_be_a_path_into_a_field_of_the_stream(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let nested = |column: &str| {
+            json!({"columns": [
+                {"column": column, "target": {"type": "identifier", "kind": "email"}}]})
+        };
+
+        let into_a_field = fx
+            .put_stream(&id, &["id"], Some(nested("email.address")))
+            .await;
+        let into_nothing = fx
+            .put_stream(&id, &["id"], Some(nested("nope.address")))
+            .await;
+
+        assert_eq!(
+            into_a_field.status,
+            StatusCode::OK,
+            "{:?}",
+            into_a_field.body
+        );
+        assert_eq!(
+            into_nothing.body["detail"],
+            "mapping: unknown_column (column \"nope.address\")"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_admin_with_a_csrf_token_may_preview_and_other_callers_are_refused(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        fx.put_stream(&id, &["id"], Some(json!({"columns": [email_rule()]})))
+            .await;
+        let boss = fx.admin_session().await;
+        let tail = format!("/sources/{id}/streams/stream_1/preview");
+
+        let as_member = fx.preview(&id, json!({}), Auth::Session(&fx.member)).await;
+        let as_read_key = fx.preview(&id, json!({}), Auth::Key(&fx.read)).await;
+        let anonymous = fx.preview(&id, json!({}), Auth::Anonymous).await;
+        let as_admin_key = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+        let as_admin = fx.preview(&id, json!({}), Auth::Session(&boss)).await;
+        // The same admin session without its CSRF token.
+        let request = Request::builder()
+            .method("POST")
+            .uri(fx.path(&tail))
+            .header(header::COOKIE, &boss.cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let no_csrf = fx.router.clone().oneshot(request).await.unwrap().status();
+
+        assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(as_read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(no_csrf, StatusCode::FORBIDDEN);
+        assert_eq!(
+            as_admin_key.status,
+            StatusCode::OK,
+            "{:?}",
+            as_admin_key.body
+        );
+        assert_eq!(as_admin.status, StatusCode::OK, "{:?}", as_admin.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_maps_the_first_records_with_the_run_s_function_and_writes_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let list = zirv_flow_store::create_list(&pool, fx.ws, "news", "", None)
+            .await
+            .unwrap();
+        let mapping = json!({
+            "columns": [
+                email_rule(),
+                {"column": "name", "target": {"type": "trait", "key": "plan"}},
+                {"column": "id", "target": {"type": "list", "list_id": list.id}}
+            ],
+            "event": {"name": "seen", "timestamp": {"column": "updated_at"},
+                      "properties": [{"property": "who", "column": "name"}]}
+        });
+        let saved = fx.put_stream(&id, &["id"], Some(mapping)).await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let tables = [
+            "people",
+            "identities",
+            "source_records",
+            "events",
+            "ingest_rejects",
+            "sync_runs",
+            "list_members",
+            "decision_records",
+            "audit_log",
+            "jobs",
+        ];
+        let counts = |pool: PgPool| async move {
+            let mut out = Vec::new();
+            for table in tables {
+                let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table}"
+                )))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                out.push(n);
+            }
+            out
+        };
+        let before = counts(pool.clone()).await;
+
+        let three = fx
+            .preview(&id, json!({"limit": 3}), Auth::Key(&fx.admin))
+            .await;
+        let all = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+
+        assert_eq!(three.status, StatusCode::OK, "{:?}", three.body);
+        assert_eq!(three.body["read"], 3);
+        assert_eq!(three.body["truncated"], true);
+        let first = &three.body["records"][0];
+        assert_eq!(first["result"], "mapped");
+        assert_eq!(first["key"], "stream_1-0");
+        assert_eq!(first["identifiers"][0]["kind"], "email");
+        assert_eq!(first["identifiers"][0]["value"], "stream_1-0@example.com");
+        assert_eq!(first["traits"]["plan"], "stream_1 record 0");
+        assert_eq!(first["lists"], json!([]), "id 0 is not a truthy flag");
+        assert_eq!(three.body["records"][1]["lists"][0], list.id.to_string());
+        assert_eq!(first["event"]["name"], "seen");
+        assert_eq!(first["event"]["occurred_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(first["event"]["properties"]["who"], "stream_1 record 0");
+        // The fake stream holds five records: the default limit shows them all.
+        assert_eq!(all.body["read"], 5);
+        assert_eq!(all.body["truncated"], false);
+        assert_eq!(
+            counts(pool.clone()).await,
+            before,
+            "a preview writes nothing"
+        );
+        let audit = fx.audit_actions().await;
+        assert!(
+            !audit.iter().any(|action| action.contains("preview")),
+            "{audit:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_of_a_draft_uses_the_draft_and_a_rejected_record_lists_codes_only(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        // The fake source can be made to hold records whose email is not an email.
+        sqlx::query("UPDATE sources SET config = config || '{\"invalid\": \"1\"}'::jsonb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        fx.put_stream(&id, &["id"], Some(json!({"columns": [email_rule()]})))
+            .await;
+
+        let reply = fx
+            .preview(
+                &id,
+                json!({"mapping": {"columns": [
+                    {"column": "email", "target": {"type": "identifier", "kind": "email"},
+                     "transforms": [{"op": "upper"}]}]}, "limit": 3}),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(
+            reply.body["records"][0]["identifiers"][0]["value"], "stream_1-0@example.com",
+            "the email kind normalizes after the transforms"
+        );
+        let rejected = &reply.body["records"][1];
+        assert_eq!(rejected["result"], "rejected");
+        assert_eq!(rejected["errors"][0]["field"], "email");
+        assert_eq!(rejected["errors"][0]["reason"], "invalid_identifier");
+        assert!(!rejected.to_string().contains("not-an-email"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_refuses_what_a_save_refuses_and_what_it_cannot_find(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let key = Auth::Key(&fx.admin);
+
+        let unmapped = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+        let invalid_draft = fx
+            .preview(
+                &id,
+                json!({"mapping": {"columns": [
+                    {"column": "mail", "target": {"type": "identifier", "kind": "email"}}]}}),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+        let keyless_event = {
+            fx.put_stream(&id, &[], None).await;
+            fx.preview(
+                &id,
+                json!({"mapping": {"columns": [email_rule()], "event": {"name": "e"}}}),
+                Auth::Key(&fx.admin),
+            )
+            .await
+        };
+        let unknown_list = fx
+            .preview(
+                &id,
+                json!({"mapping": {"columns": [email_rule(),
+                    {"column": "name", "target": {"type": "list",
+                     "list_id": "00000000-0000-7000-8000-000000000000"}}]}}),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+        let low = fx
+            .preview(&id, json!({"limit": 0}), Auth::Key(&fx.admin))
+            .await;
+        let high = fx
+            .preview(&id, json!({"limit": 21}), Auth::Key(&fx.admin))
+            .await;
+        let no_stream = fx
+            .send(
+                "POST",
+                &format!("/sources/{id}/streams/nope/preview"),
+                Some(json!({})),
+                key,
+            )
+            .await;
+        let no_source = fx
+            .send(
+                "POST",
+                "/sources/00000000-0000-7000-8000-000000000000/streams/stream_1/preview",
+                Some(json!({})),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+        sqlx::query("UPDATE sources SET kind = 'gone'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        fx.put_stream(&id, &["id"], Some(json!({"columns": [email_rule()]})))
+            .await;
+        let unavailable = fx.preview(&id, json!({}), Auth::Key(&fx.admin)).await;
+
+        assert_eq!(unmapped.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unmapped.body["detail"], "stream_not_mapped");
+        assert_eq!(
+            invalid_draft.body["detail"],
+            "mapping: unknown_column (column \"mail\")"
+        );
+        assert_eq!(
+            keyless_event.body["detail"],
+            "mapping: event_requires_primary_key"
+        );
+        assert_eq!(
+            unknown_list.body["detail"],
+            "mapping: unknown_list (column \"name\")"
+        );
+        assert_eq!(low.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(high.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(no_stream.status, StatusCode::NOT_FOUND);
+        assert_eq!(no_source.status, StatusCode::NOT_FOUND);
+        assert_eq!(unavailable.status, StatusCode::CONFLICT);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_in_another_workspace_finds_no_source_and_reads_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.keyed_source().await;
+        let boss = fx.admin_session().await;
+        let foreign_ws = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("theirs").unwrap(),
+            &Slug::parse("theirs").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+
+        let reply = call(
+            &fx.router,
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{}/sources/{id}/streams/stream_1/preview",
+                foreign_ws.as_uuid()
+            ),
+            Some(json!({})),
+            Auth::Session(&boss),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
     impl Fixture {
         async fn stream_freshness(&self, id: &str, who: Auth<'_>) -> Value {
             let reply = self

@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::apply::Header;
-use super::model::{Mapping, Target, Transform};
+use super::apply::{Header, MAX_EVENT_PROPERTIES};
+use super::model::{EventRule, Mapping, Target, Transform};
 use super::transform::valid_format;
+use crate::events::{validate_event_name, validate_property_name};
 use crate::people::{IdentifierKind, TraitType, validate_key};
 
 /// The most column rules a mapping holds.
@@ -54,6 +55,14 @@ pub enum MappingError {
     DuplicateTrait(String),
     /// A transform is malformed: a bad format, an empty separator, text over its cap.
     InvalidTransform(String),
+    /// The event's name breaks the event-name rule.
+    InvalidEventName,
+    /// A property of the event has a name that is not a valid property name.
+    InvalidEventProperty(String),
+    /// Two properties of the event share a name.
+    DuplicateEventProperty(String),
+    /// The event names more than 50 properties.
+    TooManyEventProperties,
 }
 
 impl MappingError {
@@ -68,20 +77,29 @@ impl MappingError {
             Self::ArchivedTrait(_) => "archived_trait",
             Self::DuplicateTrait(_) => "duplicate_trait",
             Self::InvalidTransform(_) => "invalid_transform",
+            Self::InvalidEventName => "invalid_event_name",
+            Self::InvalidEventProperty(_) => "invalid_event_property",
+            Self::DuplicateEventProperty(_) => "duplicate_event_property",
+            Self::TooManyEventProperties => "too_many_event_properties",
         }
     }
 
     /// The column the problem is on, when it is on one.
     pub fn column(&self) -> Option<&str> {
         match self {
-            Self::NoIdentifier | Self::TooManyRules => None,
+            Self::NoIdentifier
+            | Self::TooManyRules
+            | Self::InvalidEventName
+            | Self::TooManyEventProperties => None,
             Self::UnknownColumn(column)
             | Self::InvalidIdentifierKind(column)
             | Self::InvalidTraitKey(column)
             | Self::UnknownTrait(column)
             | Self::ArchivedTrait(column)
             | Self::DuplicateTrait(column)
-            | Self::InvalidTransform(column) => Some(column),
+            | Self::InvalidTransform(column)
+            | Self::InvalidEventProperty(column)
+            | Self::DuplicateEventProperty(column) => Some(column),
         }
     }
 }
@@ -94,23 +112,50 @@ pub fn validate(
     header: &Header,
     catalog: &dyn TraitCatalog,
 ) -> Result<(), MappingError> {
+    validate_with(mapping, &|column| header.contains(column), catalog)
+}
+
+/// As [`validate`] for a stream of JSON records: a column may be a dotted path, which is known
+/// when its first segment is a field of the stream (`header` holds the top-level fields). A
+/// top-level field whose name holds a dot is known too. Whether the path leads anywhere is a
+/// matter of each record, not of the mapping.
+pub fn validate_paths(
+    mapping: &Mapping,
+    header: &Header,
+    catalog: &dyn TraitCatalog,
+) -> Result<(), MappingError> {
+    let known = |column: &str| {
+        header.contains(column)
+            || column
+                .split('.')
+                .next()
+                .is_some_and(|first| header.contains(first))
+    };
+    validate_with(mapping, &known, catalog)
+}
+
+fn validate_with(
+    mapping: &Mapping,
+    known: &dyn Fn(&str) -> bool,
+    catalog: &dyn TraitCatalog,
+) -> Result<(), MappingError> {
     if mapping.columns.len() > MAX_RULES {
         return Err(MappingError::TooManyRules);
     }
     if let Some(key) = &mapping.key_column
-        && !header.contains(key)
+        && !known(key)
     {
         return Err(MappingError::UnknownColumn(key.clone()));
     }
     if let Some(signal) = &mapping.delete_when
-        && !header.contains(&signal.column)
+        && !known(&signal.column)
     {
         return Err(MappingError::UnknownColumn(signal.column.clone()));
     }
     let mut identifiers = 0;
     let mut traits = HashSet::new();
     for rule in &mapping.columns {
-        if !header.contains(&rule.column) {
+        if !known(&rule.column) {
             return Err(MappingError::UnknownColumn(rule.column.clone()));
         }
         match &rule.target {
@@ -141,11 +186,53 @@ pub fn validate(
             return Err(MappingError::InvalidTransform(rule.column.clone()));
         }
         for transform in &rule.transforms {
-            check_transform(transform, header, &rule.column)?;
+            check_transform(transform, known, &rule.column)?;
         }
     }
     if identifiers == 0 {
         return Err(MappingError::NoIdentifier);
+    }
+    if let Some(event) = &mapping.event {
+        check_event(event, known)?;
+    }
+    Ok(())
+}
+
+fn check_event(event: &EventRule, known: &dyn Fn(&str) -> bool) -> Result<(), MappingError> {
+    validate_event_name(&event.name).map_err(|_| MappingError::InvalidEventName)?;
+    if event.properties.len() > MAX_EVENT_PROPERTIES {
+        return Err(MappingError::TooManyEventProperties);
+    }
+    let mut names = HashSet::new();
+    for property in &event.properties {
+        validate_property_name(&property.property)
+            .map_err(|_| MappingError::InvalidEventProperty(property.property.clone()))?;
+        if !names.insert(property.property.as_str()) {
+            return Err(MappingError::DuplicateEventProperty(
+                property.property.clone(),
+            ));
+        }
+    }
+    let values = event
+        .timestamp
+        .iter()
+        .map(|rule| (rule.column.as_str(), rule.transforms.as_slice()))
+        .chain(
+            event
+                .properties
+                .iter()
+                .map(|rule| (rule.column.as_str(), rule.transforms.as_slice())),
+        );
+    for (column, transforms) in values {
+        if !known(column) {
+            return Err(MappingError::UnknownColumn(column.to_owned()));
+        }
+        if transforms.len() > MAX_TRANSFORMS {
+            return Err(MappingError::InvalidTransform(column.to_owned()));
+        }
+        for transform in transforms {
+            check_transform(transform, known, column)?;
+        }
     }
     Ok(())
 }
@@ -156,7 +243,7 @@ fn short(text: &str) -> bool {
 
 fn check_transform(
     transform: &Transform,
-    header: &Header,
+    known: &dyn Fn(&str) -> bool,
     column: &str,
 ) -> Result<(), MappingError> {
     let invalid = || MappingError::InvalidTransform(column.to_owned());
@@ -167,7 +254,7 @@ fn check_transform(
             if columns.is_empty() || columns.len() > MAX_CONCAT_COLUMNS || !short(separator) {
                 return Err(invalid());
             }
-            match columns.iter().find(|other| !header.contains(other)) {
+            match columns.iter().find(|other| !known(other)) {
                 Some(other) => Err(MappingError::UnknownColumn(other.clone())),
                 None => Ok(()),
             }
@@ -190,7 +277,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::super::model::{ColumnRule, DeleteRule, DeleteWhen};
+    use super::super::model::{ColumnRule, DeleteRule, DeleteWhen, PropertyRule, ValueRule};
     use super::*;
 
     fn header() -> Header {
@@ -233,6 +320,7 @@ mod tests {
         validate(
             &Mapping {
                 key_column: None,
+                event: None,
                 columns,
                 delete_when: None,
             },
@@ -280,6 +368,7 @@ mod tests {
         let mapping = Mapping {
             delete_when: None,
             key_column: Some("Ghost".into()),
+            event: None,
             columns: vec![email()],
         };
         assert_eq!(
@@ -438,6 +527,7 @@ mod tests {
     fn the_delete_column_must_be_in_the_header() {
         let mut mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![email()],
             delete_when: Some(DeleteWhen {
                 column: "Ghost".into(),
@@ -450,5 +540,168 @@ mod tests {
         );
         mapping.delete_when.as_mut().unwrap().column = "Last".into();
         assert_eq!(validate(&mapping, &header(), &catalog()), Ok(()));
+    }
+
+    fn with_event(event: EventRule) -> Mapping {
+        Mapping {
+            key_column: None,
+            event: Some(event),
+            delete_when: None,
+            columns: vec![email()],
+        }
+    }
+
+    fn event(name: &str, properties: Vec<PropertyRule>) -> EventRule {
+        EventRule {
+            name: name.into(),
+            timestamp: None,
+            properties,
+        }
+    }
+
+    fn property(name: &str, column: &str) -> PropertyRule {
+        PropertyRule {
+            property: name.into(),
+            column: column.into(),
+            transforms: vec![],
+        }
+    }
+
+    fn event_check(mapping: &Mapping) -> Result<(), MappingError> {
+        validate(mapping, &header(), &catalog())
+    }
+
+    #[test]
+    fn an_event_with_a_valid_name_properties_and_known_columns_is_valid() {
+        let mut rule = event("order_placed", vec![property("plan", "Plan")]);
+        rule.timestamp = Some(ValueRule {
+            column: "Name".into(),
+            transforms: vec![Transform::Timestamp {
+                format: "%d/%m/%Y".into(),
+            }],
+        });
+
+        assert_eq!(event_check(&with_event(rule)), Ok(()));
+    }
+
+    #[test]
+    fn an_event_name_must_follow_the_event_name_rule() {
+        for name in ["", ".", "..", "has\ncontrol", &"n".repeat(129)] {
+            let error = event_check(&with_event(event(name, vec![]))).unwrap_err();
+
+            assert_eq!(error, MappingError::InvalidEventName, "{name:?}");
+            assert_eq!(error.code(), "invalid_event_name");
+            assert_eq!(error.column(), None);
+        }
+    }
+
+    #[test]
+    fn an_event_property_needs_a_valid_unique_name_and_at_most_fifty_are_allowed() {
+        for name in ["", "tab\there"] {
+            let error =
+                event_check(&with_event(event("e", vec![property(name, "Plan")]))).unwrap_err();
+
+            assert_eq!(error.code(), "invalid_event_property", "{name:?}");
+        }
+        let duplicate = event_check(&with_event(event(
+            "e",
+            vec![property("a", "Plan"), property("a", "Name")],
+        )))
+        .unwrap_err();
+        assert_eq!(duplicate, MappingError::DuplicateEventProperty("a".into()));
+        assert_eq!(duplicate.code(), "duplicate_event_property");
+        let many = (0..51)
+            .map(|n| property(&format!("p{n}"), "Plan"))
+            .collect();
+        assert_eq!(
+            event_check(&with_event(event("e", many))),
+            Err(MappingError::TooManyEventProperties)
+        );
+        let fifty = (0..50)
+            .map(|n| property(&format!("p{n}"), "Plan"))
+            .collect();
+        assert_eq!(event_check(&with_event(event("e", fifty))), Ok(()));
+    }
+
+    #[test]
+    fn the_columns_and_transforms_of_an_event_are_checked_like_a_rules() {
+        let ghost = with_event(event("e", vec![property("p", "Ghost")]));
+        assert_eq!(
+            event_check(&ghost),
+            Err(MappingError::UnknownColumn("Ghost".into()))
+        );
+        let mut timestamp = event("e", vec![]);
+        timestamp.timestamp = Some(ValueRule {
+            column: "Plan".into(),
+            transforms: vec![Transform::Timestamp {
+                format: String::new(),
+            }],
+        });
+        assert_eq!(
+            event_check(&with_event(timestamp)),
+            Err(MappingError::InvalidTransform("Plan".into()))
+        );
+        let mut concat = property("p", "Plan");
+        concat.transforms = vec![Transform::Concat {
+            columns: vec!["Ghost".into()],
+            separator: " ".into(),
+        }];
+        assert_eq!(
+            event_check(&with_event(event("e", vec![concat]))),
+            Err(MappingError::UnknownColumn("Ghost".into()))
+        );
+    }
+
+    #[test]
+    fn validate_wants_exact_names_and_validate_paths_accepts_a_path_into_a_known_field() {
+        let nested = Mapping {
+            key_column: Some("Plan.id".into()),
+            event: None,
+            delete_when: None,
+            columns: vec![
+                rule(
+                    "Email.address",
+                    Target::Identifier {
+                        kind: "email".into(),
+                    },
+                ),
+                rule("Name.first.0", Target::Trait { key: "name".into() }),
+            ],
+        };
+
+        assert_eq!(
+            validate(&nested, &header(), &catalog()),
+            Err(MappingError::UnknownColumn("Plan.id".into()))
+        );
+        assert_eq!(validate_paths(&nested, &header(), &catalog()), Ok(()));
+        let unknown_first = Mapping {
+            columns: vec![rule(
+                "Ghost.address",
+                Target::Identifier {
+                    kind: "email".into(),
+                },
+            )],
+            ..nested
+        };
+        assert_eq!(
+            validate_paths(&unknown_first, &header(), &catalog()),
+            Err(MappingError::UnknownColumn("Ghost.address".into()))
+        );
+    }
+
+    #[test]
+    fn validate_paths_checks_concat_and_event_columns_by_their_first_segment() {
+        let mut mapping = with_event(event("e", vec![property("p", "Ghost.x")]));
+        mapping.columns[0].transforms = vec![Transform::Concat {
+            columns: vec!["Name.last".into()],
+            separator: " ".into(),
+        }];
+
+        assert_eq!(
+            validate_paths(&mapping, &header(), &catalog()),
+            Err(MappingError::UnknownColumn("Ghost.x".into()))
+        );
+        mapping.event = Some(event("e", vec![property("p", "Last.x")]));
+        assert_eq!(validate_paths(&mapping, &header(), &catalog()), Ok(()));
     }
 }

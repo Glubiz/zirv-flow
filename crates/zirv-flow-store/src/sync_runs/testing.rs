@@ -174,6 +174,8 @@ pub(crate) fn upsert(fixture: &Fixture, key: &str, email: &str) -> SyncUpsert {
             trace: fixture.trace.clone(),
         },
         sample: json!({"properties": {}, "masked": []}),
+        lists: Vec::new(),
+        event: None,
     }
 }
 
@@ -194,6 +196,8 @@ pub(crate) fn batch<'a>(
         lease_token: fixture.job.lease_token,
         attempt: fixture.job.attempts,
         trace: &fixture.trace,
+        received_at: OffsetDateTime::now_utc(),
+        redaction_key: None,
         upserts,
         deleted: &[],
         seen: &[],

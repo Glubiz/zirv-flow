@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { Button, EmptyState, formatDateTime, Pill } from "../../ui";
+import { MappingDialog } from "./MappingDialog";
 import { StreamDialog } from "./StreamDialog";
 import { FreshnessBadge } from "./FreshnessBadge";
 import { lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
@@ -28,6 +29,7 @@ function stalenessCell(stream: Stream): string {
 /** The streams of a source with their settings; admins set each one up in a dialog. */
 export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, busy }: StreamsPanelProps) {
   const [editing, setEditing] = useState<Stream | null>(null);
+  const [mapping, setMapping] = useState<Stream | null>(null);
 
   if (streams.length === 0) {
     return (
@@ -95,6 +97,9 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                         Reconcile now
                       </Button>
                     ) : null}
+                    <Button onClick={() => setMapping(stream)} aria-label={`Map ${stream.name}`}>
+                      Map
+                    </Button>
                     <Button onClick={() => setEditing(stream)} aria-label={`Set up ${stream.name}`}>
                       Set up
                     </Button>
@@ -114,6 +119,19 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
           onClose={() => setEditing(null)}
           onSaved={(saved) => {
             setEditing(null);
+            onChanged(saved);
+          }}
+        />
+      ) : null}
+      {mapping ? (
+        <MappingDialog
+          key={mapping.id}
+          workspaceId={workspaceId}
+          sourceId={sourceId}
+          stream={mapping}
+          onClose={() => setMapping(null)}
+          onSaved={(saved) => {
+            setMapping(null);
             onChanged(saved);
           }}
         />

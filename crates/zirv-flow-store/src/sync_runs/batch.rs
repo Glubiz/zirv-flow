@@ -6,13 +6,19 @@
 //!
 //! Nothing here logs a record value, an identifier or a trait value.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{Value, json};
-use sqlx::PgConnection;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use sqlx::{Connection, PgConnection};
+use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::{TraceContext, WorkspaceId};
+use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
+use crate::events::{
+    EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
+};
+use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
@@ -38,6 +44,19 @@ pub(crate) const DELETE_BY_SWEEP: &str = "swept";
 pub struct SyncUpsert {
     pub record: ProfileRecord,
     pub sample: Value,
+    /// The lists the record's person joins.
+    pub lists: Vec<Uuid>,
+    /// The event the record yields, when the mapping describes one.
+    pub event: Option<SyncEvent>,
+}
+
+/// The event of a record: its person is the record's, its time the run's unless it brings one.
+#[derive(Clone, Debug)]
+pub struct SyncEvent {
+    pub name: String,
+    pub properties: Map<String, Value>,
+    /// When the event happened, when the mapping says.
+    pub timestamp: Option<OffsetDateTime>,
 }
 
 /// A record the mapping refused: codes and a masked sample, never a value.
@@ -65,6 +84,10 @@ pub struct SyncBatch<'a> {
     pub lease_token: Uuid,
     pub attempt: i32,
     pub trace: &'a TraceContext,
+    /// When the run saw its records: the events' `received_at`, stable across attempts.
+    pub received_at: OffsetDateTime,
+    /// Redacts the events' properties. Needed when any upsert has an event.
+    pub redaction_key: Option<&'a HmacKey>,
     pub upserts: &'a [SyncUpsert],
     /// The keys of the records the source or the mapping's delete signal marks as deleted, each
     /// with why: [`DELETE_BY_SOURCE`] or [`DELETE_BY_SIGNAL`].
@@ -95,11 +118,21 @@ pub struct Counts {
     pub deleted: i64,
 }
 
+/// What the event path did with the events of a batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EventCounts {
+    pub accepted: i64,
+    pub duplicate: i64,
+    pub rejected: i64,
+}
+
 /// Where a committed batch left the run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BatchProgress {
     /// What this batch added.
     pub batch: Counts,
+    /// What became of the batch's events.
+    pub events: EventCounts,
     /// The run's totals after it.
     pub run: Counts,
     /// The reject share went over the run's threshold: the batch is committed and the run is
@@ -115,6 +148,8 @@ pub enum BatchOutcome {
     LeaseLost,
     /// The run is no longer running (cancelled, or ended): nothing was written.
     Cancelled,
+    /// A list the mapping names does not exist: nothing was written.
+    ListMissing,
 }
 
 /// A reject to store, with the code that heads it.
@@ -176,6 +211,11 @@ pub async fn commit_sync_batch(
     }
 
     let results = apply_upserts(&mut tx, batch).await?;
+    let events = apply_events(&mut tx, batch, &results).await?;
+    link_event_rejects(&mut tx, batch, &events).await?;
+    if !join_lists(&mut tx, batch, &results).await? {
+        return Ok(BatchOutcome::ListMissing);
+    }
 
     // Every record the run read that still exists in the source is marked as seen: the applied
     // and unchanged ones, and the ones the mapping or the store refused, whose earlier
@@ -216,10 +256,14 @@ pub async fn commit_sync_batch(
             sample: reject.sample.clone(),
         })
         .collect();
-    for (upsert, result) in batch.upserts.iter().zip(results) {
+    for (index, (upsert, result)) in batch.upserts.iter().zip(results).enumerate() {
+        // A record counts once, as its worst outcome: rejected, then applied, then unchanged.
+        let event = events.per_upsert.get(index).copied().flatten();
         let reason: &'static str = match result {
             Some(ProfileOutcome::Applied { person_id, .. }) => {
-                counts.applied += 1;
+                if event != Some(EventResult::Rejected) {
+                    counts.applied += 1;
+                }
                 let mut subjects = vec![("person", person_id)];
                 subjects.extend(
                     seen.get(upsert.record.record_key.as_str())
@@ -229,7 +273,11 @@ pub async fn commit_sync_batch(
                 continue;
             }
             Some(ProfileOutcome::Unchanged { .. }) => {
-                counts.unchanged += 1;
+                match event {
+                    Some(EventResult::Rejected) => {}
+                    Some(EventResult::Accepted) => counts.applied += 1,
+                    _ => counts.unchanged += 1,
+                }
                 continue;
             }
             Some(ProfileOutcome::Rejected { reason }) => reason,
@@ -267,7 +315,10 @@ pub async fn commit_sync_batch(
         }
     }
 
-    counts.rejected = i64::try_from(refusals.len()).unwrap_or(i64::MAX);
+    // A record whose event was refused is rejected, and its profile change stands.
+    counts.rejected = i64::try_from(refusals.len())
+        .unwrap_or(i64::MAX)
+        .saturating_add(events.counts.rejected);
     insert_rejects(&mut tx, batch, &refusals).await?;
     for refusal in &refusals {
         let code = refusal
@@ -341,6 +392,7 @@ pub async fn commit_sync_batch(
     commit(tx).await?;
     Ok(BatchOutcome::Committed(BatchProgress {
         batch: counts,
+        events: events.counts,
         run: Counts {
             read,
             applied,
@@ -391,6 +443,237 @@ async fn apply_upserts(
     }
     let outcomes = apply_profile_records(tx, batch.workspace, &records).await?;
     Ok(outcomes.into_iter().map(Some).collect())
+}
+
+/// What became of one record's event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventResult {
+    Accepted,
+    Duplicate,
+    Rejected,
+}
+
+/// The events of a batch, by the position of their record.
+#[derive(Default)]
+struct EventsApplied {
+    per_upsert: Vec<Option<EventResult>>,
+    /// The rejects the event path wrote or found open for these events.
+    reject_ids: Vec<Uuid>,
+    /// The `message_id`s of events refused as `apply_failed`, whose rejects have no id to hand
+    /// back.
+    failed_messages: Vec<String>,
+    counts: EventCounts,
+}
+
+/// The idempotency key of a record's event: the same record, stream, source and event name give
+/// the same key, so a re-read of the record never duplicates its event, and a record that
+/// changed does not rewrite its past.
+fn event_message_id(batch: &SyncBatch<'_>, record_key: &str, name: &str) -> String {
+    let mut hash = Sha256::new();
+    for (position, part) in [batch.source, batch.stream, record_key, name]
+        .into_iter()
+        .enumerate()
+    {
+        if position > 0 {
+            hash.update([0]);
+        }
+        hash.update(part.as_bytes());
+    }
+    let digest: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sync:{digest}")
+}
+
+/// Applies the event of each record whose profile was written or already current, through the
+/// event path: validation against the published schema, redaction and reject handling. With
+/// `singly`, each event gets a savepoint of its own and one that cannot be stored is rejected as
+/// `apply_failed`.
+async fn apply_events(
+    tx: &mut crate::Tx,
+    batch: &SyncBatch<'_>,
+    results: &[Option<ProfileOutcome>],
+) -> Result<EventsApplied, StoreError> {
+    let mut applied = EventsApplied::default();
+    if batch.upserts.iter().all(|upsert| upsert.event.is_none()) {
+        return Ok(applied);
+    }
+    // The job fails a run with events and no key before it reads; a batch never gets here
+    // without one.
+    let key = batch.redaction_key.ok_or_else(StoreError::poison)?;
+    let mut events = EventBatch::default();
+    for (upsert, result) in batch.upserts.iter().zip(results) {
+        let current = matches!(
+            result,
+            Some(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
+        );
+        let Some(event) = upsert.event.as_ref().filter(|_| current) else {
+            applied.per_upsert.push(None);
+            continue;
+        };
+        let message_id = event_message_id(batch, &upsert.record.record_key, &event.name);
+        let record = EventRecord {
+            source: batch.source.to_owned(),
+            identifiers: upsert.record.identifiers.clone(),
+            name: event.name.clone(),
+            properties: event.properties.clone(),
+            timestamp: event.timestamp,
+            received_at: batch.received_at,
+            message_id: Some(message_id.clone()),
+            trace: batch.trace.clone(),
+        };
+        let outcome = if batch.singly {
+            let outcome = apply_event_singly(tx, batch, key, &record, &message_id).await?;
+            if outcome.is_none() {
+                applied.failed_messages.push(message_id);
+            }
+            outcome
+        } else {
+            Some(apply_event_record(tx, batch.workspace, key, &mut events, &record).await?)
+        };
+        let result = match outcome {
+            Some(EventOutcome::Accepted { .. }) => {
+                applied.counts.accepted += 1;
+                EventResult::Accepted
+            }
+            Some(EventOutcome::Duplicate { .. }) => {
+                applied.counts.duplicate += 1;
+                EventResult::Duplicate
+            }
+            Some(EventOutcome::Rejected { reject_id, .. }) => {
+                applied.counts.rejected += 1;
+                applied.reject_ids.push(reject_id);
+                EventResult::Rejected
+            }
+            None => {
+                applied.counts.rejected += 1;
+                EventResult::Rejected
+            }
+        };
+        applied.per_upsert.push(Some(result));
+    }
+    events.finish(tx, batch.workspace).await?;
+    Ok(applied)
+}
+
+/// One event in a savepoint of its own. `None` when it cannot be stored: it is rejected as
+/// `apply_failed` and the batch goes on.
+async fn apply_event_singly(
+    tx: &mut crate::Tx,
+    batch: &SyncBatch<'_>,
+    key: &HmacKey,
+    record: &EventRecord,
+    message_id: &str,
+) -> Result<Option<EventOutcome>, StoreError> {
+    let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
+    let mut single = EventBatch::default();
+    let done =
+        match apply_event_record(&mut savepoint, batch.workspace, key, &mut single, record).await {
+            Ok(outcome) => single
+                .finish(&mut savepoint, batch.workspace)
+                .await
+                .map(|()| outcome),
+            Err(error) => Err(error),
+        };
+    match done {
+        Ok(outcome) => {
+            savepoint.commit().await.map_err(StoreError::query)?;
+            Ok(Some(outcome))
+        }
+        Err(error) if error.is_retryable() => Err(error),
+        Err(_) => {
+            savepoint.rollback().await.map_err(StoreError::query)?;
+            reject_apply_failed(
+                tx,
+                batch.workspace,
+                key,
+                &FailedItem {
+                    kind: "event",
+                    source: batch.source,
+                    name: Some(&record.name),
+                    values: &record.properties,
+                    timestamp: record.timestamp,
+                    received_at: batch.received_at,
+                    message_id: Some(message_id),
+                    trace: batch.trace,
+                },
+            )
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+/// Ties the rejects of the batch's events to the run, so the run's detail lists what it hit.
+/// An open reject the event path found for the same message is tied to this run too.
+async fn link_event_rejects(
+    tx: &mut crate::Tx,
+    batch: &SyncBatch<'_>,
+    events: &EventsApplied,
+) -> Result<(), StoreError> {
+    if events.reject_ids.is_empty() && events.failed_messages.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE ingest_rejects SET sync_run_id = $2 \
+         WHERE workspace_id = $1 \
+           AND (id = ANY($3) OR (message_id = ANY($4) AND replayed_at IS NULL))",
+    )
+    .bind(batch.workspace.as_uuid())
+    .bind(batch.run_id)
+    .bind(&events.reject_ids)
+    .bind(&events.failed_messages)
+    .execute(&mut **tx)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// Adds the people of the records whose profile was written or already current to the lists the
+/// mapping names. False when a list does not exist: the caller rolls the batch back.
+async fn join_lists(
+    tx: &mut crate::Tx,
+    batch: &SyncBatch<'_>,
+    results: &[Option<ProfileOutcome>],
+) -> Result<bool, StoreError> {
+    // Lists in one order, so two runs never wait on each other's lists.
+    let mut by_list: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+    for (upsert, result) in batch.upserts.iter().zip(results) {
+        let Some(
+            ProfileOutcome::Applied { person_id, .. } | ProfileOutcome::Unchanged { person_id, .. },
+        ) = result
+        else {
+            continue;
+        };
+        for list in &upsert.lists {
+            by_list.entry(*list).or_default().push(*person_id);
+        }
+    }
+    for (list, mut people) in by_list {
+        people.sort_unstable();
+        people.dedup();
+        for chunk in people.chunks(MAX_PEOPLE_PER_CALL) {
+            match add_members(
+                tx,
+                batch.workspace,
+                list,
+                chunk,
+                ListSource::Sync,
+                None,
+                batch.trace,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(MembershipError::NoSuchList) => return Ok(false),
+                Err(MembershipError::Store(error)) => return Err(error),
+                Err(MembershipError::TooMany) => return Err(StoreError::poison()),
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Sets `last_seen_run` on the live ledger rows of `keys` and returns their ids by key.
@@ -1049,6 +1332,7 @@ mod tests {
         let mapping = Mapping {
             delete_when: None,
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),
                 target: Target::Trait { key: "plan".into() },
@@ -1081,6 +1365,568 @@ mod tests {
             .unwrap();
         assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
         assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+    }
+
+    // The events and lists of a batch (file sources).
+
+    fn key() -> zirv_flow_core::HmacKey {
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
+        HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction)
+    }
+
+    /// A record with an `order_placed` event carrying `total`, joining `lists`.
+    fn with_event(
+        fx: &Fixture,
+        record_key: &str,
+        email: &str,
+        total: Value,
+        lists: &[Uuid],
+    ) -> SyncUpsert {
+        let mut item = upsert(fx, record_key, email);
+        item.lists = lists.to_vec();
+        item.event = Some(SyncEvent {
+            name: "order_placed".into(),
+            properties: json!({ "total": total }).as_object().cloned().unwrap(),
+            timestamp: None,
+        });
+        item
+    }
+
+    /// Publishes `order_placed` in block mode, with a required numeric `total`.
+    async fn block_order_placed(pool: &PgPool, fx: &Fixture) {
+        use crate::events::{NewEventSchema, create_event_schema, publish_schema_draft};
+        use zirv_flow_core::events::{EventMode, PropertyType, SchemaProperty};
+
+        create_event_schema(
+            pool,
+            fx.ws,
+            &NewEventSchema {
+                name: "order_placed".into(),
+                mode: EventMode::Block,
+                description: String::new(),
+                properties: vec![SchemaProperty {
+                    name: "total".into(),
+                    property_type: PropertyType::Number,
+                    required: true,
+                    enum_values: None,
+                    description: String::new(),
+                    pii: false,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(pool).await.unwrap();
+        publish_schema_draft(&mut tx, fx.ws, "order_placed", None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+    }
+
+    async fn list(pool: &PgPool, fx: &Fixture, name: &str) -> Uuid {
+        crate::create_list(pool, fx.ws, name, "", None)
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// A batch of the fixture carrying the redaction key.
+    fn keyed<'a>(
+        fx: &'a Fixture,
+        source: &'a str,
+        upserts: &'a [SyncUpsert],
+        checkpoint: &'a Value,
+        key: &'a zirv_flow_core::HmacKey,
+    ) -> SyncBatch<'a> {
+        SyncBatch {
+            redaction_key: Some(key),
+            ..batch(fx, source, upserts, checkpoint)
+        }
+    }
+
+    async fn nothing_of_events_and_lists(pool: &PgPool) {
+        for (table, sql) in [
+            ("events", "SELECT count(*) FROM events"),
+            ("list_members", "SELECT count(*) FROM list_members"),
+            (
+                "list_member_changes",
+                "SELECT count(*) FROM list_member_changes",
+            ),
+            ("ingest_rejects", "SELECT count(*) FROM ingest_rejects"),
+            ("people", "SELECT count(*) FROM people"),
+            ("source_records", "SELECT count(*) FROM source_records"),
+        ] {
+            assert_eq!(count(pool, sql).await, 0, "{table}");
+        }
+    }
+
+    #[test]
+    fn an_events_message_id_is_stable_sixty_nine_characters_and_differs_by_every_part() {
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("test"));
+        let at = OffsetDateTime::now_utc();
+        let checkpoint = json!({});
+        let make = |source: &'static str, stream: &'static str| SyncBatch {
+            workspace: zirv_flow_core::WorkspaceId::from_uuid(Uuid::nil()),
+            run_id: Uuid::nil(),
+            stream_id: Uuid::nil(),
+            source,
+            stream,
+            job_id: Uuid::nil(),
+            lease_token: Uuid::nil(),
+            attempt: 1,
+            trace: &trace,
+            received_at: at,
+            redaction_key: None,
+            upserts: &[],
+            deleted: &[],
+            seen: &[],
+            rejected: &[],
+            duplicates: 0,
+            checkpoint: &checkpoint,
+            incremental: false,
+            singly: false,
+        };
+
+        let base = event_message_id(&make("s", "t"), "k", "e");
+
+        assert_eq!(base.len(), 69);
+        assert!(base.starts_with("sync:"));
+        assert_eq!(base, event_message_id(&make("s", "t"), "k", "e"));
+        for other in [
+            event_message_id(&make("s2", "t"), "k", "e"),
+            event_message_id(&make("s", "t2"), "k", "e"),
+            event_message_id(&make("s", "t"), "k2", "e"),
+            event_message_id(&make("s", "t"), "k", "e2"),
+            // The parts are separated, not concatenated.
+            event_message_id(&make("s", "t"), "ke", ""),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_applies_profiles_events_and_list_members_in_one_transaction(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let vip = list(&pool, &fx, "vip").await;
+        let key = key();
+        let upserts = [
+            with_event(&fx, "k0", "a0@example.com", json!(10), &[news]),
+            with_event(&fx, "k1", "a1@example.com", json!(20), &[news, vip]),
+            upsert(&fx, "k2", "a2@example.com"),
+        ];
+        let cp = json!({"offset": 3});
+
+        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.read, progress.batch.applied), (3, 3));
+        assert_eq!(
+            progress.events,
+            EventCounts {
+                accepted: 2,
+                duplicate: 0,
+                rejected: 0
+            }
+        );
+        // The events are the people's, under the run's trace, from the source, at the run's time.
+        let events: Vec<(String, String, Uuid, Value, Option<String>)> = sqlx::query_as(
+            "SELECT name, source, trace_id, properties, message_id FROM events ORDER BY received_at, id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(event.0, "order_placed");
+            assert_eq!(event.1, source);
+            assert_eq!(event.2, fx.run.trace_id);
+            assert!(event.4.as_deref().unwrap().starts_with("sync:"));
+        }
+        let received: Vec<OffsetDateTime> = sqlx::query_scalar("SELECT received_at FROM events")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(received.iter().all(|at| *at == received[0]));
+        // The members: two in news, one in vip, all from a sync, with a history row each.
+        let members: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT list_id, source FROM list_members ORDER BY list_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|(_, source)| source == "sync"));
+        let changes: Vec<(String, String)> =
+            sqlx::query_as("SELECT action, source FROM list_member_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(changes.len(), 3);
+        assert!(
+            changes
+                .iter()
+                .all(|(action, source)| action == "added" && source == "sync")
+        );
+        let counts: Vec<(Uuid, i64)> = sqlx::query_as("SELECT id, member_count FROM lists")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(counts.iter().find(|(id, _)| *id == news).unwrap().1, 2);
+        assert_eq!(counts.iter().find(|(id, _)| *id == vip).unwrap().1, 1);
+        // Every decision of the batch is under the run's trace and caused by the run, and none
+        // holds a value.
+        let decisions: Vec<(Uuid, String, String, String, Value)> = sqlx::query_as(
+            "SELECT trace_id, cause_kind, action, outcome, subject_ids FROM decision_records",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for decision in &decisions {
+            assert_eq!(decision.0, fx.run.trace_id);
+            assert_eq!(decision.1, "sync_run");
+        }
+        let actions: std::collections::BTreeSet<_> =
+            decisions.iter().map(|d| d.2.as_str()).collect();
+        assert!(actions.contains("event.accepted") && actions.contains("list.membership"));
+        assert!(actions.contains("sync.record"));
+        let shown = format!("{decisions:?}");
+        assert!(!shown.contains("example.com") && !shown.contains("order_placed"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_read_of_the_same_records_changes_nothing(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let key = key();
+        let upserts = [
+            with_event(&fx, "k0", "a0@example.com", json!(10), &[news]),
+            with_event(&fx, "k1", "a1@example.com", json!(20), &[news]),
+        ];
+        let cp = json!({"offset": 2});
+        commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+        let events_before = count(&pool, "SELECT count(*) FROM events").await;
+        let changes_before = count(&pool, "SELECT count(*) FROM list_member_changes").await;
+
+        let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        let BatchOutcome::Committed(progress) = again else {
+            panic!("{again:?}");
+        };
+        assert_eq!(
+            (
+                progress.batch.applied,
+                progress.batch.unchanged,
+                progress.batch.rejected
+            ),
+            (0, 2, 0)
+        );
+        assert_eq!(
+            progress.events,
+            EventCounts {
+                accepted: 0,
+                duplicate: 2,
+                rejected: 0
+            }
+        );
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM events").await,
+            events_before
+        );
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM list_member_changes").await,
+            changes_before
+        );
+        let duplicates: i64 =
+            sqlx::query_scalar("SELECT sum(duplicates)::bigint FROM event_dedupe")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(duplicates, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_event_on_an_unchanged_profile_counts_the_record_as_applied(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        let first = [upsert(&fx, "k0", "a0@example.com")];
+        let cp = json!({"offset": 1});
+        commit_sync_batch(&pool, &keyed(&fx, &source, &first, &cp, &key))
+            .await
+            .unwrap();
+
+        let second = [with_event(&fx, "k0", "a0@example.com", json!(5), &[])];
+        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &second, &cp, &key))
+            .await
+            .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(
+            (progress.batch.applied, progress.batch.unchanged),
+            (1, 0),
+            "an accepted event is something the record changed"
+        );
+        assert_eq!(progress.events.accepted, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refused_event_is_a_reject_of_the_run_and_the_record_counts_once_as_rejected(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        block_order_placed(&pool, &fx).await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let key = key();
+        let upserts = [
+            with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
+            with_event(&fx, "bad", "a1@example.com", json!("not a number"), &[news]),
+        ];
+        let cp = json!({"offset": 2});
+
+        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        // One accepted, one refused: the refused record is rejected, its profile change stands.
+        assert_eq!(
+            (
+                progress.batch.read,
+                progress.batch.applied,
+                progress.batch.rejected
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
+        assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 2);
+        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
+        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+        // The reject is the event path's, kind event, tied to the run, with no value in it.
+        let rejects: Vec<(String, Option<Uuid>, Value, Option<String>)> =
+            sqlx::query_as("SELECT kind, sync_run_id, sample, reason FROM ingest_rejects")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rejects.len(), 1);
+        assert_eq!(rejects[0].0, "event");
+        assert_eq!(rejects[0].1, Some(fx.run.id));
+        assert_eq!(rejects[0].3.as_deref(), Some("validation_failed"));
+        let listed = crate::list_run_rejects(&pool, fx.ws, fx.run.id, 10)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (run.records_read, run.records_applied, run.records_rejected),
+            (2, 1, 1)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_open_reject_found_again_is_tied_to_the_run_that_hit_it(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        block_order_placed(&pool, &fx).await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        let upserts = [with_event(&fx, "bad", "a1@example.com", json!("x"), &[])];
+        let cp = json!({"offset": 1});
+        commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+        // The reject stays open and is forgotten by its run, as when an earlier run is deleted.
+        sqlx::query("UPDATE ingest_rejects SET sync_run_id = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        let BatchOutcome::Committed(progress) = again else {
+            panic!("{again:?}");
+        };
+        assert_eq!(progress.batch.rejected, 1);
+        assert_eq!(count(&pool, "SELECT count(*) FROM ingest_rejects").await, 1);
+        let linked: Option<Uuid> = sqlx::query_scalar("SELECT sync_run_id FROM ingest_rejects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(linked, Some(fx.run.id));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_missing_list_rolls_the_whole_batch_back(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        let upserts = [with_event(
+            &fx,
+            "k0",
+            "a0@example.com",
+            json!(1),
+            &[Uuid::now_v7()],
+        )];
+        let cp = json!({"offset": 1});
+
+        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, BatchOutcome::ListMissing));
+        nothing_of_events_and_lists(&pool).await;
+        nothing_written(&pool, &fx).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_after_the_events_and_members_rolls_back_profiles_events_and_members_together(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let key = key();
+        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+        // PostgreSQL refuses a NUL in jsonb, after everything else was written.
+        let poison = [SyncReject {
+            record_key: "poison".into(),
+            reasons: vec![("\u{0}".into(), "invalid_identifier")],
+            sample: json!({}),
+        }];
+        let cp = json!({"offset": 1});
+
+        let result = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                rejected: &poison,
+                ..keyed(&fx, &source, &upserts, &cp, &key)
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        nothing_of_events_and_lists(&pool).await;
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM event_dedupe").await,
+            0,
+            "the dedupe row is rolled back with the event"
+        );
+        let members: i64 = sqlx::query_scalar("SELECT member_count FROM lists WHERE id = $1")
+            .bind(news)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(members, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_of_events_and_members_is_fenced_by_the_lease_and_by_a_cancel(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let key = key();
+        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+        let cp = json!({"offset": 1});
+
+        // Another worker holds the lease.
+        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+            .bind(fx.job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let lost = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+        assert!(matches!(lost, BatchOutcome::LeaseLost));
+        nothing_of_events_and_lists(&pool).await;
+
+        // The run was cancelled.
+        let fx = fixture(&pool, "two", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+        let mut connection = pool.acquire().await.unwrap();
+        cancel_run(&mut connection, fx.ws, fx.source_id, fx.run.id)
+            .await
+            .unwrap();
+        drop(connection);
+        let cancelled = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+        assert!(matches!(cancelled, BatchOutcome::Cancelled));
+        nothing_of_events_and_lists(&pool).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn applying_events_record_by_record_gives_the_same_result(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        block_order_placed(&pool, &fx).await;
+        let source = fx.source_id.to_string();
+        let news = list(&pool, &fx, "news").await;
+        let key = key();
+        let upserts = [
+            with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
+            with_event(&fx, "bad", "a1@example.com", json!("x"), &[news]),
+        ];
+        let cp = json!({"offset": 2});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                singly: true,
+                ..keyed(&fx, &source, &upserts, &cp, &key)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
+        assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
+        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_with_events_and_no_redaction_key_writes_nothing(pool: PgPool) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[])];
+        let cp = json!({"offset": 1});
+
+        let result = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp)).await;
+
+        assert!(result.is_err());
+        nothing_of_events_and_lists(&pool).await;
     }
 
     #[sqlx::test]

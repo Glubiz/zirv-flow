@@ -12,8 +12,8 @@ mod sweep;
 pub(crate) mod testing;
 
 pub use batch::{
-    BatchOutcome, BatchProgress, Counts, DELETE_BY_SIGNAL, DELETE_BY_SOURCE,
-    SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncUpsert, commit_sync_batch,
+    BatchOutcome, BatchProgress, Counts, DELETE_BY_SIGNAL, DELETE_BY_SOURCE, EventCounts,
+    SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncEvent, SyncReject, SyncUpsert, commit_sync_batch,
 };
 pub use job::{RUN_JOB_KIND, run_trace};
 pub use model::{

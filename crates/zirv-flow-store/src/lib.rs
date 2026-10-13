@@ -150,12 +150,13 @@ pub use suppressions::{
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
     Counts as SyncCounts, DELETE_BY_SIGNAL as SYNC_DELETE_BY_SIGNAL,
-    DELETE_BY_SOURCE as SYNC_DELETE_BY_SOURCE, FanOut, Lease as SyncLease,
-    RUN_JOB_KIND as SYNC_RUN_JOB_KIND, ReconcileQueued, RunCursor, RunEnd, RunKind, RunReject,
-    RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome, SweepUnit,
-    SyncBatch, SyncReject, SyncRun, SyncUpsert, cancel_run, commit_sync_batch, fail_orphaned_runs,
-    fail_run, find_run, finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run,
-    queue_runs_for_source, run_trace, start_run, sweep_exceeds_limit, sweep_unreached,
+    DELETE_BY_SOURCE as SYNC_DELETE_BY_SOURCE, EventCounts as SyncEventCounts, FanOut,
+    Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, ReconcileQueued, RunCursor, RunEnd,
+    RunKind, RunReject, RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome,
+    SweepUnit, SyncBatch, SyncEvent, SyncReject, SyncRun, SyncUpsert, cancel_run,
+    commit_sync_batch, fail_orphaned_runs, fail_run, find_run, finish_run, list_run_rejects,
+    list_runs, queue_reconcile_run, queue_run, queue_runs_for_source, run_trace, start_run,
+    sweep_exceeds_limit, sweep_unreached,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

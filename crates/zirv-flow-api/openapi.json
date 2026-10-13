@@ -9627,7 +9627,157 @@
             }
           },
           "422": {
-            "description": "Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have",
+            "description": "Settings the stream cannot serve, such as incremental without a cursor field, a mapping that names a column the stream does not have, or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Shows what a mapping makes of the first records of a stream. Reads from the start of the\nstream, never from a checkpoint, and writes nothing. The saved mapping is used unless the\nbody brings a draft, which is checked as a save is. Workspace admins only; not audited, since\nit changes nothing.",
+        "operationId": "preview_stream_mapping",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Stream name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The sample records and what the mapping makes of them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, source or stream, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The source type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid draft mapping (the same codes as a save), a limit outside 1 to 20, no mapping to preview (`stream_not_mapped`), or a source that reported a blank or repeated field name (`code` is `blank_header` or `duplicate_header`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The source refused or failed the request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The source did not answer in time",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11665,7 +11815,7 @@
         "properties": {
           "column": {
             "type": "string",
-            "description": "A column name of the header."
+            "description": "A column name of the header, or for a JSON stream a dotted path such as `address.city`\nor `items.0.sku`."
           },
           "target": {
             "$ref": "#/components/schemas/TargetBody"
@@ -12946,6 +13096,38 @@
           }
         }
       },
+      "EventRuleBody": {
+        "type": "object",
+        "description": "The event a record yields: a constant name, the person of the record, a time and properties.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The event's name."
+          },
+          "properties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PropertyRuleBody"
+            },
+            "description": "The event's properties, each from one column; at most 50."
+          },
+          "timestamp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValueRuleBody",
+                "description": "Where the event's time comes from; without it the event happened when the run saw it."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "EventSchemaBody": {
         "type": "object",
         "required": [
@@ -14175,7 +14357,7 @@
           },
           "source": {
             "type": "string",
-            "description": "`ui`, `api`, `import`, `merge` or `flow`.",
+            "description": "`ui`, `api`, `import`, `merge`, `flow` or `sync`.",
             "example": "ui"
           }
         }
@@ -14223,6 +14405,17 @@
               {
                 "$ref": "#/components/schemas/DeleteWhenBody",
                 "description": "The column that marks a record as deleted in its source. Only a synced stream takes it; a\nCSV import refuses a mapping with one. A record whose cell satisfies the rule is removed\ninstead of applied."
+              }
+            ]
+          },
+          "event": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EventRuleBody",
+                "description": "The one event each record yields. Sync runs only: a CSV import refuses it."
               }
             ]
           },
@@ -14328,7 +14521,7 @@
           },
           "source": {
             "type": "string",
-            "description": "`ui`, `api`, `import`, `merge` or `flow`."
+            "description": "`ui`, `api`, `import`, `merge`, `flow` or `sync`."
           },
           "trace_id": {
             "type": "string",
@@ -14540,7 +14733,7 @@
           },
           "source": {
             "type": "string",
-            "description": "`ui`, `api`, `import`, `merge` or `flow`."
+            "description": "`ui`, `api`, `import`, `merge`, `flow` or `sync`."
           }
         }
       },
@@ -14612,6 +14805,172 @@
             "format": "uuid"
           }
         }
+      },
+      "PreviewBody": {
+        "type": "object",
+        "required": [
+          "records",
+          "read",
+          "truncated"
+        ],
+        "properties": {
+          "read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many records were mapped.",
+            "minimum": 0
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewRecord"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The stream has more records than the preview shows."
+          }
+        }
+      },
+      "PreviewError": {
+        "type": "object",
+        "description": "Why the mapping refused a record: the field and the rule, never the value.",
+        "required": [
+          "field",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "PreviewEvent": {
+        "type": "object",
+        "description": "The event a record would yield.",
+        "required": [
+          "name",
+          "properties"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the event happened, when the mapping says; otherwise the run's start decides."
+          },
+          "properties": {
+            "type": "object"
+          }
+        }
+      },
+      "PreviewIdentifier": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "PreviewRecord": {
+        "type": "object",
+        "description": "One record of the sample and what the mapping makes of it.",
+        "required": [
+          "key",
+          "deleted",
+          "result",
+          "identifiers",
+          "traits",
+          "lists",
+          "errors"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "The source reports the record as deleted."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewError"
+            }
+          },
+          "event": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PreviewEvent"
+              }
+            ]
+          },
+          "identifiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewIdentifier"
+            }
+          },
+          "key": {
+            "type": "string",
+            "description": "The record's key within the stream."
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The lists the person would join."
+          },
+          "result": {
+            "type": "string",
+            "description": "`mapped`, `rejected` or `deleted`."
+          },
+          "traits": {
+            "type": "object"
+          }
+        }
+      },
+      "PreviewRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many records to show, 1 to 20; 10 when absent.",
+            "minimum": 0
+          },
+          "mapping": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MappingBody",
+                "description": "A draft mapping to try. It is checked exactly as a save is. Absent, the stream's saved\nmapping is used."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "PrivacySettingsBody": {
         "type": "object",
@@ -14906,6 +15265,29 @@
             "example": "number"
           }
         }
+      },
+      "PropertyRuleBody": {
+        "type": "object",
+        "description": "One property of the event.",
+        "required": [
+          "property",
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "property": {
+            "type": "string"
+          },
+          "transforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransformBody"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "ProviderBody": {
         "type": "object",
@@ -17064,6 +17446,25 @@
             "description": "The property's text; a list or an object is its JSON."
           }
         }
+      },
+      "ValueRuleBody": {
+        "type": "object",
+        "description": "A column and the transforms that turn it into a value.",
+        "required": [
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "transforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransformBody"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "VersionBody": {
         "type": "object",

@@ -556,6 +556,7 @@ mod tests {
         let mapping = Mapping {
             delete_when: None,
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),
                 target: Target::Trait { key: "plan".into() },

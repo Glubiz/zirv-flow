@@ -167,6 +167,9 @@ pub(crate) struct MappingBody {
     /// row number, so only the same file can be run again without changes.
     key_column: Option<String>,
     columns: Vec<ColumnRuleBody>,
+    /// The one event each record yields. Sync runs only: a CSV import refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) event: Option<EventRuleBody>,
     /// The column that marks a record as deleted in its source. Only a synced stream takes it; a
     /// CSV import refuses a mapping with one. A record whose cell satisfies the rule is removed
     /// instead of applied.
@@ -212,10 +215,44 @@ impl MappingBody {
     }
 }
 
+/// The event a record yields: a constant name, the person of the record, a time and properties.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EventRuleBody {
+    /// The event's name.
+    name: String,
+    /// Where the event's time comes from; without it the event happened when the run saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timestamp: Option<ValueRuleBody>,
+    /// The event's properties, each from one column; at most 50.
+    #[serde(default)]
+    properties: Vec<PropertyRuleBody>,
+}
+
+/// A column and the transforms that turn it into a value.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValueRuleBody {
+    column: String,
+    #[serde(default)]
+    transforms: Vec<TransformBody>,
+}
+
+/// One property of the event.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PropertyRuleBody {
+    property: String,
+    column: String,
+    #[serde(default)]
+    transforms: Vec<TransformBody>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ColumnRuleBody {
-    /// A column name of the header.
+    /// A column name of the header, or for a JSON stream a dotted path such as `address.city`
+    /// or `items.0.sku`.
     column: String,
     target: TargetBody,
     /// Applied in order to the cell before it reaches the target; at most 10.
@@ -446,6 +483,43 @@ mod tests {
             serde_json::from_value::<MappingBody>(json!({
                 "columns": [], "delete_when": {"column": "x", "rule": "regex"}
             }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_mapping_body_with_an_event_round_trips_and_one_without_serializes_no_event_key() {
+        let with_event = json!({
+            "columns": [{"column": "profile.email",
+                         "target": {"type": "identifier", "kind": "email"}, "transforms": []}],
+            "event": {
+                "name": "order_placed",
+                "timestamp": {"column": "order.at",
+                              "transforms": [{"op": "timestamp", "format": "unix"}]},
+                "properties": [{"property": "total", "column": "order.total",
+                                "transforms": [{"op": "cast", "to": "number"}]}]
+            }
+        });
+        let without = json!({
+            "key_column": null,
+            "columns": [{"column": "Email",
+                         "target": {"type": "identifier", "kind": "email"}, "transforms": []}]
+        });
+
+        let body: MappingBody = serde_json::from_value(with_event.clone()).unwrap();
+        let core = body.to_core().unwrap();
+        let back = MappingBody::from_core(&core).unwrap();
+        let plain: MappingBody = serde_json::from_value(without.clone()).unwrap();
+
+        assert!(core.has_event());
+        let mut expected = with_event;
+        expected["key_column"] = serde_json::Value::Null;
+        assert_eq!(serde_json::to_value(&back).unwrap(), expected);
+        assert_eq!(serde_json::to_value(&plain).unwrap(), without);
+        assert!(
+            serde_json::from_value::<MappingBody>(
+                json!({"columns": [], "event": {"name": "e", "extra": 1}})
+            )
             .is_err()
         );
     }

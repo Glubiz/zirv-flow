@@ -142,6 +142,35 @@ pub fn validate_stream_settings(
     }
 }
 
+/// The schemes an `HttpsUrl` field takes: `https`, and `http` in tests and test-support builds, where a local server stands in for the file host.
+#[cfg(any(test, feature = "test-support"))]
+const ALLOWED_SCHEMES_HTTPS: &[&str] = &["https", "http"];
+#[cfg(not(any(test, feature = "test-support")))]
+const ALLOWED_SCHEMES_HTTPS: &[&str] = &["https"];
+
+/// Why `text` is not an absolute URL of one of `schemes` with a host, no user info and no
+/// fragment; none when it is.
+fn url_problem(text: &str, schemes: &[&str]) -> Option<&'static str> {
+    let Ok(url) = Url::parse(text) else {
+        return Some(scheme_reason(schemes));
+    };
+    if !schemes.contains(&url.scheme()) || !url.has_host() {
+        return Some(scheme_reason(schemes));
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Some("must not contain credentials or a fragment");
+    }
+    None
+}
+
+fn scheme_reason(schemes: &[&str]) -> &'static str {
+    if schemes.contains(&"http") {
+        "must be an http or https URL"
+    } else {
+        "must be an https URL"
+    }
+}
+
 fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
     match field.kind {
         FieldKind::Text => match value.as_str() {
@@ -150,10 +179,11 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
             None => Some("must be text"),
         },
         FieldKind::Url => match value.as_str() {
-            Some(text) => match Url::parse(text) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => None,
-                _ => Some("must be an http or https URL"),
-            },
+            Some(text) => url_problem(text, &["http", "https"]),
+            None => Some("must be text"),
+        },
+        FieldKind::HttpsUrl => match value.as_str() {
+            Some(text) => url_problem(text, ALLOWED_SCHEMES_HTTPS),
             None => Some("must be text"),
         },
         FieldKind::Number => (!value.is_number()).then_some("must be a number"),
@@ -368,5 +398,53 @@ mod tests {
             fields_of(unsupported.map(|_| ())),
             ["sync_mode: is not supported by this stream"]
         );
+    }
+
+    #[test]
+    fn a_url_field_refuses_user_info_and_fragments_and_an_https_field_refuses_http_in_production() {
+        let url = FieldSpec {
+            key: "url",
+            label: "",
+            help: "",
+            kind: FieldKind::Url,
+            required: false,
+            secret: false,
+        };
+        let https = FieldSpec {
+            kind: FieldKind::HttpsUrl,
+            ..url
+        };
+
+        for good in ["http://example.com/a", "https://example.com/a?x=1"] {
+            assert_eq!(check_value(&url, &json!(good)), None, "{good}");
+        }
+        for bad in [
+            "https://u:p@example.com/",
+            "https://u@example.com/",
+            "https://example.com/#top",
+        ] {
+            assert_eq!(
+                check_value(&url, &json!(bad)),
+                Some("must not contain credentials or a fragment"),
+                "{bad}"
+            );
+            assert_eq!(
+                check_value(&https, &json!(bad)),
+                Some("must not contain credentials or a fragment"),
+                "{bad}"
+            );
+        }
+        for bad in ["ftp://example.com/", "not a url", "https://"] {
+            assert!(check_value(&url, &json!(bad)).is_some(), "{bad}");
+            assert!(check_value(&https, &json!(bad)).is_some(), "{bad}");
+        }
+        assert_eq!(check_value(&https, &json!("https://example.com/a")), None);
+        assert_eq!(check_value(&https, &json!(3)), Some("must be text"));
+        // Production builds take https only; tests serve over http on loopback.
+        assert_eq!(
+            url_problem("http://example.com/", &["https"]),
+            Some("must be an https URL")
+        );
+        assert_eq!(url_problem("https://example.com/", &["https"]), None);
     }
 }
