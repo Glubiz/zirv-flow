@@ -57,6 +57,7 @@ url = "2.5.8"
 futures-util = { version = "0.3.34", default-features = false }
 uuid = { version = "1.28.0", features = ["v4", "v7", "serde"] }
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
+zirv-flow-ai = { path = "crates/zirv-flow-ai" }
 zirv-flow-api = { path = "crates/zirv-flow-api" }
 zirv-flow-connectors = { path = "crates/zirv-flow-connectors" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }

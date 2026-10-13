@@ -4552,6 +4552,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zirv-flow-ai"
+version = "0.33.0"
+dependencies = [
+ "axum",
+ "metrics",
+ "reqwest 0.13.5",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+ "zirv-flow-core",
+]
+
+[[package]]
 name = "zirv-flow-api"
 version = "0.33.0"
 dependencies = [
