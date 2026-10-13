@@ -2,7 +2,7 @@
 //! workspace may choose from, with context windows and prices. Empty by default, which means the
 //! assistant is unavailable.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use serde::{Deserialize, Serialize};
 use url::Url;

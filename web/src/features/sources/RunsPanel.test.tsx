@@ -97,13 +97,17 @@ describe("the runs of a source", () => {
 
   it("shows a loading state and then an error with a retry", async () => {
     let attempts = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     mockApi(
       routes("admin", {
-        [`GET ${BASE}/runs`]: () => {
+        [`GET ${BASE}/runs`]: async () => {
           attempts += 1;
-          return attempts === 1
-            ? problem(500, "Internal Server Error", "internal error")
-            : json({ runs: [aRun()], next_cursor: null });
+          if (attempts > 1) return json({ runs: [aRun()], next_cursor: null });
+          await gate;
+          return problem(500, "Internal Server Error", "internal error");
         },
       }),
     );
@@ -111,6 +115,7 @@ describe("the runs of a source", () => {
     mount();
 
     expect(await screen.findByText("Loading runs")).toBeInTheDocument();
+    release();
     await user.click(await screen.findByRole("button", { name: "Try again" }));
     expect(await runsTable()).toBeTruthy();
   });
