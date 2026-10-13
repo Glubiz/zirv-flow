@@ -73,10 +73,11 @@ impl std::fmt::Display for SignatureError {
 
 impl std::error::Error for SignatureError {}
 
-fn mac(secret: &[u8], timestamp: Option<i64>, body: &[u8]) -> HmacSha256 {
+/// The MAC over `"{timestamp}.{body}"`; the timestamp is the header text as the sender signed it.
+fn mac(secret: &[u8], timestamp: Option<&str>, body: &[u8]) -> HmacSha256 {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts a key of any length");
     if let Some(timestamp) = timestamp {
-        mac.update(timestamp.to_string().as_bytes());
+        mac.update(timestamp.as_bytes());
         mac.update(b".");
     }
     mac.update(body);
@@ -118,8 +119,8 @@ pub fn verify<'h>(
         .strip_prefix(scheme.signature_prefix)
         .and_then(decode_digest)
         .ok_or(SignatureError::MalformedSignature)?;
-    let signed_at = match scheme.timestamp_header {
-        None => None,
+    let (signed_at, signed_text) = match scheme.timestamp_header {
+        None => (None, None),
         Some(name) => {
             let text = header(name).ok_or(SignatureError::MissingTimestamp)?;
             let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
@@ -130,10 +131,10 @@ pub fn verify<'h>(
             if now_unix.abs_diff(timestamp) > scheme.tolerance_seconds.max(0).unsigned_abs() {
                 return Err(SignatureError::OutsideTolerance);
             }
-            Some(timestamp)
+            (Some(timestamp), Some(text))
         }
     };
-    mac(secret, signed_at, body)
+    mac(secret, signed_text, body)
         .verify_slice(&digest)
         .map_err(|_| SignatureError::Mismatch)?;
     Ok(Verified { signed_at })
@@ -142,12 +143,16 @@ pub fn verify<'h>(
 /// The signature digest for `body`: 64 lowercase hex digits, without the prefix. Pass the
 /// timestamp for the timestamped scheme. For tests, docs and the UI's curl example.
 pub fn sign(secret: &[u8], timestamp: Option<i64>, body: &[u8]) -> String {
-    mac(secret, timestamp, body)
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    mac(
+        secret,
+        timestamp.map(|seconds| seconds.to_string()).as_deref(),
+        body,
+    )
+    .finalize()
+    .into_bytes()
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect()
 }
 
 /// A new shared secret: `zfwh_` and 32 random bytes as 64 hex digits.
@@ -222,6 +227,24 @@ mod tests {
             ),
             ("x-ts", timestamp.to_string()),
         ]
+    }
+
+    #[test]
+    fn a_zero_padded_timestamp_header_signed_verbatim_verifies() {
+        let padded = format!("0{NOW}");
+        let mut mac = HmacSha256::new_from_slice(SECRET).unwrap();
+        mac.update(format!("{padded}.").as_bytes());
+        mac.update(BODY);
+        let digest: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let headers = [("x-sig", format!("sha256={digest}")), ("x-ts", padded)];
+
+        let verified = run(&timestamped(), SECRET, &headers, BODY).unwrap();
+        assert_eq!(verified.signed_at, Some(NOW));
     }
 
     #[test]
