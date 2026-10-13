@@ -132,8 +132,33 @@ pub(crate) fn mask_manifest(manifest: &Value) -> Value {
 }
 
 /// Puts the saved value back wherever the draft keeps a saved header or stream query key at
-/// [`KEPT_VALUE`]. A key the draft adds, and a value it changes, stay the model's.
+/// [`KEPT_VALUE`]. A key the draft adds, and a value it changes, stay the model's. Header names
+/// match ignoring ASCII case, as HTTP does, and a restored header takes the saved spelling, so the
+/// validator and the diff see the same header the source already sends. Query keys match exactly.
 pub(crate) fn restore_kept(draft: &mut Value, saved: &Value) {
+    if let (Some(headers), Some(saved)) = (
+        draft.get_mut("headers").and_then(Value::as_object_mut),
+        saved.get("headers").and_then(Value::as_object),
+    ) {
+        let kept: Vec<String> = headers
+            .iter()
+            .filter(|(_, value)| value.as_str() == Some(KEPT_VALUE))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in kept {
+            let Some((name, original)) = saved
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&key))
+            else {
+                continue;
+            };
+            if *name != key && headers.contains_key(name) {
+                continue;
+            }
+            headers.remove(&key);
+            headers.insert(name.clone(), original.clone());
+        }
+    }
     let restore = |draft: Option<&mut Value>, saved: Option<&Value>| {
         let (Some(draft), Some(saved)) = (draft.and_then(Value::as_object_mut), saved) else {
             return;
@@ -146,7 +171,6 @@ pub(crate) fn restore_kept(draft: &mut Value, saved: &Value) {
             }
         }
     };
-    restore(draft.get_mut("headers"), saved.get("headers"));
     let saved_streams = saved.get("streams").and_then(Value::as_array);
     for stream in draft
         .get_mut("streams")
@@ -164,6 +188,41 @@ pub(crate) fn restore_kept(draft: &mut Value, saved: &Value) {
             original.and_then(|stream| stream.get("query")),
         );
     }
+}
+
+/// The code of a draft that still holds [`KEPT_VALUE`] after the restore.
+pub(crate) const PLACEHOLDER_LEFT: &str = "placeholder_left";
+
+/// One feedback line (`placeholder_left at <pointer>`) for every header or stream query value
+/// still [`KEPT_VALUE`]: a new key, a renamed stream or a query key moved to another stream has no
+/// saved value to come back to, and saving it would replace a secret with the placeholder.
+pub(crate) fn leftover_placeholders(manifest: &Value) -> Vec<String> {
+    fn escape(key: &str) -> String {
+        key.replace('~', "~0").replace('/', "~1")
+    }
+    fn scan(map: Option<&Value>, base: &str, lines: &mut Vec<String>) {
+        for (key, value) in map.and_then(Value::as_object).into_iter().flatten() {
+            if value.as_str() == Some(KEPT_VALUE) {
+                lines.push(format!("{PLACEHOLDER_LEFT} at {base}/{}", escape(key)));
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    scan(manifest.get("headers"), "/headers", &mut lines);
+    for (index, stream) in manifest
+        .get("streams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        scan(
+            stream.get("query"),
+            &format!("/streams/{index}/query"),
+            &mut lines,
+        );
+    }
+    lines
 }
 
 /// A trait of the registry, as the model sees it.
@@ -535,6 +594,37 @@ mod tests {
         assert_eq!(draft["streams"][0]["query"]["limit"], 10);
         // A key the saved manifest never had has nothing to come back to.
         assert_eq!(draft["streams"][0]["query"]["extra"], "(kept)");
+    }
+
+    #[test]
+    fn a_header_name_matches_the_saved_one_ignoring_case() {
+        let saved = json!({"headers": {"X-Api-Key": "SECRET"}});
+        let mut draft = json!({"headers": {"x-api-key": "(kept)"}});
+
+        restore_kept(&mut draft, &saved);
+
+        assert_eq!(draft, json!({"headers": {"X-Api-Key": "SECRET"}}));
+        assert!(leftover_placeholders(&draft).is_empty());
+    }
+
+    #[test]
+    fn every_placeholder_left_after_the_restore_is_reported_with_its_pointer() {
+        let saved = json!({"streams": [{"name": "a", "query": {"token": "SECRET"}}]});
+        let mut draft = json!({
+            "headers": {"X-New": "(kept)", "a/b": "(kept)", "X-Ok": "v"},
+            "streams": [{"name": "renamed", "query": {"token": "(kept)", "n": 1}}]
+        });
+
+        restore_kept(&mut draft, &saved);
+
+        assert_eq!(
+            leftover_placeholders(&draft),
+            [
+                "placeholder_left at /headers/X-New",
+                "placeholder_left at /headers/a~1b",
+                "placeholder_left at /streams/0/query/token"
+            ]
+        );
     }
 
     #[test]

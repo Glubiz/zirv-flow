@@ -328,6 +328,12 @@ async fn validate_turn(
     if let (Some(saved), Some(draft)) = (saved, restored.get_mut("manifest")) {
         prompt::restore_kept(draft, saved);
     }
+    if let Some(draft) = restored.get("manifest") {
+        let left = prompt::leftover_placeholders(draft);
+        if !left.is_empty() {
+            return Verdict::Invalid(DraftIssue::from_lines(&left));
+        }
+    }
     match tool.call(context, &restored).await {
         Ok(ToolOutput::Draft(draft)) => Verdict::Valid(draft),
         Ok(ToolOutput::Context(_)) => feedback(),
@@ -707,7 +713,10 @@ async fn recheck(
     draft: &AiDraft,
     content: &Value,
 ) -> Result<(), ApiError> {
-    let source_id = draft.source_id.ok_or_else(ApiError::not_found)?;
+    let Some(source_id) = draft.source_id else {
+        // A manifest draft for a source not created yet has no saved version to lock or compare.
+        return recheck_manifest(content);
+    };
     let (source, stream) = match draft.kind {
         DraftKind::Mapping => {
             let name = draft.stream_name.as_deref().unwrap_or_default();
@@ -742,15 +751,33 @@ async fn recheck(
                 .map(|_| ())
                 .map_err(|issue: MappingIssue| ApiError::from(issue))
         }
-        DraftKind::Manifest => manifest::validate(content).map(|_| ()).map_err(|issues| {
-            problems(
-                issues
-                    .into_iter()
-                    .map(|issue| (format!("manifest{}", issue.path), issue.code.to_owned()))
-                    .collect(),
-            )
-        }),
+        DraftKind::Manifest => recheck_manifest(content),
     }
+}
+
+fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
+    let left = prompt::leftover_placeholders(content);
+    if !left.is_empty() {
+        return Err(problems(
+            left.into_iter()
+                .map(|line| {
+                    let issue = DraftIssue::from_line(&line);
+                    (
+                        format!("manifest{}", issue.at.unwrap_or_default()),
+                        issue.code,
+                    )
+                })
+                .collect(),
+        ));
+    }
+    manifest::validate(content).map(|_| ()).map_err(|issues| {
+        problems(
+            issues
+                .into_iter()
+                .map(|issue| (format!("manifest{}", issue.path), issue.code.to_owned()))
+                .collect(),
+        )
+    })
 }
 
 /// Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not

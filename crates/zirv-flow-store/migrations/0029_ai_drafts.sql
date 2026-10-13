@@ -1,7 +1,8 @@
 -- Assistant drafts (architecture 13.2, 15 `ai/drafts`): a mapping or manifest the model drafted
 -- and the validator approved, kept until it is accepted into an editor or expires. A draft that
 -- never validated keeps no content: raw model output is never stored. Content is an artifact
--- like a saved mapping; it holds no secret (a manifest names credential fields, never values).
+-- like a saved mapping or manifest: a manifest draft holds the static header and query values
+-- restored from the saved source config, as that config does, and never a credential value.
 CREATE TABLE ai_drafts (
     id           uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,

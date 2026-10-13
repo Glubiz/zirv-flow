@@ -757,6 +757,66 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_manifest_draft_for_a_source_not_created_yet_is_accepted_and_audited(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let port = serve_api().await;
+        fx.fake.push(answer(
+            "draft_manifest",
+            json!({"manifest": manifest(port, &["id", "email"])}),
+        ));
+        let reply = fx
+            .draft(json!({"kind": "manifest", "prompt": "Read my contacts"}))
+            .await;
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        let id = reply.body["id"].as_str().unwrap().to_owned();
+        let audited_before = fx.count("audit_log").await;
+
+        let accepted = fx.accept(&fx.admin, &id).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["content"], reply.body["content"]);
+        assert_eq!(fx.count("audit_log").await, audited_before + 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_placeholder_left_in_a_manifest_draft_goes_back_to_the_model_and_is_never_stored(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let port = serve_api().await;
+        let mut leaky = manifest(port, &["id", "email"]);
+        leaky["headers"] = json!({"X-New": "(kept)"});
+        fx.fake
+            .push(answer("draft_manifest", json!({"manifest": leaky})));
+        fx.fake.push(answer(
+            "draft_manifest",
+            json!({"manifest": manifest(port, &["id", "email"])}),
+        ));
+        let sent = fx.fake.call_count();
+
+        let reply = fx
+            .draft(json!({"kind": "manifest", "prompt": "Read my contacts"}))
+            .await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_eq!(reply.body["attempts"], 2);
+        let requests = fx.requests_after(sent);
+        let feedback = last_feedback(&requests[1]);
+        assert!(
+            feedback.contains("placeholder_left at /headers/X-New"),
+            "{feedback}"
+        );
+        let stored: Value = sqlx::query_scalar("SELECT content FROM ai_drafts WHERE id = $1::uuid")
+            .bind(reply.body["id"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored.to_string().contains("(kept)"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn accepting_returns_the_draft_and_publishes_nothing(pool: PgPool) {
         let fx = setup(&pool, false, 100_000_000).await;
         let source = fx.pulled_source(json!({})).await;
