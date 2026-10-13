@@ -17967,6 +17967,396 @@
           }
         }
       },
+      "SegmentAggFn": {
+        "type": "string",
+        "enum": [
+          "count",
+          "sum",
+          "min",
+          "max",
+          "avg",
+          "first_time",
+          "last_time"
+        ]
+      },
+      "SegmentAggregate": {
+        "type": "object",
+        "required": [
+          "fn",
+          "op",
+          "value"
+        ],
+        "properties": {
+          "fn": {
+            "$ref": "#/components/schemas/SegmentAggFn"
+          },
+          "op": {
+            "$ref": "#/components/schemas/SegmentOp"
+          },
+          "prop": {
+            "type": "string"
+          },
+          "value": {
+            "type": "object",
+            "description": "A number, or a timestamp for `first_time` and `last_time`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentAllNode": {
+        "type": "object",
+        "description": "True when every child is true; an empty list is true.",
+        "required": [
+          "all"
+        ],
+        "properties": {
+          "all": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentNode"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentAnyNode": {
+        "type": "object",
+        "description": "True when some child is true; an empty list is false.",
+        "required": [
+          "any"
+        ],
+        "properties": {
+          "any": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentNode"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentConsentNode": {
+        "type": "object",
+        "description": "The person's consent status for a channel, or one of its topics.",
+        "required": [
+          "consent"
+        ],
+        "properties": {
+          "consent": {
+            "type": "object",
+            "required": [
+              "channel",
+              "status"
+            ],
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "subscribed",
+                  "unsubscribed",
+                  "pending_confirmation",
+                  "unknown"
+                ]
+              },
+              "topic": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentDefinition": {
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "v"
+            ],
+            "properties": {
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/SegmentNode"
+          }
+        ],
+        "description": "A segment definition, version 1: a node with `v` added. Unknown keys are refused."
+      },
+      "SegmentEventNode": {
+        "type": "object",
+        "description": "The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one).",
+        "required": [
+          "event"
+        ],
+        "properties": {
+          "agg": {
+            "$ref": "#/components/schemas/SegmentAggregate"
+          },
+          "event": {
+            "type": "string"
+          },
+          "where": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentPropertyFilter"
+            }
+          },
+          "window": {
+            "$ref": "#/components/schemas/SegmentWindow"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentIdentifierNode": {
+        "type": "object",
+        "description": "The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+        "required": [
+          "identifier"
+        ],
+        "properties": {
+          "identifier": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentIssue": {
+        "type": "object",
+        "description": "One problem with a definition. It carries a position and a fixed code, never a value from the definition.",
+        "required": [
+          "pointer",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "unsupported_version",
+              "malformed",
+              "unknown_key",
+              "unknown_trait",
+              "unknown_event",
+              "unknown_property",
+              "unknown_list",
+              "unknown_segment",
+              "unknown_topic",
+              "invalid_identifier_kind",
+              "operator_not_allowed",
+              "value_type_mismatch",
+              "value_missing",
+              "value_not_allowed",
+              "aggregate_not_allowed",
+              "invalid_duration",
+              "window_too_long",
+              "invalid_range",
+              "too_deep",
+              "too_many_nodes",
+              "too_many_values",
+              "value_too_long"
+            ]
+          },
+          "pointer": {
+            "type": "string",
+            "description": "A JSON pointer into the definition."
+          }
+        }
+      },
+      "SegmentListNode": {
+        "type": "object",
+        "description": "The person is a member of the list.",
+        "required": [
+          "list"
+        ],
+        "properties": {
+          "list": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentNode": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SegmentAllNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentAnyNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentNotNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentTraitNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentEventNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentListNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentSegmentNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentConsentNode"
+          },
+          {
+            "$ref": "#/components/schemas/SegmentIdentifierNode"
+          }
+        ],
+        "description": "One node of a segment condition tree: an object with exactly one node key."
+      },
+      "SegmentNotNode": {
+        "type": "object",
+        "description": "Boolean negation of the child. A leaf's operator is never rewritten under it.",
+        "required": [
+          "not"
+        ],
+        "properties": {
+          "not": {
+            "$ref": "#/components/schemas/SegmentNode"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentOp": {
+        "type": "string",
+        "enum": [
+          "eq",
+          "neq",
+          "in",
+          "not_in",
+          "contains",
+          "starts_with",
+          "exists",
+          "not_exists",
+          "gt",
+          "gte",
+          "lt",
+          "lte",
+          "between",
+          "before",
+          "after",
+          "within_last",
+          "more_than_ago",
+          "within_next",
+          "contains_all",
+          "is_empty"
+        ]
+      },
+      "SegmentPropertyFilter": {
+        "type": "object",
+        "required": [
+          "prop",
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "$ref": "#/components/schemas/SegmentOp"
+          },
+          "prop": {
+            "type": "string"
+          },
+          "value": {
+            "type": "object",
+            "description": "The operand; its type follows the property's type."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentSegmentNode": {
+        "type": "object",
+        "description": "The person is in the other segment. Cycles are rejected when the segment is saved.",
+        "required": [
+          "segment"
+        ],
+        "properties": {
+          "segment": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentTraitNode": {
+        "type": "object",
+        "description": "A condition on a person's trait. Beside `trait` go `op` and, for most operators, `value`.",
+        "required": [
+          "trait",
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "$ref": "#/components/schemas/SegmentOp"
+          },
+          "trait": {
+            "type": "string"
+          },
+          "value": {
+            "type": "object",
+            "description": "The operand; its type follows the trait's type."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SegmentWindow": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "last"
+            ],
+            "properties": {
+              "last": {
+                "type": "string",
+                "description": "ISO 8601 duration in days or hours, such as P90D."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "between"
+            ],
+            "properties": {
+              "between": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "since_trait"
+            ],
+            "properties": {
+              "since_trait": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "Which events count; with no window, all retained events."
+      },
       "SessionBody": {
         "type": "object",
         "required": [
