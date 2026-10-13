@@ -125,8 +125,9 @@ pub use sessions::{
 };
 pub use sources::{
     DiscoveredStream, NewSource, Source, SourceUpdate, Stream, StreamSettings, configure_stream,
-    create_source, delete_source, find_source, find_source_for_update, find_stream, list_sources,
-    list_streams, set_stream_mapping, sync_schedule, update_source, upsert_discovered_streams,
+    create_source, delete_source, find_source, find_source_for_update, find_stream,
+    find_stream_by_id, list_sources, list_streams, set_stream_mapping, sync_schedule,
+    update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{

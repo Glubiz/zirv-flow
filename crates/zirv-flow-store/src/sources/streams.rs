@@ -143,6 +143,25 @@ pub async fn find_stream<'e>(
     .map_err(StoreError::query)
 }
 
+pub async fn find_stream_by_id<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Stream>, StoreError> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        stream_columns!(),
+        " FROM streams WHERE workspace_id = $1 AND source_id = $2 AND id = $3"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(id)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Replaces the settings of a stream; `None` when the source has no such stream. The database
 /// refuses an incremental stream with no cursor field.
 pub async fn configure_stream<'e>(

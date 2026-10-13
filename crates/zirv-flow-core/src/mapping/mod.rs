@@ -8,6 +8,7 @@
 mod apply;
 mod json_record;
 mod model;
+mod sample;
 mod transform;
 mod validate;
 
@@ -16,4 +17,5 @@ pub use apply::{
 };
 pub use json_record::JsonRecord;
 pub use model::{ColumnRule, Mapping, Target, Transform};
+pub use sample::{RejectSample, SAMPLE_STRING_CHARS, reject_sample};
 pub use validate::{MappingError, TraitCatalog, TraitState, validate};

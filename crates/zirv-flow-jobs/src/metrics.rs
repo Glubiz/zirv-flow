@@ -56,6 +56,48 @@ pub(crate) fn record_drained(outcome: &DrainOutcome) {
     }
 }
 
+/// How a sync run ended, the `outcome` label of `zirv_flow_sync_runs_total`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl RunOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Counts an ended sync run and times it: `zirv_flow_sync_runs_total{outcome}` and
+/// `zirv_flow_sync_run_duration_seconds`. No source, stream or workspace label.
+pub(crate) fn record_sync_run(outcome: RunOutcome, seconds: f64) {
+    metrics::counter!("zirv_flow_sync_runs_total", "outcome" => outcome.as_str()).increment(1);
+    metrics::histogram!("zirv_flow_sync_run_duration_seconds").record(seconds);
+}
+
+/// Counts what a committed sync batch did: `zirv_flow_sync_records_total{outcome}`.
+pub(crate) fn record_sync_records(counts: &zirv_flow_store::SyncCounts) {
+    for (outcome, count) in [
+        ("applied", counts.applied),
+        ("unchanged", counts.unchanged),
+        ("rejected", counts.rejected),
+        ("deleted", counts.deleted),
+    ] {
+        if let Ok(count) = u64::try_from(count)
+            && count > 0
+        {
+            metrics::counter!("zirv_flow_sync_records_total", "outcome" => outcome)
+                .increment(count);
+        }
+    }
+}
+
 /// The `zirv_flow_ingest_inbox_age_seconds` gauge: the oldest unprocessed inbox row.
 pub(crate) fn set_inbox_age(seconds: f64) {
     metrics::gauge!("zirv_flow_ingest_inbox_age_seconds").set(seconds);
@@ -261,6 +303,51 @@ mod tests {
             handle
                 .render()
                 .contains("zirv_flow_ingest_inbox_age_seconds 0"),
+        );
+    }
+
+    #[test]
+    fn sync_metrics_carry_only_the_outcome_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_sync_run(RunOutcome::Succeeded, 1.5);
+            record_sync_run(RunOutcome::Failed, 0.5);
+            record_sync_records(&zirv_flow_store::SyncCounts {
+                read: 9,
+                applied: 4,
+                unchanged: 3,
+                rejected: 1,
+                deleted: 1,
+            });
+        });
+        let output = handle.render();
+
+        assert!(
+            output.contains("zirv_flow_sync_runs_total{outcome=\"succeeded\"} 1"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_sync_runs_total{outcome=\"failed\"} 1"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_sync_run_duration_seconds_count 2"),
+            "{output}"
+        );
+        for (outcome, count) in [
+            ("applied", 4),
+            ("unchanged", 3),
+            ("rejected", 1),
+            ("deleted", 1),
+        ] {
+            let line = format!("zirv_flow_sync_records_total{{outcome=\"{outcome}\"}} {count}");
+            assert!(output.contains(&line), "{output}");
+        }
+        assert!(
+            !output.contains("source") && !output.contains("workspace"),
+            "{output}"
         );
     }
 }

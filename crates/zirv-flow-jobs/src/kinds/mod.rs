@@ -16,6 +16,7 @@ mod noop;
 mod person_merge_rewrite;
 mod privacy_erase;
 mod privacy_export;
+mod sync_run;
 mod traits_recompute;
 
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
@@ -29,6 +30,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &privacy_export::PrivacyExport,
     &import_dry_run::ImportDryRun,
     &import_run::ImportRun,
+    &sync_run::SyncRunKind,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text
