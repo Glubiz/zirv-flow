@@ -719,9 +719,15 @@ pub(super) mod tests {
             primary_key: &[],
             staleness_threshold_seconds: None,
         };
-        configure_stream(&pool, ws, source, "unmapped", &enable)
-            .await
-            .unwrap();
+        configure_stream(
+            &mut *pool.acquire().await.unwrap(),
+            ws,
+            source,
+            "unmapped",
+            &enable,
+        )
+        .await
+        .unwrap();
         crate::set_stream_mapping(&pool, ws, source, "disabled", &json!({"columns": []}))
             .await
             .unwrap();

@@ -180,6 +180,7 @@ enum StoreErrorKind {
     Conflict,
     Retryable,
     Timeout,
+    RunActive,
 }
 
 impl StoreError {
@@ -284,6 +285,16 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::Retryable)
     }
 
+    /// A change the stream's active sync run would undo: it was refused and nothing was written.
+    pub(crate) fn run_active() -> Self {
+        Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether the change was refused because a sync run is queued or running.
+    pub fn is_run_active(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::RunActive)
+    }
+
     /// Whether the query ran past its statement timeout and PostgreSQL cancelled it.
     pub fn is_timeout(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Timeout)
@@ -348,6 +359,7 @@ impl fmt::Display for StoreError {
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
+            StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
             StoreErrorKind::Retryable => {
                 formatter
                     .write_str("the transaction conflicted with another and can be retried")?;

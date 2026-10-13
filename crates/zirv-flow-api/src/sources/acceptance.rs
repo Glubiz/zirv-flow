@@ -1262,4 +1262,64 @@ mod tests {
             "deleting the source stops the firing"
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn changing_a_cursor_or_a_source_config_during_an_active_run_is_a_409(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let stream = format!("/sources/{id}/streams/stream_1");
+        let started = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "stream_1"})),
+            )
+            .await;
+        let run_id = started.body[0]["id"].as_str().unwrap().to_owned();
+        let incremental = json!({"enabled": true, "sync_mode": "incremental",
+            "cursor_field": "updated_at", "mapping": mapping_body()});
+
+        let cursor = fx.as_admin("PUT", &stream, Some(incremental.clone())).await;
+        let config = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"config": {"streams": 3}})),
+            )
+            .await;
+        let staleness = fx
+            .as_admin(
+                "PUT",
+                &stream,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "staleness_threshold_seconds": 60})),
+            )
+            .await;
+        let name = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"name": "CRM 2"})),
+            )
+            .await;
+
+        for refused in [&cursor, &config] {
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "sync_run_active");
+            assert!(
+                refused.body["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cancel it")
+            );
+        }
+        assert_eq!(staleness.status, StatusCode::OK, "{:?}", staleness.body);
+        assert_eq!(name.status, StatusCode::OK);
+        fx.as_admin("POST", &format!("/sources/{id}/runs/{run_id}/cancel"), None)
+            .await;
+        let after = fx.as_admin("PUT", &stream, Some(incremental)).await;
+        assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
+        assert_eq!(after.body["sync_mode"], "incremental");
+    }
 }

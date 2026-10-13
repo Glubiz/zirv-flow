@@ -1295,7 +1295,10 @@ incremental stream also keeps its cursor on the stream: the next run starts ther
 refresh always starts from the beginning. A run that fails on its rejects does not move the
 stream's cursor, so after the mapping is fixed the next run reads those records again. Changing a
 stream's sync mode, cursor field or primary key, or a source's settings, clears the stream's
-cursor, since it belonged to the old ones.
+cursor, since it belonged to the old ones. Such a change is refused with a 409 (`sync_run_active`)
+while a run of the stream (for a source's settings, of any of its streams) is queued or running,
+since that run would write the old cursor back: wait for it or cancel it first. Other changes,
+such as the staleness threshold, enabled, the name, the schedule or the mapping, stay allowed.
 
 **Cancel** with `POST .../runs/{run_id}/cancel` (admins only; 409 when the run has ended). The
 run stops at its next unit: the unit in flight is not applied, and the checkpoint stays at the

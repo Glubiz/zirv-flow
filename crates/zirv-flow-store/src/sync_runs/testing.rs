@@ -83,7 +83,7 @@ pub(crate) async fn source_with_stream(
     .unwrap();
     commit(tx).await.unwrap();
     let stream = configure_stream(
-        pool,
+        &mut *pool.acquire().await.unwrap(),
         ws,
         source.id,
         "contacts",

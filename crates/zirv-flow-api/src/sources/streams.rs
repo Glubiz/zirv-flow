@@ -326,6 +326,7 @@ pub(crate) async fn list(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "A change of the sync mode, cursor field or primary key while the stream has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Settings the stream cannot serve, such as incremental without a cursor field, or a mapping that names a column the stream does not have", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

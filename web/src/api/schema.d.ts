@@ -10184,7 +10184,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Another source has that name, or the type is not in this build */
+            /** @description Another source has that name, the type is not in this build, or `config` changes while a stream of the source has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10661,6 +10661,15 @@ export interface operations {
             };
             /** @description No such workspace, source or stream, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A change of the sync mode, cursor field or primary key while the stream has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

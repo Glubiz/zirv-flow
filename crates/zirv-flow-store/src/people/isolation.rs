@@ -710,10 +710,15 @@ mod tests {
             assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), [own]);
             assert!(find_source(&pool, ws, foreign).await.unwrap().is_none());
             assert!(
-                update_source(&pool, ws, foreign, &SourceUpdate::default())
-                    .await
-                    .unwrap()
-                    .is_none()
+                update_source(
+                    &mut *pool.acquire().await.unwrap(),
+                    ws,
+                    foreign,
+                    &SourceUpdate::default()
+                )
+                .await
+                .unwrap()
+                .is_none()
             );
             assert_eq!(list_streams(&pool, ws, own).await.unwrap().len(), 1);
             assert!(list_streams(&pool, ws, foreign).await.unwrap().is_empty());
@@ -731,10 +736,16 @@ mod tests {
                 staleness_threshold_seconds: None,
             };
             assert!(
-                configure_stream(&pool, ws, foreign, "contacts", &settings)
-                    .await
-                    .unwrap()
-                    .is_none()
+                configure_stream(
+                    &mut *pool.acquire().await.unwrap(),
+                    ws,
+                    foreign,
+                    "contacts",
+                    &settings
+                )
+                .await
+                .unwrap()
+                .is_none()
             );
             let mut connection = pool.acquire().await.unwrap();
             assert!(

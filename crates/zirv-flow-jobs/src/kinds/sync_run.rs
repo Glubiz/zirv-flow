@@ -711,7 +711,7 @@ mod tests {
         commit(tx).await.unwrap();
         for stream in &streams {
             configure_stream(
-                pool,
+                &mut *pool.acquire().await.unwrap(),
                 ws,
                 source.id,
                 &stream.name,

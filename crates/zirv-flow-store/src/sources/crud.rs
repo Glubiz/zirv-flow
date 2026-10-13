@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::{Acquire, PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{SecretId, UserId, WorkspaceId};
@@ -144,13 +144,44 @@ pub async fn find_source_for_update(
 /// Changes the given fields. `None` when there is no such source; a name taken by another
 /// source is a conflict. A changed `config` clears the checkpoints of the source's streams: a
 /// new database or URL invalidates a cursor.
-pub async fn update_source<'e>(
-    executor: impl PgExecutor<'e>,
+///
+/// A changed `config` is refused with [`StoreError::is_run_active`], and nothing is written,
+/// while any stream of the source has a `queued` or `running` sync run, which would write an
+/// old-cursor checkpoint back. The streams are locked first, so no run is queued between the
+/// check and the commit (see [`configure_stream`](super::configure_stream)); a run queued
+/// after it reads the new `config` when its job starts.
+pub async fn update_source(
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
     update: &SourceUpdate<'_>,
 ) -> Result<Option<Source>, StoreError> {
-    sqlx::query_as(concat!(
+    let mut tx = connection.begin().await.map_err(StoreError::query)?;
+    if let Some(config) = update.config {
+        sqlx::query("SELECT id FROM streams WHERE workspace_id = $1 AND source_id = $2 FOR UPDATE")
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StoreError::query)?;
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sync_runs \
+                            WHERE workspace_id = $1 AND source_id = $2 \
+                              AND state IN ('queued', 'running')) \
+                    AND $3::jsonb IS DISTINCT FROM (SELECT config FROM sources \
+                                                    WHERE workspace_id = $1 AND id = $2)",
+        )
+        .bind(workspace.as_uuid())
+        .bind(id)
+        .bind(config)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+        if blocked {
+            return Err(StoreError::run_active());
+        }
+    }
+    let source = sqlx::query_as(concat!(
         "WITH cleared AS ( \
             UPDATE streams SET checkpoint = NULL \
             WHERE workspace_id = $1 AND source_id = $2 AND checkpoint IS NOT NULL \
@@ -174,9 +205,11 @@ pub async fn update_source<'e>(
     .bind(update.enabled)
     .bind(update.credential_secret_id.map(|id| id.as_uuid()))
     .bind(update.credential_fields)
-    .fetch_optional(executor)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(StoreError::query)
+    .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
+    Ok(source)
 }
 
 /// Deletes a source with its streams and its credential secret, and returns what was deleted.
@@ -275,7 +308,7 @@ mod tests {
 
         let more = json!({"streams": 3});
         let updated = update_source(
-            &pool,
+            &mut *pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -293,13 +326,18 @@ mod tests {
         assert_eq!(updated.config, more);
         assert_eq!(updated.schedule.as_deref(), Some("0 * * * *"));
         assert!(!updated.enabled);
-        let untouched = update_source(&pool, ws, created.id, &SourceUpdate::default())
-            .await
-            .unwrap()
-            .unwrap();
+        let untouched = update_source(
+            &mut *pool.acquire().await.unwrap(),
+            ws,
+            created.id,
+            &SourceUpdate::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(untouched.schedule.as_deref(), Some("0 * * * *"));
         let cleared = update_source(
-            &pool,
+            &mut *pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -315,7 +353,7 @@ mod tests {
         let secret_id = secret(&pool, ws).await;
         let fields = vec!["token".to_owned()];
         let linked = update_source(
-            &pool,
+            &mut *pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
@@ -329,10 +367,15 @@ mod tests {
         .unwrap();
         assert_eq!(linked.credential_secret_id, Some(secret_id.as_uuid()));
         assert_eq!(linked.credential_fields, fields);
-        let kept = update_source(&pool, ws, created.id, &SourceUpdate::default())
-            .await
-            .unwrap()
-            .unwrap();
+        let kept = update_source(
+            &mut *pool.acquire().await.unwrap(),
+            ws,
+            created.id,
+            &SourceUpdate::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(kept.credential_fields, fields);
 
         let mut tx = begin(&pool).await.unwrap();
@@ -478,7 +521,7 @@ mod tests {
             .await
             .unwrap();
         let linked = update_source(
-            &pool,
+            &mut *pool.acquire().await.unwrap(),
             one,
             own.id,
             &SourceUpdate {
@@ -517,7 +560,7 @@ mod tests {
     }
 
     async fn update(pool: &PgPool, ws: WorkspaceId, source_id: Uuid, change: SourceUpdate<'_>) {
-        update_source(pool, ws, source_id, &change)
+        update_source(&mut *pool.acquire().await.unwrap(), ws, source_id, &change)
             .await
             .unwrap()
             .unwrap();
@@ -570,5 +613,65 @@ mod tests {
         )
         .await;
         assert!(!kept(&pool).await, "a new config clears it");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_config_change_is_refused_while_any_stream_has_an_active_run(pool: PgPool) {
+        use crate::sync_runs::testing::fixture;
+
+        let fx = fixture(&pool, "one", "incremental").await;
+        set_checkpoint(&pool).await;
+        let config = json!({"records": 3});
+        let same = json!({});
+
+        let refused = update_source(
+            &mut *pool.acquire().await.unwrap(),
+            fx.ws,
+            fx.source_id,
+            &SourceUpdate {
+                config: Some(&config),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        update(
+            &pool,
+            fx.ws,
+            fx.source_id,
+            SourceUpdate {
+                name: Some("renamed"),
+                config: Some(&same),
+                schedule: Some(Some("0 * * * *")),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+
+        assert!(refused.unwrap_err().is_run_active());
+        assert!(
+            kept(&pool).await,
+            "nothing was written, and other changes stay allowed"
+        );
+        let stored: Value = sqlx::query_scalar("SELECT config FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, same);
+        sqlx::query("UPDATE sync_runs SET state = 'failed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        update(
+            &pool,
+            fx.ws,
+            fx.source_id,
+            SourceUpdate {
+                config: Some(&config),
+                ..SourceUpdate::default()
+            },
+        )
+        .await;
+        assert!(!kept(&pool).await);
     }
 }

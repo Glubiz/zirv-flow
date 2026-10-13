@@ -8855,7 +8855,7 @@
             }
           },
           "409": {
-            "description": "Another source has that name, or the type is not in this build",
+            "description": "Another source has that name, the type is not in this build, or `config` changes while a stream of the source has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9608,6 +9608,16 @@
           },
           "404": {
             "description": "No such workspace, source or stream, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A change of the sync mode, cursor field or primary key while the stream has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it",
             "content": {
               "application/problem+json": {
                 "schema": {

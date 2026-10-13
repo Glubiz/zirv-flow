@@ -475,7 +475,7 @@ pub(crate) async fn get(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or source, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Another source has that name, or the type is not in this build", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Another source has that name, the type is not in this build, or `config` changes while a stream of the source has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid field, or no field at all", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to seal the credential", body = Problem, content_type = "application/problem+json")
     ),
