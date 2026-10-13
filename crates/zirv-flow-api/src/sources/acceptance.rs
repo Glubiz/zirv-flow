@@ -96,6 +96,21 @@ mod tests {
         fixture_with_egress(pool, keyring, None).await
     }
 
+    /// A fixture with a keyring whose egress policy allows only loopback addresses.
+    async fn fixture_with_loopback_egress(pool: &PgPool) -> Fixture {
+        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
+            "127.0.0.0/8".to_owned(),
+            "::1/128".to_owned(),
+        ])
+        .unwrap();
+        fixture_with_egress(
+            pool,
+            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
+            Some(policy),
+        )
+        .await
+    }
+
     /// `fixture_with`, and the egress policy the server enforces when one is given.
     async fn fixture_with_egress(
         pool: &PgPool,
@@ -810,17 +825,7 @@ mod tests {
     async fn a_postgres_source_password_is_ciphertext_at_rest_and_in_no_response_or_audit_entry(
         pool: PgPool,
     ) {
-        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
-            "127.0.0.0/8".to_owned(),
-            "::1/128".to_owned(),
-        ])
-        .unwrap();
-        let fx = fixture_with_egress(
-            &pool,
-            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
-            Some(policy),
-        )
-        .await;
+        let fx = fixture_with_loopback_egress(&pool).await;
         let options = pool.connect_options();
         let created = fx
             .as_admin(
@@ -857,17 +862,7 @@ mod tests {
     async fn a_mysql_source_password_is_ciphertext_at_rest_and_in_no_response_or_audit_entry(
         pool: PgPool,
     ) {
-        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
-            "127.0.0.0/8".to_owned(),
-            "::1/128".to_owned(),
-        ])
-        .unwrap();
-        let fx = fixture_with_egress(
-            &pool,
-            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
-            Some(policy),
-        )
-        .await;
+        let fx = fixture_with_loopback_egress(&pool).await;
         let (host, port) = mysql_address();
         let created = fx
             .as_admin(
@@ -2398,17 +2393,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
-            "127.0.0.0/8".to_owned(),
-            "::1/128".to_owned(),
-        ])
-        .unwrap();
-        let fx = fixture_with_egress(
-            &pool,
-            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
-            Some(policy),
-        )
-        .await;
+        let fx = fixture_with_loopback_egress(&pool).await;
         zirv_flow_store::create_trait_definition(&pool, fx.ws, &trait_definition("plan", false))
             .await
             .unwrap();
@@ -2930,17 +2915,7 @@ mod tests {
     async fn kafka_sasl_credentials_are_ciphertext_at_rest_and_in_no_response_or_audit_entry(
         pool: PgPool,
     ) {
-        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
-            "127.0.0.0/8".to_owned(),
-            "::1/128".to_owned(),
-        ])
-        .unwrap();
-        let fx = fixture_with_egress(
-            &pool,
-            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
-            Some(policy),
-        )
-        .await;
+        let fx = fixture_with_loopback_egress(&pool).await;
         let broker = std::env::var("ZIRV_KAFKA_SASL_BROKER").expect("run kafka-fixture.sh");
         let id = fx
             .kafka_source_with(
