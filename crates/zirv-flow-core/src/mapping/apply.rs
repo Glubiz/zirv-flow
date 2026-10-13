@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::json_record::JsonRecord;
 use super::model::{DeleteRule, EventRule, Mapping, Target, Transform};
-use super::transform::{apply_transform, cast, into_json, parse_flag};
+use super::transform::{apply_transform, cast, into_json, parse_flag, sql_timestamp};
 use super::validate::{TraitCatalog, TraitState};
 use crate::people::{Identifier, TraitType, TraitValue, coerce};
 
@@ -355,9 +355,13 @@ fn chain_of(column: &str, transforms: &[Transform], row: &dyn Cells) -> Result<V
     run_chain(column, transforms, cell, row)
 }
 
-/// A value read as an instant: RFC 3339 text.
+/// A value read as an instant: RFC 3339 text, or the SQL text form read as UTC.
 fn instant(value: &Value) -> Option<OffsetDateTime> {
-    let TraitValue::Timestamp(text) = coerce(TraitType::Timestamp, value).ok()? else {
+    let widened = match value {
+        Value::String(text) => Value::String(sql_timestamp(text).into_owned()),
+        other => other.clone(),
+    };
+    let TraitValue::Timestamp(text) = coerce(TraitType::Timestamp, &widened).ok()? else {
         return None;
     };
     let parsed = chrono::DateTime::parse_from_rfc3339(&text).ok()?;
@@ -432,6 +436,16 @@ mod tests {
     use serde_json::json;
 
     use super::super::model::{ColumnRule, EventRule, PropertyRule, Transform, ValueRule};
+    #[test]
+    fn an_event_time_reads_sql_timestamp_text_and_rfc_3339_alike() {
+        let unix = |value: &str| instant(&json!(value)).map(|at| at.unix_timestamp());
+        assert_eq!(unix("2024-01-01 00:01:00+00"), Some(1_704_067_260));
+        assert_eq!(unix("2024-01-01 00:01:00"), Some(1_704_067_260));
+        assert_eq!(unix("2024-01-01T00:01:00Z"), Some(1_704_067_260));
+        assert_eq!(unix("2024-01-01 02:01:00+02:00"), Some(1_704_067_260));
+        assert_eq!(unix("2024-01-01"), None);
+        assert_eq!(unix("2024-01-01 00:01:00x"), None);
+    }
     use super::*;
 
     fn header(names: &[&str]) -> Header {
