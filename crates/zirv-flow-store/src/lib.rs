@@ -140,10 +140,10 @@ pub use sources::{
     DiscoveredStream, NewOAuthState, NewSource, OAuthState, RefreshError, Source, SourceUpdate,
     StoredTokens, Stream, StreamSettings, TokenError, clear_tokens, configure_stream,
     create_oauth_state, create_source, delete_expired_oauth_states, delete_source, find_source,
-    find_source_for_update, find_stream, find_stream_by_id, link_tokens, list_sources,
-    list_streams, load_tokens, refresh_serialized, set_stream_mapping, sync_reconcile_schedule,
-    sync_schedule, sync_source_reconcile_schedules, take_oauth_state, update_source,
-    upsert_discovered_streams,
+    find_source_for_update, find_stream, find_stream_by_id, find_stream_for_update, link_tokens,
+    list_sources, list_streams, load_tokens, refresh_serialized, set_stream_mapping,
+    sync_reconcile_schedule, sync_schedule, sync_source_reconcile_schedules, take_oauth_state,
+    update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use stream_freshness::{

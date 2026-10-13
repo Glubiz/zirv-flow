@@ -32,7 +32,7 @@ use zirv_flow_connectors::manifest;
 use zirv_flow_core::UserId;
 use zirv_flow_core::mapping::Mapping;
 use zirv_flow_core::token::sha256;
-use zirv_flow_store::{AiDraft, DraftKind, DraftStatus, NewAiDraft, Source, Stream};
+use zirv_flow_store::{AiDraft, DraftKind, DraftStatus, NewAiDraft, PgConnection, Source, Stream};
 
 use super::diff::{self, Change, MANIFEST_KEYS, MAPPING_KEYS};
 use super::dispatch::{DispatchError, Dispatcher};
@@ -46,7 +46,7 @@ use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::sources::{
     MappingIssue, PreviewBody, SampleBody, check_sample, is_push, keeps_connection,
-    load_mapping_check, preview_mapping, problems, sample_manifest, saved_mapping_body,
+    mapping_check_of, preview_mapping, problems, sample_manifest, saved_mapping_body,
 };
 
 /// The longest prompt, in characters.
@@ -697,25 +697,37 @@ pub(crate) async fn create(
 
 /// Re-checks a stored draft against the current state: the saved version is unchanged since the
 /// draft was made, and the content still passes the rules a save applies.
-async fn recheck(state: &AppState, draft: &AiDraft, content: &Value) -> Result<(), ApiError> {
-    let (source, stream) = match (draft.kind, draft.source_id) {
-        (DraftKind::Mapping, Some(source_id)) => {
+///
+/// It runs in the transaction that marks the draft accepted, and reads the stream (a mapping) or
+/// the source (a manifest) under the row lock a save takes first. A save that commits after the
+/// read waits for this transaction, so a draft is never accepted over a version it did not see.
+async fn recheck(
+    state: &AppState,
+    tx: &mut PgConnection,
+    draft: &AiDraft,
+    content: &Value,
+) -> Result<(), ApiError> {
+    let source_id = draft.source_id.ok_or_else(ApiError::not_found)?;
+    let (source, stream) = match draft.kind {
+        DraftKind::Mapping => {
             let name = draft.stream_name.as_deref().unwrap_or_default();
             let stream =
-                zirv_flow_store::find_stream(&state.pool, draft.workspace_id, source_id, name)
+                zirv_flow_store::find_stream_for_update(tx, draft.workspace_id, source_id, name)
                     .await?
                     .ok_or_else(ApiError::not_found)?;
-            (None, Some(stream))
-        }
-        (DraftKind::Manifest, Some(source_id)) => {
-            let source = zirv_flow_store::find_source(&state.pool, draft.workspace_id, source_id)
+            let source = zirv_flow_store::find_source(&mut *tx, draft.workspace_id, source_id)
                 .await?
                 .ok_or_else(ApiError::not_found)?;
-            (Some(source), None)
+            (source, Some(stream))
         }
-        _ => (None, None),
+        DraftKind::Manifest => {
+            let source = zirv_flow_store::find_source_for_update(tx, draft.workspace_id, source_id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            (source, None)
+        }
     };
-    let saved = saved_artifact(draft.kind, stream.as_ref(), source.as_ref());
+    let saved = saved_artifact(draft.kind, stream.as_ref(), Some(&source));
     if saved.as_ref().map(digest) != draft.base_digest {
         return Err(ApiError::ai_draft_outdated());
     }
@@ -723,13 +735,8 @@ async fn recheck(state: &AppState, draft: &AiDraft, content: &Value) -> Result<(
         DraftKind::Mapping => {
             let body: MappingBody =
                 serde_json::from_value(content.clone()).map_err(|_| ApiError::internal())?;
-            let check = load_mapping_check(
-                state,
-                draft.workspace_id,
-                draft.source_id.unwrap_or_default(),
-                draft.stream_name.as_deref().unwrap_or_default(),
-            )
-            .await?;
+            let stream = stream.as_ref().ok_or_else(ApiError::internal)?;
+            let check = mapping_check_of(state, draft.workspace_id, &source, stream).await?;
             check
                 .check(&body)
                 .map(|_| ())
@@ -788,9 +795,9 @@ pub(crate) async fn accept(
         .content
         .clone()
         .ok_or_else(ApiError::ai_draft_invalid)?;
-    recheck(&state, &draft, &content).await?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    recheck(&state, &mut tx, &draft, &content).await?;
     if !zirv_flow_store::mark_ai_draft_accepted(&mut tx, workspace.id, user, id, now).await? {
         return Err(ApiError::not_found());
     }

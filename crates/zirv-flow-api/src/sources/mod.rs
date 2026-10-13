@@ -17,7 +17,9 @@ pub(crate) mod tokens;
 pub(crate) use actions::read_stream_records;
 pub(crate) use manifest::{SampleBody, ValidateRequest, keeps_connection, sample_manifest};
 pub(crate) use preview::{PreviewBody, check_sample, preview_mapping};
-pub(crate) use streams::{MappingCheck, MappingIssue, load_mapping_check, saved_mapping_body};
+pub(crate) use streams::{
+    MappingCheck, MappingIssue, load_mapping_check, mapping_check_of, saved_mapping_body,
+};
 
 #[cfg(test)]
 mod acceptance;

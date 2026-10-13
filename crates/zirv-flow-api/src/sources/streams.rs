@@ -17,7 +17,7 @@ use zirv_flow_connectors::sources::{
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
 use zirv_flow_store::{
-    PartitionLag, RunKind, RunTrigger, Stream, StreamFreshness, StreamSettings,
+    PartitionLag, RunKind, RunTrigger, Source, Stream, StreamFreshness, StreamSettings,
     cancel_consumer_runs, queue_run, stream_lag,
 };
 
@@ -567,7 +567,17 @@ pub(crate) async fn load_mapping_check(
     let stream = zirv_flow_store::find_stream(&state.pool, workspace, source_id, stream)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let descriptor = descriptor_of(&stream)?;
+    mapping_check_of(state, workspace, &source, &stream).await
+}
+
+/// [`load_mapping_check`] for a source and stream the caller has already read.
+pub(crate) async fn mapping_check_of(
+    state: &AppState,
+    workspace: WorkspaceId,
+    source: &Source,
+    stream: &Stream,
+) -> Result<MappingCheck, ApiError> {
+    let descriptor = descriptor_of(stream)?;
     build_check(
         state,
         workspace,

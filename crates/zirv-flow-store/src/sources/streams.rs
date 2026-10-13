@@ -161,6 +161,28 @@ pub async fn find_stream<'e>(
     .map_err(StoreError::query)
 }
 
+/// Reads a stream and locks its row until the transaction ends, so a read made to decide on its
+/// mapping cannot be overtaken by a save: [`configure_stream`] locks the same row first. `None`
+/// when the source has no such stream.
+pub async fn find_stream_for_update(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    name: &str,
+) -> Result<Option<Stream>, StoreError> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        stream_columns!(),
+        " FROM streams WHERE workspace_id = $1 AND source_id = $2 AND name = $3 FOR UPDATE"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(name)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 pub async fn find_stream_by_id<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,

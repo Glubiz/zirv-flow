@@ -851,6 +851,52 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accept_waits_for_a_save_in_flight_and_then_refuses_the_outdated_draft(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let source = fx.pulled_source(json!({})).await;
+        fx.fake.push(answer("draft_mapping", good_mapping()));
+        let made = fx.draft(mapping_run(&source)).await;
+        let id = made.body["id"].as_str().unwrap().to_owned();
+        // A save of the stream's mapping is in flight: it holds the stream row and has not
+        // committed, so the row an unlocked read sees is still the one the draft was made from.
+        let other = json!({"columns": [
+            {"column": "id", "target": {"type": "identifier", "kind": "external:crm"}}]});
+        let mut save = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::set_stream_mapping(
+            &mut *save,
+            fx.ws,
+            source.parse().unwrap(),
+            "stream_1",
+            &other,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let accept = fx.accept(&fx.admin, &id);
+        tokio::pin!(accept);
+        // The check reads under the row lock, so it cannot answer while the save holds it. A check
+        // before the transaction would read the old mapping and accept the draft here.
+        let early = tokio::time::timeout(std::time::Duration::from_millis(750), &mut accept).await;
+        assert!(
+            early.is_err(),
+            "accept answered while a save held the stream"
+        );
+        zirv_flow_store::commit(save).await.unwrap();
+
+        let reply = accept.await;
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "ai_draft_outdated");
+        assert_eq!(
+            fx.count("audit_log WHERE action = 'ai.draft.accepted'")
+                .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn no_identifier_value_reaches_the_provider_without_the_opt_in(pool: PgPool) {
         let fx = setup(&pool, false, 100_000_000).await;
         let pulled = fx.pulled_source(json!({})).await;
