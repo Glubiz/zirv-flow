@@ -29,6 +29,8 @@ pub enum RuntimeError {
     RetryAfterTooLong { seconds: u64 },
     /// A cursor or next link came back that was already followed.
     PaginationLoop,
+    /// A cursor or next link was longer than the driver keeps track of (8 KiB).
+    PaginationTokenTooLong,
     /// A body was not the JSON shape the caller expected.
     UnexpectedShape,
     /// The request could not be built, for example a header value with a control character.
@@ -70,6 +72,9 @@ impl fmt::Display for RuntimeError {
                 "the source asked to wait {seconds} seconds, which is too long"
             ),
             Self::PaginationLoop => f.write_str("the source repeated a page it had already sent"),
+            Self::PaginationTokenTooLong => {
+                f.write_str("the source sent a cursor or link that is too long to follow")
+            }
             Self::UnexpectedShape => f.write_str("the source answered with an unexpected shape"),
             Self::InvalidRequest => f.write_str("the request could not be built"),
             Self::Http(error) => error.fmt(f),

@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use reqwest::header::LINK;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use super::auth::Auth;
@@ -15,10 +16,24 @@ use super::error::RuntimeError;
 use super::send::{RequestSpec, RuntimeResponse};
 use crate::sources::SourceContext;
 
-/// The most pages one stream reads. An API that pages without end, or that ignores the offset or
-/// page parameter and sends the same full page forever, ends here with
-/// [`RuntimeError::PaginationLoop`].
+/// The most pages one stream reads. An API that pages without end, with a new cursor or a
+/// different page every time, ends here with [`RuntimeError::PaginationLoop`]. (One that sends
+/// the same page again, as an API that ignores the offset does, ends at the second.)
 const MAX_PAGES: usize = 100_000;
+
+/// The longest cursor or next link the driver keeps track of, in bytes.
+const MAX_TOKEN_BYTES: usize = 8 * 1024;
+
+/// A fixed-size fingerprint (SHA-256, truncated to 128 bits) of a cursor, a link or a page, so
+/// the loop guards hold 16 bytes per entry however large the input is.
+type Fingerprint = [u8; 16];
+
+fn fingerprint(bytes: &[u8]) -> Fingerprint {
+    let digest = Sha256::digest(bytes);
+    let mut short = [0; 16];
+    short.copy_from_slice(&digest[..16]);
+    short
+}
 
 /// How an API pages its results. The parameter names are the API's own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,8 +96,10 @@ struct Driver<'a> {
     next: Option<RequestSpec>,
     /// An error found while reading the page just returned, reported on the next poll.
     deferred: Option<RuntimeError>,
-    /// The cursors or URLs already requested.
-    seen: HashSet<String>,
+    /// Fingerprints of the cursors or URLs already requested.
+    seen: HashSet<Fingerprint>,
+    /// The fingerprint of the previous non-empty page, for the offset and page styles.
+    last_page: Option<Fingerprint>,
     pages: usize,
     max_pages: usize,
     /// The next offset or page number.
@@ -120,7 +137,7 @@ impl<'a> Driver<'a> {
                 (first.with_url(url), u64::from(number))
             }
             Pagination::LinkHeader => {
-                seen.insert(first.url().to_string());
+                seen.insert(fingerprint(first.url().as_str().as_bytes()));
                 (first, 0)
             }
         };
@@ -132,6 +149,7 @@ impl<'a> Driver<'a> {
             next: Some(first),
             deferred: None,
             seen,
+            last_page: None,
             pages: 0,
             max_pages: MAX_PAGES,
             position,
@@ -156,6 +174,10 @@ impl<'a> Driver<'a> {
         let mut body = response.json()?;
         let found = take_items(&mut body, self.items)?;
         let count = found.len() as u64;
+        if self.repeats_previous_page(&found) {
+            self.next = None;
+            return Err(RuntimeError::PaginationLoop);
+        }
 
         match self.advance(&spec, &response, &body, count) {
             Ok(next) => self.next = next,
@@ -167,6 +189,21 @@ impl<'a> Driver<'a> {
             self.deferred = Some(RuntimeError::PaginationLoop);
         }
         Ok(Page { body, items: found })
+    }
+
+    /// Whether an offset or page stream got the page it got last time, which is what an API that
+    /// ignores the parameter sends. Remembers this page for the next comparison.
+    fn repeats_previous_page(&mut self, found: &[Value]) -> bool {
+        if found.is_empty()
+            || !matches!(
+                self.style,
+                Pagination::Offset { .. } | Pagination::Page { .. }
+            )
+        {
+            return false;
+        }
+        let page = fingerprint(&serde_json::to_vec(found).unwrap_or_default());
+        self.last_page.replace(page) == Some(page)
     }
 
     /// The request for the page after the one just read, or `None` at the end.
@@ -182,7 +219,10 @@ impl<'a> Driver<'a> {
                 let Some(cursor) = cursor_at(body, next)? else {
                     return Ok(None);
                 };
-                if !self.seen.insert(cursor.clone()) {
+                if cursor.len() > MAX_TOKEN_BYTES {
+                    return Err(RuntimeError::PaginationTokenTooLong);
+                }
+                if !self.seen.insert(fingerprint(cursor.as_bytes())) {
                     return Err(RuntimeError::PaginationLoop);
                 }
                 Ok(Some(spec.with_url(with_param(spec.url(), param, &cursor))))
@@ -213,7 +253,10 @@ impl<'a> Driver<'a> {
                 if !spec.owns(&target) {
                     return Err(RuntimeError::CrossOrigin);
                 }
-                if !self.seen.insert(target.to_string()) {
+                if target.as_str().len() > MAX_TOKEN_BYTES {
+                    return Err(RuntimeError::PaginationTokenTooLong);
+                }
+                if !self.seen.insert(fingerprint(target.as_str().as_bytes())) {
                     return Err(RuntimeError::PaginationLoop);
                 }
                 Ok(Some(spec.with_url(target)))
@@ -805,11 +848,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_api_that_ignores_the_offset_ends_at_the_page_cap_as_a_loop() {
-        // Always a full page, whatever the offset: nothing else would stop this.
+    async fn an_endless_api_with_a_new_page_every_time_ends_at_the_page_cap() {
+        let served = Arc::new(Mutex::new(0_u64));
+        let counted = Arc::clone(&served);
         let mock = serve(Router::new().route(
             "/items",
-            get(|| async { axum::Json(json!({"data": [{"id": 1}, {"id": 2}]})) }),
+            get(move || {
+                let id = {
+                    let mut served = counted.lock().unwrap();
+                    *served += 1;
+                    *served
+                };
+                async move { axum::Json(json!({"data": [{"id": id}, {"id": id + 1_000_000}]})) }
+            }),
         ))
         .await;
         let ctx = context("paged", "s");
@@ -834,5 +885,102 @@ mod tests {
             &RuntimeError::PaginationLoop
         );
         assert_eq!(mock.hits(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_api_that_ignores_the_offset_or_page_is_a_loop_on_the_second_page() {
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|| async { axum::Json(json!({"data": [{"id": 1}, {"id": 2}]})) }),
+        ))
+        .await;
+        let styles = [
+            Pagination::Offset {
+                param: "offset",
+                limit_param: "limit",
+                limit: 2,
+            },
+            Pagination::Page {
+                param: "page",
+                first: 1,
+                size_param: None,
+            },
+        ];
+
+        for style in styles {
+            let before = mock.hits();
+            let pages = read(&mock, style, &Auth::None).await;
+
+            assert_eq!(pages.len(), 2, "{style:?}");
+            assert!(pages[0].is_ok());
+            assert_eq!(
+                pages[1].as_ref().unwrap_err(),
+                &RuntimeError::PaginationLoop
+            );
+            assert_eq!(mock.hits() - before, 2, "the repeat is caught on request 2");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cursor_or_link_over_the_cap_is_a_typed_error_and_one_at_the_cap_is_followed() {
+        let long = "c".repeat(MAX_TOKEN_BYTES + 1);
+        let exact = "c".repeat(MAX_TOKEN_BYTES);
+        for (cursor, too_long) in [(long, true), (exact, false)] {
+            let mock = serve(Router::new().route(
+                "/items",
+                get(move |RawQuery(query): RawQuery| {
+                    let cursor = cursor.clone();
+                    async move {
+                        let next = param(&query, "after").is_none().then_some(cursor);
+                        axum::Json(json!({"data": [{"id": 1}], "next": next}))
+                    }
+                }),
+            ))
+            .await;
+            let style = Pagination::Cursor {
+                param: "after",
+                next: "/next",
+            };
+
+            let pages = read(&mock, style, &Auth::None).await;
+
+            if too_long {
+                assert_eq!(pages.len(), 2);
+                assert_eq!(
+                    pages[1].as_ref().unwrap_err(),
+                    &RuntimeError::PaginationTokenTooLong
+                );
+                assert_eq!(mock.hits(), 1, "the long cursor was not requested");
+            } else {
+                assert!(pages.iter().all(Result::is_ok));
+                assert_eq!(mock.hits(), 2);
+            }
+        }
+
+        let link = format!("</items?x={}>; rel=\"next\"", "l".repeat(MAX_TOKEN_BYTES));
+        let mock = serve(Router::new().route(
+            "/items",
+            get(move || {
+                let link = link.clone();
+                async move {
+                    let mut response = axum::Json(json!({"data": []})).into_response();
+                    response.headers_mut().insert("link", link.parse().unwrap());
+                    response
+                }
+            }),
+        ))
+        .await;
+        let pages = read(&mock, Pagination::LinkHeader, &Auth::None).await;
+        assert_eq!(
+            pages[1].as_ref().unwrap_err(),
+            &RuntimeError::PaginationTokenTooLong
+        );
+    }
+
+    #[test]
+    fn fingerprints_are_16_bytes_whatever_the_input_and_tell_inputs_apart() {
+        assert_eq!(fingerprint(&vec![7; 1 << 20]).len(), 16);
+        assert_ne!(fingerprint(b"a"), fingerprint(b"b"));
+        assert_eq!(fingerprint(b"a"), fingerprint(b"a"));
     }
 }
