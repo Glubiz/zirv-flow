@@ -8,6 +8,7 @@ import { json, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { ManifestEditor } from "./ManifestEditor";
 import { issueText } from "./labels";
 import { starterManifest } from "./manifest";
+import { aiSettings } from "./testData";
 
 function Editor({ initial, sourceId }: { initial: string; sourceId?: string }) {
   const [value, setValue] = useState(initial);
@@ -37,7 +38,10 @@ const VALID = {
     },
   ],
 };
-const BASE = { "GET /api/v1/session": () => json(session(OWNER, "csrf-m")) };
+const BASE = {
+  "GET /api/v1/session": () => json(session(OWNER, "csrf-m")),
+  "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(false)),
+};
 const VALIDATE = "POST /api/v1/workspaces/ws1/source-manifests/validate";
 const SAMPLE = "POST /api/v1/workspaces/ws1/sources/src-1/manifest/sample";
 
@@ -202,5 +206,28 @@ describe("the sample", () => {
     await screen.findByRole("list", { name: "Problems in the manifest" });
     expect(screen.getByRole("button", { name: "Test with sample" })).toBeDisabled();
     expect(screen.getByLabelText("Stream to read")).toBeDisabled();
+  });
+
+  it("replaces the text with an accepted draft", async () => {
+    const manifest = JSON.parse(starterManifest("none")) as Record<string, unknown>;
+    manifest["base_url"] = "https://drafted.example.test";
+    mockApi({
+      ...BASE,
+      "GET /api/v1/workspaces/ws1/ai/settings": () => json(aiSettings(true)),
+      [VALIDATE]: () => json(VALID),
+      "POST /api/v1/workspaces/ws1/ai/drafts": () =>
+        json({ id: "d1", kind: "manifest", status: "valid", attempts: 1, content: manifest, issues: [], changes: [], dry_run: null }),
+      "POST /api/v1/workspaces/ws1/ai/drafts/d1/accept": () =>
+        json({ id: "d1", kind: "manifest", source_id: null, stream: null, content: manifest }),
+    });
+    const user = userEvent.setup();
+    mount(starterManifest("none"));
+
+    await user.type(await screen.findByLabelText("What do you want?"), "Read my contacts");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Accept" }));
+
+    expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Manifest").value).toContain("https://drafted.example.test");
   });
 });

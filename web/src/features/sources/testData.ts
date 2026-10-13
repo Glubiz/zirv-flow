@@ -264,3 +264,18 @@ export function aWebhook(change: Partial<Webhook> = {}): Webhook {
     ...change,
   };
 }
+
+/** The assistant's settings with the assistant switched `enabled` or not. */
+export function aiSettings(enabled: boolean, piiOptIn = false) {
+  return {
+    enabled,
+    provider_id: "openai",
+    model: "big",
+    monthly_budget_micros: 1_000_000,
+    pii_opt_in: piiOptIn,
+    transcript_days: null,
+    provider_key_set: true,
+    last_probe: null,
+    updated_at: "2026-10-01T09:00:00Z",
+  };
+}

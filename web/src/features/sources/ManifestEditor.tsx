@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { AssistantPanel } from "../assistant";
 import { Button, EmptyState, InlineError, LoadingState, SelectField, TextAreaField } from "../../ui";
 import { issueText } from "./labels";
 import { analyze, lineOfPointer, offsetOfLine, prettyPrint, STARTERS, starterManifest, type AuthType } from "./manifest";
@@ -288,6 +289,14 @@ export function ManifestEditor({
         </div>
       ) : (
         <p className="muted">Save the source to read a sample with its credential.</p>
+      )}
+      {disabled ? null : (
+        <AssistantPanel
+          workspaceId={workspaceId}
+          kind="manifest"
+          sourceId={sourceId}
+          onAccept={(content) => onChange(JSON.stringify(content, null, 2))}
+        />
       )}
     </div>
   );
