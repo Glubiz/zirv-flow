@@ -46,7 +46,7 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 2. **Every number is explainable.** Counts, memberships and skipped sends link to the data and rule behind them.
 3. **Freshness is a value.** Every segment result and send decision carries the age of its inputs.
 4. **Compliance is data, enforced at one boundary.** Consent, suppression and erasure live in the profile store and are checked in the send pipeline, not left to flow design.
-5. **Deterministic core, effects at the edge.** Segment compiler, flow interpreter and template renderer are pure functions of their input and an explicit `now`; the clock is read at the edges and I/O lives in job handlers (8.2).
+5. **Deterministic core, effects at the edge.** Segment compiler, flow interpreter and template renderer are pure functions of their input and an injected clock; I/O lives in job handlers. The segment compiler takes an explicit `now` and reads the clock at the edges (8.2); the flow engine adopts the same seam when it is built (M5).
 6. **At-least-once execution with idempotency keys.** Exactly-once is never claimed for a system that cannot honour a key.
 7. **The workspace is the isolation unit.** Every row carries `workspace_id`; every query and job is scoped by it.
 8. **API first.** The UI uses the public `/api/v1`; every milestone ships API and UI for its feature together.
@@ -870,11 +870,13 @@ least 50 in 90 days, not VIP, subscribed to the newsletter":
 | `list`, `segment` | Membership; segment references must stay acyclic |
 | `consent`, `identifier` | Channel/topic state; presence of an identifier kind |
 
+**Semantics.** Every leaf is two-valued: a missing trait, or a missing or null property, makes every operator false except `not_exists`, so `neq` and `not_in` on a missing value are false. `not` is plain boolean negation of its child, so "not (country eq DK)" includes people with no country while "country neq DK" does not. Over zero matching events `count` is 0, and `sum`, `min`, `max`, `avg` and first or last time are missing, so every comparison on them is false. Date values compare at UTC midnight; the workspace time zone is out of scope in v1, a recorded limitation (21.1). The compiled SQL reproduces this with `COALESCE(…, false)`, and the property tests enforce it (ruling 887b9eef).
+
 ### 8.2 Compilation
 
 `parse -> validate -> normalize -> lower`. Validation checks types, operators,
 references and window limits against the field registry and event catalog.
-Normalization flattens, pushes `not` inward and folds constants. Lowering emits
+Normalization flattens, pushes `not` inward through `all` and `any` (never rewriting a leaf operator under `not`) and folds constants. Lowering emits
 SQL with an `EXISTS` subquery per event condition; every value is a bind
 parameter, column and JSON keys come only from the registry, and relative
 windows bind `$now` from the explicit `now` the caller passes, so output is deterministic. Result:
@@ -901,7 +903,7 @@ targets (OQ-2).
 ### 8.3 Preview, explain, membership
 
 - **Preview:** count and sample under a `statement_timeout` (default 10 s), always with data age. A read replica (`database.read_url`) is deferred: in M4 preview and explain use the primary under `statement_timeout`, and the replica comes only if the M4 benchmark (#127) shows preview load harming ingestion.
-- **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile. The store loads one bounded **snapshot** of the person in one read-only, consistent transaction: traits; events, limited to the referenced names and the widest window and capped; lists, consent and identifier kinds; and current memberships. The reference evaluator (8.2) runs over the snapshot at the same evaluation time the SQL would use. A node that hit a cap reports "unable to explain", never a false pass or fail. Unknown results propagate unless the known children decide the outcome.
+- **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile. The store loads one bounded **snapshot** of the person in one read-only, consistent transaction: traits; events, limited to the referenced names and the widest window and capped; lists, consent and identifier kinds; and current memberships. The reference evaluator (8.2) runs over the snapshot at the same evaluation time the SQL would use. Leaves are two-valued, so a node is unknown only when it hit a cap: it reports "unable to explain", never a false pass or fail, and unknown propagates unless the known children decide the outcome.
 - **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: segment id, version, cause `data_change`, `time`, `definition_change` or `initial`), and enqueue batched flow triggers, all in one transaction.
 
 ### 8.4 Recompute and versioning
@@ -2078,6 +2080,11 @@ they were ruled as their capabilities were added to the plan.
   `definition_change`; events and decisions are recorded. Flow segment-entry and segment-exit
   triggers ignore `definition_change` changes. A flow that wants the current members chooses
   "enroll current members" at publish (M5). Section 8.4.
+
+- **Segment semantics (M4):** leaves are two-valued, `not` is boolean negation that normalization
+  never pushes into a leaf operator, and aggregates over zero events are missing except `count`
+  (8.1). Dates compare at UTC midnight: per-workspace time zones for date conditions are out of
+  scope in v1, a recorded limitation to revisit with flow schedules (M5).
 
 - **OQ-1:** Hot traits are promoted to typed columns with btree indexes; every other trait stays in the
   `people.traits` `jsonb`. At 1 million people and 20 mixed-type traits (M2 benchmark, tier M's
