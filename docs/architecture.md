@@ -528,6 +528,29 @@ field sources, the set already in `core::mapping`. There is no expression
 language or scripting in v1 (OQ-5); a request the set cannot express becomes an
 issue. The UI previews a mapping on sample records before saving.
 
+As built (M3, HTTP manifest): the `http` source (`zirv-flow-connectors::sources::http`, one registry
+line) runs any valid **manifest v1** on the connector runtime. The manifest is JSON stored as
+`sources.config.manifest` (JSON because the config is `jsonb`, the editor edits text and the
+assistant's typed tool schema is JSON; a YAML parser would be a second surface for an input an AI
+drafts from untrusted documentation). It names the base URL, the auth type (never a secret: the
+credential fields have fixed names), a rate limit, static headers and 1 to 20 streams, each with a
+path, static query, records pointer, one of the runtime's pagination styles, typed fields, a primary
+key, an optional incremental cursor, an optional delete signal and an optional mapping seed. There is
+no expression language: unknown keys are refused, a closed list of script-like keys and any string
+holding a template marker get their own code, and the only dynamic value in a request is the
+incremental parameter. `zirv_flow_connectors::manifest::validate(&Value)` is the pure validator
+(a hand-written walk that copies no value into an issue; `{code, path}` only, at most 50 issues,
+limits of 64 KiB, 20 streams, 200 fields and 12 levels checked before the walk). The API's validate
+endpoint, the editor, the source's own `read` and `check`, and the assistant tool (13.2) call it; it
+depends on `core` only (5.1), and the spec-level `config_check` makes `validate_config` run it on
+create and update. The checkpoint is `{"since": ...}` and moves only with the last batch of a stream
+(to the highest cursor value seen), because an API may return records in any order; a lost lease
+re-reads from the run's start, which the idempotent apply makes harmless (OQ-2 keeps ascending-order
+resume open). A delete signal sets `Record.deleted` and nothing else: the batch path and the sweep
+are unchanged. Discovery makes no request; a stream's mapping in the manifest is a seed written to
+`streams.mapping` once, after the checks a saved mapping gets. `Source::rate_limit(config)` lets a
+source type take its rate from its settings.
+
 As built (M3, file sources): the `file` source (`zirv-flow-connectors::sources::file`, one registry
 line) reads a CSV, NDJSON or top-level JSON array file at an https address through
 `SourceContext::send` in byte-range windows of 4 MiB. A window begins at a record boundary and
@@ -667,8 +690,22 @@ exceed it in aggregate, `Retry-After` handling mitigates but does not prevent th
 distributed enforcement is revisited with OQ-9 at M6. Auth is attached only to the source's base
 origin, and any other origin is refused before sending. A refreshed OAuth2 token is handed back
 through the context's token slot (`take_refreshed_token`); `connectors` never writes to `store`
-(5.1), so the caller stores it through `encrypted_secrets`, and test connection and discovery drop
-it. Errors carry a variant, a status and an attempt count, never a URL, header or body.
+(5.1), so the caller stores it through `encrypted_secrets`; a client-credentials token is short-lived and is fetched anew
+by the next call. Errors carry a variant, a status and an attempt count, never a URL, header or body.
+
+As built (M3, HTTP manifest): the runtime now speaks the OAuth2 authorization-code grant. The
+consent is `POST .../sources/{id}/oauth/start` (a signed-in admin) and `GET /api/v1/oauth/callback`:
+the OIDC pattern again, with a hash-keyed single-use server-side state (`source_oauth_states`, ten
+minutes) holding the PKCE verifier, the source and the user, and the existing session binding the
+browser (the callback takes the state first, then requires the same signed-in admin). The code is
+exchanged through the guarded client (`exchange_code`); a response without a refresh token is
+refused. Both tokens are one `oauth_token` secret linked from `sources.oauth_secret_id`, apart from
+the credential row so that a refreshing job and an admin replacing the credential never overwrite
+each other. A refresh that rotates the refresh token is serialized across processes by the
+`TokenStore` trait the runtime defines and `api` and `jobs` implement over
+`store::sources::oauth::refresh_serialized`: one transaction locks the token row, reloads it, calls
+the provider only if the stored refresh token is still the one the caller held, and saves the result.
+A token is used only with the token URL, client id and scopes it was issued for.
 
 As built (M3, freshness): the state is derived, never stored. `streams` gains `enabled_at`,
 `last_success_at` and `last_run_failed`; the high-water mark is the existing `checkpoint`.

@@ -194,7 +194,7 @@ federated live sources, WASM plugins, destinations (M6).
 **Exit criteria.**
 - [x] Killing a worker mid-sync against a seeded Postgres source and restarting resumes from the last checkpoint, with no duplicate events and no missing records.
 - [x] A record deleted in a full-refresh source is gone from its person's contributions after the next successful run; a failed or cancelled run deletes nothing.
-- [ ] A manifest for a mock API with cursor pagination, OAuth2 refresh and `429` responses syncs incrementally (fixture test).
+- [x] A manifest for a mock API with cursor pagination, OAuth2 refresh and `429` responses syncs incrementally (fixture test).
 - [ ] Credentials appear only as ciphertext in a database dump; no API response returns plaintext.
 - [ ] The egress policy blocks loopback, private, link-local and metadata addresses unless allowlisted, including after DNS resolution.
 - [ ] A configured local model server on a private address is blocked until its resolved address is explicitly allowlisted; provider keys appear only as ciphertext.
