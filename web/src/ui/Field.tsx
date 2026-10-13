@@ -1,4 +1,10 @@
-import { useId, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import {
+  useId,
+  type InputHTMLAttributes,
+  type Ref,
+  type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from "react";
 
 /** The hint and the error of a field, wired to the control for assistive technology. */
 function describedBy(id: string, hint: string | undefined, error: string | undefined): string | undefined {
@@ -83,6 +89,7 @@ interface TextAreaFieldProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaEle
   label: string;
   hint?: string;
   mono?: boolean;
+  ref?: Ref<HTMLTextAreaElement>;
 }
 
 export function TextAreaField({ label, hint, mono = false, className, ...rest }: TextAreaFieldProps) {

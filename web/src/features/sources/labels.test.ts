@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   configFrom,
+  describeJson,
+  issueText,
+  MANIFEST_ISSUE_CODES,
+  oauthReasonText,
+  parseJsonObject,
   credentialFrom,
   filled,
   freshnessLabel,
@@ -152,5 +157,60 @@ describe("freshness", () => {
     expect(thresholdLabel(aFreshness({ threshold_seconds: 90, threshold_is_default: false }))).toBe("2 min");
     expect(thresholdLabel(aFreshness({ threshold_seconds: null }))).toBe("None");
     expect(thresholdLabel(null)).toBe("None");
+  });
+});
+
+describe("the manifest settings", () => {
+  const FIELDS = [{ ...CONFIG[0]!, key: "manifest", kind: "json", required: true }];
+
+  it("keeps a JSON object as indented text in the form and sends it back as an object", () => {
+    const values = initialValues(FIELDS, { manifest: { version: "v1", streams: [] } });
+
+    expect(values.manifest).toBe('{\n  "version": "v1",\n  "streams": []\n}');
+    expect(configFrom(FIELDS, values)).toEqual({ manifest: { version: "v1", streams: [] } });
+  });
+
+  it("leaves out text that is not an object and refuses to save it", () => {
+    for (const text of ["[1]", "5", '"x"', "{", ""]) {
+      expect(parseJsonObject(text), text).toBeNull();
+      expect(configFrom(FIELDS, { manifest: text }), text).toEqual({});
+    }
+    expect(shapesValid(FIELDS, { manifest: "[1]" })).toBe(false);
+    expect(shapesValid(FIELDS, { manifest: "{}" })).toBe(true);
+  });
+
+  it("describes a manifest by its streams", () => {
+    expect(describeJson({ streams: [{}, {}] })).toBe("2 streams described");
+    expect(describeJson({ streams: [{}] })).toBe("1 stream described");
+    expect(describeJson({})).toBe("Set");
+    expect(describeJson(null)).toBe("Set");
+  });
+
+  it("has a sentence for every code the validator can return, and says so plainly for an unknown one", () => {
+    const unknown = issueText("a_code_from_the_future");
+    for (const code of MANIFEST_ISSUE_CODES) {
+      const text = issueText(code);
+      expect(text, code).not.toBe("");
+      expect(text, code).not.toBe(unknown);
+    }
+    expect(unknown).toBe("This part of the manifest is not valid.");
+  });
+
+  it("explains every reason a connection can fail, and a reason it does not know", () => {
+    for (const reason of [
+      "unknown_state",
+      "state_mismatch",
+      "provider_error",
+      "exchange_failed",
+      "no_refresh_token",
+      "source_gone",
+    ]) {
+      expect(oauthReasonText(reason), reason).not.toBe(oauthReasonText("nope"));
+    }
+    expect(oauthReasonText(null)).toBe("Connecting the account did not work. Try again.");
+  });
+
+  it("explains a run that stopped on a manifest that no longer passes", () => {
+    expect(runErrorText("source_config_invalid", 0.05)).toContain("manifest");
   });
 });

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { NewSourcePage } from "./NewSourcePage";
-import { aSource, aStream, FAKE_KIND, POSTGRES_KIND } from "./testData";
+import { aSource, aStream, FAKE_KIND, HTTP_KIND, POSTGRES_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -330,5 +330,70 @@ describe("the source wizard", () => {
 
     expect(await screen.findByText(/Only workspace admins can add sources/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Choose Fake source" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the wizard for an HTTP manifest source", () => {
+  const MANIFEST = `{"version":"v1","base_url":"https://api.example.test","auth":{"type":"bearer"},"streams":[]}`;
+  const HTTP = {
+    ...BASE,
+    "GET /api/v1/source-kinds": () => json([HTTP_KIND]),
+    "POST /api/v1/workspaces/ws1/source-manifests/validate": () =>
+      json({ valid: true, issues: [], streams: [{ name: "contacts", fields: [{ name: "id", type: "string" }] }] }),
+  };
+
+  it("edits the manifest in the manifest editor and sends it as an object", async () => {
+    const calls = mockApi({
+      ...HTTP,
+      "POST /api/v1/workspaces/ws1/sources": () => json(aSource({ kind: "http" }), 201),
+      "POST /api/v1/workspaces/ws1/sources/src-1/test": () => json({ ok: true, error: null }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Choose HTTP API (manifest)" }));
+    await user.type(screen.getByLabelText("Name"), "API");
+    const area = screen.getByLabelText("Manifest");
+    // userEvent treats braces as key descriptors, so the text is set in one go.
+    await user.click(area);
+    await user.paste(MANIFEST);
+    expect(await screen.findByText("Save the source to read a sample with its credential.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save and test" }));
+
+    expect(await screen.findByText("The connection to CRM works.")).toBeInTheDocument();
+    const created = calls.find((call) => call.method === "POST" && call.path.endsWith("/sources"));
+    expect((created?.body as { config: unknown }).config).toEqual({ manifest: JSON.parse(MANIFEST) as unknown });
+  });
+
+  it("will not save a manifest that is not a JSON object", async () => {
+    mockApi(HTTP);
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Choose HTTP API (manifest)" }));
+    await user.type(screen.getByLabelText("Name"), "API");
+    await user.click(screen.getByLabelText("Manifest"));
+    await user.paste("[1, 2]");
+
+    expect(screen.getByRole("button", { name: "Save and test" })).toBeDisabled();
+  });
+
+  it("offers a sample once the source is saved and its settings are opened again", async () => {
+    mockApi({
+      ...HTTP,
+      "POST /api/v1/workspaces/ws1/sources": () => json(aSource({ kind: "http" }), 201),
+      "POST /api/v1/workspaces/ws1/sources/src-1/test": () => json({ ok: false, error: "the source refused the credential" }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Choose HTTP API (manifest)" }));
+    await user.type(screen.getByLabelText("Name"), "API");
+    await user.click(screen.getByLabelText("Manifest"));
+    await user.paste(MANIFEST);
+    await user.click(screen.getByRole("button", { name: "Save and test" }));
+    await user.click(await screen.findByRole("button", { name: "Back to settings" }));
+
+    expect(await screen.findByRole("button", { name: "Test with sample" })).toBeInTheDocument();
   });
 });

@@ -113,6 +113,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Finishes connecting an account: the provider sends the browser here with `code` and `state`.
+         * @description Always answers `303` to the source page (or the front page when the state is unknown), with
+         *     `?oauth=connected`, or `?oauth=failed&reason=<code>` and nothing stored. The browser must hold
+         *     the session of the admin who started.
+         */
+        get: operations["finish_source_oauth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session": {
         parameters: {
             query?: never;
@@ -1412,6 +1434,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/source-manifests/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Checks a draft manifest. A bad manifest is a 200 with its issues, not a 422, because the editor
+         *     asks on every pause in typing; saving a source with the same manifest answers 422 with the
+         *     same codes. Writes nothing and is not audited. Workspace admins only.
+         */
+        post: operations["validate_source_manifest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/sources": {
         parameters: {
             query?: never;
@@ -1472,6 +1515,49 @@ export interface paths {
          *     the user's settings. Workspace admins only. Audited as `source.discovered`.
          */
         post: operations["discover_source_streams"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reads the first records of a stream with a draft or the saved manifest, using the source's
+         *     stored credential and account tokens, and returns them raw. Reads from the start, never from
+         *     a checkpoint, and writes nothing. Workspace admins only; not audited, since it changes
+         *     nothing. A rate-limited or refused call answers as discovery does.
+         */
+        post: operations["sample_source_manifest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sources/{id}/oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Starts connecting an account: stores a single-use state and returns the provider's consent
+         *     URL, which the page navigates to. A person's session is needed; an API key is refused.
+         *     Workspace admins only. Audited as `source.oauth_started`.
+         */
+        post: operations["start_source_oauth"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3088,6 +3174,13 @@ export interface components {
              */
             row: number;
         };
+        /** @description One problem of a manifest: a code and the JSON pointer of the key it concerns. Never a value. */
+        IssueBody: {
+            /** @description A stable code such as `unknown_field`, `required` or `path_invalid`. */
+            code: string;
+            /** @description A JSON pointer into the manifest; empty for the manifest itself. */
+            path: string;
+        };
         /** @description One invalid field of one item of an ingestion request. */
         ItemProblem: {
             /** @description The field, or empty when the item itself is the wrong type. */
@@ -3182,6 +3275,15 @@ export interface components {
             members: components["schemas"]["ListMemberBody"][];
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
+        };
+        ManifestFieldBody: {
+            name: string;
+            /** @description `string`, `number`, `boolean`, `timestamp`, `json` or `unknown`. */
+            type: string;
+        };
+        ManifestStreamBody: {
+            fields: components["schemas"]["ManifestFieldBody"][];
+            name: string;
         };
         /** @description How the columns of a file become identifiers, traits and lists. */
         MappingBody: {
@@ -3290,6 +3392,18 @@ export interface components {
             index: number;
             /** @example not_found */
             reason: string;
+        };
+        /** @description Whether and how a source is connected to an account by OAuth2 consent. */
+        OAuthBody: {
+            /** @description An account is connected: tokens are stored. */
+            connected: boolean;
+            /** Format: date-time */
+            connected_at?: string | null;
+            /**
+             * @description The source's manifest uses the authorization-code grant, so an admin must connect an
+             *     account before it can sync.
+             */
+            required: boolean;
         };
         PersonHitBody: {
             display?: null | components["schemas"]["DisplayBody"];
@@ -3771,6 +3885,31 @@ export interface components {
             next_cursor?: string | null;
             runs: components["schemas"]["RunBody"][];
         };
+        SampleBody: {
+            /**
+             * Format: int32
+             * @description How many records are returned.
+             */
+            read: number;
+            /** @description The records exactly as the API returned them (raw values, before any mapping). */
+            records: Record<string, never>[];
+            /** @description The stream has more records than the sample shows. */
+            truncated: boolean;
+        };
+        SampleRequest: {
+            /**
+             * Format: int32
+             * @description How many records to read, 1 to 20; 10 when absent.
+             */
+            limit?: number | null;
+            /**
+             * @description A draft manifest to try, checked exactly as a save is. Absent, the source's saved
+             *     manifest is used.
+             */
+            manifest?: Record<string, never> | null;
+            /** @description The stream to read, by name. */
+            stream: string;
+        };
         SaveDraftRequest: {
             /** @description Replaces the draft. */
             properties: components["schemas"]["PropertyBody"][];
@@ -3902,6 +4041,8 @@ export interface components {
             kind: string;
             /** @example CRM */
             name: string;
+            /** @description The OAuth2 consent state; never a token. */
+            oauth: components["schemas"]["OAuthBody"];
             /** @description A cron expression in UTC, or null. */
             schedule?: string | null;
             /** Format: date-time */
@@ -3920,6 +4061,13 @@ export interface components {
              */
             kind: string;
             label: string;
+        };
+        StartBody: {
+            /**
+             * @description Where to send the browser: the provider's consent page. The page that gets it navigates
+             *     there; the server never fetches it.
+             */
+            authorization_url: string;
         };
         /** @description Which stream to run. */
         StartRunRequest: {
@@ -4304,6 +4452,17 @@ export interface components {
              * @description Null for calls made with an API key.
              */
             user_id?: string | null;
+        };
+        ValidateBody: {
+            /** @description At most 50, in the order found; empty when the manifest is valid. */
+            issues: components["schemas"]["IssueBody"][];
+            /** @description The streams the manifest declares, for a stream picker; empty when it is invalid. */
+            streams: components["schemas"]["ManifestStreamBody"][];
+            valid: boolean;
+        };
+        ValidateRequest: {
+            /** @description The draft manifest: any JSON value. Whether it is a valid manifest v1 is the answer. */
+            manifest?: Record<string, never>;
         };
         ValueCountBody: {
             /** Format: int64 */
@@ -4716,6 +4875,40 @@ export interface operations {
                 };
             };
             /** @description The database is unavailable; nothing was stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    finish_source_oauth: {
+        parameters: {
+            query?: {
+                /** @description The authorization code */
+                code?: string;
+                /** @description The single-use state `start` issued */
+                state?: string;
+                /** @description Set by the provider when it refused */
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch`, `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone` */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The server has no master key */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -10082,6 +10275,69 @@ export interface operations {
             };
         };
     };
+    validate_source_manifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ValidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the manifest is valid, its issues, and its streams */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidateBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over the manifest size cap (64 KiB) plus 1 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_sources: {
         parameters: {
             query?: never;
@@ -10477,6 +10733,186 @@ export interface operations {
             };
             /** @description The source did not answer in time */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    sample_source_manifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SampleRequest"];
+            };
+        };
+        responses: {
+            /** @description The raw sample records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SampleBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source does not use a manifest, or its type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid draft manifest (the same codes as a save), a stream the manifest does not have, or a limit outside 1 to 20 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The API refused or failed the request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The API did not answer in time */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    start_source_oauth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Source id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Where to send the browser */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, an API key (a consent needs a person), or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or source, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source does not use the authorization-code grant (`code` is `oauth_not_configured`), or the server has no `server.public_url` (`code` is `public_url_not_configured`), or the type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source has no `client_id` in its credential */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -193,6 +193,9 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                   values={values}
                   onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
                   disabled={busy}
+                  kind={kind.kind}
+                  workspaceId={workspaceId}
+                  sourceId={source?.id}
                 />
                 {DATABASE_KINDS.includes(kind.kind) ? (
                   <p className="muted">
