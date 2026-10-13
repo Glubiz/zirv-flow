@@ -135,6 +135,8 @@ pub struct OAuthState {
     pub source_id: Uuid,
     pub user_id: Uuid,
     pub pkce_verifier: String,
+    /// The token binding of the manifest the consent was started under.
+    pub binding: String,
 }
 
 impl fmt::Debug for OAuthState {
@@ -144,6 +146,7 @@ impl fmt::Debug for OAuthState {
             .field("source_id", &self.source_id)
             .field("user_id", &self.user_id)
             .field("pkce_verifier", &"[redacted]")
+            .field("binding", &self.binding)
             .finish()
     }
 }
@@ -154,31 +157,41 @@ struct StateRow {
     source_id: Uuid,
     user_id: Uuid,
     pkce_verifier: String,
+    binding: String,
 }
 
-/// Records a consent started by `user` for `source`, valid for `ttl_seconds`. `state_hash` is the
-/// hash of the single-use `state`; the verifier is kept in clear for that long, as an OIDC
-/// login's is. A source that is not in `workspace` is refused by the database.
+/// A consent to record: started by `user` for `source`, valid for `ttl_seconds`. `state_hash` is
+/// the hash of the single-use `state`; the verifier is kept in clear for that long, as an OIDC
+/// login's is. `binding` is the token binding of the manifest the consent was started under, which
+/// the callback checks before it sends the code anywhere.
+pub struct NewOAuthState<'a> {
+    pub workspace: WorkspaceId,
+    pub source: Uuid,
+    pub user: Uuid,
+    pub state_hash: &'a [u8],
+    pub pkce_verifier: &'a str,
+    pub binding: &'a str,
+    pub ttl_seconds: i64,
+}
+
+/// Records a consent in progress. A source that is not in the workspace is refused by the
+/// database.
 pub async fn create_oauth_state<'e>(
     executor: impl PgExecutor<'e>,
-    workspace: WorkspaceId,
-    source: Uuid,
-    user: Uuid,
-    state_hash: &[u8],
-    pkce_verifier: &str,
-    ttl_seconds: i64,
+    consent: &NewOAuthState<'_>,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO source_oauth_states \
-            (state_hash, workspace_id, source_id, user_id, pkce_verifier, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))",
+        "INSERT INTO source_oauth_states 
+            (state_hash, workspace_id, source_id, user_id, pkce_verifier, binding, expires_at) 
+         VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))",
     )
-    .bind(state_hash)
-    .bind(workspace.as_uuid())
-    .bind(source)
-    .bind(user)
-    .bind(pkce_verifier)
-    .bind(ttl_seconds as f64)
+    .bind(consent.state_hash)
+    .bind(consent.workspace.as_uuid())
+    .bind(consent.source)
+    .bind(consent.user)
+    .bind(consent.pkce_verifier)
+    .bind(consent.binding)
+    .bind(consent.ttl_seconds as f64)
     .execute(executor)
     .await
     .map_err(StoreError::query)?;
@@ -194,7 +207,7 @@ pub async fn take_oauth_state<'e>(
 ) -> Result<Option<OAuthState>, StoreError> {
     let row: Option<StateRow> = sqlx::query_as(
         "DELETE FROM source_oauth_states WHERE state_hash = $1 AND expires_at > now() \
-         RETURNING workspace_id, source_id, user_id, pkce_verifier",
+         RETURNING workspace_id, source_id, user_id, pkce_verifier, binding",
     )
     .bind(state_hash)
     .fetch_optional(executor)
@@ -205,6 +218,7 @@ pub async fn take_oauth_state<'e>(
         source_id: row.source_id,
         user_id: row.user_id,
         pkce_verifier: row.pkce_verifier,
+        binding: row.binding,
     }))
 }
 
@@ -432,6 +446,24 @@ mod tests {
         .id
     }
 
+    fn new_state<'a>(
+        fx: &Fixture,
+        workspace: WorkspaceId,
+        user: Uuid,
+        state_hash: &'a [u8],
+        ttl_seconds: i64,
+    ) -> NewOAuthState<'a> {
+        NewOAuthState {
+            workspace,
+            source: fx.source,
+            user,
+            state_hash,
+            pkce_verifier: "verifier",
+            binding: "b",
+            ttl_seconds,
+        }
+    }
+
     async fn fixture(pool: PgPool) -> Fixture {
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();
         let root = HmacRoot::bootstrap_from(keys.current());
@@ -495,6 +527,7 @@ mod tests {
             source_id: Uuid::nil(),
             user_id: Uuid::nil(),
             pkce_verifier: "verifier-secret".into(),
+            binding: "b".into(),
         };
         assert!(!format!("{state:?}").contains("secret"));
     }
@@ -528,10 +561,10 @@ mod tests {
         .await
         .unwrap();
         let user = user.id.as_uuid();
-        create_oauth_state(&fx.pool, fx.ws, fx.source, user, b"fresh", "verifier", 600)
+        create_oauth_state(&fx.pool, &new_state(&fx, fx.ws, user, b"fresh", 600))
             .await
             .unwrap();
-        create_oauth_state(&fx.pool, fx.ws, fx.source, user, b"old", "verifier", -1)
+        create_oauth_state(&fx.pool, &new_state(&fx, fx.ws, user, b"old", -1))
             .await
             .unwrap();
 
@@ -541,6 +574,7 @@ mod tests {
             (fx.ws, fx.source, user)
         );
         assert_eq!(taken.pkce_verifier, "verifier");
+        assert_eq!(taken.binding, "b");
         assert!(
             take_oauth_state(&fx.pool, b"fresh")
                 .await
@@ -567,8 +601,7 @@ mod tests {
         .id
         .as_uuid();
 
-        let result =
-            create_oauth_state(&fx.pool, other, fx.source, user, b"s", "verifier", 600).await;
+        let result = create_oauth_state(&fx.pool, &new_state(&fx, other, user, b"s", 600)).await;
 
         assert!(result.is_err());
         assert!(take_oauth_state(&fx.pool, b"s").await.unwrap().is_none());

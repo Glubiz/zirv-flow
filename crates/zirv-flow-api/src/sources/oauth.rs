@@ -2,11 +2,13 @@
 //! the authorization-code flow with PKCE.
 //!
 //! `start` (an admin with a session) stores a single-use server-side state, hashed, with the PKCE
-//! verifier, the source and the user, for ten minutes, and returns the provider's authorization
-//! URL. `callback` takes that state first, so a replay always finds nothing and a failure later
-//! never leaves a usable state; it checks that the browser that returns is the signed-in admin
-//! who left, exchanges the code through the guarded client and stores both tokens in one
-//! `oauth_token` secret. Every failure stores nothing and redirects the browser to the source
+//! verifier, the token binding of the manifest, the source and the user, for ten minutes, and
+//! returns the provider's authorization URL. `callback` takes that state first, so a replay always
+//! finds nothing and a failure later never leaves a usable state; it checks that the browser that
+//! returns is the signed-in admin who left and that the manifest still has the binding the consent
+//! started under (else `state_mismatch`, before the code goes anywhere), exchanges the code
+//! through the guarded client and stores both tokens in one `oauth_token` secret, after checking the
+//! binding again under the source's row lock. Every failure stores nothing and redirects the browser to the source
 //! page (or, when no state was found, to the front page) with `?oauth=failed&reason=<code>`.
 //!
 //! No code, state, token, verifier or URL reaches a log line, an audit entry or a metric label:
@@ -26,9 +28,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::manifest::{self, Auth as ManifestAuth};
 use zirv_flow_connectors::runtime::{CodeExchange, RuntimeError, exchange_code};
+use zirv_flow_connectors::sources::{Credential, active_binding};
 use zirv_flow_core::token::{random_token, sha256};
 use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
-use zirv_flow_store::{Source, StoredTokens};
+use zirv_flow_store::{NewOAuthState, Source, StoredTokens};
 
 use super::actions::network_context;
 use super::{credential, kind_unavailable, registry};
@@ -161,6 +164,8 @@ pub(crate) async fn start(
     let client_id = credential
         .get("client_id")
         .ok_or_else(|| super::invalid("credential.client_id", "is required"))?;
+    let binding =
+        active_binding(&source.config, &credential).ok_or_else(ApiError::oauth_not_configured)?;
 
     let consent_state = random_token(32);
     let verifier = random_token(32);
@@ -168,12 +173,15 @@ pub(crate) async fn start(
     zirv_flow_store::delete_expired_oauth_states(&mut *tx).await?;
     zirv_flow_store::create_oauth_state(
         &mut *tx,
-        workspace.id,
-        source_id,
-        user.as_uuid(),
-        &sha256(&consent_state),
-        &verifier,
-        STATE_SECONDS,
+        &NewOAuthState {
+            workspace: workspace.id,
+            source: source_id,
+            user: user.as_uuid(),
+            state_hash: &sha256(&consent_state),
+            pkce_verifier: &verifier,
+            binding: &binding,
+            ttl_seconds: STATE_SECONDS,
+        },
     )
     .await?;
     admin::audit(
@@ -271,7 +279,7 @@ fn redirect(target: &str) -> Response {
         ("error" = Option<String>, Query, description = "Set by the provider when it refused")
     ),
     responses(
-        (status = 303, description = "Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch`, `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone`"),
+        (status = 303, description = "Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch` (also when the manifest's authentication changed since the consent started), `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone`"),
         (status = 503, description = "The server has no master key", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []))
@@ -381,6 +389,11 @@ async fn complete(
     let client_id = credential
         .get("client_id")
         .ok_or_else(|| failed("exchange_failed"))?;
+    // The configuration may have changed since the consent started: the code and the verifier go
+    // only to the token endpoint the consent was for.
+    if active_binding(&source.config, &credential).as_deref() != Some(consent.binding.as_str()) {
+        return Err(failed("state_mismatch"));
+    }
     let context = network_context(
         state,
         driver.spec().kind,
@@ -408,24 +421,29 @@ async fn complete(
         _ => failed("exchange_failed"),
     })?;
     let stored = super::tokens::to_stored(&token).map_err(|_| failed("no_refresh_token"))?;
-    store_tokens(state, principal, workspace, &source, &stored)
+    let saved = store_tokens(state, principal, workspace, &source, &credential, &stored)
         .await
         .map_err(|error| Failure {
             error: Some(Box::new(error)),
             ..failed("exchange_failed")
         })?;
+    if !saved {
+        return Err(failed("state_mismatch"));
+    }
     Ok((workspace, source_id))
 }
 
 /// Seals the tokens into the source's `oauth_token` secret (replacing it on a reconnect), links
-/// it, and audits `source.oauth_connected`, all in one transaction.
+/// it, and audits `source.oauth_connected`, all in one transaction. The locked source row is checked
+/// again: tokens issued under a configuration a save has since replaced are not stored (`false`).
 async fn store_tokens(
     state: &AppState,
     principal: &Principal,
     workspace: WorkspaceId,
     source: &Source,
+    credential: &Credential,
     tokens: &StoredTokens,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     let plaintext = tokens.to_plaintext().map_err(|_| ApiError::internal())?;
     let keyring = credential::keyring(state)?;
     let context = principal.context();
@@ -434,6 +452,11 @@ async fn store_tokens(
     let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, source.id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if locked.credential_secret_id != source.credential_secret_id
+        || active_binding(&locked.config, credential).as_deref() != Some(tokens.binding.as_str())
+    {
+        return Ok(false);
+    }
     let linked = match locked.oauth_secret_id {
         Some(secret) => {
             admin::replace_secret_in(
@@ -470,7 +493,7 @@ async fn store_tokens(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    Ok(())
+    Ok(true)
 }
 
 /// Audits `source.oauth_failed` with the reason, for a consent whose state was found.

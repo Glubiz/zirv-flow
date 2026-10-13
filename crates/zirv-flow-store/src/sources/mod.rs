@@ -12,8 +12,9 @@ pub use crud::{
     find_source_for_update, list_sources, update_source,
 };
 pub use oauth::{
-    OAuthState, RefreshError, StoredTokens, TokenError, clear_tokens, create_oauth_state,
-    delete_expired_oauth_states, link_tokens, load_tokens, refresh_serialized, take_oauth_state,
+    NewOAuthState, OAuthState, RefreshError, StoredTokens, TokenError, clear_tokens,
+    create_oauth_state, delete_expired_oauth_states, link_tokens, load_tokens, refresh_serialized,
+    take_oauth_state,
 };
 pub use schedule::{sync_reconcile_schedule, sync_schedule, sync_source_reconcile_schedules};
 pub use streams::{

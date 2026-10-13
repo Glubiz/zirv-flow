@@ -18,7 +18,7 @@ const REFRESH_BINDING_KEY: &str = "oauth_refresh_binding";
 
 /// The binding a token fetched under the source's current `config` and `credential` carries, or
 /// `None` when the manifest is not an authorization-code one. Never holds a secret.
-fn active_binding(config: &Value, credential: &Credential) -> Option<String> {
+pub fn active_binding(config: &Value, credential: &Credential) -> Option<String> {
     let manifest = super::manifest_of(config).ok()?;
     let ManifestAuth::OAuth2AuthorizationCode {
         token_url, scopes, ..

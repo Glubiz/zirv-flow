@@ -1592,7 +1592,7 @@ server stores a single-use state (hashed, ten minutes) with the PKCE verifier. R
 `server.public_url` the start answers 409 `public_url_not_configured`. The callback exchanges the
 code through the guarded client and stores the access and refresh token in one sealed secret, then
 returns to the source page with a success or failure banner. On any failure (an unknown or reused
-state, another person's session, a provider error, a refused exchange, a response with no refresh
+state, another person's session, a manifest whose authentication changed since the consent started, a provider error, a refused exchange, a response with no refresh
 token) nothing is stored. Refresh tokens that rotate are stored by whoever refreshes (a sync run or a
 test), serialized across processes so a single-use token is never used twice. Audit entries
 (`source.oauth_started`, `source.oauth_connected`, `source.oauth_failed` with a reason,

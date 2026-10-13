@@ -299,7 +299,7 @@ export function oauthReasonText(reason: string | null): string {
   const texts: Record<string, string> = {
     unknown_state: "The sign-in link had expired or was already used. Start again with Connect account.",
     state_mismatch:
-      "The sign-in was finished by a different person or session than the one that started it. Start again while signed in as yourself.",
+      "The sign-in was finished by a different person or session than the one that started it, or the source's connection settings changed in between. Start again while signed in as yourself.",
     provider_error: "The provider did not allow the connection. Start again and approve the request.",
     exchange_failed: "The provider refused to hand over the account tokens. Check the client ID and secret, then try again.",
     no_refresh_token:

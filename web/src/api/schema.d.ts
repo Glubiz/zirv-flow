@@ -4901,7 +4901,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch`, `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone` */
+            /** @description Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch` (also when the manifest's authentication changed since the consent started), `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone` */
             303: {
                 headers: {
                     [name: string]: unknown;

@@ -1001,6 +1001,44 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_callback_after_the_auth_section_changed_sends_no_code_and_stores_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_source(fx.manifest()).await;
+        let state = fx.state_of(&fx.admin, &id).await;
+        let mut other_scopes = fx.manifest();
+        other_scopes["auth"]["scopes"] = json!(["contacts.write"]);
+        let edited = fx
+            .as_key(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"config": {"manifest": other_scopes}})),
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+
+        let reply = fx
+            .callback(Some(&fx.admin), &format!("code={CODE}&state={state}"))
+            .await;
+
+        assert_eq!(
+            location(&reply),
+            format!(
+                "{PUBLIC_URL}/w/{}/sources/{id}?oauth=failed&reason=state_mismatch",
+                fx.ws.as_uuid()
+            )
+        );
+        assert!(fx.upstream.forms.lock().unwrap().is_empty());
+        assert_eq!(
+            fx.count("SELECT count(*) FROM encrypted_secrets WHERE purpose = 'oauth_token'")
+                .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_callback_is_counted_by_outcome_with_no_other_label(pool: PgPool) {
         use metrics_exporter_prometheus::PrometheusBuilder;
 

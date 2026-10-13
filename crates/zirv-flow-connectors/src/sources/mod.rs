@@ -22,7 +22,7 @@ mod validate;
 pub use context::SourceContext;
 pub use credential::{Credential, CredentialFormatError};
 pub use error::SourceError;
-pub use http::{REFRESH_TOKEN_KEY, seed_refresh_token};
+pub use http::{REFRESH_TOKEN_KEY, active_binding, seed_refresh_token};
 pub use registry::Registry;
 pub use source::{BoxFuture, ErasedSource, Source};
 pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};

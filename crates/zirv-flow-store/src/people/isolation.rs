@@ -1132,7 +1132,7 @@ mod tests {
         use zirv_flow_core::{Email, Keyring, MasterKey};
 
         use crate::{
-            NewSource, create_oauth_state, create_source, create_user, load_tokens,
+            NewOAuthState, NewSource, create_oauth_state, create_source, create_user, load_tokens,
             take_oauth_state,
         };
 
@@ -1161,18 +1161,41 @@ mod tests {
 
         // Workspace two cannot start a consent for workspace one's source.
         assert!(
-            create_oauth_state(&pool, two, source.id, user, b"foreign", "v", 600)
-                .await
-                .is_err()
+            create_oauth_state(
+                &pool,
+                &NewOAuthState {
+                    workspace: two,
+                    source: source.id,
+                    user,
+                    state_hash: b"foreign",
+                    pkce_verifier: "v",
+                    binding: "b",
+                    ttl_seconds: 600,
+                },
+            )
+            .await
+            .is_err()
         );
         assert!(take_oauth_state(&pool, b"foreign").await.unwrap().is_none());
 
         // The consent that workspace one started names workspace one, and only it.
-        create_oauth_state(&pool, one, source.id, user, b"own", "v", 600)
-            .await
-            .unwrap();
+        create_oauth_state(
+            &pool,
+            &NewOAuthState {
+                workspace: one,
+                source: source.id,
+                user,
+                state_hash: b"own",
+                pkce_verifier: "v",
+                binding: "b",
+                ttl_seconds: 600,
+            },
+        )
+        .await
+        .unwrap();
         let taken = take_oauth_state(&pool, b"own").await.unwrap().unwrap();
         assert_eq!(taken.workspace_id, one);
+        assert_eq!(taken.binding, "b");
 
         // Tokens are read through the workspace.
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();

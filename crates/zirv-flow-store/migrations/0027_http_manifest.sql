@@ -13,8 +13,8 @@ ALTER TABLE sources
 CREATE INDEX sources_oauth_secret_idx ON sources (oauth_secret_id)
     WHERE oauth_secret_id IS NOT NULL;
 
--- A consent in progress: the hash of the single-use `state`, the PKCE verifier, and who started
--- it for which source. Taken (deleted) by the callback, so it can be used once; expires after
+-- A consent in progress: the hash of the single-use `state`, the PKCE verifier, the token binding of
+-- the manifest it was started under (a hash, never a secret), and who started it for which source. Taken (deleted) by the callback, so it can be used once; expires after
 -- ten minutes. Deleting the source or the user deletes it.
 CREATE TABLE source_oauth_states (
     state_hash   bytea PRIMARY KEY,
@@ -22,6 +22,7 @@ CREATE TABLE source_oauth_states (
     source_id    uuid NOT NULL,
     user_id      uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     pkce_verifier text NOT NULL,
+    binding      text NOT NULL,
     expires_at   timestamptz NOT NULL,
     FOREIGN KEY (workspace_id, source_id) REFERENCES sources (workspace_id, id) ON DELETE CASCADE
 );
