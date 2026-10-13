@@ -54,6 +54,9 @@ pub(super) struct Partition<F> {
     end: i64,
     /// Empty fetches in a row while the log reaches past `next`.
     streak: u8,
+    /// Where the next probe starts when the last one stopped short of the gap's end; `None`
+    /// starts it right after `next`.
+    probe_from: Option<i64>,
     /// The last pass found nothing more to deliver.
     settled: bool,
 }
@@ -98,6 +101,7 @@ impl<F: PartitionFetch> Partition<F> {
             next,
             end: latest,
             streak: 0,
+            probe_from: None,
             settled: false,
         })
     }
@@ -147,16 +151,25 @@ impl<F: PartitionFetch> Partition<F> {
         }
         if let Some(last) = records.last() {
             self.next = last.offset + 1;
+            self.probe_from = None;
         }
         Ok(records)
     }
 
-    /// Fetches at `next + 1` and on, at most [`PROBE_SPAN`] offsets below `high`, and returns the
-    /// records of the first fetch that holds one above `next`. An empty probe proves nothing (an
-    /// open transaction fetches empty too), so the partition never moves past one.
+    /// Fetches from the probe cursor (`next + 1` when there is none), at most [`PROBE_SPAN`]
+    /// offsets below `high`, and returns the records of the first fetch that holds one above
+    /// `next`. A gap longer than one pass is crossed over several: the cursor keeps where this
+    /// probe stopped, and wraps to `next + 1` once it reaches `high`. An empty probe proves
+    /// nothing (an open transaction fetches empty too), so the partition never moves past one.
     async fn probe(&mut self, high: i64) -> Result<Option<Vec<RecordAndOffset>>, SourceError> {
-        let last = high.min(self.next.saturating_add(PROBE_SPAN + 1));
-        for offset in self.next + 1..last {
+        let first = self.probe_from.unwrap_or(0).max(self.next + 1);
+        if first >= high {
+            self.probe_from = None;
+            return Ok(None);
+        }
+        let last = high.min(first.saturating_add(PROBE_SPAN));
+        self.probe_from = Some(last);
+        for offset in first..last {
             match self.fetcher.fetch(offset).await {
                 Ok((mut records, probe_high)) => {
                     self.end = self.end.max(probe_high);
@@ -182,6 +195,7 @@ impl<F: PartitionFetch> Partition<F> {
             metrics::counter!("zirv_flow_kafka_offset_resets_total").increment(1);
             self.next = earliest;
             self.streak = 0;
+            self.probe_from = None;
             Ok(())
         } else if self.next > latest {
             Err(code(OFFSET_OUT_OF_RANGE))
@@ -515,6 +529,28 @@ mod tests {
         assert_eq!(offsets(&second), [5, 6, 7]);
         assert_eq!(partition.position().next, 8);
         assert_eq!(log.calls(), [3, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn a_gap_longer_than_one_probe_is_crossed_over_successive_passes() {
+        // Offsets 3 to 19 hold nothing deliverable: the record at 20 is PROBE_SPAN + 1 past 3.
+        let mut log = Log::new(0, 40);
+        log.holes = (3..20).collect();
+        let mut partition = Partition::open(0, log.clone(), Some(3)).await.unwrap();
+
+        assert!(partition.pass().await.unwrap().is_empty());
+        let second = partition.pass().await.unwrap();
+        assert!(second.is_empty() && partition.settled());
+        assert_eq!(partition.position().next, 3, "the offset does not move");
+        let third = partition.pass().await.unwrap();
+
+        assert_eq!(offsets(&third), (20..40).collect::<Vec<_>>());
+        assert_eq!(partition.position().next, 40);
+        // Each pass fetches at `next`, the second then probes 4..=19, the third resumes at 20.
+        let mut expected = vec![3, 3];
+        expected.extend(4..20);
+        expected.extend([3, 20]);
+        assert_eq!(log.calls(), expected);
     }
 
     #[tokio::test]
