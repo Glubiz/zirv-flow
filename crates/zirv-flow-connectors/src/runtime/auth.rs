@@ -175,6 +175,20 @@ impl AccessToken {
         self.expires_at
     }
 
+    /// As [`AccessToken::expires_at`], in seconds since the Unix epoch, for a caller that stores
+    /// the date without depending on `chrono`.
+    pub fn expires_at_unix(&self) -> Option<i64> {
+        self.expires_at.map(|at| at.timestamp())
+    }
+
+    /// As [`AccessToken::new`], with the lapse in seconds since the Unix epoch.
+    pub fn new_unix(token: SecretString, expires_at: Option<i64>) -> Self {
+        Self::new(
+            token,
+            expires_at.and_then(|seconds| DateTime::from_timestamp(seconds, 0)),
+        )
+    }
+
     /// A fingerprint of the token URL, the client id and the scopes the token was fetched for,
     /// never of the secret. A token is used only with the configuration it is bound to. Store it
     /// with the token and give it back with [`AccessToken::with_binding`]; a token without one is
@@ -357,7 +371,9 @@ async fn refresh_request(
     // A response without a refresh token keeps the old one; one with it rotates it.
     let rotated =
         new_refresh_token(&parsed).unwrap_or_else(|| SecretString::new(held.expose().to_owned()));
-    Ok(token.with_refresh_token(rotated))
+    Ok(token
+        .with_refresh_token(rotated)
+        .with_binding(binding_of(token_url, client_id, scopes)))
 }
 
 /// Asks the token endpoint for a client-credentials token. One attempt: a failure is the
