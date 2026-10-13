@@ -36,11 +36,13 @@ pub use accounts::{
     record_failed_sign_in, record_successful_sign_in, set_password,
 };
 pub use ai::{
-    AiCall, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, FeatureUsage, FinishedAiCall,
-    NewAiCall, ProbeRecord, Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage,
-    ai_usage, calls_in_last_minute, erase_ai_transcripts, find_ai_settings, finish_ai_call,
-    insert_ai_transcript, lock_ai_settings, month_start, purge_expired_ai_transcripts,
-    put_ai_settings, record_ai_call, reserve_ai_call, spent_this_month,
+    AiCall, AiDraft, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, DRAFT_PURGE_BATCH,
+    DraftKind, DraftStatus, FeatureUsage, FinishedAiCall, NewAiCall, NewAiDraft, ProbeRecord,
+    Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage, ai_usage,
+    calls_in_last_minute, erase_ai_transcripts, find_ai_draft, find_ai_settings, finish_ai_call,
+    insert_ai_draft, insert_ai_transcript, lock_ai_settings, mark_ai_draft_accepted, month_start,
+    purge_expired_ai_drafts, purge_expired_ai_transcripts, put_ai_settings, record_ai_call,
+    reserve_ai_call, spent_this_month,
 };
 pub use api_keys::{
     ApiKey, StoredApiKey, create_api_key, find_api_key_for_auth, list_api_keys, revoke_api_key,

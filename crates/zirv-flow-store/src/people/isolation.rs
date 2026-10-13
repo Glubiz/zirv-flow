@@ -1368,4 +1368,93 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn ai_drafts_are_found_and_accepted_only_in_their_own_workspace(pool: PgPool) {
+        use crate::{
+            DraftKind, DraftStatus, NewAiDraft, NewSource, create_source, create_user,
+            find_ai_draft, insert_ai_draft, mark_ai_draft_accepted, purge_expired_ai_drafts,
+        };
+        use zirv_flow_core::Email;
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let user = create_user(
+            &pool,
+            &Email::parse("ada@example.com").unwrap(),
+            None,
+            false,
+        )
+        .await
+        .unwrap()
+        .id;
+        let config = json!({});
+        let mut sources = Vec::new();
+        for ws in [one, two] {
+            let source = create_source(
+                &pool,
+                ws,
+                &NewSource {
+                    id: Uuid::now_v7(),
+                    kind: "fake",
+                    name: "crm",
+                    config: &config,
+                    credential_secret_id: None,
+                    credential_fields: &[],
+                    schedule: None,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap();
+            sources.push(source.id);
+        }
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let content = json!({"columns": []});
+        let draft = |ws: WorkspaceId, source: Uuid| NewAiDraft {
+            id: Uuid::now_v7(),
+            workspace_id: ws,
+            user_id: user,
+            kind: DraftKind::Mapping,
+            source_id: Some(source),
+            stream_name: Some("contacts"),
+            status: DraftStatus::Valid,
+            content: Some(&content),
+            base_digest: None,
+            expires_at: now + time::Duration::days(7),
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        let mine = draft(one, sources[0]);
+        insert_ai_draft(&mut connection, &mine).await.unwrap();
+        // A draft cannot point at another workspace's source.
+        assert!(
+            insert_ai_draft(&mut connection, &draft(one, sources[1]))
+                .await
+                .is_err()
+        );
+
+        assert!(
+            find_ai_draft(&pool, two, user, mine.id, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !mark_ai_draft_accepted(&mut connection, two, user, mine.id, now)
+                .await
+                .unwrap()
+        );
+        let untouched = find_ai_draft(&pool, one, user, mine.id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.status, DraftStatus::Valid);
+        // The purge is instance-wide by design, so it takes nothing that has not expired.
+        assert_eq!(
+            purge_expired_ai_drafts(&mut connection, now, 10)
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }
