@@ -134,7 +134,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
         )}
         {streaming ? (
           <p className="muted">
-            Primary key is the message key. Each message is a record under its key, and a message with an empty value
+            Primary key is the message key. Each message is a record under its key, and a message with a null value
             removes the record.
           </p>
         ) : (

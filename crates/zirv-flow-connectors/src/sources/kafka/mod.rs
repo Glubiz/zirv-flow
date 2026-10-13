@@ -53,7 +53,7 @@ impl Source for Kafka {
     const SPEC: SourceSpec = SourceSpec {
         kind: "kafka",
         label: "Kafka",
-        description: "JSON messages from Apache Kafka topics, one stream per topic. A message with an empty value deletes its record.",
+        description: "JSON messages from Apache Kafka topics, one stream per topic. A message with a null value deletes its record.",
         config_fields: &[
             FieldSpec {
                 key: "brokers",
