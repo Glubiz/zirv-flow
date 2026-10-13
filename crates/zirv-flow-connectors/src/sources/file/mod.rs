@@ -252,6 +252,18 @@ enum Parser {
 }
 
 impl Parser {
+    /// A parser for a window at the start of the file, which `bytes` begin; `records` came before it.
+    fn at_start(format: Format, bytes: &[u8], records: u64) -> Self {
+        match format {
+            Format::Csv => {
+                let sample = &bytes[..bytes.len().min(4096)];
+                Self::Csv(Box::new(CsvWindow::at_start(detect_delimiter(sample))))
+            }
+            Format::Ndjson => Self::Ndjson(NdjsonWindow::new(true, records)),
+            Format::Json => Self::Json(JsonArrayWindow::new(true, records)),
+        }
+    }
+
     fn push(&mut self, slice: &[u8], out: &mut Vec<Parsed>) -> Result<(), SourceError> {
         match self {
             Self::Csv(window) => window.push(slice, out),
@@ -295,7 +307,7 @@ impl Parser {
 }
 
 /// The checkpoint this source writes (architecture 7.2: opaque to the engine).
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct FileCheckpoint {
     /// The byte offset of the next record.
     offset: u64,
@@ -342,10 +354,15 @@ fn read<'a>(
     window: u64,
     slice: usize,
 ) -> BoxStream<'a, Result<Batch, SourceError>> {
-    let start = match Target::new(config, credential) {
-        Ok(target) => start(target, checkpoint),
-        Err(error) => Err(error),
-    };
+    let start = Target::new(config, credential).and_then(|target| {
+        let from = match checkpoint {
+            Some(Checkpoint(value)) => {
+                serde_json::from_value(value).map_err(|_| error::checkpoint_invalid())?
+            }
+            None => FileCheckpoint::default(),
+        };
+        Ok((target, from))
+    });
     let state = match start {
         Ok((target, from)) => Read {
             ctx,
@@ -389,27 +406,6 @@ fn read<'a>(
         }
     })
     .boxed()
-}
-
-/// The checkpoint to resume from, or the start of the file.
-fn start(
-    target: Target,
-    checkpoint: Option<Checkpoint>,
-) -> Result<(Target, FileCheckpoint), SourceError> {
-    let from = match checkpoint {
-        Some(Checkpoint(value)) => {
-            serde_json::from_value(value).map_err(|_| error::checkpoint_invalid())?
-        }
-        None => FileCheckpoint {
-            offset: 0,
-            row: 0,
-            validator: None,
-            size: None,
-            header: None,
-            delimiter: None,
-        },
-    };
-    Ok((target, from))
 }
 
 impl Read<'_> {
@@ -464,17 +460,24 @@ impl Read<'_> {
     }
 
     fn parser(&self, window: &Window) -> Result<Parser, SourceError> {
-        let at_start = self.offset == 0;
+        if self.offset == 0 {
+            return Ok(Parser::at_start(
+                self.target.format,
+                &window.bytes,
+                self.row,
+            ));
+        }
         Ok(match self.target.format {
-            Format::Csv => Parser::Csv(Box::new(if at_start {
-                let sample = &window.bytes[..window.bytes.len().min(4096)];
-                CsvWindow::at_start(detect_delimiter(sample))
-            } else {
+            Format::Csv => {
                 let header = self.header.clone().ok_or_else(error::checkpoint_invalid)?;
-                CsvWindow::resumed(self.delimiter, header, self.row)
-            })),
-            Format::Ndjson => Parser::Ndjson(NdjsonWindow::new(at_start, self.row)),
-            Format::Json => Parser::Json(JsonArrayWindow::new(at_start, self.row)),
+                Parser::Csv(Box::new(CsvWindow::resumed(
+                    self.delimiter,
+                    header,
+                    self.row,
+                )))
+            }
+            Format::Ndjson => Parser::Ndjson(NdjsonWindow::new(false, self.row)),
+            Format::Json => Parser::Json(JsonArrayWindow::new(false, self.row)),
         })
     }
 
@@ -545,30 +548,19 @@ async fn discover(
     let target = Target::new(config, credential)?;
     let auth = auth(credential)?;
     let first = fetch_window(ctx, &auth, &target.url, 0, window, &Expect::default()).await?;
-    let mut parser = match target.format {
-        Format::Csv => {
-            let sample = &first.bytes[..first.bytes.len().min(4096)];
-            Parser::Csv(Box::new(CsvWindow::at_start(detect_delimiter(sample))))
-        }
-        Format::Ndjson => Parser::Ndjson(NdjsonWindow::new(true, 0)),
-        Format::Json => Parser::Json(JsonArrayWindow::new(true, 0)),
-    };
+    let mut parser = Parser::at_start(target.format, &first.bytes, 0);
     let mut records = Vec::new();
-    for piece in first.bytes.chunks(slice) {
-        parser.push(piece, &mut records)?;
-        let enough = match target.format {
-            Format::Csv => parser.header().is_some(),
-            _ => records.len() >= DISCOVER_RECORDS,
-        };
-        if enough {
-            break;
-        }
-    }
-    let enough = match target.format {
+    let enough = |parser: &Parser, records: &[Parsed]| match target.format {
         Format::Csv => parser.header().is_some(),
         _ => records.len() >= DISCOVER_RECORDS,
     };
-    if first.ended && !enough {
+    for piece in first.bytes.chunks(slice) {
+        parser.push(piece, &mut records)?;
+        if enough(&parser, &records) {
+            break;
+        }
+    }
+    if first.ended && !enough(&parser, &records) {
         parser.finish(&mut records)?;
     }
     let fields = match parser.header() {

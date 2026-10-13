@@ -416,12 +416,12 @@ fn event_message_id(batch: &SyncBatch<'_>, record_key: &str, name: &str) -> Stri
         }
         hash.update(part.as_bytes());
     }
-    let hex: String = hash
+    let digest: String = hash
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    format!("sync:{hex}")
+    format!("sync:{digest}")
 }
 
 /// Applies the event of each record whose profile was written or already current, through the
@@ -462,51 +462,11 @@ async fn apply_events(
             trace: batch.trace.clone(),
         };
         let outcome = if batch.singly {
-            let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-            let mut single = EventBatch::default();
-            let done = match apply_event_record(
-                &mut savepoint,
-                batch.workspace,
-                key,
-                &mut single,
-                &record,
-            )
-            .await
-            {
-                Ok(outcome) => single
-                    .finish(&mut savepoint, batch.workspace)
-                    .await
-                    .map(|()| outcome),
-                Err(error) => Err(error),
-            };
-            match done {
-                Ok(outcome) => {
-                    savepoint.commit().await.map_err(StoreError::query)?;
-                    Some(outcome)
-                }
-                Err(error) if error.is_retryable() => return Err(error),
-                Err(_) => {
-                    savepoint.rollback().await.map_err(StoreError::query)?;
-                    reject_apply_failed(
-                        tx,
-                        batch.workspace,
-                        key,
-                        &FailedItem {
-                            kind: "event",
-                            source: batch.source,
-                            name: Some(&record.name),
-                            values: &record.properties,
-                            timestamp: record.timestamp,
-                            received_at: batch.received_at,
-                            message_id: Some(&message_id),
-                            trace: batch.trace,
-                        },
-                    )
-                    .await?;
-                    applied.failed_messages.push(message_id);
-                    None
-                }
+            let outcome = apply_event_singly(tx, batch, key, &record, &message_id).await?;
+            if outcome.is_none() {
+                applied.failed_messages.push(message_id);
             }
+            outcome
         } else {
             Some(apply_event_record(tx, batch.workspace, key, &mut events, &record).await?)
         };
@@ -533,6 +493,54 @@ async fn apply_events(
     }
     events.finish(tx, batch.workspace).await?;
     Ok(applied)
+}
+
+/// One event in a savepoint of its own. `None` when it cannot be stored: it is rejected as
+/// `apply_failed` and the batch goes on.
+async fn apply_event_singly(
+    tx: &mut crate::Tx,
+    batch: &SyncBatch<'_>,
+    key: &HmacKey,
+    record: &EventRecord,
+    message_id: &str,
+) -> Result<Option<EventOutcome>, StoreError> {
+    let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
+    let mut single = EventBatch::default();
+    let done =
+        match apply_event_record(&mut savepoint, batch.workspace, key, &mut single, record).await {
+            Ok(outcome) => single
+                .finish(&mut savepoint, batch.workspace)
+                .await
+                .map(|()| outcome),
+            Err(error) => Err(error),
+        };
+    match done {
+        Ok(outcome) => {
+            savepoint.commit().await.map_err(StoreError::query)?;
+            Ok(Some(outcome))
+        }
+        Err(error) if error.is_retryable() => Err(error),
+        Err(_) => {
+            savepoint.rollback().await.map_err(StoreError::query)?;
+            reject_apply_failed(
+                tx,
+                batch.workspace,
+                key,
+                &FailedItem {
+                    kind: "event",
+                    source: batch.source,
+                    name: Some(&record.name),
+                    values: &record.properties,
+                    timestamp: record.timestamp,
+                    received_at: batch.received_at,
+                    message_id: Some(message_id),
+                    trace: batch.trace,
+                },
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 /// Ties the rejects of the batch's events to the run, so the run's detail lists what it hit.
@@ -1325,27 +1333,18 @@ mod tests {
     }
 
     async fn nothing_of_events_and_lists(pool: &PgPool) {
-        for table in [
-            "events",
-            "list_members",
-            "list_member_changes",
-            "ingest_rejects",
-            "people",
-            "source_records",
+        for (table, sql) in [
+            ("events", "SELECT count(*) FROM events"),
+            ("list_members", "SELECT count(*) FROM list_members"),
+            (
+                "list_member_changes",
+                "SELECT count(*) FROM list_member_changes",
+            ),
+            ("ingest_rejects", "SELECT count(*) FROM ingest_rejects"),
+            ("people", "SELECT count(*) FROM people"),
+            ("source_records", "SELECT count(*) FROM source_records"),
         ] {
-            let rows = count(
-                pool,
-                match table {
-                    "events" => "SELECT count(*) FROM events",
-                    "list_members" => "SELECT count(*) FROM list_members",
-                    "list_member_changes" => "SELECT count(*) FROM list_member_changes",
-                    "ingest_rejects" => "SELECT count(*) FROM ingest_rejects",
-                    "people" => "SELECT count(*) FROM people",
-                    _ => "SELECT count(*) FROM source_records",
-                },
-            )
-            .await;
-            assert_eq!(rows, 0, "{table}");
+            assert_eq!(count(pool, sql).await, 0, "{table}");
         }
     }
 

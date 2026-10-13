@@ -278,16 +278,14 @@ fn event(rule: &EventRule, row: &dyn Cells, errors: &mut Vec<RowError>) -> Optio
     let mut occurred_at = None;
     if let Some(timestamp) = &rule.timestamp {
         match chain_of(&timestamp.column, &timestamp.transforms, row) {
-            Ok(value) => match present(&value) {
-                None => {}
-                Some(_) => match instant(&value) {
-                    Some(at) => occurred_at = Some(at),
-                    None => errors.push(RowError {
-                        column: timestamp.column.clone(),
-                        reason: RowErrorReason::BadTimestamp,
-                    }),
-                },
+            Ok(value) if present(&value).is_some() => match instant(&value) {
+                Some(at) => occurred_at = Some(at),
+                None => errors.push(RowError {
+                    column: timestamp.column.clone(),
+                    reason: RowErrorReason::BadTimestamp,
+                }),
             },
+            Ok(_) => {}
             Err(error) => errors.push(error),
         }
     }
