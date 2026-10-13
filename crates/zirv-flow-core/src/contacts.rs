@@ -4,7 +4,7 @@
 //! The validation reuses the event rules of [`crate::events`], so a contact and an event
 //! property fail for the same reasons. Problems name fields and reason codes, never values.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

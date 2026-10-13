@@ -1,7 +1,7 @@
 //! A source record's JSON object seen as cells, so a sync run maps a record with the same
 //! rules as a CSV row.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 

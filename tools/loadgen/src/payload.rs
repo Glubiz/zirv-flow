@@ -89,7 +89,7 @@ pub fn item(seed: u64, run_id: &str, people: u64, seq: u64, kind: Kind, typed: b
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use hashbrown::HashSet;
 
     use super::*;
 

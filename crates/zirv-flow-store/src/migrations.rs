@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use hashbrown::HashSet;
 
 use sqlx::PgConnection;
 use sqlx::migrate::{Migrate, Migrator};

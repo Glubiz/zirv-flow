@@ -1,6 +1,6 @@
 //! Event names, schema properties and the modes that govern them (architecture section 12.1).
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::fmt;
 use std::str::FromStr;
 

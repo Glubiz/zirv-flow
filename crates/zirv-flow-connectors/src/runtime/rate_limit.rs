@@ -5,7 +5,7 @@
 //! says so, and the runtime waits) but does not prevent it. Enforcing the limit across workers
 //! is revisited with OQ-9 at M6.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 

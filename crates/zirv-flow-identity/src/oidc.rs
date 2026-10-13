@@ -264,7 +264,7 @@ impl Provider {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     use super::*;
     use crate::mock::{CLIENT_ID, MockProvider, Token};

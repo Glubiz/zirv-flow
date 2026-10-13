@@ -10,7 +10,7 @@
 //! The dry run ([`preview_replay`]) runs the same judgement and writes nothing. Nothing here
 //! logs or returns a name, an identifier or a value.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
