@@ -10213,15 +10213,25 @@ email,b@example.com,
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
         fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
 
-        // The client goes away after 100 ms; the provider takes 400 ms.
-        let dropped = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            crate::dispatch(&state, None, workspace, "mapping", |privacy| {
-                mapping_request(privacy, false)
-            }),
-        )
-        .await;
-        assert!(dropped.is_err(), "the handler was dropped mid-call");
+        let before = fake.call_count();
+        // The client goes away once the provider has the request; it answers 400 ms later. A fixed
+        // delay could instead drop the handler while it is still reserving the call.
+        let mut handler = Box::pin(crate::dispatch(
+            &state,
+            None,
+            workspace,
+            "mapping",
+            |privacy| mapping_request(privacy, false),
+        ));
+        let provider_has_it = async {
+            while fake.call_count() == before {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut handler => panic!("the call finished before the handler was dropped"),
+            () = provider_has_it => drop(handler),
+        }
         settled(&pool).await;
 
         let (outcome, input, output, cost): (String, i32, i32, i64) = sqlx::query_as(
