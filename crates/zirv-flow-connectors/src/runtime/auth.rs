@@ -163,15 +163,18 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
     else {
         return Err(RuntimeError::InvalidRequest);
     };
-    let mut form = url::form_urlencoded::Serializer::new(String::new());
-    form.append_pair("grant_type", "client_credentials");
-    if !scopes.is_empty() {
-        form.append_pair("scope", &scopes.join(" "));
-    }
-    if *client_auth == ClientAuth::Body {
-        form.append_pair("client_id", client_id);
-        form.append_pair("client_secret", client_secret.expose());
-    }
+    let body = {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.append_pair("grant_type", "client_credentials");
+        if !scopes.is_empty() {
+            form.append_pair("scope", &scopes.join(" "));
+        }
+        if *client_auth == ClientAuth::Body {
+            form.append_pair("client_id", client_id);
+            form.append_pair("client_secret", client_secret.expose());
+        }
+        form.finish()
+    };
     let mut request = Request::new(Method::POST, token_url.clone());
     let headers = request.headers_mut();
     headers.insert(
@@ -182,7 +185,7 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
     if *client_auth == ClientAuth::Basic {
         headers.insert(AUTHORIZATION, basic_value(client_id, client_secret)?);
     }
-    *request.body_mut() = Some(Bytes::from(form.finish()).into());
+    *request.body_mut() = Some(Bytes::from(body).into());
 
     let response = ctx.http().execute(request).await?;
     let status = response.status();

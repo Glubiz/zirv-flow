@@ -4,6 +4,7 @@
 
 mod auth;
 mod error;
+mod paginate;
 mod rate_limit;
 mod retry;
 mod send;
@@ -13,6 +14,7 @@ mod testing;
 pub(crate) use auth::TokenSlot;
 pub use auth::{AccessToken, ApiKeyPlacement, Auth, ClientAuth};
 pub use error::RuntimeError;
+pub use paginate::{Page, Pagination, paginate};
 pub use rate_limit::{RateLimit, RateLimits};
 pub use reqwest::Method;
 pub use retry::RetryPolicy;
