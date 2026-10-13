@@ -73,6 +73,9 @@ pub struct SyncBatch<'a> {
     /// reconciliation reads keys only). They count as seen.
     pub seen: &'a [String],
     pub rejected: &'a [SyncReject],
+    /// Records the unit read and dropped as an earlier occurrence of a key it carries again. They
+    /// count as read, and as nothing else.
+    pub duplicates: usize,
     /// Where the source resumes after this batch.
     pub checkpoint: &'a Value,
     /// Also write the checkpoint to the stream, for the next run.
@@ -194,7 +197,11 @@ pub async fn commit_sync_batch(
 
     let mut counts = Counts {
         read: i64::try_from(
-            batch.upserts.len() + batch.deleted.len() + batch.rejected.len() + batch.seen.len(),
+            batch.upserts.len()
+                + batch.deleted.len()
+                + batch.rejected.len()
+                + batch.seen.len()
+                + batch.duplicates,
         )
         .unwrap_or(i64::MAX),
         ..Counts::default()
@@ -836,6 +843,51 @@ mod tests {
         (from..to)
             .map(|n| upsert(fx, &format!("k{n}"), &format!("a{n}@example.com")))
             .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dropped_duplicate_counts_as_read_and_in_the_reject_check_only(pool: PgPool) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        // 90 applied, 6 rejected and 4 duplicates dropped by the planner: 100 records read, and
+        // 6 of them rejected is over the 5% threshold. Without the duplicates only 96 were read
+        // and the check would not apply yet.
+        let upserts = many(&fx, 0, 90);
+        let rejects: Vec<SyncReject> = (0..6).map(|_| reject()).collect();
+        let cp = json!({"offset": 100});
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                rejected: &rejects,
+                duplicates: 4,
+                incremental: true,
+                ..batch(&fx, &source, &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(progress.batch.read, 100);
+        assert_eq!(
+            (
+                progress.batch.applied,
+                progress.batch.unchanged,
+                progress.batch.rejected,
+                progress.batch.deleted
+            ),
+            (90, 0, 6, 0)
+        );
+        assert!(progress.threshold_exceeded);
+        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.records_read, 100);
     }
 
     #[sqlx::test]

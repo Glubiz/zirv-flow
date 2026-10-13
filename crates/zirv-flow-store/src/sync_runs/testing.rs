@@ -198,6 +198,7 @@ pub(crate) fn batch<'a>(
         deleted: &[],
         seen: &[],
         rejected: &[],
+        duplicates: 0,
         checkpoint,
         incremental: false,
         singly: false,

@@ -274,12 +274,15 @@ struct Planned {
     /// reconciliation's.
     seen: Vec<String>,
     rejected: Vec<SyncReject>,
+    /// Records read in the unit that a later occurrence of the same key replaced.
+    duplicates: usize,
 }
 
 /// Keeps the last occurrence of each key, in source order: a unit may carry one key twice (a
 /// soft-deleted row and a live one), and the later state is the source's current answer, so a key
 /// is never both applied or seen and deleted, and never applied twice.
-fn last_occurrence_wins(records: Vec<Record>) -> Vec<Record> {
+fn last_occurrence_wins(records: Vec<Record>) -> (Vec<Record>, usize) {
+    let read = records.len();
     let mut last: HashMap<&str, usize> = HashMap::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
         last.insert(record.key.as_str(), index);
@@ -290,11 +293,13 @@ fn last_occurrence_wins(records: Vec<Record>) -> Vec<Record> {
         .map(|(index, record)| last[record.key.as_str()] == index)
         .collect();
     drop(last);
-    records
+    let kept: Vec<Record> = records
         .into_iter()
         .zip(keep)
         .filter_map(|(record, keep)| keep.then_some(record))
-        .collect()
+        .collect();
+    let dropped = read - kept.len();
+    (kept, dropped)
 }
 
 impl Planner<'_> {
@@ -314,8 +319,12 @@ impl Planner<'_> {
     /// Reads `records` for a reconciliation: only which are deleted and which still exist. The
     /// records are not mapped to profile records and nothing is rejected.
     fn plan_keys(&self, records: Vec<Record>) -> Planned {
-        let mut planned = Planned::default();
-        for record in last_occurrence_wins(records) {
+        let (records, duplicates) = last_occurrence_wins(records);
+        let mut planned = Planned {
+            duplicates,
+            ..Planned::default()
+        };
+        for record in records {
             let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
             match self.deletion(&record, &cells) {
                 Some(why) => planned.deleted.push((record.key, why)),
@@ -328,8 +337,12 @@ impl Planner<'_> {
     /// Maps `records`: the accepted ones become profile records, the deleted ones keys to
     /// retract, and the others rejects with a masked sample.
     fn plan(&self, records: Vec<Record>) -> Planned {
-        let mut planned = Planned::default();
-        for record in last_occurrence_wins(records) {
+        let (records, duplicates) = last_occurrence_wins(records);
+        let mut planned = Planned {
+            duplicates,
+            ..Planned::default()
+        };
+        for record in records {
             let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
             if let Some(why) = self.deletion(&record, &cells) {
                 planned.deleted.push((record.key, why));
@@ -476,6 +489,7 @@ impl Pass<'_> {
             deleted: &planned.deleted,
             seen: &planned.seen,
             rejected: &planned.rejected,
+            duplicates: planned.duplicates,
             checkpoint: &checkpoint.0,
             // A reconciliation never moves the stream's cursor.
             incremental: !self.reconcile && self.stream.sync_mode == SyncMode::Incremental.as_str(),
@@ -1834,6 +1848,7 @@ mod tests {
             row("a", "a@example.com", false),
         ]);
         assert_eq!(shape(&planned), (vec!["b", "a"], vec![], vec![], vec![]));
+        assert_eq!(planned.duplicates, 1, "a dropped duplicate was still read");
 
         // Live, then deleted: the key is removed and not applied.
         let planned = planner.plan(vec![
@@ -1874,6 +1889,7 @@ mod tests {
         ]);
 
         assert_eq!(shape(&planned), (vec![], vec!["b"], vec![], vec!["a"]));
+        assert_eq!(planned.duplicates, 2);
     }
 
     #[test]
