@@ -7,9 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
 metrics.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
@@ -27,4 +30,5 @@ test-support = []
 axum.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus.workspace = true
+tracing-subscriber.workspace = true
 tokio.workspace = true

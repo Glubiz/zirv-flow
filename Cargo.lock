@@ -4588,16 +4588,20 @@ name = "zirv-flow-connectors"
 version = "0.34.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "bytes",
+ "chrono",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "rand 0.8.8",
  "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "zirv-flow-core",
 ]
