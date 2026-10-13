@@ -8,6 +8,7 @@ pub mod csv_file;
 pub mod egress;
 mod email;
 pub mod events;
+pub mod freshness;
 mod ids;
 pub mod mapping;
 pub mod password;
@@ -22,6 +23,7 @@ mod validation;
 mod workspace;
 
 pub use email::Email;
+pub use freshness::{Freshness, FreshnessInput, Threshold, effective_threshold, freshness};
 pub use ids::{ApiKeyId, SecretId, UserId, WorkspaceId};
 pub use role::Role;
 pub use scope::Scope;

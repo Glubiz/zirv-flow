@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { configFrom, credentialFrom, filled, initialValues, kindName, runErrorText, showValue, withoutSecrets } from "./labels";
-import { FAKE_KIND } from "./testData";
+import {
+  configFrom,
+  credentialFrom,
+  filled,
+  freshnessLabel,
+  freshnessTone,
+  initialValues,
+  kindName,
+  lastSuccessLabel,
+  runErrorText,
+  showValue,
+  thresholdLabel,
+  withoutSecrets,
+} from "./labels";
+import { aFreshness, FAKE_KIND } from "./testData";
 
 const CONFIG = FAKE_KIND.config_fields;
 const CREDENTIAL = FAKE_KIND.credential_fields;
@@ -69,5 +82,36 @@ describe("source forms", () => {
       expect(runErrorText(code, 0.05)).not.toContain(code);
     }
     expect(runErrorText("something_new", 0.05)).toBe("The run failed (something_new).");
+  });
+});
+
+describe("freshness", () => {
+  it("names each state, gives it a tone and leaves an unknown state as it is", () => {
+    expect([freshnessLabel("fresh"), freshnessLabel("stale"), freshnessLabel("failing")]).toEqual([
+      "Fresh",
+      "Stale",
+      "Failing",
+    ]);
+    expect([freshnessTone("fresh"), freshnessTone("stale"), freshnessTone("failing")]).toEqual([
+      "neutral",
+      "attention",
+      "error",
+    ]);
+    expect(freshnessLabel("paused")).toBe("paused");
+  });
+
+  it("says when a stream last succeeded, or that it never has", () => {
+    const now = Date.parse("2026-10-10T12:00:00Z");
+
+    expect(lastSuccessLabel(aFreshness({ last_success_at: "2026-10-10T09:00:00Z" }), now)).toBe("3 hours ago");
+    expect(lastSuccessLabel(aFreshness({ last_success_at: null }), now)).toBe("Never");
+    expect(lastSuccessLabel(null, now)).toBe("Never");
+  });
+
+  it("states the threshold in force and marks the default", () => {
+    expect(thresholdLabel(aFreshness({ threshold_seconds: 7200, threshold_is_default: true }))).toBe("2.0 h (default)");
+    expect(thresholdLabel(aFreshness({ threshold_seconds: 90, threshold_is_default: false }))).toBe("2 min");
+    expect(thresholdLabel(aFreshness({ threshold_seconds: null }))).toBe("None");
+    expect(thresholdLabel(null)).toBe("None");
   });
 });

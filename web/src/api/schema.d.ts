@@ -2863,6 +2863,37 @@ export interface components {
             /** @description True for a credential field: render a password input and never prefill it. */
             secret: boolean;
         };
+        /** @description Whether a stream's data is current (architecture 7.5). The state is derived on every read. */
+        FreshnessBody: {
+            /**
+             * @description The stream's checkpoint, opaque connector state that may hold a value of a record.
+             *     Workspace admins only; null for everyone else, for a full refresh and before the first
+             *     batch.
+             */
+            high_water_mark?: unknown;
+            /**
+             * Format: date-time
+             * @description When the stream last succeeded; null if it never has.
+             */
+            last_success_at?: string | null;
+            /**
+             * @description `fresh`, `stale` (past the threshold since the last success) or `failing` (the last run
+             *     failed).
+             * @example fresh
+             */
+            state: string;
+            /**
+             * @description Whether `threshold_seconds` is the default of twice the schedule interval and not the
+             *     stream's own.
+             */
+            threshold_is_default: boolean;
+            /**
+             * Format: int64
+             * @description Seconds without a success before the stream counts as stale; null when it never turns
+             *     stale (no explicit threshold and no schedule).
+             */
+            threshold_seconds?: number | null;
+        };
         HistoryBody: {
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntryBody"][];
@@ -3831,6 +3862,11 @@ export interface components {
             /** @description The names of the credential fields that are set. Their values are never returned. */
             credential_fields_set: string[];
             enabled: boolean;
+            /**
+             * @description The worst freshness among the source's enabled streams (`failing`, then `stale`, then
+             *     `fresh`); null when it has none, or the source is disabled.
+             */
+            freshness?: string | null;
             /** Format: uuid */
             id: string;
             /**
@@ -3873,6 +3909,7 @@ export interface components {
             discovered: components["schemas"]["DescriptorBody"];
             /** @description Whether runs read this stream. New streams start disabled. */
             enabled: boolean;
+            freshness?: null | components["schemas"]["FreshnessBody"];
             /** Format: uuid */
             id: string;
             mapping?: null | components["schemas"]["MappingBody"];
@@ -3880,7 +3917,9 @@ export interface components {
             primary_key: string[];
             /**
              * Format: int32
-             * @description How long without new data before the stream counts as stale, in seconds.
+             * @description The stream's own threshold: seconds without a successful run before the stream counts as
+             *     stale. Absent means twice the source schedule's interval, or never stale when the source
+             *     has no schedule. `freshness.threshold_seconds` is the one in force.
              */
             staleness_threshold_seconds?: number | null;
             /** @description `full_refresh` or `incremental`. */

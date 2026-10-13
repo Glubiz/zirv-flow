@@ -1,8 +1,10 @@
 //! Job metrics, through the `metrics` facade; the binary installs the recorder.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use zirv_flow_store::{DrainOutcome, QueueDepth};
+use uuid::Uuid;
+use zirv_flow_core::Freshness;
+use zirv_flow_store::{DrainOutcome, QueueDepth, StreamFreshness};
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +153,93 @@ impl QueueGauges {
 fn queue_gauge(kind: &str, state: &str, value: f64) {
     metrics::gauge!("zirv_flow_jobs", "kind" => kind.to_owned(), "state" => state.to_owned())
         .set(value);
+}
+
+/// The freshness gauges (architecture 7.5, 15):
+/// - `zirv_flow_stream_freshness_seconds{workspace,stream}`, the age of the stream's data;
+/// - `zirv_flow_stream_state{workspace,stream}`, 0 fresh, 1 stale, 2 failing;
+/// - `zirv_flow_streams{workspace,state}`, how many enabled streams are in each state.
+///
+/// The labels are ids only: no source name, kind, host, schedule or record value. It remembers
+/// what it has set, so a stream or workspace that dropped out of the report (disabled, deleted)
+/// is set to 0 rather than left at its last value.
+#[derive(Default)]
+pub(crate) struct FreshnessGauges {
+    streams: BTreeSet<(Uuid, Uuid)>,
+    workspaces: BTreeSet<Uuid>,
+}
+
+impl FreshnessGauges {
+    pub(crate) fn update(&mut self, report: &[StreamFreshness]) {
+        let streams: BTreeSet<(Uuid, Uuid)> = report
+            .iter()
+            .map(|stream| (stream.workspace_id, stream.stream_id))
+            .collect();
+        let mut counts: BTreeMap<Uuid, BTreeMap<Freshness, usize>> = BTreeMap::new();
+        for stream in report {
+            *counts
+                .entry(stream.workspace_id)
+                .or_default()
+                .entry(stream.state)
+                .or_default() += 1;
+        }
+        let workspaces: BTreeSet<Uuid> = counts.keys().copied().collect();
+        for (workspace, stream) in self.streams.difference(&streams) {
+            stream_gauges(*workspace, *stream, 0.0, 0.0);
+        }
+        for workspace in self.workspaces.difference(&workspaces) {
+            for state in STATES {
+                count_gauge(*workspace, state, 0.0);
+            }
+        }
+        for stream in report {
+            stream_gauges(
+                stream.workspace_id,
+                stream.stream_id,
+                stream.age_seconds as f64,
+                stream.state.gauge_value(),
+            );
+        }
+        for (workspace, by_state) in &counts {
+            for state in STATES {
+                let count = by_state.get(&state).copied().unwrap_or(0);
+                count_gauge(*workspace, state, count as f64);
+            }
+        }
+        self.streams = streams;
+        self.workspaces = workspaces;
+    }
+
+    /// Sets everything this instance has published to 0, for an instance that stops leading.
+    pub(crate) fn zero_all(&mut self) {
+        self.update(&[]);
+    }
+}
+
+const STATES: [Freshness; 3] = [Freshness::Fresh, Freshness::Stale, Freshness::Failing];
+
+fn stream_gauges(workspace: Uuid, stream: Uuid, age_seconds: f64, state: f64) {
+    metrics::gauge!(
+        "zirv_flow_stream_freshness_seconds",
+        "workspace" => workspace.to_string(),
+        "stream" => stream.to_string(),
+    )
+    .set(age_seconds);
+    metrics::gauge!(
+        "zirv_flow_stream_state",
+        "workspace" => workspace.to_string(),
+        "stream" => stream.to_string(),
+    )
+    .set(state);
+}
+
+fn count_gauge(workspace: Uuid, state: Freshness, count: f64) {
+    metrics::gauge!(
+        "zirv_flow_streams",
+        "workspace" => workspace.to_string(),
+        "state" => state.as_str(),
+    )
+    .set(count);
 }
 
 #[cfg(test)]
@@ -363,6 +452,119 @@ mod tests {
         }
         assert!(
             !output.contains("source") && !output.contains("workspace"),
+            "{output}"
+        );
+    }
+
+    fn fresh_row(workspace: Uuid, stream: Uuid, state: Freshness, age: i64) -> StreamFreshness {
+        StreamFreshness {
+            workspace_id: workspace,
+            source_id: Uuid::nil(),
+            stream_id: stream,
+            state,
+            last_success_at: None,
+            age_seconds: age,
+            threshold_seconds: None,
+            threshold_is_default: false,
+            high_water_mark: None,
+        }
+    }
+
+    #[test]
+    fn the_freshness_gauges_follow_the_report_and_zero_what_dropped_out() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = FreshnessGauges::default();
+        let (ws, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let (a, b, c) = (
+            Uuid::from_u128(10),
+            Uuid::from_u128(11),
+            Uuid::from_u128(12),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[
+                fresh_row(ws, a, Freshness::Fresh, 5),
+                fresh_row(ws, b, Freshness::Stale, 700),
+                fresh_row(other, c, Freshness::Failing, 9),
+            ]);
+        });
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[fresh_row(ws, a, Freshness::Failing, 6)]);
+        });
+        let second = handle.render();
+
+        let value = |output: &str, metric: &str, key: &str, id: Uuid| {
+            output
+                .lines()
+                .filter(|line| {
+                    line.starts_with(metric) && line.contains(&format!("{key}=\"{id}\""))
+                })
+                .map(|line| line.rsplit_once(' ').unwrap().1.to_owned())
+                .next()
+        };
+        assert_eq!(
+            value(&first, "zirv_flow_stream_state{", "stream", b).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            value(&first, "zirv_flow_stream_freshness_seconds{", "stream", b).as_deref(),
+            Some("700")
+        );
+        assert_eq!(
+            value(&second, "zirv_flow_stream_state{", "stream", a).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            value(&second, "zirv_flow_stream_state{", "stream", b).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            value(&second, "zirv_flow_stream_freshness_seconds{", "stream", c).as_deref(),
+            Some("0")
+        );
+        let counts = |output: &str, workspace: Uuid, state: &str| {
+            output
+                .lines()
+                .find(|line| {
+                    line.starts_with("zirv_flow_streams{")
+                        && line.contains(&format!("workspace=\"{workspace}\""))
+                        && line.contains(&format!("state=\"{state}\""))
+                })
+                .map(|line| line.rsplit_once(' ').unwrap().1.to_owned())
+        };
+        assert_eq!(counts(&first, ws, "fresh").as_deref(), Some("1"));
+        assert_eq!(counts(&first, ws, "stale").as_deref(), Some("1"));
+        assert_eq!(counts(&first, ws, "failing").as_deref(), Some("0"));
+        assert_eq!(counts(&second, ws, "failing").as_deref(), Some("1"));
+        assert_eq!(counts(&second, ws, "stale").as_deref(), Some("0"));
+        assert_eq!(counts(&second, other, "failing").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn stepping_down_zeroes_the_freshness_gauges() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = FreshnessGauges::default();
+        let (ws, stream) = (Uuid::from_u128(1), Uuid::from_u128(10));
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[fresh_row(ws, stream, Freshness::Stale, 700)]);
+            gauges.zero_all();
+        });
+
+        let output = handle.render();
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("zirv_flow_stream_state{") && line.ends_with(" 0")),
+            "{output}"
+        );
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.starts_with("zirv_flow_stream_state{") && !line.ends_with(" 0")),
             "{output}"
         );
     }

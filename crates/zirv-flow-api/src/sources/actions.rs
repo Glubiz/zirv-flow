@@ -220,7 +220,8 @@ pub(crate) async fn discover_source(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    bodies(&streams)
+    // Discovery is for admins, who may see the high-water mark.
+    bodies(state, workspace, id, &streams, true).await
 }
 
 /// A failed call to the source, shown as the source's own failure.
