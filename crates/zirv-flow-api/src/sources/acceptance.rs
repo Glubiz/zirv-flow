@@ -1322,4 +1322,156 @@ mod tests {
         assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
         assert_eq!(after.body["sync_mode"], "incremental");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kinds_list_the_database_sources_with_their_setting_kinds(pool: PgPool) {
+        let fx = fixture(&pool).await;
+
+        let kinds = call(
+            &fx.router,
+            "GET",
+            "/api/v1/source-kinds",
+            None,
+            Auth::Key(&fx.read),
+        )
+        .await;
+
+        assert_eq!(kinds.status, StatusCode::OK);
+        for kind in ["postgres", "mysql"] {
+            let entry = kinds
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["kind"] == kind)
+                .unwrap_or_else(|| panic!("{kind} is listed"));
+            let field = |key: &str| {
+                entry["config_fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|field| field["key"] == key)
+                    .unwrap_or_else(|| panic!("{kind} has the setting {key}"))
+            };
+            assert_eq!(field("host")["kind"], "text");
+            assert_eq!(field("host")["required"], true);
+            assert_eq!(field("port")["kind"], "number");
+            assert_eq!(field("ca_certificate")["kind"], "long_text");
+            assert_eq!(field("queries")["kind"], "queries");
+            assert_eq!(field("tls")["kind"], "select");
+            assert_eq!(field("tls")["options"], json!(["verify", "off"]));
+            let credentials: Vec<_> = entry["credential_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| (field["key"].clone(), field["secret"].clone()))
+                .collect();
+            assert_eq!(
+                credentials,
+                [
+                    (json!("user"), json!(true)),
+                    (json!("password"), json!(true))
+                ]
+            );
+            assert_eq!(entry["capabilities"]["emits_deletes"], false);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_database_source_validates_its_settings_and_round_trips_its_queries(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let create = |config: Value| {
+            fx.as_admin(
+                "POST",
+                "/sources",
+                Some(
+                    json!({"kind": "postgres", "name": "warehouse", "config": config,
+                    "credential": {"user": "reader", "password": "pw"}}),
+                ),
+            )
+        };
+        let fields = |reply: &Reply| -> Vec<String> {
+            reply.body["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}: {}",
+                        e["field"].as_str().unwrap(),
+                        e["reason"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+
+        let bad_host = create(json!({"host": "db/../x", "database": "shop"})).await;
+        let bad_query = create(json!({"host": "db.example.com", "database": "shop",
+            "queries": [{"name": "vip", "sql": "DROP TABLE secrets"}]}))
+        .await;
+        let bad_ca = create(json!({"host": "db.example.com", "database": "shop",
+            "ca_certificate": "not a certificate"}))
+        .await;
+
+        assert_eq!(
+            bad_host.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            bad_host.body
+        );
+        assert_eq!(fields(&bad_host).len(), 1);
+        assert!(
+            fields(&bad_host)[0].starts_with("config.host: "),
+            "{:?}",
+            fields(&bad_host)
+        );
+        assert!(
+            fields(&bad_query)[0].starts_with("config.queries: "),
+            "{:?}",
+            fields(&bad_query)
+        );
+        assert!(!fields(&bad_query)[0].contains("secrets"));
+        assert!(
+            fields(&bad_ca)[0].starts_with("config.ca_certificate: "),
+            "{:?}",
+            fields(&bad_ca)
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "a refused source stores nothing");
+
+        let queries = json!([{"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"}]);
+        let created = create(json!({"host": "db.example.com", "database": "shop",
+            "queries": queries}))
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        assert_eq!(created.body["config"]["queries"], queries);
+        assert_eq!(
+            created.body["credential_fields_set"],
+            json!(["password", "user"])
+        );
+
+        let more = json!([
+            {"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"},
+            {"name": "recent", "sql": "SELECT id FROM orders"}
+        ]);
+        let patched = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(
+                    json!({"config": {"host": "db.example.com", "database": "shop",
+                    "queries": more}}),
+                ),
+            )
+            .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        let read = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
+        assert_eq!(read.body["config"]["queries"], more);
+    }
 }

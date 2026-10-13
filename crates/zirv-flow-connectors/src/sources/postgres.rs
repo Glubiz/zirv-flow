@@ -23,7 +23,9 @@ use super::sql::discover::{MAX_TABLES, default_cursor, descriptor, from_clause};
 use super::sql::error::{from_postgres, query};
 use super::sql::keyset::{BATCH_ROWS, KeySpec, Paged, Pager, Row, batches, parse_checkpoint};
 use super::sql::metrics::metered;
-use super::sql::settings::{Flavor, Login, QUERY_PREFIX, Settings, TlsMode, config_error};
+use super::sql::settings::{
+    Flavor, Login, QUERY_PREFIX, Settings, TlsMode, check_config, config_error,
+};
 use super::sql::tls;
 use super::types::{Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor};
 
@@ -125,6 +127,7 @@ impl Source for Postgres {
             },
         ],
         rate_limit: None,
+        config_check: Some(|config| check_config(config, Flavor::Postgres)),
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,

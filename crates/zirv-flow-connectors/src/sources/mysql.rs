@@ -20,7 +20,9 @@ use super::sql::discover::{MAX_TABLES, default_cursor, descriptor, from_clause};
 use super::sql::error::{from_mysql, query};
 use super::sql::keyset::{BATCH_ROWS, KeySpec, Paged, Pager, Row, batches, parse_checkpoint};
 use super::sql::metrics::metered;
-use super::sql::settings::{Flavor, Login, QUERY_PREFIX, Settings, TlsMode, config_error};
+use super::sql::settings::{
+    Flavor, Login, QUERY_PREFIX, Settings, TlsMode, check_config, config_error,
+};
 use super::sql::tls;
 use super::types::{Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor};
 
@@ -113,6 +115,7 @@ impl Source for Mysql {
             },
         ],
         rate_limit: None,
+        config_check: Some(|config| check_config(config, Flavor::MySql)),
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,

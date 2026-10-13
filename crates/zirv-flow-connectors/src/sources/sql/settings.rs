@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::sources::{Credential, SourceError};
+use crate::sources::{Credential, FieldError, SourceError};
 
 /// The most query streams one source can define.
 pub(crate) const MAX_QUERIES: usize = 20;
@@ -148,6 +148,15 @@ impl Settings {
     pub(crate) fn query_for(&self, stream: &str) -> Option<&Query> {
         let name = stream.strip_prefix(QUERY_PREFIX)?;
         self.queries.iter().find(|query| query.name == name)
+    }
+}
+
+/// The `config_check` of the database source types: what [`Settings::parse`] refuses, as the
+/// setting that failed.
+pub(crate) fn check_config(config: &Value, flavor: Flavor) -> Vec<FieldError> {
+    match Settings::parse(config, flavor) {
+        Err(SourceError::Config { field, reason }) => vec![FieldError { field, reason }],
+        Ok(_) | Err(_) => Vec::new(),
     }
 }
 
@@ -368,6 +377,18 @@ mod tests {
             Flavor::Postgres,
         ));
         assert_eq!(error, "tls must be verify or off");
+    }
+
+    #[test]
+    fn the_config_check_reports_the_failing_setting_without_its_value() {
+        let bad = with("host", json!("db/../x"));
+
+        let errors = check_config(&bad, Flavor::Postgres);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "host");
+        assert!(!errors[0].reason.contains("db"), "{}", errors[0].reason);
+        assert!(check_config(&base(), Flavor::MySql).is_empty());
     }
 
     #[test]

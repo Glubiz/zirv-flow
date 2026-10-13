@@ -51,6 +51,11 @@ pub fn validate_config(spec: &SourceSpec, config: &Value) -> Result<(), Vec<Fiel
             }
         }
     }
+    if errors.is_empty()
+        && let Some(check) = spec.config_check
+    {
+        errors.extend(check(config));
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -217,6 +222,7 @@ mod tests {
             field("extra", FieldKind::Text, false, true),
         ],
         rate_limit: None,
+        config_check: None,
         capabilities: Capabilities {
             incremental: false,
             full_refresh: true,

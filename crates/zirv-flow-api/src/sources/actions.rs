@@ -381,6 +381,7 @@ mod tests {
             requests: 2,
             per: Duration::from_secs(1),
         }),
+        config_check: None,
     };
 
     fn state() -> AppState {
