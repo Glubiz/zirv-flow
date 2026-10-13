@@ -9,8 +9,11 @@
 mod limiter;
 mod payload;
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use uuid::Uuid;
 
 use axum::Json;
 use axum::extract::{Request, State};
@@ -39,6 +42,12 @@ pub struct IngestLimits {
     pub rate_per_key: u32,
     /// Items a key may send at once after a quiet period.
     pub burst_per_key: u32,
+    /// The largest body of a webhook request, in bytes.
+    pub max_webhook_bytes: usize,
+    /// Requests per second each webhook may receive, sustained.
+    pub rate_per_hook: u32,
+    /// Requests a webhook may receive at once after a quiet period.
+    pub burst_per_hook: u32,
 }
 
 impl Default for IngestLimits {
@@ -48,6 +57,9 @@ impl Default for IngestLimits {
             max_batch_items: 500,
             rate_per_key: 10_000,
             burst_per_key: 20_000,
+            max_webhook_bytes: 256 * 1024,
+            rate_per_hook: 50,
+            burst_per_hook: 200,
         }
     }
 }
@@ -57,6 +69,10 @@ impl Default for IngestLimits {
 pub(crate) struct IngestState {
     limits: IngestLimits,
     limiter: Arc<RateLimiter>,
+    /// One bucket per hook that resolved to a stored hook, so unknown ids never reach it.
+    hook_limiter: Arc<RateLimiter>,
+    /// When each hook last reported its freshness from this process.
+    reported: Arc<Mutex<HashMap<Uuid, Instant>>>,
 }
 
 impl IngestState {
@@ -66,7 +82,17 @@ impl IngestState {
             limits.burst_per_key,
             Instant::now(),
         ));
-        Self { limits, limiter }
+        let hook_limiter = Arc::new(RateLimiter::new(
+            limits.rate_per_hook,
+            limits.burst_per_hook,
+            Instant::now(),
+        ));
+        Self {
+            limits,
+            limiter,
+            hook_limiter,
+            reported: Arc::default(),
+        }
     }
 
     pub(crate) fn limits(&self) -> &IngestLimits {
@@ -87,6 +113,54 @@ impl IngestState {
             })
     }
 }
+
+impl IngestState {
+    /// Charges one request against the bucket of a hook that exists: a 429 with `Retry-After`
+    /// when it does not fit. Only ids that resolved to a stored hook get a bucket, so a flood of
+    /// random ids cannot grow the limiter.
+    pub(crate) fn charge_hook(&self, hook: Uuid) -> Result<(), ApiError> {
+        self.hook_limiter
+            .take(hook, 1, Instant::now())
+            .map_err(|seconds| {
+                ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "the webhook is over its rate limit",
+                )
+                .with_retry_after(seconds)
+            })
+    }
+
+    /// How many hooks hold a rate-limit bucket.
+    #[cfg(test)]
+    pub(crate) fn hook_buckets(&self) -> usize {
+        self.hook_limiter.tracked()
+    }
+
+    /// Whether this request should report the hook's freshness: at most once per window per
+    /// hook per process, so a busy hook does not serialize on its stream row.
+    pub(crate) fn report_due(&self, hook: Uuid) -> bool {
+        self.report_due_at(hook, Instant::now())
+    }
+
+    fn report_due_at(&self, hook: Uuid, now: Instant) -> bool {
+        let mut reported = self
+            .reported
+            .lock()
+            .expect("the report lock is never held across a panic");
+        if reported
+            .get(&hook)
+            .is_some_and(|last| now.saturating_duration_since(*last) < REPORT_EVERY)
+        {
+            return false;
+        }
+        reported.retain(|_, last| now.saturating_duration_since(*last) < REPORT_EVERY);
+        reported.insert(hook, now);
+        true
+    }
+}
+
+/// How often a hook reports its freshness from one process.
+const REPORT_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct AcceptedBody {
@@ -381,26 +455,39 @@ async fn accept(
     Ok(accepted)
 }
 
-fn too_large() -> ApiError {
+pub(crate) fn too_large() -> ApiError {
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
 }
 
 /// Reads the JSON body of an ingestion request: `413` over `max_bytes`, declared or not, or
 /// when it cannot be read, and `400` when it is not JSON.
 pub(crate) async fn read_json(request: Request, max_bytes: usize) -> Result<Value, ApiError> {
-    let declared = request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > max_bytes) {
-        return Err(too_large());
-    }
-    let bytes = axum::body::to_bytes(request.into_body(), max_bytes)
-        .await
-        .map_err(|_| too_large())?;
+    let bytes = read_body(request, max_bytes).await?;
     serde_json::from_slice(&bytes)
         .map_err(|_| ApiError::bad_request("request body is not valid JSON"))
+}
+
+/// Whether the declared `Content-Length` is over `max_bytes`.
+pub(crate) fn declared_too_large(headers: &axum::http::HeaderMap, max_bytes: usize) -> bool {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > max_bytes)
+}
+
+/// Reads a request body of at most `max_bytes`: `413` when it is declared larger, streams
+/// larger, or cannot be read.
+pub(crate) async fn read_body(
+    request: Request,
+    max_bytes: usize,
+) -> Result<axum::body::Bytes, ApiError> {
+    if declared_too_large(request.headers(), max_bytes) {
+        return Err(too_large());
+    }
+    axum::body::to_bytes(request.into_body(), max_bytes)
+        .await
+        .map_err(|_| too_large())
 }
 
 pub(crate) fn unavailable() -> ApiError {

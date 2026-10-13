@@ -58,6 +58,32 @@ pub(crate) fn registry() -> Registry {
     Registry::built_in()
 }
 
+/// Whether records of this source type arrive by push (a webhook) instead of being read.
+pub(crate) fn is_push(kind: &str) -> bool {
+    registry()
+        .get(kind)
+        .is_some_and(|driver| driver.spec().capabilities.push)
+}
+
+/// A push source is created, changed and removed only through the webhooks API, which keeps its
+/// secret, its hook row and its stream together.
+pub(crate) fn managed_by_webhooks() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "a webhook source is created, changed and deleted through the webhooks API",
+    )
+    .with_code("managed_by_webhooks")
+}
+
+/// A push source has no schedule and no run: its records arrive as they are sent.
+pub(crate) fn push_source() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "a webhook source receives records as they are sent; it has no run",
+    )
+    .with_code("push_source")
+}
+
 /// The answer for a stored source whose type this build does not ship.
 pub(crate) fn kind_unavailable() -> ApiError {
     ApiError::new(
