@@ -4528,7 +4528,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "clap",
@@ -4559,7 +4559,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-ai"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "hashbrown 0.17.1",
@@ -4576,7 +4576,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4610,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-connectors"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -4661,7 +4661,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "chrono",
@@ -4677,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-loadgen"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "clap",
  "hashbrown 0.17.1",
@@ -4712,7 +4712,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "0.40.0"
+version = "0.42.0"
 dependencies = [
  "flate2",
  "hashbrown 0.17.1",
