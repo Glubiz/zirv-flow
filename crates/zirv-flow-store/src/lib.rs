@@ -21,6 +21,7 @@ pub mod secrets;
 mod sessions;
 mod sources;
 mod suppressions;
+mod sync_runs;
 mod workspaces;
 
 use std::error::Error;
@@ -125,13 +126,20 @@ pub use sessions::{
 pub use sources::{
     DiscoveredStream, NewSource, Source, SourceUpdate, Stream, StreamSettings, configure_stream,
     create_source, delete_source, find_source, find_source_for_update, find_stream, list_sources,
-    list_streams, update_source, upsert_discovered_streams,
+    list_streams, set_stream_mapping, sync_schedule, update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,
     is_suppressed, list_suppressions, remove_suppression,
+};
+pub use sync_runs::{
+    BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
+    Counts as SyncCounts, FanOut, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, RunCursor, RunReject,
+    RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncRun, SyncUpsert,
+    cancel_run, commit_sync_batch, fail_run, find_run, finish_run, list_run_rejects, list_runs,
+    queue_run, queue_runs_for_source, run_trace, start_run,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

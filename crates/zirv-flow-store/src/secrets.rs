@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
-use zirv_flow_core::{Sealed, SecretId, SecretPurpose, WorkspaceId};
+use zirv_flow_core::{
+    Keyring, Sealed, SecretBytes, SecretId, SecretPurpose, WorkspaceId, secret_aad,
+};
 
 use crate::StoreError;
 
@@ -217,6 +219,40 @@ pub async fn get<'e>(
         })
     })
     .transpose()
+}
+
+/// Why a stored secret could not be opened.
+#[derive(Debug)]
+pub enum OpenError {
+    /// The workspace has no such secret.
+    NotFound,
+    /// The keyring does not open it: a wrong key, or a secret that was altered.
+    Unopenable,
+    Store(StoreError),
+}
+
+impl From<StoreError> for OpenError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// Opens a secret of this workspace and returns its plaintext, zeroized on drop. The caller
+/// parses it (a connector credential, for one, is a JSON map) and opens it right before use.
+/// `purpose` binds the secret to what it is for: a secret sealed for another purpose, or in
+/// another workspace, does not open.
+pub async fn open_json<'e>(
+    executor: impl PgExecutor<'e>,
+    keyring: &Keyring,
+    workspace: WorkspaceId,
+    secret: SecretId,
+    purpose: SecretPurpose,
+) -> Result<SecretBytes, OpenError> {
+    let stored = get(executor, workspace, secret)
+        .await?
+        .ok_or(OpenError::NotFound)?;
+    let aad = secret_aad(workspace, secret, purpose);
+    zirv_flow_core::open(keyring, &stored.sealed, &aad).map_err(|_| OpenError::Unopenable)
 }
 
 /// Replaces the sealed value of a secret of this workspace after checking the writer against the
@@ -884,5 +920,38 @@ mod tests {
         assert!(tables.iter().any(|table| table == "encrypted_secrets"));
         let hits = scan_for_marker(&pool, &marker, &hex).await;
         assert!(hits.is_empty(), "plaintext found in {hits:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn open_json_returns_the_plaintext_and_refuses_another_workspace_purpose_or_key(
+        pool: PgPool,
+    ) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let keys = keyring();
+        let id = SecretId::new();
+        let sealed = sealed_for(&keys, one, id, br#"{"token":"abc"}"#);
+        insert_unchecked(&pool, one, SecretPurpose::ConnectorCredential, id, &sealed)
+            .await
+            .unwrap();
+
+        let opened = open_json(&pool, &keys, one, id, SecretPurpose::ConnectorCredential)
+            .await
+            .unwrap();
+        let foreign = open_json(&pool, &keys, two, id, SecretPurpose::ConnectorCredential).await;
+        let other_purpose = open_json(&pool, &keys, one, id, SecretPurpose::OAuthToken).await;
+        let other_key = open_json(
+            &pool,
+            &keyring(),
+            one,
+            id,
+            SecretPurpose::ConnectorCredential,
+        )
+        .await;
+
+        assert_eq!(opened.expose(), br#"{"token":"abc"}"#);
+        assert!(matches!(foreign, Err(OpenError::NotFound)));
+        assert!(matches!(other_purpose, Err(OpenError::Unopenable)));
+        assert!(matches!(other_key, Err(OpenError::Unopenable)));
     }
 }

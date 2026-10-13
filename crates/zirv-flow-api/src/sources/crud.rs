@@ -191,6 +191,14 @@ pub(crate) async fn create_source(
     )
     .await
     .map_err(name_taken)?;
+    zirv_flow_store::sync_schedule(
+        &mut tx,
+        workspace,
+        source.id,
+        source.schedule.as_deref(),
+        source.enabled,
+    )
+    .await?;
     admin::audit(
         &mut tx,
         context,
@@ -307,6 +315,14 @@ pub(crate) async fn update_source(
     .await
     .map_err(name_taken)?
     .ok_or_else(ApiError::not_found)?;
+    zirv_flow_store::sync_schedule(
+        &mut tx,
+        workspace,
+        source.id,
+        source.schedule.as_deref(),
+        source.enabled,
+    )
+    .await?;
     admin::audit(
         &mut tx,
         context,

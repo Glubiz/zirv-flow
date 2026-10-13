@@ -8,9 +8,7 @@ use axum::http::StatusCode;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::{
-    Keyring, SecretBytes, SecretId, SecretPurpose, SecretString, open, secret_aad,
-};
+use zirv_flow_core::{Keyring, SecretBytes, SecretId, SecretPurpose, SecretString};
 use zirv_flow_store::secrets;
 
 use crate::AppState;
@@ -54,13 +52,16 @@ pub(super) async fn load(
         return Ok(Credential::new());
     };
     let keyring = keyring(state)?;
-    let id = SecretId::from_uuid(secret);
-    let stored = secrets::get(&state.pool, workspace, id)
-        .await?
-        .ok_or_else(ApiError::internal)?;
-    let aad = secret_aad(workspace, id, SecretPurpose::ConnectorCredential);
-    let bytes = open(keyring, &stored.sealed, &aad).map_err(|error| {
-        tracing::warn!(%error, "a source credential could not be opened");
+    let bytes = secrets::open_json(
+        &state.pool,
+        keyring,
+        workspace,
+        SecretId::from_uuid(secret),
+        SecretPurpose::ConnectorCredential,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(?error, "a source credential could not be opened");
         ApiError::internal()
     })?;
     from_plaintext(&bytes)

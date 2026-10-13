@@ -22,6 +22,8 @@ pub struct Stream {
     pub cursor_field: Option<String>,
     pub primary_key: Vec<String>,
     pub mapping: Option<Value>,
+    /// Where the next incremental run resumes; none for a full refresh or before any batch.
+    pub checkpoint: Option<Value>,
     pub staleness_threshold_seconds: Option<i32>,
     /// The descriptor discovery last reported.
     pub discovered: Value,
@@ -33,7 +35,7 @@ pub struct Stream {
 macro_rules! stream_columns {
     () => {
         "id, source_id, name, enabled, sync_mode, cursor_field, primary_key, mapping, \
-         staleness_threshold_seconds, discovered, created_at, updated_at"
+         checkpoint, staleness_threshold_seconds, discovered, created_at, updated_at"
     };
 }
 
@@ -164,6 +166,29 @@ pub async fn configure_stream<'e>(
     .bind(settings.cursor_field)
     .bind(settings.primary_key)
     .bind(settings.staleness_threshold_seconds)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Sets the mapping of a stream; `None` when the source has no such stream. The caller has
+/// checked it against the stream's fields.
+pub async fn set_stream_mapping<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    name: &str,
+    mapping: &Value,
+) -> Result<Option<Stream>, StoreError> {
+    sqlx::query_as(concat!(
+        "UPDATE streams SET mapping = $4, updated_at = now() \
+         WHERE workspace_id = $1 AND source_id = $2 AND name = $3 RETURNING ",
+        stream_columns!()
+    ))
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(name)
+    .bind(mapping)
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)

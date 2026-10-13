@@ -752,4 +752,99 @@ mod tests {
                 .enabled
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sync_runs_are_read_and_changed_only_in_their_own_workspace(pool: PgPool) {
+        use crate::sync_runs::testing::{batch, source_with_stream, started_run, upsert};
+        use crate::{
+            CancelOutcome, RunTrigger, cancel_run, commit_sync_batch, fail_run, find_run,
+            finish_run, list_run_rejects, list_runs, queue_run, queue_runs_for_source, start_run,
+            sync_schedule,
+        };
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let (source, stream) = source_with_stream(&pool, one, "crm", "full_refresh").await;
+        let fx = started_run(&pool, one, source, stream).await;
+        let run = fx.run.id;
+        let mut connection = pool.acquire().await.unwrap();
+
+        assert!(find_run(&pool, two, source, run).await.unwrap().is_none());
+        let (listed, _) = list_runs(&pool, two, source, None, None, 10).await.unwrap();
+        assert!(listed.is_empty());
+        assert!(
+            list_run_rejects(&pool, two, run, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            cancel_run(&mut connection, two, source, run).await.unwrap(),
+            CancelOutcome::NotFound
+        );
+        assert!(start_run(&pool, two, run).await.unwrap().is_none());
+        assert!(!fail_run(&pool, two, run, "x").await.unwrap());
+        assert!(!finish_run(&pool, two, run).await.unwrap());
+        assert!(
+            queue_run(
+                &mut connection,
+                two,
+                source,
+                stream,
+                RunTrigger::Manual,
+                None
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            queue_runs_for_source(
+                &mut connection,
+                two,
+                source,
+                RunTrigger::Manual,
+                None,
+                false
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        // A batch aimed at the run through the other workspace writes nothing.
+        let upserts = [upsert(&fx, "k0", "a0@example.com")];
+        let cp = json!({"offset": 1});
+        let foreign = commit_sync_batch(
+            &pool,
+            &crate::SyncBatch {
+                workspace: two,
+                ..batch(&fx, &source.to_string(), &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(foreign, crate::SyncBatchOutcome::Cancelled));
+        // Nor can the other workspace mirror or clear this source's schedule.
+        sync_schedule(&mut connection, one, source, Some("0 * * * *"), true)
+            .await
+            .unwrap();
+        sync_schedule(&mut connection, two, source, None, true)
+            .await
+            .unwrap();
+        let schedules: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedules WHERE source_id = $1")
+                .bind(source)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(schedules, 1);
+
+        let own = find_run(&pool, one, source, run).await.unwrap().unwrap();
+        assert_eq!((own.state.as_str(), own.records_read), ("running", 0));
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM source_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 0);
+    }
 }
