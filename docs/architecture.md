@@ -506,6 +506,22 @@ field sources, the set already in `core::mapping`. There is no expression
 language or scripting in v1 (OQ-5); a request the set cannot express becomes an
 issue. The UI previews a mapping on sample records before saving.
 
+As built (M3, file sources): the `file` source (`zirv-flow-connectors::sources::file`, one registry
+line) reads a CSV, NDJSON or top-level JSON array file at an https address through
+`SourceContext::send` in byte-range windows of 4 MiB. A window begins at a record boundary and
+is parsed by a fresh parser; the part after its last complete record is dropped and fetched
+again with the next window, so a record (at most 1 MiB) always fits. The checkpoint is the byte
+offset with the row count, the validator (`ETag`, else `Last-Modified`), the size and, for CSV,
+the header and delimiter; a later window sends `If-Range`, and a changed validator or size
+fails the read as `file_changed`. Only full refresh is offered. `core::mapping` gained the dotted
+path (resolved by `JsonRecord::for_mapping`), one optional `event` rule per mapping and the
+shared `map_json` the run and the preview both call. `commit_sync_batch` applies each record's
+event through the event path of section 12.1 and its list memberships through `add_members`
+(source `sync`) in the batch transaction, after the profile and before the checkpoint. The
+event's `message_id` is `sync:` and the SHA-256 of source, stream, record key and event name, so
+a re-read never repeats an event, and a mapping with an event needs a stream primary key.
+`POST .../streams/{name}/preview` maps the first records of the source and writes nothing.
+
 ### 7.3 Identity resolution and precedence
 
 Deterministic matching only, with rules per identifier kind:
@@ -1037,6 +1053,11 @@ message can be resent; a second reject for the same open `message_id` is not wri
 Events are partitioned by month on `occurred_at` like the decision log, with the leader
 creating this and next month and the `events.retention` job dropping old ones. Merging people
 does not yet rewrite events.
+
+As built (M3, sync events): an event a sync run yields goes through the same validation,
+redaction and reject handling as one sent over HTTP. A refused event is an `ingest_rejects` row
+of kind `event` that names the run, and the record counts once, as rejected, while its profile
+change stands. Duplicates are counted by `zirv_flow_sync_events_total{outcome}`.
 
 ### 12.2 Delivery, time and replay semantics
 

@@ -16,6 +16,80 @@ pub struct Mapping {
     #[serde(default)]
     pub key_column: Option<String>,
     pub columns: Vec<ColumnRule>,
+    /// The one event each record yields, when the mapping describes one. Sync runs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<EventRule>,
+}
+
+impl Mapping {
+    /// Whether each record also yields an event.
+    pub fn has_event(&self) -> bool {
+        self.event.is_some()
+    }
+
+    /// Every column or path the mapping reads, with repeats: the rule columns, the key column,
+    /// the columns a `concat` joins and the columns of the event.
+    pub fn referenced_columns(&self) -> Vec<&str> {
+        fn chain<'a>(columns: &mut Vec<&'a str>, transforms: &'a [Transform]) {
+            for transform in transforms {
+                if let Transform::Concat { columns: more, .. } = transform {
+                    columns.extend(more.iter().map(String::as_str));
+                }
+            }
+        }
+        let mut columns: Vec<&str> = Vec::new();
+        if let Some(key) = &self.key_column {
+            columns.push(key);
+        }
+        for rule in &self.columns {
+            columns.push(&rule.column);
+            chain(&mut columns, &rule.transforms);
+        }
+        if let Some(event) = &self.event {
+            if let Some(timestamp) = &event.timestamp {
+                columns.push(&timestamp.column);
+                chain(&mut columns, &timestamp.transforms);
+            }
+            for property in &event.properties {
+                columns.push(&property.column);
+                chain(&mut columns, &property.transforms);
+            }
+        }
+        columns
+    }
+}
+
+/// The event a record yields: its name is fixed, the person is the record's identifiers.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventRule {
+    /// The event's name, a constant.
+    pub name: String,
+    /// Where the event happened; without it the event happened when the run saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<ValueRule>,
+    /// The event's properties, each from one column.
+    #[serde(default)]
+    pub properties: Vec<PropertyRule>,
+}
+
+/// A column and the transforms that turn it into a value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueRule {
+    pub column: String,
+    #[serde(default)]
+    pub transforms: Vec<Transform>,
+}
+
+/// One property of the event.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyRule {
+    pub property: String,
+    pub column: String,
+    #[serde(default)]
+    pub transforms: Vec<Transform>,
 }
 
 /// What one column becomes.

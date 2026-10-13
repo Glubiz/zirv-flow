@@ -10351,4 +10351,44 @@ email,b@example.com,
         .unwrap();
         assert_eq!((outcome.as_str(), cost, pending), ("transport", 0, 0));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_csv_import_mapping_with_an_event_is_refused(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, body) = upload_csv(
+            &router,
+            &ws,
+            "name=Customers",
+            CUSTOMERS,
+            Auth::Session(&owner),
+        )
+        .await;
+        let id = body["id"].as_str().unwrap();
+        let uri = imports_uri(&ws, &format!("/{id}/mapping"));
+        let email = json!({"column": "Email", "target": {"type": "identifier", "kind": "email"}});
+
+        let refused = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"columns": [email], "event": {"name": "order_placed"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let plain = call(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({"columns": [email]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["detail"], "mapping: event_not_supported");
+        assert_eq!(plain.status, StatusCode::OK, "{:?}", plain.body);
+    }
 }

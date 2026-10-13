@@ -90,6 +90,10 @@ pub struct CsvParser {
     rows_seen: u64,
     /// The row numbers of the records the scan has started and the reader has not returned.
     pending: VecDeque<u64>,
+    /// The bytes of the input the scan has gone through, a stripped byte order mark included.
+    consumed: u64,
+    /// `consumed` as of the last line end outside quotes.
+    boundary: u64,
 }
 
 impl CsvParser {
@@ -107,7 +111,28 @@ impl CsvParser {
             after_cr: false,
             rows_seen: 0,
             pending: VecDeque::new(),
+            consumed: 0,
+            boundary: 0,
         }
+    }
+
+    /// A parser for input that begins at a record boundary: no byte order mark is looked for,
+    /// and the next record is row `row + 1`. Offsets it reports ([`CsvParser::boundary`]) count
+    /// from the first byte it is fed.
+    pub fn starting_at_row(delimiter: u8, row: u64) -> Self {
+        let mut parser = Self::new(delimiter);
+        parser.started = true;
+        parser.rows_seen = row;
+        parser
+    }
+
+    /// How many bytes fed so far end at a line end outside quotes: the end of the last record
+    /// [`CsvParser::push`] handed over (or of the last blank line). A byte order mark at the start
+    /// counts. A carriage return ends a line, so a window that ends between CR and LF resumes at
+    /// the LF, which reads as a blank line and is skipped. A last record with no line end is
+    /// not counted until [`CsvParser::finish`] hands it over.
+    pub fn boundary(&self) -> u64 {
+        self.boundary
     }
 
     /// Feeds `bytes`, handing each completed record to `on_record` with its row number: the header is
@@ -140,7 +165,9 @@ impl CsvParser {
         if self.scan == Scan::Quoted {
             return Err(CsvError::UnterminatedQuote);
         }
-        self.read(&[], on_record)
+        self.read(&[], on_record)?;
+        self.boundary = self.consumed;
+        Ok(())
     }
 
     /// Reads the held-back start of the file, without its byte order mark.
@@ -148,6 +175,7 @@ impl CsvParser {
         self.started = true;
         let held = std::mem::take(&mut self.prefix);
         let body = held.strip_prefix(&BOM).unwrap_or(&held);
+        self.consumed = (held.len() - body.len()) as u64;
         if body.is_empty() {
             return Ok(());
         }
@@ -226,6 +254,10 @@ impl CsvParser {
                 (Scan::QuoteInQuoted, other) => self.after_unquoted(other),
             };
             self.after_cr = byte == b'\r' && was != Scan::Quoted;
+            self.consumed += 1;
+            if line_end && self.scan == Scan::LineStart {
+                self.boundary = self.consumed;
+            }
         }
     }
 
@@ -332,6 +364,94 @@ mod tests {
             .collect()
     }
 
+    const SAMPLES: [&[u8]; 6] = [
+        b"a,b\n1,2\n3,4\n",
+        b"\xEF\xBB\xBFa,b\r\n1,\"x\r\ny\"\r\n\r\n3,4\r\n",
+        b"a,b\r1,2\r3,4",
+        b"a,b\n\n\n\"q,\"\"\n\"\",z\"\n1,2\n",
+        b"a\n\"line\none\"\n\n\n",
+        b"a,b\n1,2",
+    ];
+
+    /// Feeds `bytes` in `piece`-sized pieces; after each one the records emitted so far must be
+    /// exactly the records of the bytes up to the boundary.
+    fn boundary_matches_emitted(bytes: &[u8], piece: usize) {
+        let mut parser = CsvParser::new(b',');
+        let mut emitted: Vec<(u64, Vec<String>)> = Vec::new();
+        let mut fed = 0;
+        for chunk in bytes.chunks(piece) {
+            parser
+                .push(chunk, &mut |row, record| emitted.push((row, record)))
+                .unwrap();
+            fed += chunk.len();
+            let boundary = parser.boundary() as usize;
+            assert!(boundary <= fed);
+            let head = &bytes[..boundary];
+            let expected = numbered_in(&[head]);
+            assert_eq!(emitted, expected, "piece {piece}, fed {fed}");
+        }
+        parser
+            .finish(&mut |row, record| emitted.push((row, record)))
+            .unwrap();
+        assert_eq!(parser.boundary() as usize, bytes.len());
+        assert_eq!(emitted, numbered_in(&[bytes]));
+    }
+
+    #[test]
+    fn the_boundary_is_the_end_of_the_last_record_handed_over_wherever_the_input_is_cut() {
+        for bytes in SAMPLES {
+            for piece in 1..=bytes.len() {
+                boundary_matches_emitted(bytes, piece);
+            }
+        }
+    }
+
+    #[test]
+    fn the_boundary_counts_a_byte_order_mark_and_ignores_an_open_quote_and_a_partial_line() {
+        let mut parser = CsvParser::new(b',');
+        let mut take = |_: u64, _: Vec<String>| {};
+
+        parser
+            .push(b"\xEF\xBB\xBFa,b\n1,\"x\n2", &mut take)
+            .unwrap();
+
+        assert_eq!(parser.boundary(), 3 + 4);
+    }
+
+    #[test]
+    fn a_parser_started_at_a_boundary_reads_the_tail_with_continuing_row_numbers() {
+        let bytes: &[u8] = b"\xEF\xBB\xBFa,b\r\n1,2\r\n3,\"x\r\ny\"\r\n5,6\r\n";
+        for cut in 1..bytes.len() {
+            let mut head = CsvParser::new(b',');
+            let mut first = Vec::new();
+            head.push(&bytes[..cut], &mut |row, record| first.push((row, record)))
+                .unwrap();
+            let boundary = head.boundary() as usize;
+
+            let mut tail =
+                CsvParser::starting_at_row(b',', first.last().map_or(0, |(row, _)| *row));
+            let mut rest = Vec::new();
+            tail.push(&bytes[boundary..], &mut |row, record| {
+                rest.push((row, record))
+            })
+            .unwrap();
+            tail.finish(&mut |row, record| rest.push((row, record)))
+                .unwrap();
+
+            first.extend(rest);
+            assert_eq!(first.len(), 4, "cut at {cut}");
+            // Only the records are compared: a window cut between CR and LF resumes at the LF,
+            // which counts as a blank row and shifts the row numbers after it.
+            let records = |rows: Vec<(u64, Vec<String>)>| -> Vec<Vec<String>> {
+                rows.into_iter().map(|(_, record)| record).collect()
+            };
+            assert_eq!(
+                records(first),
+                records(numbered_in(&[bytes])),
+                "cut at {cut}"
+            );
+        }
+    }
     #[test]
     fn the_header_is_row_one_and_a_blank_line_counts_as_a_row() {
         let records = numbered_in(&[b"a,b\n\n1,2\n"]);

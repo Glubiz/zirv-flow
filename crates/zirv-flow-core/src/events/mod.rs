@@ -10,7 +10,7 @@ mod validate;
 pub use mask::{Masked, mask, mask_event, mask_sample};
 pub use property::{
     EventMode, PropertyType, SchemaProperty, UnplannedPolicy, validate_event_name,
-    validate_properties,
+    validate_properties, validate_property_name,
 };
 pub use redact::{RedactionRules, redact, validate_rules};
 pub use time_rules::{EventFlag, Timing, apply_time_rules};

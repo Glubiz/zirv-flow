@@ -111,6 +111,17 @@ export function runErrorText(code: string, threshold: number): string {
       "The stream's settings no longer fit what the source offers. Discover the streams again, set the stream up, then run it again.",
     source_error: "The source could not be read after several tries. Test the connection, then run it again.",
     job_failed: "The run could not finish after several tries. Run it again; if it keeps failing, look at the jobs page.",
+    file_changed: "The file changed while it was being read, so the run stopped. Records read before that were kept. Run it again.",
+    file_range_unsupported:
+      "The file is over 10 MiB and its server does not answer byte ranges. Ask the host to support them, or split the file.",
+    file_range_invalid:
+      "The file's server answered a byte range that does not add up, so the run stopped. Records read before that were kept. Run it again.",
+    record_too_large: "One record is over 1 MiB, so the file could not be read.",
+    csv_invalid: "The file is not valid CSV text.",
+    json_invalid: "The file is not valid JSON.",
+    list_missing: "A list the mapping adds people to has been deleted. Map the stream again, then run it again.",
+    stream_not_keyed: "The mapping has an event, but the stream has no primary key. Set one up, then run it again.",
+    event_key_unavailable: "The server has no key to protect event properties with, so events cannot be kept.",
     source_missing: "The source is gone.",
     stream_missing: "The stream is gone. Discover the streams again.",
     source_kind_unavailable: "This build of the server does not include this type of source.",

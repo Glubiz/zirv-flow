@@ -27,6 +27,18 @@ pub fn validate_event_name(name: &str) -> Result<(), ValidationError> {
     }
 }
 
+/// An event property name: 1 to 128 characters without control characters.
+pub fn validate_property_name(name: &str) -> Result<(), ValidationError> {
+    if is_name(name) {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            "property",
+            "must be 1 to 128 characters without control characters",
+        ))
+    }
+}
+
 pub(super) fn is_name(name: &str) -> bool {
     let length = name.chars().count();
     (1..=MAX_NAME_CHARS).contains(&length) && !name.chars().any(char::is_control)

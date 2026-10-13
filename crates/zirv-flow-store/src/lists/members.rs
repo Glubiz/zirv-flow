@@ -29,6 +29,8 @@ pub enum ListSource {
     Import,
     Merge,
     Flow,
+    /// A sync run added the person: a mapped list column was truthy.
+    Sync,
 }
 
 impl ListSource {
@@ -39,6 +41,7 @@ impl ListSource {
             Self::Import => "import",
             Self::Merge => "merge",
             Self::Flow => "flow",
+            Self::Sync => "sync",
         }
     }
 }
@@ -1138,6 +1141,7 @@ mod tests {
     fn a_source_has_a_stable_name_and_an_error_says_what_went_wrong() {
         assert_eq!(ListSource::Merge.as_str(), "merge");
         assert_eq!(ListSource::Flow.as_str(), "flow");
+        assert_eq!(ListSource::Sync.as_str(), "sync");
         assert_eq!(
             MembershipError::TooMany.to_string(),
             "a call takes at most 1000 people"

@@ -217,6 +217,7 @@ mod tests {
         .unwrap();
         let mapping = Mapping {
             key_column: None,
+            event: None,
             columns: vec![ColumnRule {
                 column: "email".into(),
                 target: Target::Identifier {

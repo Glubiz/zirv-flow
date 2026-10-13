@@ -32,7 +32,7 @@ pub(crate) struct ListMemberBody {
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     added_at: OffsetDateTime,
-    /// `ui`, `api`, `import`, `merge` or `flow`.
+    /// `ui`, `api`, `import`, `merge`, `flow` or `sync`.
     #[schema(example = "ui")]
     source: String,
     /// The strongest identifier the person holds; null for a person with none.

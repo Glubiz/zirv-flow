@@ -75,4 +75,20 @@ mod tests {
 
         assert_eq!(mentions, 1, "one registry line names the fake source");
     }
+
+    #[test]
+    fn the_file_source_is_registered_in_every_build() {
+        let registry = Registry::built_in();
+
+        let spec = registry.get("file").unwrap().spec();
+        assert_eq!(spec.kind, "file");
+        assert!(registry.specs().iter().any(|spec| spec.kind == "file"));
+    }
+
+    #[test]
+    fn the_file_source_is_named_once_in_its_registry_line() {
+        let production = include_str!("mod.rs");
+
+        assert_eq!(production.matches("file::File").count(), 1);
+    }
 }
