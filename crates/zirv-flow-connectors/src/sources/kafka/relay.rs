@@ -32,8 +32,10 @@ use super::super::error::SourceError;
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many sessions one relay carries at once: a read needs the bootstrap connection and one per
-/// broker. A connection beyond it is closed before the handshake.
-const MAX_SESSIONS: usize = 64;
+/// partition leader. A connection beyond it is closed before the handshake. It bounds what a local
+/// process can open while a read runs, and sits far above one connection per broker of any real
+/// cluster.
+const MAX_SESSIONS: usize = 1024;
 
 const REPLY_OK: u8 = 0;
 const REPLY_RULESET: u8 = 2;
