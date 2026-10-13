@@ -46,3 +46,53 @@ pub async fn record_stream_outcome(
     let done = query.execute(connection).await.map_err(StoreError::query)?;
     Ok(done.rows_affected() == 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use time::Duration;
+
+    use super::*;
+    use crate::stream_freshness::testing::outcome;
+    use crate::sync_runs::testing::{source_with_stream, workspace};
+    use crate::{database_now, find_stream_by_id};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_outcome_succeeds_fails_recovers_and_never_moves_the_success_backwards(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let (source, stream) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
+        let at = database_now(&pool).await.unwrap();
+        let read = || async {
+            let found = find_stream_by_id(&pool, ws, source, stream)
+                .await
+                .unwrap()
+                .unwrap();
+            (found.last_success_at, found.last_run_failed)
+        };
+
+        assert!(outcome(&pool, ws, stream, StreamOutcome::Failed, at).await);
+        assert_eq!(read().await, (None, true));
+        assert!(outcome(&pool, ws, stream, StreamOutcome::Succeeded, at).await);
+        assert_eq!(read().await, (Some(at), false), "a success recovers");
+        let earlier = at - Duration::hours(1);
+        outcome(&pool, ws, stream, StreamOutcome::Succeeded, earlier).await;
+        assert_eq!(read().await, (Some(at), false), "never backwards");
+        let later = at + Duration::hours(1);
+        outcome(&pool, ws, stream, StreamOutcome::Succeeded, later).await;
+        assert_eq!(read().await, (Some(later), false));
+        outcome(&pool, ws, stream, StreamOutcome::Failed, later).await;
+        assert_eq!(
+            read().await,
+            (Some(later), true),
+            "a failure keeps the success"
+        );
+        assert!(
+            !outcome(&pool, other, stream, StreamOutcome::Succeeded, later).await,
+            "another workspace reports on nothing"
+        );
+    }
+}
