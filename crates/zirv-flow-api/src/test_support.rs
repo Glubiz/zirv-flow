@@ -61,3 +61,36 @@ pub(crate) async fn the_scan_finds_a_planted(pool: &PgPool, markers: &[&str]) {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MARKER: &str = "zz-scan-marker-3141";
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_scan_finds_a_marker_stored_as_bytea(pool: PgPool) {
+        sqlx::query("CREATE TABLE scanned (note text, blob bytea)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scanned (note, blob) VALUES ('clean', $1)")
+            .bind(vec![0u8])
+            .execute(&pool)
+            .await
+            .unwrap();
+        tables_hold_no(&pool, &[MARKER]).await;
+
+        sqlx::query("UPDATE scanned SET blob = $1")
+            .bind(MARKER.as_bytes())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let caught = std::panic::AssertUnwindSafe(tables_hold_no(&pool, &[MARKER]));
+        assert!(
+            futures_util::FutureExt::catch_unwind(caught).await.is_err(),
+            "the scan must detect a marker stored as bytea"
+        );
+    }
+}
