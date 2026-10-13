@@ -167,6 +167,8 @@ fn queue_gauge(kind: &str, state: &str, value: f64) {
 pub(crate) struct FreshnessGauges {
     streams: BTreeSet<(Uuid, Uuid)>,
     workspaces: BTreeSet<Uuid>,
+    /// The streams whose lag gauge is set.
+    lagging: BTreeSet<(Uuid, Uuid)>,
 }
 
 impl FreshnessGauges {
@@ -206,6 +208,22 @@ impl FreshnessGauges {
                 count_gauge(*workspace, state, count as f64);
             }
         }
+        // The lag of a consumer, in messages: set while the stream reports one, 0 once it does
+        // not (disabled, deleted, not a consumer).
+        let lagging: BTreeSet<(Uuid, Uuid)> = report
+            .iter()
+            .filter(|stream| stream.lag.is_some())
+            .map(|stream| (stream.workspace_id, stream.stream_id))
+            .collect();
+        for (workspace, stream) in self.lagging.difference(&lagging) {
+            lag_gauge(*workspace, *stream, 0.0);
+        }
+        for stream in report {
+            if let Some(lag) = stream.lag {
+                lag_gauge(stream.workspace_id, stream.stream_id, lag as f64);
+            }
+        }
+        self.lagging = lagging;
         self.streams = streams;
         self.workspaces = workspaces;
     }
@@ -214,6 +232,15 @@ impl FreshnessGauges {
     pub(crate) fn zero_all(&mut self) {
         self.update(&[]);
     }
+}
+
+fn lag_gauge(workspace: Uuid, stream: Uuid, lag: f64) {
+    metrics::gauge!(
+        "zirv_flow_stream_lag_messages",
+        "workspace" => workspace.to_string(),
+        "stream" => stream.to_string(),
+    )
+    .set(lag);
 }
 
 const STATES: [Freshness; 3] = [Freshness::Fresh, Freshness::Stale, Freshness::Failing];
@@ -541,6 +568,41 @@ mod tests {
         assert_eq!(counts(&second, ws, "failing").as_deref(), Some("1"));
         assert_eq!(counts(&second, ws, "stale").as_deref(), Some("0"));
         assert_eq!(counts(&second, other, "failing").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn the_lag_gauge_follows_the_report_and_is_zeroed_when_a_stream_drops_out_or_stops_reporting() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = FreshnessGauges::default();
+        let (ws, a, b) = (Uuid::from_u128(1), Uuid::from_u128(10), Uuid::from_u128(11));
+        let consumer = |stream, lag| StreamFreshness {
+            lag,
+            ..fresh_row(ws, stream, Freshness::Fresh, 1)
+        };
+        let value = |output: &str, id: Uuid| {
+            output
+                .lines()
+                .filter(|line| {
+                    line.starts_with("zirv_flow_stream_lag_messages{")
+                        && line.contains(&format!("stream=\"{id}\""))
+                })
+                .map(|line| line.rsplit_once(' ').unwrap().1.to_owned())
+                .next()
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[consumer(a, Some(1204)), consumer(b, None)]);
+        });
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[consumer(b, None)]);
+        });
+        let second = handle.render();
+
+        assert_eq!(value(&first, a).as_deref(), Some("1204"));
+        assert_eq!(value(&first, b), None, "a pull stream has no lag series");
+        assert_eq!(value(&second, a).as_deref(), Some("0"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Tests against real brokers. They are `#[ignore]`d: `scripts/kafka-fixture.sh` starts the
 //! brokers and prints the variables they read (`ZIRV_KAFKA_BROKER`, `ZIRV_KAFKA_SASL_BROKER`,
 //! `ZIRV_KAFKA_TLS_FRONT_PORT`, `ZIRV_KAFKA_TLS_BACKEND_PORT`). The brokers advertise the name
-//! `broker.test`, which these tests resolve to a loopback address through an injected lookup.
+//! `localhost`, which these tests resolve to a loopback address through an injected lookup.
 
 #[cfg(test)]
 mod tests {
@@ -81,9 +81,9 @@ mod tests {
         .with_lookup(lookup(names))
     }
 
-    /// A context that reaches `broker.test` at the loopback address.
+    /// A context that reaches `localhost` at the loopback address.
     fn local() -> SourceContext {
-        context(&["127.0.0.0/8"], &[("broker.test", "127.0.0.1")])
+        context(&["127.0.0.0/8"], &[("localhost", "127.0.0.1")])
     }
 
     fn unique(prefix: &str) -> String {
@@ -522,10 +522,7 @@ mod tests {
         // address the policy does not allow, where a listener counts connections.
         let ctx = context(
             &["127.0.0.1/32"],
-            &[
-                ("bootstrap.test", "127.0.0.1"),
-                ("broker.test", "127.0.0.2"),
-            ],
+            &[("bootstrap.test", "127.0.0.1"), ("localhost", "127.0.0.2")],
         );
         let setup = local();
         let session = admin(&setup, &broker, None).await;
@@ -556,7 +553,7 @@ mod tests {
             let text = error.to_string();
             assert!(text.contains("not allowed by the egress policy"), "{text}");
             assert!(
-                !text.contains("127.0.0.2") && !text.contains("broker.test"),
+                !text.contains("127.0.0.2") && !text.contains("localhost"),
                 "{text}"
             );
         }
@@ -570,8 +567,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a Kafka broker: scripts/kafka-fixture.sh"]
     async fn a_bootstrap_address_the_policy_denies_is_refused_before_any_connection() {
-        let ctx = context(&[], &[("broker.test", "10.0.0.1")]);
-        let cfg = config("broker.test:9092", "t", json!({}));
+        let ctx = context(&[], &[("localhost", "10.0.0.1")]);
+        let cfg = config("localhost:9092", "t", json!({}));
 
         let error = Kafka
             .check(&ctx, &cfg, &Credential::new())
@@ -729,11 +726,11 @@ mod tests {
             Compression::NoCompression,
         )
         .await;
-        let broker = format!("broker.test:{front}");
+        let broker = format!("localhost:{front}");
         let cfg = |ca: &str| config(&broker, &topic, json!({"security": "tls", "tls_ca": ca}));
         let pki = authority();
         let (_, _, server_cert, server_key) =
-            issue(&pki, "broker.test", ExtendedKeyUsagePurpose::ServerAuth);
+            issue(&pki, "localhost", ExtendedKeyUsagePurpose::ServerAuth);
 
         // 1. A certificate for the right name, signed by the private authority, is accepted.
         let task = terminator(front, backend, (server_cert, server_key), None).await;
@@ -772,7 +769,7 @@ mod tests {
         // 4. A terminator that requires a client certificate accepts one from the authority
         //    and turns away a client without.
         let (_, _, server_cert, server_key) =
-            issue(&pki, "broker.test", ExtendedKeyUsagePurpose::ServerAuth);
+            issue(&pki, "localhost", ExtendedKeyUsagePurpose::ServerAuth);
         let mut roots = rustls::RootCertStore::empty();
         roots.add(pki.authority.der().clone()).unwrap();
         let task = terminator(front, backend, (server_cert, server_key), Some(roots)).await;

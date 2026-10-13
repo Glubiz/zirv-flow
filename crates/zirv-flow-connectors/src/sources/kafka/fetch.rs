@@ -194,6 +194,8 @@ struct ReadState<F> {
     stop_when_caught_up: bool,
     idle: Duration,
     finished: bool,
+    /// The starting positions were handed over.
+    announced: bool,
     /// Keeps the client and the relay alive as long as the stream.
     _keep: Box<dyn Any + Send>,
 }
@@ -208,8 +210,9 @@ impl<F> ReadState<F> {
     }
 }
 
-/// The batches of a read over `partitions`: one per pass that delivered something, then a last,
-/// possibly empty, one that carries the final positions and watermarks. Each batch's checkpoint
+/// The batches of a read over `partitions`: first the starting positions, then one per pass that
+/// delivered something, a heartbeat after each idle wait, and a last one with the final positions
+/// and watermarks. The heartbeats and the first and last batches hold no record. Each batch's checkpoint
 /// is the positions of all partitions after it. Ends at the plan's budget, or as soon as every
 /// partition is caught up when the plan says so. `keep` is held until the stream is dropped.
 pub(super) fn read_partitions<F>(
@@ -228,11 +231,19 @@ where
         stop_when_caught_up: plan.stop_when_caught_up,
         idle,
         finished: false,
+        announced: false,
         _keep: keep,
     };
     stream::unfold(state, |mut state| async move {
         if state.finished {
             return None;
+        }
+        if !state.announced {
+            // Where the read starts, before any fetch: the stored offsets, and the earliest
+            // offset of a partition that has none. A reader that commits only what it holds
+            // needs them to tell the two apart.
+            state.announced = true;
+            return Some((Ok(final_batch(&state)), state));
         }
         loop {
             let remaining = state.budget.saturating_sub(state.started.elapsed());
@@ -287,6 +298,9 @@ where
             }
             if state.partitions.iter().all(Partition::settled) || state.partitions.is_empty() {
                 sleep(state.idle.min(remaining)).await;
+                // Nothing came: a heartbeat with the positions and watermarks, so the reader
+                // can flush what it holds, report lag and notice the end of its budget.
+                return Some((Ok(final_batch(&state)), state));
             }
         }
     })
@@ -590,6 +604,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_first_batch_holds_the_starting_positions_and_no_record() {
+        let mut stored = Positions::default();
+        stored.set(0, PartitionPosition { next: 2, end: None });
+
+        let batches = collect(
+            vec![(0, Log::new(0, 4)), (1, Log::new(1, 3))],
+            stored,
+            ReadPlan::default(),
+        )
+        .await;
+
+        let first = batches[0].as_ref().unwrap();
+        assert!(first.records.is_empty() && first.refused.is_empty());
+        let positions = Positions::from_checkpoint(&first.checkpoint).unwrap();
+        assert_eq!(positions.get(0).unwrap().next, 2, "the stored offset");
+        assert_eq!(
+            positions.get(1).unwrap().next,
+            1,
+            "the earliest of a new partition"
+        );
+    }
+
+    #[tokio::test]
     async fn a_malformed_message_is_refused_and_the_partition_goes_on() {
         let log = Log::new(0, 3);
         let mut bad = message(1);
@@ -601,7 +638,11 @@ mod tests {
 
         let batches = collect(vec![(7, log)], Positions::default(), ReadPlan::default()).await;
 
-        let first = batches[0].as_ref().unwrap();
+        assert!(
+            batches[0].as_ref().unwrap().records.is_empty(),
+            "the starting positions come first"
+        );
+        let first = batches[1].as_ref().unwrap();
         assert_eq!(first.records.len(), 2);
         assert_eq!(first.refused.len(), 1);
         assert_eq!(first.refused[0].location, "partition 7 offset 1");
@@ -622,8 +663,13 @@ mod tests {
 
         assert!(started.elapsed() >= Duration::from_millis(60));
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(batches.len(), 1);
-        assert!(batches[0].as_ref().unwrap().records.is_empty());
+        // Idle passes beat, and the last batch is the final positions; none holds a record.
+        assert!(batches.len() >= 2, "{}", batches.len());
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.as_ref().unwrap().records.is_empty())
+        );
     }
 
     #[tokio::test]
@@ -636,7 +682,7 @@ mod tests {
 
         let batches = collect(vec![(0, log)], Positions::default(), ReadPlan::default()).await;
 
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].as_ref().unwrap_err(), &code("kafka_timeout"));
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[1].as_ref().unwrap_err(), &code("kafka_timeout"));
     }
 }

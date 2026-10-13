@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Starts the Kafka fixtures the broker tests need and prints the variables they read.
 #
-#   zf-kafka-redpanda   a Redpanda broker (plaintext), advertised as broker.test:$ZIRV_KAFKA_PORT
+#   zf-kafka-redpanda   a Redpanda broker (plaintext), advertised as localhost:$ZIRV_KAFKA_PORT
 #   zf-kafka-sasl       an Apache Kafka broker with SASL PLAIN, SCRAM-SHA-256 and SCRAM-SHA-512
-#                       on SASL_PLAINTEXT, advertised as broker.test:$ZIRV_KAFKA_SASL_PORT
+#                       on SASL_PLAINTEXT, advertised as localhost:$ZIRV_KAFKA_SASL_PORT
 #
-# The brokers advertise the name broker.test, which the tests resolve to 127.0.0.1 through an
-# injected lookup, so the same advertised address works for the test process on the host and
-# proves metadata-learned brokers go through the relay. Usage:
+# The brokers advertise the name localhost, so the address a broker names in its metadata is one
+# the test process on the host can dial. The connector tests resolve it through an injected
+# lookup (to prove metadata-learned brokers go through the egress relay); the job tests use the
+# system resolver. Usage:
 #
 #   eval "$(scripts/kafka-fixture.sh)"      # starts both, exports the variables
 #   scripts/kafka-fixture.sh stop           # removes the two containers it started
@@ -36,7 +37,7 @@ fi
     redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M \
     --overprovisioned --node-id 0 \
     --kafka-addr "internal://0.0.0.0:$PORT,tls://0.0.0.0:$TLS_BACKEND" \
-    --advertise-kafka-addr "internal://broker.test:$PORT,tls://broker.test:$TLS_FRONT" >/dev/null
+    --advertise-kafka-addr "internal://localhost:$PORT,tls://localhost:$TLS_FRONT" >/dev/null
 
   docker run -d --name zf-kafka-sasl -p "$SASL_PORT:$SASL_PORT" --entrypoint sh "$KAFKA_IMAGE" -c "
 set -e
@@ -46,7 +47,7 @@ node.id=1
 controller.quorum.voters=1@localhost:9094
 controller.listener.names=CONTROLLER
 listeners=INTERNAL://localhost:9095,SASL://0.0.0.0:$SASL_PORT,CONTROLLER://localhost:9094
-advertised.listeners=INTERNAL://localhost:9095,SASL://broker.test:$SASL_PORT
+advertised.listeners=INTERNAL://localhost:9095,SASL://localhost:$SASL_PORT
 listener.security.protocol.map=INTERNAL:PLAINTEXT,SASL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
 inter.broker.listener.name=INTERNAL
 sasl.enabled.mechanisms=PLAIN,SCRAM-SHA-256,SCRAM-SHA-512
@@ -81,8 +82,8 @@ exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties
 } >&2
 
 cat <<EOF
-export ZIRV_KAFKA_BROKER=broker.test:$PORT
-export ZIRV_KAFKA_SASL_BROKER=broker.test:$SASL_PORT
+export ZIRV_KAFKA_BROKER=localhost:$PORT
+export ZIRV_KAFKA_SASL_BROKER=localhost:$SASL_PORT
 export ZIRV_KAFKA_TLS_FRONT_PORT=$TLS_FRONT
 export ZIRV_KAFKA_TLS_BACKEND_PORT=$TLS_BACKEND
 EOF

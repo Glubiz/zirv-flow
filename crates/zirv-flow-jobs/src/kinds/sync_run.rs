@@ -32,8 +32,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::{
-    Checkpoint, Credential, Record, Registry, SourceContext, StreamConfig, StreamDescriptor,
-    StreamSettingsInput, SyncMode, validate_stream_settings,
+    Checkpoint, Credential, ErasedSource, Record, Refused, Registry, SourceContext, StreamConfig,
+    StreamDescriptor, StreamSettingsInput, SyncMode, validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{
@@ -42,12 +42,12 @@ use zirv_flow_core::mapping::{
 use zirv_flow_store::HmacKey;
 use zirv_flow_store::secrets::{self, OpenError};
 use zirv_flow_store::{
-    PgPool, ProfileRecord, ReconcileQueued, RunEnd, SYNC_DELETE_BY_SIGNAL, SYNC_DELETE_BY_SOURCE,
-    SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream, SweepOutcome, SweepUnit,
-    SyncBatch, SyncBatchOutcome, SyncCounts, SyncEvent, SyncLease, SyncReject, SyncUpsert,
-    commit_sync_batch, fail_run, find_source, find_stream_by_id, finish_run,
-    list_trait_definitions, queue_reconcile_run, queue_runs_for_source, run_trace, start_run,
-    sweep_exceeds_limit, sweep_unreached,
+    PartitionOffset, PgPool, ProfileRecord, ReconcileQueued, RunEnd, SYNC_DELETE_BY_SIGNAL,
+    SYNC_DELETE_BY_SOURCE, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
+    SweepOutcome, SweepUnit, SyncBatch, SyncBatchOutcome, SyncCounts, SyncEvent, SyncLease,
+    SyncReject, SyncRun, SyncUpsert, commit_sync_batch, fail_run, find_source, find_stream_by_id,
+    finish_run, list_trait_definitions, queue_reconcile_run, queue_runs_for_source, run_trace,
+    start_run, sweep_exceeds_limit, sweep_unreached,
 };
 
 use super::import_rows::Probe;
@@ -73,16 +73,16 @@ impl JobKind for SyncRunKind {
 }
 
 const CONFLICTED: JobError = JobError::new("the sync batch kept conflicting with another");
-const LEASE_LOST: JobError = JobError::new("the sync attempt lost its lease");
+pub(super) const LEASE_LOST: JobError = JobError::new("the sync attempt lost its lease");
 
 /// Why an attempt failed, and the code its run ends with should no attempt be left.
-struct Failure {
-    error: JobError,
-    code: &'static str,
+pub(super) struct Failure {
+    pub(super) error: JobError,
+    pub(super) code: &'static str,
 }
 
 impl Failure {
-    const fn job(error: JobError) -> Self {
+    pub(super) const fn job(error: JobError) -> Self {
         Self {
             error,
             code: "job_failed",
@@ -108,7 +108,7 @@ impl From<sqlx::Error> for Failure {
     }
 }
 
-fn id_in(payload: &Value, key: &str) -> Option<Uuid> {
+pub(super) fn id_in(payload: &Value, key: &str) -> Option<Uuid> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -236,16 +236,16 @@ async fn reconcile_firing(
 }
 
 #[derive(Clone, Copy)]
-struct Ids {
-    workspace: WorkspaceId,
-    source: Uuid,
-    stream: Uuid,
-    run: Uuid,
-    lease: SyncLease,
+pub(super) struct Ids {
+    pub(super) workspace: WorkspaceId,
+    pub(super) source: Uuid,
+    pub(super) stream: Uuid,
+    pub(super) run: Uuid,
+    pub(super) lease: SyncLease,
 }
 
 /// Ends the run with `code`, unless it ended already.
-async fn end_failed(pool: &PgPool, ids: Ids, code: &'static str) -> Result<(), Failure> {
+pub(super) async fn end_failed(pool: &PgPool, ids: Ids, code: &'static str) -> Result<(), Failure> {
     match fail_run(pool, ids.workspace, ids.run, ids.lease, code).await? {
         RunEnd::Ended => record_sync_run(RunOutcome::Failed, 0.0),
         RunEnd::Over => {}
@@ -255,7 +255,7 @@ async fn end_failed(pool: &PgPool, ids: Ids, code: &'static str) -> Result<(), F
 }
 
 /// What mapping needs besides the records.
-struct Planner<'a> {
+pub(super) struct Planner<'a> {
     mapping: &'a Mapping,
     catalog: &'a HashMap<String, TraitState>,
     /// The trait keys the registry marks non-PII.
@@ -263,8 +263,7 @@ struct Planner<'a> {
     declared: Vec<&'a str>,
     source: &'a str,
     stream: &'a str,
-    observed_at: OffsetDateTime,
-    trace: &'a zirv_flow_core::TraceContext,
+    pub(super) trace: &'a zirv_flow_core::TraceContext,
 }
 
 /// The parts of one unit of work.
@@ -340,7 +339,9 @@ impl Planner<'_> {
 
     /// Maps `records`: the accepted ones become profile records, the deleted ones keys to
     /// retract, and the others rejects with a masked sample.
-    fn plan(&self, records: Vec<Record>) -> Planned {
+    /// `observed_at` is when the records were seen: the run start for a pull run, so a resumed
+    /// run observes what the first attempt did; the gather time for a consumer.
+    fn plan(&self, records: Vec<Record>, observed_at: OffsetDateTime) -> Planned {
         let (records, duplicates) = last_occurrence_wins(records);
         let mut planned = Planned {
             duplicates,
@@ -380,7 +381,7 @@ impl Planner<'_> {
                         record_key: record.key,
                         identifiers: mapped.identifiers,
                         traits: mapped.traits,
-                        observed_at: self.observed_at,
+                        observed_at,
                         trace: self.trace.clone(),
                     },
                 }),
@@ -419,7 +420,7 @@ async fn load_traits(
 }
 
 /// Opens the credential of a source right before it is read.
-async fn open_credential(
+pub(super) async fn open_credential(
     ctx: &JobContext<'_>,
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -460,40 +461,66 @@ async fn commit_batch(pool: &PgPool, batch: &SyncBatch<'_>) -> Result<SyncBatchO
 }
 
 /// How the run came out of a unit of work.
-enum Unit {
+pub(super) enum Unit {
     Continue,
     /// The run is over: failed on its rejects, or cancelled.
     Stop,
 }
 
+/// What one unit of work holds.
+pub(super) struct Gathered {
+    pub(super) records: Vec<Record>,
+    /// Items the source refused to make records of.
+    pub(super) refused: Vec<Refused>,
+    /// The per-partition offsets that resume after the unit; empty for a pull run.
+    pub(super) offsets: Vec<PartitionOffset>,
+    /// When the records were seen: the run start for a pull run, the gather time for a consumer.
+    pub(super) observed_at: OffsetDateTime,
+}
+
 /// What a pass needs to commit units.
-struct Pass<'a> {
-    pool: &'a PgPool,
-    ids: Ids,
-    stream: &'a Stream,
-    planner: &'a Planner<'a>,
-    job: (Uuid, Uuid, i32),
-    started: Option<OffsetDateTime>,
-    probe: &'a Probe,
-    committed: usize,
+pub(super) struct Pass<'a> {
+    pub(super) pool: &'a PgPool,
+    pub(super) ids: Ids,
+    pub(super) stream: &'a Stream,
+    pub(super) planner: &'a Planner<'a>,
+    pub(super) job: (Uuid, Uuid, i32),
+    pub(super) started: Option<OffsetDateTime>,
+    pub(super) probe: &'a Probe,
+    pub(super) committed: usize,
     /// The run is a reconciliation: it reads keys only and applies nothing.
-    reconcile: bool,
+    pub(super) reconcile: bool,
     /// Redacts the events' properties.
-    redaction_key: Option<Arc<HmacKey>>,
+    pub(super) redaction_key: Option<Arc<HmacKey>>,
 }
 
 impl Pass<'_> {
     /// Maps and commits what was gathered, with the checkpoint that resumes after it.
-    async fn commit(
+    pub(super) async fn commit(
         &mut self,
-        records: Vec<Record>,
+        gathered: Gathered,
         checkpoint: &Checkpoint,
     ) -> Result<Unit, Failure> {
-        let planned = if self.reconcile {
+        let Gathered {
+            records,
+            refused,
+            offsets,
+            observed_at,
+        } = gathered;
+        let mut planned = if self.reconcile {
             self.planner.plan_keys(records)
         } else {
-            self.planner.plan(records)
+            self.planner.plan(records, observed_at)
         };
+        // A message the source refused is a reject of the run, by its place and a static code:
+        // no payload byte is stored.
+        planned
+            .rejected
+            .extend(refused.into_iter().map(|item| SyncReject {
+                reasons: vec![(item.location.clone(), item.code)],
+                record_key: item.location,
+                sample: serde_json::json!({"properties": {}, "masked": []}),
+            }));
         let source = self.ids.source.to_string();
         let batch = SyncBatch {
             workspace: self.ids.workspace,
@@ -505,7 +532,7 @@ impl Pass<'_> {
             lease_token: self.job.1,
             attempt: self.job.2,
             trace: self.planner.trace,
-            received_at: self.planner.observed_at,
+            received_at: observed_at,
             redaction_key: self.redaction_key.as_deref(),
             upserts: &planned.upserts,
             deleted: &planned.deleted,
@@ -515,7 +542,7 @@ impl Pass<'_> {
             checkpoint: &checkpoint.0,
             // A reconciliation never moves the stream's cursor.
             incremental: !self.reconcile && self.stream.sync_mode == SyncMode::Incremental.as_str(),
-            offsets: &[],
+            offsets: &offsets,
             singly: false,
         };
         self.probe.before_commit().await;
@@ -609,41 +636,90 @@ impl Pass<'_> {
         }
     }
 
-    fn seconds(&self) -> f64 {
+    pub(super) fn seconds(&self) -> f64 {
         self.started.map_or(0.0, |at| {
             (OffsetDateTime::now_utc() - at).as_seconds_f64().max(0.0)
         })
     }
 }
 
-async fn run_pass(
-    ctx: &mut JobContext<'_>,
+/// Everything a run needs once it is started, whichever job works it: the source, the stream,
+/// the mapping checked against the stream as it is now, the trait registry and the source's
+/// driver and context.
+pub(super) struct Prepared {
+    pub(super) source: zirv_flow_store::Source,
+    pub(super) stream: Stream,
+    mapping: Mapping,
+    descriptor: StreamDescriptor,
+    pub(super) mode: SyncMode,
+    catalog: HashMap<String, TraitState>,
+    plain: HashSet<String>,
+    pub(super) redaction_key: Option<Arc<HmacKey>>,
+    pub(super) trace: zirv_flow_core::TraceContext,
+    pub(super) source_text: String,
+    pub(super) driver: &'static dyn ErasedSource,
+    pub(super) context: SourceContext,
+    pub(super) config: StreamConfig,
+}
+
+impl Prepared {
+    pub(super) fn planner(&self) -> Planner<'_> {
+        Planner {
+            mapping: &self.mapping,
+            catalog: &self.catalog,
+            plain: &self.plain,
+            declared: self
+                .descriptor
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect(),
+            source: &self.source_text,
+            stream: &self.stream.name,
+            trace: &self.trace,
+        }
+    }
+}
+
+/// What preparing a run came to.
+pub(super) enum Prep {
+    Ready(Box<Prepared>),
+    /// The run was ended as failed, with its code: there is nothing to read.
+    Ended,
+}
+
+/// Loads and checks what a started run needs, and ends the run with a code when the source, the
+/// stream, its mapping or its settings are not usable.
+pub(super) async fn prepare(
+    ctx: &JobContext<'_>,
     pool: &PgPool,
     ids: Ids,
-    probe: &Probe,
-) -> Result<(), Failure> {
-    // Cancelled, or finished by an earlier attempt: nothing to do.
-    let Some(run) = start_run(pool, ids.workspace, ids.run).await? else {
-        return Ok(());
-    };
+    run: &SyncRun,
+) -> Result<Prep, Failure> {
+    macro_rules! fail {
+        ($code:expr) => {{
+            end_failed(pool, ids, $code).await?;
+            return Ok(Prep::Ended);
+        }};
+    }
     let Some(source) = find_source(pool, ids.workspace, ids.source).await? else {
-        return end_failed(pool, ids, "source_missing").await;
+        fail!("source_missing");
     };
     let Some(stream) = find_stream_by_id(pool, ids.workspace, ids.source, ids.stream).await? else {
-        return end_failed(pool, ids, "stream_missing").await;
+        fail!("stream_missing");
     };
     let Some(mapping_json) = &stream.mapping else {
-        return end_failed(pool, ids, "stream_not_mapped").await;
+        fail!("stream_not_mapped");
     };
     let Ok(mapping) = serde_json::from_value::<Mapping>(mapping_json.clone()) else {
-        return end_failed(pool, ids, "mapping_invalid").await;
+        fail!("mapping_invalid");
     };
 
     // The residual of the source review: settings can outlive the descriptor they were set
     // against, so they are checked again against the one discovery last reported.
     let Ok(descriptor) = serde_json::from_value::<StreamDescriptor>(stream.discovered.clone())
     else {
-        return end_failed(pool, ids, "stream_settings_invalid").await;
+        fail!("stream_settings_invalid");
     };
     let mode = match validate_stream_settings(
         &descriptor,
@@ -655,10 +731,10 @@ async fn run_pass(
         },
     ) {
         Ok(mode) => mode,
-        Err(_) => return end_failed(pool, ids, "stream_settings_invalid").await,
+        Err(_) => fail!("stream_settings_invalid"),
     };
     let Some(driver) = Registry::built_in().get(&source.kind) else {
-        return end_failed(pool, ids, "source_kind_unavailable").await;
+        fail!("source_kind_unavailable");
     };
 
     let (catalog, plain) = load_traits(pool, ids.workspace).await?;
@@ -671,10 +747,10 @@ async fn run_pass(
         .map(|field| field.name.clone())
         .collect();
     let Ok(header) = Header::new(fields) else {
-        return end_failed(pool, ids, "mapping_invalid").await;
+        fail!("mapping_invalid");
     };
     if validate_paths(&mapping, &header, &catalog).is_err() {
-        return end_failed(pool, ids, "mapping_invalid").await;
+        fail!("mapping_invalid");
     }
     // An event's idempotency rests on the record key, so the key must be a real one, and its
     // properties are redacted with the worker's key.
@@ -683,29 +759,72 @@ async fn run_pass(
         .and_then(|settings| settings.redaction_key.clone());
     if mapping.has_event() {
         if stream.primary_key.is_empty() {
-            return end_failed(pool, ids, "stream_not_keyed").await;
+            fail!("stream_not_keyed");
         }
         if redaction_key.is_none() {
-            return end_failed(pool, ids, "event_key_unavailable").await;
+            fail!("event_key_unavailable");
         }
     }
-    let trace = run_trace(&run);
-    let source_text = ids.source.to_string();
-    let planner = Planner {
-        mapping: &mapping,
-        catalog: &catalog,
-        plain: &plain,
-        declared: descriptor
-            .fields
-            .iter()
-            .map(|field| field.name.as_str())
-            .collect(),
-        source: &source_text,
-        stream: &stream.name,
-        // The time the run was started, so a resumed run observes what the first attempt did.
-        observed_at: run.started_at.unwrap_or(run.created_at),
-        trace: &trace,
+    let config = StreamConfig {
+        name: stream.name.clone(),
+        sync_mode: mode,
+        cursor_field: stream.cursor_field.clone(),
+        primary_key: stream.primary_key.clone(),
     };
+    let context = SourceContext::new(
+        ctx.egress().clone(),
+        HttpLimits::default(),
+        driver.spec().kind,
+        ids.source.to_string(),
+        Arc::clone(ctx.rate_limits()),
+    )
+    .map(|context| context.with_rate_limit(driver.spec().rate_limit))
+    .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    Ok(Prep::Ready(Box::new(Prepared {
+        source,
+        stream,
+        mapping,
+        descriptor,
+        mode,
+        catalog,
+        plain,
+        redaction_key,
+        trace: run_trace(run),
+        source_text: ids.source.to_string(),
+        driver,
+        context,
+        config,
+    })))
+}
+
+async fn run_pass(
+    ctx: &mut JobContext<'_>,
+    pool: &PgPool,
+    ids: Ids,
+    probe: &Probe,
+) -> Result<(), Failure> {
+    // Cancelled, or finished by an earlier attempt: nothing to do.
+    let Some(run) = start_run(pool, ids.workspace, ids.run).await? else {
+        return Ok(());
+    };
+    let prepared = match prepare(ctx, pool, ids, &run).await? {
+        Prep::Ready(prepared) => prepared,
+        Prep::Ended => return Ok(()),
+    };
+    let Prepared {
+        source,
+        stream,
+        mode,
+        redaction_key,
+        driver,
+        context: source_context,
+        config,
+        ..
+    } = prepared.as_ref();
+    let planner = prepared.planner();
+    // The time the run was started, so a resumed run observes what the first attempt did.
+    let observed_at = run.started_at.unwrap_or(run.created_at);
+    let mode = *mode;
 
     // A run resumes from its own checkpoint; an incremental stream starts from the cursor of
     // the last run; a full refresh and a reconciliation start from the beginning.
@@ -719,38 +838,29 @@ async fn run_pass(
                 .flatten()
         })
         .map(Checkpoint);
-    let config = StreamConfig {
-        name: stream.name.clone(),
-        sync_mode: mode,
-        cursor_field: stream.cursor_field.clone(),
-        primary_key: stream.primary_key.clone(),
-    };
-    let source_context = SourceContext::new(
-        ctx.egress().clone(),
-        HttpLimits::default(),
-        driver.spec().kind,
-        ids.source.to_string(),
-        Arc::clone(ctx.rate_limits()),
-    )
-    .map(|context| context.with_rate_limit(driver.spec().rate_limit))
-    .map_err(|_| JobError::new("the outbound client could not be built"))?;
 
     let mut pass = Pass {
         pool,
         ids,
-        stream: &stream,
+        stream,
         planner: &planner,
         job: (ctx.job_id(), ctx.lease_token(), ctx.attempts()),
         started: run.started_at,
         probe,
         committed: 0,
         reconcile,
-        redaction_key,
+        redaction_key: redaction_key.clone(),
+    };
+    let gather = |records: Vec<Record>| Gathered {
+        records,
+        refused: Vec::new(),
+        offsets: Vec::new(),
+        observed_at,
     };
 
     // The credential is opened right before the read and dropped with it.
     let credential = open_credential(ctx, pool, ids.workspace, source.credential_secret_id).await?;
-    let mut batches = driver.read(&source_context, &source.config, &credential, &config, start);
+    let mut batches = driver.read(source_context, &source.config, &credential, config, start);
     let mut gathered: Vec<Record> = Vec::new();
     let mut pending: Option<Checkpoint> = None;
     loop {
@@ -765,7 +875,7 @@ async fn run_pass(
                 if gathered.len() >= SYNC_BATCH_RECORDS {
                     let checkpoint = pending.take().unwrap_or(Checkpoint(Value::Null));
                     if let Unit::Stop = pass
-                        .commit(std::mem::take(&mut gathered), &checkpoint)
+                        .commit(gather(std::mem::take(&mut gathered)), &checkpoint)
                         .await?
                     {
                         return Ok(());
@@ -780,7 +890,7 @@ async fn run_pass(
         }
     }
     if let Some(checkpoint) = pending
-        && let Unit::Stop = pass.commit(gathered, &checkpoint).await?
+        && let Unit::Stop = pass.commit(gather(gathered), &checkpoint).await?
     {
         return Ok(());
     }
@@ -788,7 +898,7 @@ async fn run_pass(
     // the source no longer lists. Every other way out of the pass returned above, so a failed,
     // cancelled or threshold-stopped run sweeps nothing.
     if (reconcile || mode == SyncMode::FullRefresh)
-        && let Unit::Stop = pass.sweep(&source_text, &stream).await?
+        && let Unit::Stop = pass.sweep(&prepared.source_text, stream).await?
     {
         return Ok(());
     }
@@ -804,7 +914,7 @@ async fn run_pass(
     Ok(())
 }
 
-fn source_failure(message: &'static str) -> Failure {
+pub(super) fn source_failure(message: &'static str) -> Failure {
     Failure {
         error: JobError::new(message),
         code: "source_error",
@@ -1860,7 +1970,6 @@ mod tests {
             declared: vec!["email", "name"],
             source: "s",
             stream: "stream_1",
-            observed_at: OffsetDateTime::now_utc(),
             trace,
         }
     }
@@ -1893,6 +2002,36 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_carries_the_place_of_each_message_and_the_time_it_was_given() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let mut message = row("a", "a@example.com", false);
+        message.occurrence = Some("2/17".into());
+        let tombstone = Record {
+            key: "gone".into(),
+            data: Value::Null,
+            deleted: true,
+            occurrence: Some("2/18".into()),
+        };
+
+        let planned = planner.plan(vec![message, tombstone], at);
+
+        assert_eq!(planned.upserts.len(), 1);
+        assert_eq!(planned.upserts[0].occurrence.as_deref(), Some("2/17"));
+        assert_eq!(planned.upserts[0].record.observed_at, at);
+        assert_eq!(
+            planned.deleted,
+            vec![("gone".to_owned(), SYNC_DELETE_BY_SOURCE)],
+            "a tombstone deletes without a mapped value"
+        );
+        assert!(planned.rejected.is_empty());
+    }
+
+    #[test]
     fn the_last_occurrence_of_a_key_in_a_unit_wins() {
         let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
         let catalog = HashMap::new();
@@ -1901,34 +2040,46 @@ mod tests {
         let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
 
         // Deleted, then live: the key stays live and is applied once.
-        let planned = planner.plan(vec![
-            row("a", "a@example.com", true),
-            row("b", "b@example.com", false),
-            row("a", "a@example.com", false),
-        ]);
+        let planned = planner.plan(
+            vec![
+                row("a", "a@example.com", true),
+                row("b", "b@example.com", false),
+                row("a", "a@example.com", false),
+            ],
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(shape(&planned), (vec!["b", "a"], vec![], vec![], vec![]));
         assert_eq!(planned.duplicates, 1, "a dropped duplicate was still read");
 
         // Live, then deleted: the key is removed and not applied.
-        let planned = planner.plan(vec![
-            row("a", "a@example.com", false),
-            row("a", "a@example.com", false),
-            row("a", "a@example.com", true),
-        ]);
+        let planned = planner.plan(
+            vec![
+                row("a", "a@example.com", false),
+                row("a", "a@example.com", false),
+                row("a", "a@example.com", true),
+            ],
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(shape(&planned), (vec![], vec!["a"], vec![], vec![]));
 
         // Deleted, then rejected: the rejected key is kept and counted as seen, not deleted.
-        let planned = planner.plan(vec![
-            row("a", "a@example.com", true),
-            row("a", "not-an-email", false),
-        ]);
+        let planned = planner.plan(
+            vec![
+                row("a", "a@example.com", true),
+                row("a", "not-an-email", false),
+            ],
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(shape(&planned), (vec![], vec![], vec!["a"], vec![]));
 
         // Rejected, then live: the key is applied and not rejected.
-        let planned = planner.plan(vec![
-            row("a", "not-an-email", false),
-            row("a", "a@example.com", false),
-        ]);
+        let planned = planner.plan(
+            vec![
+                row("a", "not-an-email", false),
+                row("a", "a@example.com", false),
+            ],
+            OffsetDateTime::now_utc(),
+        );
         assert_eq!(shape(&planned), (vec!["a"], vec![], vec![], vec![]));
     }
 
@@ -1968,7 +2119,6 @@ mod tests {
             declared: vec!["email", "name", "meta"],
             source: "s",
             stream: "stream_1",
-            observed_at: OffsetDateTime::now_utc(),
             trace: &trace,
         };
         let record = |key: &str, deleted: bool| Record {
@@ -1978,7 +2128,10 @@ mod tests {
             occurrence: None,
         };
 
-        let planned = planner.plan(vec![record("gone", true), record("kept", false)]);
+        let planned = planner.plan(
+            vec![record("gone", true), record("kept", false)],
+            OffsetDateTime::now_utc(),
+        );
 
         assert_eq!(
             planned.deleted,
@@ -2005,7 +2158,6 @@ mod tests {
             declared: vec!["email", "name"],
             source: "s",
             stream: "stream_1",
-            observed_at: OffsetDateTime::now_utc(),
             trace: &trace,
         };
         let record = Record {
@@ -2015,7 +2167,7 @@ mod tests {
             occurrence: None,
         };
 
-        let planned = planner.plan(vec![record]);
+        let planned = planner.plan(vec![record], OffsetDateTime::now_utc());
 
         assert!(planned.upserts.is_empty());
         assert_eq!(planned.rejected.len(), 1);
