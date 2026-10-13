@@ -1,5 +1,4 @@
 //! Fixtures for the tests of sync runs: a workspace with a source, a mapped stream, a queued run
-#![cfg(test)]
 //! and the claimed job that works it.
 
 use std::time::Duration;
@@ -186,5 +185,15 @@ pub(crate) fn batch<'a>(
         checkpoint,
         incremental: false,
         singly: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fixture_mapping_has_an_identifier_column() {
+        assert_eq!(mapping()["columns"][0]["column"], "email");
     }
 }
