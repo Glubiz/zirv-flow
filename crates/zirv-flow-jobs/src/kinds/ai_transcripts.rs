@@ -1,10 +1,14 @@
-//! `maintenance.ai_transcripts`: deletes AI transcripts past their expiry (ruling OQ-26). An
-//! instance-level job that an hourly schedule enqueues. It deletes in bounded batches and a
-//! rerun finds nothing left for the batches that completed, so it is idempotent.
+//! `maintenance.ai_transcripts`: deletes AI transcripts past their expiry (ruling OQ-26), and the
+//! assistant's drafts past theirs (seven days after they were made). An instance-level job that an
+//! hourly schedule enqueues. It deletes in bounded batches and a rerun finds nothing left for the
+//! batches that completed, so it is idempotent.
 
 use serde_json::Value;
 use tracing::info;
-use zirv_flow_store::{TRANSCRIPT_PURGE_BATCH, database_now, purge_expired_ai_transcripts};
+use zirv_flow_store::{
+    DRAFT_PURGE_BATCH, TRANSCRIPT_PURGE_BATCH, database_now, purge_expired_ai_drafts,
+    purge_expired_ai_transcripts,
+};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -27,7 +31,15 @@ impl JobKind for AiTranscripts {
                 break;
             }
         }
-        info!(deleted, "AI transcript retention ran");
+        let mut drafts = 0;
+        for _ in 0..MAX_BATCHES {
+            let batch = purge_expired_ai_drafts(ctx.conn(), now, DRAFT_PURGE_BATCH).await?;
+            drafts += batch;
+            if batch < DRAFT_PURGE_BATCH as u64 {
+                break;
+            }
+        }
+        info!(deleted, drafts, "AI transcript and draft retention ran");
         Ok(())
     }
 }
@@ -118,6 +130,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, [json!({"n": 2})]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_hourly_run_also_purges_expired_drafts(pool: PgPool) {
+        use zirv_flow_core::Email;
+        use zirv_flow_store::{
+            DraftKind, DraftStatus, NewAiDraft, NewSource, create_source, create_user,
+            insert_ai_draft,
+        };
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("ours").unwrap();
+        let slug = Slug::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let user = create_user(
+            &pool,
+            &Email::parse("ada@example.com").unwrap(),
+            None,
+            false,
+        )
+        .await
+        .unwrap()
+        .id;
+        let config = json!({});
+        let source = Uuid::now_v7();
+        create_source(
+            &pool,
+            ws,
+            &NewSource {
+                id: source,
+                kind: "fake",
+                name: "crm",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let now = OffsetDateTime::now_utc();
+        let content = json!({"columns": []});
+        let mut connection = pool.acquire().await.unwrap();
+        let mut ids = Vec::new();
+        for offset in [-1_i64, 7] {
+            let id = Uuid::now_v7();
+            ids.push(id);
+            insert_ai_draft(
+                &mut connection,
+                &NewAiDraft {
+                    id,
+                    workspace_id: ws,
+                    user_id: user,
+                    kind: DraftKind::Mapping,
+                    source_id: Some(source),
+                    stream_name: Some("contacts"),
+                    status: DraftStatus::Valid,
+                    content: Some(&content),
+                    base_digest: None,
+                    expires_at: now + time::Duration::days(offset),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        drop(connection);
+
+        for _ in 0..2 {
+            let mut new = NewJob::new(AiTranscripts::KIND, TraceContext::root(Cause::api("req")));
+            new.payload = json!({});
+            zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+            let claimed = zirv_flow_store::claim_job(
+                &pool,
+                "w",
+                &[AiTranscripts::KIND],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed);
+            AiTranscripts
+                .run(&mut ctx, claimed.payload.clone())
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+
+        let left: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM ai_drafts")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [ids[1]], "only the draft that expired is gone");
     }
 
     #[sqlx::test]
