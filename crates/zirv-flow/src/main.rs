@@ -622,6 +622,7 @@ fn http_state(
         .with_import_limits(config.import_limits())
         .with_explorer_limits(config.explorer_limits())
         .with_egress_policy(config.egress_policy())
+        .with_public_url(config.public_url())
         .with_ai_config(config.ai_config());
     if let Some(secrets) = secrets {
         state = state

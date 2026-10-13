@@ -955,6 +955,7 @@ pub(super) mod tests {
                     cursor_field: None,
                     primary_key: &[],
                     descriptor: &descriptor,
+                    suggested_mapping: None,
                 },
                 crate::DiscoveredStream {
                     name: "unmapped",
@@ -962,6 +963,7 @@ pub(super) mod tests {
                     cursor_field: None,
                     primary_key: &[],
                     descriptor: &descriptor,
+                    suggested_mapping: None,
                 },
             ],
         )
@@ -1202,6 +1204,7 @@ pub(super) mod tests {
                 cursor_field: None,
                 primary_key: &[],
                 descriptor: &descriptor,
+                suggested_mapping: None,
             })
             .collect();
         let found = crate::upsert_discovered_streams(&mut tx, ws, source, &streams)

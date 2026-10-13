@@ -1,5 +1,6 @@
 import { SelectField, TextAreaField, TextField } from "../../ui";
 import type { FieldSpec, Values } from "./labels";
+import { ManifestEditor } from "./ManifestEditor";
 import { QueriesField } from "./QueriesField";
 
 interface FieldInputsProps {
@@ -7,6 +8,11 @@ interface FieldInputsProps {
   values: Values;
   onChange: (key: string, value: string) => void;
   disabled?: boolean;
+  /** The source type being filled in, which decides how a JSON setting is edited. */
+  kind?: string;
+  workspaceId?: string;
+  /** The saved source, once there is one. */
+  sourceId?: string;
 }
 
 function inputType(field: FieldSpec): "text" | "url" | "number" | "password" {
@@ -18,7 +24,15 @@ function inputType(field: FieldSpec): "text" | "url" | "number" | "password" {
  * The form of a source type, rendered from its field specs. A secret field is a password input
  * that is never filled in: the server does not return credentials, so there is nothing to show.
  */
-export function FieldInputs({ fields, values, onChange, disabled = false }: FieldInputsProps) {
+export function FieldInputs({
+  fields,
+  values,
+  onChange,
+  disabled = false,
+  kind,
+  workspaceId = "",
+  sourceId,
+}: FieldInputsProps) {
   return (
     <>
       {fields.map((field) => {
@@ -47,6 +61,33 @@ export function FieldInputs({ fields, values, onChange, disabled = false }: Fiel
               hint={field.help || undefined}
               value={value}
               rows={6}
+              mono
+              spellCheck={false}
+              disabled={disabled}
+              onChange={(event) => onChange(field.key, event.target.value)}
+            />
+          );
+        }
+        if (field.kind === "json") {
+          // The manifest of an HTTP source has an editor of its own; any other JSON setting is text.
+          return kind === "http" ? (
+            <ManifestEditor
+              key={field.key}
+              label={label}
+              hint={field.help || undefined}
+              value={value}
+              workspaceId={workspaceId}
+              sourceId={sourceId}
+              disabled={disabled}
+              onChange={(next) => onChange(field.key, next)}
+            />
+          ) : (
+            <TextAreaField
+              key={field.key}
+              label={label}
+              hint={field.help || undefined}
+              value={value}
+              rows={10}
               mono
               spellCheck={false}
               disabled={disabled}

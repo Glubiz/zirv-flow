@@ -7,7 +7,6 @@ use hashbrown::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
@@ -16,7 +15,7 @@ use uuid::Uuid;
 use zirv_flow_connectors::sources::{Record, StreamConfig, SyncMode};
 use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState};
 
-use super::actions::{CALL_TIMEOUT, prepare, timed_out, upstream};
+use super::actions::{prepare, read_sample};
 use super::streams::{checked_mapping, descriptor_of, trait_catalog};
 use super::{invalid, is_push};
 use crate::AppState;
@@ -267,32 +266,8 @@ pub(crate) async fn preview(
         cursor_field: None,
         primary_key: stream.primary_key.clone(),
     };
-    let wanted = limit as usize;
-    let read = async {
-        let mut batches = call.driver.read(
-            &call.context,
-            &call.source.config,
-            &call.credential,
-            &config,
-            None,
-        );
-        let mut records: Vec<Record> = Vec::new();
-        // One more than shown, to know whether the stream has more.
-        while records.len() <= wanted {
-            match batches.next().await {
-                Some(Ok(batch)) => records.extend(batch.records),
-                Some(Err(error)) => return Err(error),
-                None => break,
-            }
-        }
-        Ok(records)
-    };
-    let mut records = tokio::time::timeout(CALL_TIMEOUT, read)
-        .await
-        .map_err(|_| timed_out())?
-        .map_err(upstream)?;
-    let truncated = records.len() > wanted;
-    records.truncate(wanted);
+    let (records, truncated) =
+        read_sample(&call, &call.source.config, &config, limit as usize).await?;
     let declared: Vec<&str> = descriptor
         .fields
         .iter()

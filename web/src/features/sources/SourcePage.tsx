@@ -1,12 +1,12 @@
-import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useSourceAccess } from "./access";
 import { EditSourceDialog } from "./EditSourceDialog";
 import { FreshnessBadge } from "./FreshnessBadge";
-import { isPush, kindName, plural, showValue, type Stream } from "./labels";
+import { describeJson, isPush, kindName, oauthReasonText, plural, showValue, type Stream } from "./labels";
 import { WebhookPanel } from "./WebhookPanel";
 import { RunsPanel } from "./RunsPanel";
 import { StreamsPanel } from "./StreamsPanel";
@@ -42,6 +42,16 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [runsVersion, setRunsVersion] = useState(0);
+  const [params, setParams] = useSearchParams();
+  // What the consent that just returned here came to; read once, then taken out of the address.
+  const [returned] = useState(() => ({ outcome: params.get("oauth"), reason: params.get("reason") }));
+  useEffect(() => {
+    if (!params.has("oauth") && !params.has("reason")) return;
+    const rest = new URLSearchParams(params);
+    rest.delete("oauth");
+    rest.delete("reason");
+    setParams(rest, { replace: true });
+  }, [params, setParams]);
 
   async function run(task: () => Promise<void>) {
     setBusy(true);
@@ -73,6 +83,13 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
       const found = await unwrap(client.POST("/api/v1/workspaces/{ws}/sources/{id}/discover", path));
       setNotice(`Found ${plural(found.length, "stream", "streams")}.`);
       streams.reload();
+    });
+
+  /** Sends the browser to the provider's consent page; it comes back with `?oauth=`. */
+  const connect = () =>
+    run(async () => {
+      const started = await unwrap(client.POST("/api/v1/workspaces/{ws}/sources/{id}/oauth/start", path));
+      window.location.assign(started.authorization_url);
     });
 
   const remove = () =>
@@ -122,6 +139,11 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                       <Button onClick={() => void test()} disabled={busy}>
                         Test connection
                       </Button>
+                      {data.oauth.required ? (
+                        <Button onClick={() => void connect()} disabled={busy}>
+                          {data.oauth.connected ? "Reconnect account" : "Connect account"}
+                        </Button>
+                      ) : null}
                       <Button onClick={() => setEditing(true)} disabled={kind === null}>
                         Edit
                       </Button>
@@ -137,6 +159,14 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                   ) : null
                 }
               />
+              {returned.outcome === "connected" ? (
+                <p className="notice" role="status">
+                  The account is connected. Test the connection, then run the source.
+                </p>
+              ) : null}
+              {returned.outcome === "failed" ? (
+                <InlineError title="Connecting the account failed" detail={oauthReasonText(returned.reason)} />
+              ) : null}
               {notice ? (
                 <p className="notice" role="status">
                   {notice}
@@ -177,9 +207,23 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                   {Object.entries(data.config).map(([key, value]) => (
                     <div key={key} className="fact">
                       <dt>{kind?.config_fields.find((field) => field.key === key)?.label ?? key}</dt>
-                      <dd>{showValue(value)}</dd>
+                      <dd>
+                        {kind?.config_fields.find((field) => field.key === key)?.kind === "json"
+                          ? describeJson(value)
+                          : showValue(value)}
+                      </dd>
                     </div>
                   ))}
+                  {data.oauth.required ? (
+                    <div className="fact">
+                      <dt>Account</dt>
+                      <dd>
+                        {data.oauth.connected && data.oauth.connected_at
+                          ? `Connected ${formatDateTime(data.oauth.connected_at)}`
+                          : "Not connected"}
+                      </dd>
+                    </div>
+                  ) : null}
                   {(kind?.credential_fields ?? []).map((field) => (
                     <div key={field.key} className="fact">
                       <dt>{field.label}</dt>

@@ -233,6 +233,7 @@ fn descriptor() -> Result<serde_json::Value, ApiError> {
         sync_modes: vec![SyncMode::FullRefresh],
         default_cursor_field: None,
         default_primary_key: Vec::new(),
+        suggested_mapping: None,
     })
     .map_err(|_| ApiError::internal())
 }
@@ -318,6 +319,7 @@ pub(crate) async fn create_webhook(
             cursor_field: None,
             primary_key: &[],
             descriptor: &descriptor,
+            suggested_mapping: None,
         }],
     )
     .await?

@@ -33,7 +33,7 @@ use uuid::Uuid;
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::{
     Checkpoint, Credential, ErasedSource, Record, Refused, Registry, SourceContext, StreamConfig,
-    StreamDescriptor, StreamSettingsInput, SyncMode, validate_stream_settings,
+    StreamDescriptor, StreamSettingsInput, SyncMode, validate_config, validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{
@@ -736,6 +736,10 @@ pub(super) async fn prepare(
     let Some(driver) = Registry::built_in().get(&source.kind) else {
         fail!("source_kind_unavailable");
     };
+    // The settings can outlive the rules they were saved under: a manifest is checked again.
+    if validate_config(driver.spec(), &source.config).is_err() {
+        fail!("source_config_invalid");
+    }
 
     let (catalog, plain) = load_traits(pool, ids.workspace).await?;
 
@@ -778,7 +782,7 @@ pub(super) async fn prepare(
         ids.source.to_string(),
         Arc::clone(ctx.rate_limits()),
     )
-    .map(|context| context.with_rate_limit(driver.spec().rate_limit))
+    .map(|context| context.with_rate_limit(driver.rate_limit(&source.config)))
     .map_err(|_| JobError::new("the outbound client could not be built"))?;
     Ok(Prep::Ready(Box::new(Prepared {
         source,
@@ -859,8 +863,20 @@ async fn run_pass(
     };
 
     // The credential is opened right before the read and dropped with it.
-    let credential = open_credential(ctx, pool, ids.workspace, source.credential_secret_id).await?;
-    let mut batches = driver.read(source_context, &source.config, &credential, config, start);
+    let mut credential =
+        open_credential(ctx, pool, ids.workspace, source.credential_secret_id).await?;
+    // An account connected by consent: its tokens seed the context, and refreshes are stored.
+    let source_context = super::sync_tokens::prepare(
+        pool,
+        ctx.keyring(),
+        ids.workspace,
+        source,
+        &mut credential,
+        source_context.clone(),
+    )
+    .await
+    .map_err(|reason| Failure::job(JobError::new(reason)))?;
+    let mut batches = driver.read(&source_context, &source.config, &credential, config, start);
     let mut gathered: Vec<Record> = Vec::new();
     let mut pending: Option<Checkpoint> = None;
     loop {
@@ -1063,6 +1079,7 @@ mod tests {
                 cursor_field: cursor,
                 primary_key: &key,
                 descriptor: json,
+                suggested_mapping: None,
             })
             .collect();
         let mut tx = begin(pool).await.unwrap();
@@ -2363,6 +2380,7 @@ mod tests {
                     cursor_field: cursor,
                     primary_key: &key,
                     descriptor: json,
+                    suggested_mapping: None,
                 })
                 .collect();
             let mut tx = begin(&env.pool).await.unwrap();
@@ -3715,6 +3733,7 @@ mod tests {
                 cursor_field: None,
                 primary_key: &key,
                 descriptor: &descriptor,
+                suggested_mapping: None,
             }],
         )
         .await
@@ -4101,5 +4120,762 @@ mod tests {
         assert_eq!(run.error_code.as_deref(), Some("list_missing"));
         assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
         assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+    }
+
+    // The http source end to end: a real `http` source with an OAuth2 authorization-code
+    // account against a local API.
+
+    mod http {
+        use std::sync::Mutex;
+
+        use axum::extract::RawQuery;
+        use axum::http::{HeaderValue, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use zirv_flow_connectors::runtime::RateLimits;
+        use zirv_flow_connectors::sources::{active_binding, seed_refresh_token};
+        use zirv_flow_core::{HmacRoot, SecretBytes, SecretString};
+        use zirv_flow_store::{StoredTokens, load_tokens};
+
+        use super::*;
+        use crate::kinds::sync_tokens::from_stored;
+
+        const MANIFEST: &str = include_str!(
+            "../../../zirv-flow-connectors/tests/fixtures/manifests/cursor_oauth2_code.json"
+        );
+
+        struct Api {
+            records: Mutex<Vec<Value>>,
+            valid_access: Mutex<String>,
+            valid_refresh: Mutex<String>,
+            refreshes: AtomicUsize,
+            data_requests: AtomicUsize,
+            revoke_at: AtomicUsize,
+            rate_limit_once: Mutex<bool>,
+            queries: Mutex<Vec<String>>,
+        }
+
+        fn contact(id: u32, status: &str, day: u32) -> Value {
+            json!({
+                "id": format!("c{id}"),
+                "email": format!("person{id}@example.com"),
+                "updated_at": format!("2026-01-{day:02}T00:00:00Z"),
+                "status": status,
+            })
+        }
+
+        /// The pairs of a form or a query, with the percent-escapes the runtime writes decoded.
+        fn params(query: &Option<String>) -> HashMap<String, String> {
+            let decode = |text: &str| {
+                let bytes = text.replace('+', " ").into_bytes();
+                let mut out = Vec::new();
+                let mut at = 0;
+                while at < bytes.len() {
+                    if bytes[at] == b'%' && at + 2 < bytes.len() {
+                        let hex = std::str::from_utf8(&bytes[at + 1..at + 3]).unwrap();
+                        out.push(u8::from_str_radix(hex, 16).unwrap());
+                        at += 3;
+                    } else {
+                        out.push(bytes[at]);
+                        at += 1;
+                    }
+                }
+                String::from_utf8(out).unwrap()
+            };
+            query
+                .as_deref()
+                .unwrap_or_default()
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(key, value)| (decode(key), decode(value)))
+                .collect()
+        }
+
+        async fn serve_api(records: Vec<Value>) -> (u16, Arc<Api>) {
+            let api = Arc::new(Api {
+                records: Mutex::new(records),
+                valid_access: Mutex::default(),
+                valid_refresh: Mutex::new("rt-0".to_owned()),
+                refreshes: AtomicUsize::new(0),
+                data_requests: AtomicUsize::new(0),
+                revoke_at: AtomicUsize::new(0),
+                rate_limit_once: Mutex::new(false),
+                queries: Mutex::default(),
+            });
+            let data = Arc::clone(&api);
+            let token = Arc::clone(&api);
+            let router = Router::new()
+                .route(
+                    "/v1/contacts",
+                    get(move |headers: HeaderMap, RawQuery(query): RawQuery| {
+                        let api = Arc::clone(&data);
+                        async move {
+                            let n = api.data_requests.fetch_add(1, Ordering::SeqCst) + 1;
+                            api.queries
+                                .lock()
+                                .unwrap()
+                                .push(query.clone().unwrap_or_default());
+                            if api.revoke_at.load(Ordering::SeqCst) == n {
+                                *api.valid_access.lock().unwrap() = "revoked".to_owned();
+                            }
+                            let sent = headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned();
+                            if sent != format!("Bearer {}", api.valid_access.lock().unwrap()) {
+                                return StatusCode::UNAUTHORIZED.into_response();
+                            }
+                            let q = params(&query);
+                            if q.contains_key("cursor")
+                                && std::mem::take(&mut *api.rate_limit_once.lock().unwrap())
+                            {
+                                let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+                                response
+                                    .headers_mut()
+                                    .insert("retry-after", HeaderValue::from_static("1"));
+                                return response;
+                            }
+                            let rows: Vec<Value> = api
+                                .records
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|row| {
+                                    q.get("since").is_none_or(|since| {
+                                        row["updated_at"].as_str().unwrap_or_default()
+                                            > since.as_str()
+                                    })
+                                })
+                                .cloned()
+                                .collect();
+                            let size: usize = q["limit"].parse().unwrap();
+                            let start: usize = q.get("cursor").map_or(0, |c| c.parse().unwrap());
+                            let page: Vec<Value> =
+                                rows.iter().skip(start).take(size).cloned().collect();
+                            let next =
+                                (start + size < rows.len()).then(|| (start + size).to_string());
+                            axum::Json(json!({"data": page, "next_cursor": next})).into_response()
+                        }
+                    }),
+                )
+                .route(
+                    "/token",
+                    post(move |body: String| {
+                        let api = Arc::clone(&token);
+                        async move {
+                            let form = params(&Some(body));
+                            let mut valid = api.valid_refresh.lock().unwrap();
+                            if form.get("refresh_token") != Some(&*valid) {
+                                *valid = "revoked".to_owned();
+                                return StatusCode::BAD_REQUEST.into_response();
+                            }
+                            let n = api.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
+                            *valid = format!("rt-{n}");
+                            *api.valid_access.lock().unwrap() = format!("acc-{n}");
+                            axum::Json(json!({
+                                "access_token": format!("acc-{n}"),
+                                "refresh_token": format!("rt-{n}"),
+                                "expires_in": 3600,
+                            }))
+                            .into_response()
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            (port, api)
+        }
+
+        fn http_mapping() -> Value {
+            let rule = |column: &str, target: Target| ColumnRule {
+                column: column.into(),
+                target,
+                transforms: Vec::new(),
+            };
+            serde_json::to_value(Mapping {
+                delete_when: None,
+                key_column: None,
+                event: None,
+                columns: vec![
+                    rule(
+                        "email",
+                        Target::Identifier {
+                            kind: "email".into(),
+                        },
+                    ),
+                    rule(
+                        "status",
+                        Target::Trait {
+                            key: "display_name".into(),
+                        },
+                    ),
+                ],
+            })
+            .unwrap()
+        }
+
+        /// The source's credential: the OAuth client the mock provider registered.
+        fn client() -> Value {
+            json!({"client_id": "client", "client_secret": "shh"})
+        }
+
+        /// [`client`] opened, as a run opens the credential before a read.
+        fn client_credential() -> Credential {
+            Credential::from_json(&SecretBytes::new(client().to_string().into_bytes())).unwrap()
+        }
+
+        /// The source's settings: the cursor reference manifest pointed at the mock on `port`,
+        /// asking for pages of `page` and allowing a thousand requests a second.
+        fn http_config(port: u16, page: u32) -> Value {
+            let base = format!("http://127.0.0.1:{port}");
+            let mut manifest: Value = serde_json::from_str(
+                &MANIFEST
+                    .replace("https://api.example.test", &base)
+                    .replace("https://auth.example.test", &base),
+            )
+            .unwrap();
+            manifest["streams"][0]["query"] = json!({"limit": page});
+            manifest["rate_limit"] = json!({"requests": 1000, "per_seconds": 1});
+            json!({"manifest": manifest})
+        }
+
+        /// The tokens a consent under `config` leaves, with an access token that lapsed long
+        /// ago, so the first call of a run refreshes it with `rt-0`. They carry the binding of
+        /// `config`: a run seeds no tokens issued for another token endpoint, client or scopes,
+        /// and reads such a source as not connected.
+        fn account_tokens(config: &Value) -> StoredTokens {
+            StoredTokens {
+                access_token: SecretString::new("stale".to_owned()),
+                refresh_token: SecretString::new("rt-0".to_owned()),
+                expires_at: Some(OffsetDateTime::UNIX_EPOCH),
+                binding: active_binding(config, &client_credential()).unwrap(),
+            }
+        }
+
+        struct Account {
+            env: Env,
+            keyring: Arc<Keyring>,
+            api: Arc<Api>,
+        }
+
+        /// A workspace with an `http` source on the cursor reference manifest, an account
+        /// connected earlier under the same manifest and client (a refresh token and a lapsed
+        /// access token), one stream `contacts` mapped and read in `sync_mode`. `page` is the
+        /// page size the manifest asks for.
+        async fn setup_http(
+            pool: &PgPool,
+            records: Vec<Value>,
+            sync_mode: &str,
+            page: u32,
+        ) -> Account {
+            zirv_flow_store::migrate(pool).await.unwrap();
+            let (port, api) = serve_api(records).await;
+            let keyring = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+            let root = HmacRoot::bootstrap_from(keyring.current());
+            zirv_flow_store::secrets::insert_hmac_root_if_absent(
+                pool,
+                &seal(
+                    &keyring,
+                    root.to_secret_bytes().expose(),
+                    &zirv_flow_core::deployment_key_aad(zirv_flow_store::secrets::HMAC_ROOT),
+                ),
+            )
+            .await
+            .unwrap();
+            let ws = create_workspace(
+                pool,
+                &WorkspaceName::parse("one").unwrap(),
+                &Slug::parse("one").unwrap(),
+            )
+            .await
+            .unwrap()
+            .id;
+            create_trait_definition(
+                pool,
+                ws,
+                &NewTraitDefinition {
+                    key: "display_name".into(),
+                    trait_type: TraitType::String,
+                    precedence: Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii: false,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+            let config = http_config(port, page);
+
+            // The credential and the account tokens, as the API's consent leaves them.
+            let secret = |purpose: SecretPurpose, plaintext: &[u8]| {
+                let id = SecretId::new();
+                let sealed = seal(&keyring, plaintext, &secret_aad(ws, id, purpose));
+                (id, sealed, purpose)
+            };
+            let (credential, sealed, purpose) = secret(
+                SecretPurpose::ConnectorCredential,
+                client().to_string().as_bytes(),
+            );
+            zirv_flow_store::secrets::insert_unchecked(pool, ws, purpose, credential, &sealed)
+                .await
+                .unwrap();
+            let (tokens, sealed, purpose) = secret(
+                SecretPurpose::OAuthToken,
+                account_tokens(&config).to_plaintext().unwrap().expose(),
+            );
+            zirv_flow_store::secrets::insert_unchecked(pool, ws, purpose, tokens, &sealed)
+                .await
+                .unwrap();
+
+            let source = create_source(
+                pool,
+                ws,
+                &NewSource {
+                    id: Uuid::now_v7(),
+                    kind: "http",
+                    name: "api",
+                    config: &config,
+                    credential_secret_id: Some(credential),
+                    credential_fields: &["client_id".to_owned(), "client_secret".to_owned()],
+                    schedule: None,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            zirv_flow_store::link_tokens(&mut connection, ws, source.id, Some(tokens))
+                .await
+                .unwrap();
+            drop(connection);
+
+            let discovery = SourceContext::new(
+                Arc::default(),
+                HttpLimits::default(),
+                "http",
+                "test",
+                Arc::default(),
+            )
+            .unwrap();
+            let found = Registry::built_in()
+                .get("http")
+                .unwrap()
+                .discover(&discovery, &config, &Credential::new())
+                .await
+                .unwrap();
+            let descriptor = serde_json::to_value(&found[0]).unwrap();
+            let incremental = sync_mode == "incremental";
+            let cursor = incremental.then_some("updated_at");
+            let key = vec!["id".to_owned()];
+            let mut tx = begin(pool).await.unwrap();
+            let streams = upsert_discovered_streams(
+                &mut tx,
+                ws,
+                source.id,
+                &[DiscoveredStream {
+                    name: "contacts",
+                    sync_mode,
+                    cursor_field: cursor,
+                    primary_key: &key,
+                    descriptor: &descriptor,
+                    suggested_mapping: None,
+                }],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            commit(tx).await.unwrap();
+            configure_stream(
+                &mut pool.acquire().await.unwrap(),
+                ws,
+                source.id,
+                "contacts",
+                &StreamSettings {
+                    enabled: true,
+                    sync_mode,
+                    cursor_field: cursor,
+                    primary_key: &key,
+                    staleness_threshold_seconds: None,
+                    reconcile_schedule: None,
+                    sweep_limit: 1.0,
+                },
+            )
+            .await
+            .unwrap();
+            set_stream_mapping(pool, ws, source.id, "contacts", &http_mapping())
+                .await
+                .unwrap();
+            Account {
+                env: Env {
+                    pool: pool.clone(),
+                    ws,
+                    source: source.id,
+                    stream: streams[0].id,
+                },
+                keyring,
+                api,
+            }
+        }
+
+        impl Account {
+            /// One run, worked by one attempt that reaches loopback and holds the master key.
+            async fn run(&self, limits: &Arc<RateLimits>) -> zirv_flow_store::SyncRun {
+                let (run, job) = self.env.queue().await;
+                self.attempt(&job, &Probe::default(), limits).await.unwrap();
+                self.env.run(run.id).await
+            }
+
+            async fn attempt(
+                &self,
+                job: &ClaimedJob,
+                probe: &Probe,
+                limits: &Arc<RateLimits>,
+            ) -> Result<(), JobError> {
+                let mut tx = begin(&self.env.pool).await.unwrap();
+                let result = {
+                    let mut ctx = JobContext::new(&mut tx, job)
+                        .with_ingest(IngestSettings {
+                            pool: self.env.pool.clone(),
+                            redaction_key: None,
+                            batch_size: 500,
+                            shards: 1,
+                        })
+                        .with_outbound(
+                            Some(Arc::clone(&self.keyring)),
+                            loopback(),
+                            Arc::clone(limits),
+                        );
+                    run_sync(&mut ctx, &job.payload, probe).await
+                };
+                if result.is_ok() {
+                    commit(tx).await.unwrap();
+                }
+                result
+            }
+
+            async fn tokens(&self) -> StoredTokens {
+                load_tokens(&self.env.pool, &self.keyring, self.env.ws, self.env.source)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+
+            async fn checkpoint(&self) -> Option<Value> {
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(self.env.stream)
+                    .fetch_one(&self.env.pool)
+                    .await
+                    .unwrap()
+            }
+        }
+
+        /// The account `setup_http` stores, seeded as `sync_tokens::prepare` seeds it and read
+        /// as a run reads it, without the database and so without the token store. Tokens a run
+        /// does not seed leave the source not connected, and every run below would fail before
+        /// its first request.
+        #[tokio::test]
+        async fn the_stored_account_is_seeded_and_each_lapsed_or_revoked_token_refreshed_once() {
+            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+            let (port, api) = serve_api(records).await;
+            api.revoke_at.store(2, Ordering::SeqCst);
+            let config = http_config(port, 2);
+            let tokens = account_tokens(&config);
+            let mut credential = client_credential();
+
+            assert!(seed_refresh_token(
+                &mut credential,
+                &config,
+                &tokens.refresh_token,
+                &tokens.binding
+            ));
+            let driver = Registry::built_in().get("http").unwrap();
+            let context = SourceContext::new(
+                loopback(),
+                HttpLimits::default(),
+                "http",
+                "test",
+                Arc::default(),
+            )
+            .unwrap()
+            .with_rate_limit(driver.rate_limit(&config))
+            .with_access_token(from_stored(tokens));
+            let stream = StreamConfig {
+                name: "contacts".to_owned(),
+                sync_mode: SyncMode::Incremental,
+                cursor_field: Some("updated_at".to_owned()),
+                primary_key: vec!["id".to_owned()],
+            };
+            let batches: Vec<_> = driver
+                .read(&context, &config, &credential, &stream, None)
+                .map(Result::unwrap)
+                .collect()
+                .await;
+
+            let read: usize = batches.iter().map(|batch| batch.records.len()).sum();
+            assert_eq!(read, 5);
+            // One refresh for the lapsed token, one more for the revoked one.
+            assert_eq!(api.refreshes.load(Ordering::SeqCst), 2);
+            assert_eq!(api.data_requests.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                batches.last().unwrap().checkpoint.0,
+                json!({"since": "2026-01-05T00:00:00Z"})
+            );
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_token_revoked_mid_sync_is_refreshed_once_and_the_rotated_refresh_token_is_stored(
+            pool: PgPool,
+        ) {
+            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+            let account = setup_http(&pool, records, "incremental", 2).await;
+            // The API stops accepting the first access token on its second data request.
+            account.api.revoke_at.store(2, Ordering::SeqCst);
+            let limits = Arc::<RateLimits>::default();
+
+            let first = account.run(&limits).await;
+
+            assert_eq!(first.state, "succeeded", "{:?}", first.error_code);
+            assert_eq!(first.records_read, 5);
+            // One refresh for the stale token, exactly one more for the revoked one.
+            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
+            // Three pages, and the second asked twice.
+            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 4);
+            // The rotated refresh token is what is stored, and the provider would refuse rt-0.
+            let stored = account.tokens().await;
+            assert_eq!(stored.refresh_token.expose(), "rt-2");
+            assert_eq!(stored.access_token.expose(), "acc-2");
+            assert_eq!(
+                account.checkpoint().await,
+                Some(json!({"since": "2026-01-05T00:00:00Z"}))
+            );
+
+            // Run 2 reads only what is newer and needs no refresh: the stored token is good.
+            account
+                .api
+                .records
+                .lock()
+                .unwrap()
+                .push(contact(6, "active", 6));
+            account.api.queries.lock().unwrap().clear();
+            let second = account.run(&limits).await;
+
+            assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
+            assert_eq!(second.records_read, 1);
+            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
+            assert!(
+                account
+                    .api
+                    .queries
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|query| query.contains("since=2026-01-05T00%3A00%3A00Z"))
+            );
+            assert_eq!(
+                account.checkpoint().await,
+                Some(json!({"since": "2026-01-06T00:00:00Z"}))
+            );
+            assert_eq!(
+                account
+                    .env
+                    .count("SELECT count(*) FROM source_records")
+                    .await,
+                6
+            );
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_429_with_retry_after_is_waited_out_and_the_run_succeeds(pool: PgPool) {
+            let records: Vec<Value> = (1..=4).map(|id| contact(id, "active", id)).collect();
+            let account = setup_http(&pool, records, "incremental", 2).await;
+            *account.api.rate_limit_once.lock().unwrap() = true;
+            let started = std::time::Instant::now();
+
+            let run = account.run(&Arc::default()).await;
+
+            assert_eq!(run.state, "succeeded", "{:?}", run.error_code);
+            assert_eq!(run.records_read, 4);
+            assert!(started.elapsed() >= Duration::from_millis(900));
+            // The 429 cost one extra request, not a run attempt.
+            assert_eq!(run.attempt, 1);
+            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 3);
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_lease_lost_mid_stream_rereads_from_the_start_checkpoint_without_duplicates(
+            pool: PgPool,
+        ) {
+            let records: Vec<Value> = (1..=1200)
+                .map(|id| {
+                    let mut row = contact(1, "active", 1);
+                    row["id"] = json!(format!("c{id}"));
+                    row["email"] = json!(format!("person{id}@example.com"));
+                    row["updated_at"] =
+                        json!(format!("2026-01-01T{:02}:{:02}:00Z", id / 60 % 24, id % 60));
+                    row
+                })
+                .collect();
+            let account = setup_http(&pool, records, "incremental", 500).await;
+            let (run, job) = account.env.queue().await;
+            let limits = Arc::<RateLimits>::default();
+
+            // The first attempt dies after its first unit was committed.
+            let first = account
+                .attempt(
+                    &job,
+                    &Probe {
+                        stop_after: Some(1),
+                        before_commit: None,
+                    },
+                    &limits,
+                )
+                .await;
+            assert!(first.is_err());
+            let mid = account.env.run(run.id).await;
+            assert_eq!(mid.state, "running");
+            // Only the end of the stream moves the checkpoint: the committed unit carries the
+            // checkpoint the run started with.
+            assert_eq!(mid.checkpoint, Some(json!({"since": null})));
+
+            account
+                .attempt(&job, &Probe::default(), &limits)
+                .await
+                .unwrap();
+
+            let done = account.env.run(run.id).await;
+            assert_eq!(done.state, "succeeded", "{:?}", done.error_code);
+            assert_eq!(done.attempt, 2);
+            // The first 500 were read again, and applying them again changed nothing.
+            assert_eq!(
+                account
+                    .env
+                    .count("SELECT count(*) FROM source_records")
+                    .await,
+                1200
+            );
+            assert_eq!(
+                account
+                    .env
+                    .count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
+                    .await,
+                1200
+            );
+            assert_eq!(done.records_applied, 1200);
+            assert_eq!(done.records_unchanged, 500);
+            assert_eq!(
+                account.checkpoint().await,
+                Some(json!({"since": "2026-01-01T20:00:00Z"}))
+            );
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_delete_signal_in_the_manifest_removes_the_record_through_the_batch_path(
+            pool: PgPool,
+        ) {
+            let records: Vec<Value> = (1..=3).map(|id| contact(id, "active", id)).collect();
+            let account = setup_http(&pool, records, "incremental", 10).await;
+            let limits = Arc::<RateLimits>::default();
+            let first = account.run(&limits).await;
+            assert_eq!(first.records_deleted, 0);
+
+            // The API now reports c2 as deleted, with a newer cursor value.
+            account.api.records.lock().unwrap()[1] = contact(2, "deleted", 9);
+            let second = account.run(&limits).await;
+
+            assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
+            assert_eq!(second.records_read, 1);
+            assert_eq!(second.records_deleted, 1);
+            assert_eq!(
+                account
+                    .env
+                    .count("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
+                    .await,
+                1
+            );
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_changed_manifest_rate_is_used_by_the_next_context(pool: PgPool) {
+            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+            let account = setup_http(&pool, records, "full_refresh", 2).await;
+            // One process-wide registry of buckets, as the worker has.
+            let limits = Arc::<RateLimits>::default();
+
+            let started = std::time::Instant::now();
+            let fast = account.run(&limits).await;
+            assert_eq!(fast.state, "succeeded", "{:?}", fast.error_code);
+            let fast_time = started.elapsed();
+            assert!(fast_time < Duration::from_secs(2), "{fast_time:?}");
+
+            // An admin edits the rate: one request every two seconds. Three pages follow.
+            sqlx::query(
+                "UPDATE sources SET config = jsonb_set(config, \
+                    '{manifest,rate_limit}', '{\"requests\": 1, \"per_seconds\": 2}')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let started = std::time::Instant::now();
+            let slow = account.run(&limits).await;
+
+            assert_eq!(slow.state, "succeeded", "{:?}", slow.error_code);
+            assert!(
+                started.elapsed() >= Duration::from_millis(3500),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn an_invalid_stored_manifest_fails_the_run_before_any_request(pool: PgPool) {
+            let account = setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
+            sqlx::query(
+                "UPDATE sources SET config = jsonb_set(config, \
+                    '{manifest,streams,0,path}', '\"no-slash\"')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let run = account.run(&Arc::default()).await;
+
+            assert_eq!(run.state, "failed");
+            assert_eq!(run.error_code.as_deref(), Some("source_config_invalid"));
+            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
+            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_source_whose_account_was_never_connected_fails_without_any_request(
+            pool: PgPool,
+        ) {
+            let account = setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
+            sqlx::query("UPDATE sources SET oauth_secret_id = NULL, oauth_connected_at = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let (run, job) = account.env.queue().await;
+            // The last attempt ends the run as failed.
+            let result = account
+                .attempt(&job, &Probe::default(), &Arc::default())
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
+            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
+            let _ = run;
+        }
     }
 }

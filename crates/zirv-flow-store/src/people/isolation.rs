@@ -698,6 +698,7 @@ mod tests {
                     cursor_field: None,
                     primary_key: &[],
                     descriptor: &descriptor,
+                    suggested_mapping: None,
                 }],
             )
             .await
@@ -1285,5 +1286,86 @@ mod tests {
         let untouched = find_webhook(&pool, two, theirs.id).await.unwrap().unwrap();
         assert_eq!(untouched.dedupe_field, "id");
         assert_eq!(untouched.secret_id, theirs.secret_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn oauth_states_and_tokens_are_taken_and_read_only_in_their_own_workspace(pool: PgPool) {
+        use zirv_flow_core::{Email, Keyring, MasterKey};
+
+        use crate::{
+            NewOAuthState, NewSource, create_oauth_state, create_source, create_user, load_tokens,
+            take_oauth_state,
+        };
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let source = create_source(
+            &pool,
+            one,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "http",
+                name: "api",
+                config: &json!({}),
+                credential_secret_id: None,
+                credential_fields: &[],
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let user = create_user(&pool, &Email::parse("a@example.com").unwrap(), None, false)
+            .await
+            .unwrap()
+            .id
+            .as_uuid();
+
+        // Workspace two cannot start a consent for workspace one's source.
+        assert!(
+            create_oauth_state(
+                &pool,
+                &NewOAuthState {
+                    workspace: two,
+                    source: source.id,
+                    user,
+                    state_hash: b"foreign",
+                    pkce_verifier: "v",
+                    binding: "b",
+                    ttl_seconds: 600,
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(take_oauth_state(&pool, b"foreign").await.unwrap().is_none());
+
+        // The consent that workspace one started names workspace one, and only it.
+        create_oauth_state(
+            &pool,
+            &NewOAuthState {
+                workspace: one,
+                source: source.id,
+                user,
+                state_hash: b"own",
+                pkce_verifier: "v",
+                binding: "b",
+                ttl_seconds: 600,
+            },
+        )
+        .await
+        .unwrap();
+        let taken = take_oauth_state(&pool, b"own").await.unwrap().unwrap();
+        assert_eq!(taken.workspace_id, one);
+        assert_eq!(taken.binding, "b");
+
+        // Tokens are read through the workspace.
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        assert!(
+            load_tokens(&pool, &keys, two, source.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

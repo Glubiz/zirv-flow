@@ -47,6 +47,23 @@ describe("the source form fields", () => {
   });
 });
 
+describe("a JSON setting", () => {
+  const json = { ...POSTGRES_KIND.config_fields[0]!, key: "manifest", label: "Manifest", kind: "json", required: true };
+
+  it("is plain text for a source type that has no editor of its own", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<FieldInputs fields={[json]} values={{ manifest: "" }} onChange={onChange} kind="other" />);
+
+    const area = screen.getByLabelText("Manifest");
+    expect(area.tagName).toBe("TEXTAREA");
+    expect(screen.queryByRole("button", { name: "Format" })).not.toBeInTheDocument();
+    await user.type(area, "x");
+
+    expect(onChange).toHaveBeenCalledWith("manifest", "x");
+  });
+});
+
 describe("the Kafka source form", () => {
   it("renders the broker list as text, the authority as a multi-line input and the credential as passwords", () => {
     render(<FieldInputs fields={KAFKA_KIND.config_fields} values={{}} onChange={vi.fn()} />);

@@ -1,0 +1,20 @@
+{
+  "version": "v1",
+  "base_url": "https://api.example.test",
+  "auth": { "type": "api_key", "in": "header", "name": "X-Api-Key" },
+  "headers": { "Accept": "application/json" },
+  "streams": [
+    {
+      "name": "customers",
+      "path": "/customers",
+      "records_path": "/items",
+      "pagination": { "type": "offset", "param": "offset", "limit_param": "limit", "limit": 2 },
+      "fields": [
+        { "name": "id", "type": "number" },
+        { "name": "email", "type": "string" },
+        { "name": "address", "type": "json" }
+      ],
+      "primary_key": ["id"]
+    }
+  ]
+}

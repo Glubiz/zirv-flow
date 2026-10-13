@@ -875,6 +875,7 @@ mod broker_tests {
                 cursor_field: None,
                 primary_key,
                 descriptor: &described,
+                suggested_mapping: None,
             }],
         )
         .await

@@ -166,6 +166,7 @@ impl Source for Fake {
                 sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
                 default_cursor_field: Some("updated_at".into()),
                 default_primary_key: vec!["id".into()],
+                suggested_mapping: None,
             })
             .collect())
     }

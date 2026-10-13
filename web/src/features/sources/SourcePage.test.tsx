@@ -1,12 +1,12 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SourcePage } from "./SourcePage";
-import { aFreshness, aSource, aStream, FAKE_KIND } from "./testData";
+import { aFreshness, aSource, aStream, FAKE_KIND, HTTP_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -420,5 +420,143 @@ describe("a source", () => {
     await user.click(dialog.getByRole("button", { name: "Save stream" }));
 
     expect(await dialog.findByText(/only an incremental stream can be reconciled/)).toBeInTheDocument();
+  });
+});
+
+describe("connecting an account", () => {
+  const original = window.location;
+  afterEach(() => {
+    Object.defineProperty(window, "location", { value: original, configurable: true });
+  });
+
+  const MANIFEST_SOURCE = (connected: boolean) =>
+    aSource({
+      kind: "http",
+      name: "API",
+      config: { manifest: { version: "v1", streams: [{ name: "a" }, { name: "b" }] } },
+      credential_fields_set: ["client_id"],
+      oauth: {
+        required: true,
+        connected,
+        connected_at: connected ? "2026-10-04T09:00:00Z" : null,
+      },
+    });
+
+  function connectable(connected: boolean) {
+    return {
+      ...ADMIN,
+      "GET /api/v1/source-kinds": () => json([HTTP_KIND]),
+      "GET /api/v1/workspaces/ws1/sources/src-1": () => json(MANIFEST_SOURCE(connected)),
+    };
+  }
+
+  function mountAt(search: string) {
+    return renderRoute(
+      `/w/ws1/sources/src-1${search}`,
+      "/w/:ws/sources/*",
+      <Routes>
+        <Route
+          path=":sourceId"
+          element={
+            <>
+              <SourcePage />
+              <Where />
+            </>
+          }
+        />
+      </Routes>,
+    );
+  }
+
+  function Where() {
+    const location = useLocation();
+    return <p>Address {location.pathname + location.search}</p>;
+  }
+
+  it("shows a Connect account button, sends the browser to the provider and does nothing else", async () => {
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", { value: { assign }, configurable: true });
+    const calls = mockApi({
+      ...connectable(false),
+      "POST /api/v1/workspaces/ws1/sources/src-1/oauth/start": () =>
+        json({ authorization_url: "https://auth.example.test/authorize?state=s" }),
+    });
+    const user = userEvent.setup();
+    mountAt("");
+
+    expect(await screen.findByText("Not connected")).toBeInTheDocument();
+    expect(screen.getByText("2 streams described")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Connect account" }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://auth.example.test/authorize?state=s"));
+    expect(calls.find((call) => call.path.endsWith("/oauth/start"))?.headers.get("x-csrf-token")).toBe("csrf-source");
+  });
+
+  it("offers Reconnect and shows when the account was connected", async () => {
+    mockApi(connectable(true));
+    mountAt("");
+
+    expect(await screen.findByRole("button", { name: "Reconnect account" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect account" })).not.toBeInTheDocument();
+    expect(screen.getByText(/^Connected /)).toBeInTheDocument();
+  });
+
+  it("shows why starting failed", async () => {
+    mockApi({
+      ...connectable(false),
+      "POST /api/v1/workspaces/ws1/sources/src-1/oauth/start": () =>
+        problem(409, "Conflict", "connecting an account needs server.public_url to be set"),
+    });
+    const user = userEvent.setup();
+    mountAt("");
+
+    await user.click(await screen.findByRole("button", { name: "Connect account" }));
+
+    expect(await screen.findByText(/needs server.public_url/)).toBeInTheDocument();
+  });
+
+  it("shows a success banner once and takes the outcome out of the address", async () => {
+    mockApi(connectable(true));
+    mountAt("?oauth=connected");
+
+    expect(await screen.findByText(/The account is connected/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Address /w/ws1/sources/src-1")).toBeInTheDocument());
+  });
+
+  it("explains each failure in plain words", async () => {
+    for (const [reason, text] of [
+      ["state_mismatch", /different person or session/],
+      ["no_refresh_token", /did not give a refresh token/],
+      ["unknown_state", /expired or was already used/],
+    ] as const) {
+      mockApi(connectable(false));
+      const view = mountAt(`?oauth=failed&reason=${reason}`);
+
+      expect(await screen.findByText("Connecting the account failed")).toBeInTheDocument();
+      expect(screen.getByText(text)).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText("Address /w/ws1/sources/src-1")).toBeInTheDocument());
+      view.unmount();
+    }
+  });
+
+  it("gives a member no Connect button and no banner action", async () => {
+    mockApi({
+      ...connectable(false),
+      "GET /api/v1/session": () => json(session(MEMBER, "csrf-m")),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+    });
+    mountAt("");
+
+    expect(await screen.findByText("Not connected")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect account" })).not.toBeInTheDocument();
+  });
+
+  it("shows no account line for a source that needs none", async () => {
+    mockApi(ADMIN);
+    mountAt("");
+
+    await screen.findByRole("heading", { name: "CRM" });
+    expect(screen.queryByText("Account")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect account" })).not.toBeInTheDocument();
   });
 });

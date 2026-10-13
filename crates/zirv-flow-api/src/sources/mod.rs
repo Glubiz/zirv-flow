@@ -7,12 +7,18 @@ pub(crate) mod actions;
 pub(crate) mod credential;
 pub(crate) mod crud;
 pub(crate) mod kinds;
+pub(crate) mod manifest;
+pub(crate) mod oauth;
 pub(crate) mod preview;
 pub(crate) mod runs;
 pub(crate) mod streams;
+pub(crate) mod tokens;
 
 #[cfg(test)]
 mod acceptance;
+
+#[cfg(test)]
+mod http_acceptance;
 
 use axum::http::StatusCode;
 use zirv_flow_connectors::sources::{FieldError, Registry};

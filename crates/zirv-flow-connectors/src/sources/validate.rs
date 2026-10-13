@@ -161,6 +161,10 @@ const ALLOWED_SCHEMES_HTTPS: &[&str] = &["https"];
 
 /// Why `text` is not an absolute URL of one of `schemes` with a host, no user info and no
 /// fragment; none when it is.
+pub(crate) fn url_problem_https(text: &str) -> Option<&'static str> {
+    url_problem(text, ALLOWED_SCHEMES_HTTPS)
+}
+
 fn url_problem(text: &str, schemes: &[&str]) -> Option<&'static str> {
     let Ok(url) = Url::parse(text) else {
         return Some(scheme_reason(schemes));
@@ -235,6 +239,7 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
         },
         FieldKind::Number => (!value.is_number()).then_some("must be a number"),
         FieldKind::Bool => (!value.is_boolean()).then_some("must be true or false"),
+        FieldKind::Json => (!value.is_object()).then_some("must be a JSON object"),
         FieldKind::Select(options) => match value.as_str() {
             Some(text) if options.contains(&text) => None,
             _ => Some("must be one of the listed options"),
@@ -395,6 +400,7 @@ mod tests {
             sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
             default_cursor_field: Some("updated_at".into()),
             default_primary_key: vec!["id".into()],
+            suggested_mapping: None,
         }
     }
 

@@ -63,6 +63,10 @@ pub struct StreamDescriptor {
     pub sync_modes: Vec<SyncMode>,
     pub default_cursor_field: Option<String>,
     pub default_primary_key: Vec<String>,
+    /// A mapping the source suggests for a stream that is new, in the shape the mapping editor
+    /// saves. The store writes it only when the stream is first stored, never over a mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_mapping: Option<Value>,
 }
 
 /// How a stream is configured for a read: what the user chose from the descriptor.
@@ -140,6 +144,7 @@ mod tests {
             sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
             default_cursor_field: Some("updated_at".into()),
             default_primary_key: vec!["id".into()],
+            suggested_mapping: None,
         };
 
         let value = serde_json::to_value(&descriptor).unwrap();

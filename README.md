@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1501,6 +1501,115 @@ with the `sync_run` cause and a durable id (the source record, the person, or th
 a value. Metrics: `zirv_flow_sync_runs_total{outcome}`, `zirv_flow_sync_records_total{outcome}`
 `zirv_flow_sync_events_total{outcome}` (`accepted`, `duplicate`, `rejected`) and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
 
+### The HTTP manifest source
+
+The `http` source type reads any HTTP API that a **manifest** describes: its address, how to
+authenticate, how it pages, which field is the incremental cursor, which record marks a deletion and
+(optionally) how its fields map to people. The manifest is JSON data stored as the source's
+`config.manifest`. It is interpreted, never executed: there is no expression language and no
+scripting. A manifest holds no secret; the credential fields below hold those.
+
+Add one in the setup wizard like any source. The **Manifest** field is an editor that checks the text
+as you type and shows every problem as a sentence with its place in the manifest (click it to jump
+to the line), offers a starter manifest for each kind of authentication, and, once the source is
+saved, a **Test with sample** button that reads a few raw records with the stored credential.
+
+**A manifest, annotated.**
+
+```jsonc
+{
+  "version": "v1",                                  // the only version
+  "base_url": "https://api.example.com/v1",         // https; no user info, query or fragment
+  "auth": { "type": "oauth2_authorization_code",    // see Authentication
+            "authorize_url": "https://auth.example.com/authorize",
+            "token_url": "https://auth.example.com/token",
+            "scopes": ["contacts.read"] },
+  "rate_limit": { "requests": 100, "per_seconds": 60 },   // optional; 1-1000 per 1-3600 s
+  "headers": { "Accept": "application/json" },      // optional; static; at most 10
+  "streams": [{                                     // 1 to 20
+    "name": "contacts",                             // unique, 1-256 characters
+    "path": "/contacts",                            // starts with /, no //, .., ? or #
+    "query": { "limit": 100 },                      // optional static parameters, at most 20
+    "records_path": "/data",                        // JSON pointer to the array; "" for a top-level array
+    "pagination": { "type": "cursor", "param": "cursor", "next": "/next_cursor" },
+    "fields": [ { "name": "id", "type": "string" },        // 1 to 200
+                { "name": "email", "type": "string" },
+                { "name": "updated_at", "type": "timestamp" } ],
+    "primary_key": ["id"],                          // fields of the stream; no positional fallback
+    "incremental": { "cursor_field": "updated_at",  // optional
+                     "request_param": "since", "cursor_type": "timestamp" },
+    "delete_signal": { "path": "status", "equals": "deleted" },   // optional
+    "mapping": { "key_column": "id", "columns": [ ... ] }         // optional; see Mapping reference
+  }]
+}
+```
+
+**Authentication.** `auth.type` is one of `none`; `api_key` (`in`: `header` or `query`, and `name`);
+`basic`; `bearer`; `oauth2_client_credentials` (`token_url`, `scopes`, `client_auth`: `body` or
+`basic`); and `oauth2_authorization_code` (`authorize_url`, `token_url`, `scopes`, `client_auth`).
+The credential fields are fixed by the type: `api_key` reads `api_key`; `basic` reads `username` and
+`password`; `bearer` reads `token`; both OAuth2 types read `client_id` and `client_secret` (optional
+for authorization code, since a PKCE client may have none). A missing one fails the test or the run
+naming `credential.<name>`. Auth headers cannot be set in `headers`: `Authorization`,
+`Proxy-Authorization`, `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
+`Range` and `If-*` are refused. An `api_key` header name follows the same rule, except that it may
+be `Authorization`. Changing the `auth` section of a manifest disconnects an account
+connected earlier, because a refresh token belongs to one client and scope set.
+
+**Pagination.** `none`; `cursor` (`param`, `next`: a JSON pointer in the response); `offset`
+(`param`, `limit_param`, `limit` 1-1000); `page` (`param`, `first`, and optionally `size_param` with
+`size`); `link_header`. They are the runtime's drivers (see Connector runtime).
+
+**Incremental reads and the checkpoint.** With `incremental`, a read after the first sends the stored
+value as `request_param`. The checkpoint is `{"since": <text|null>}` and moves only at the end of a
+stream: every batch but the last carries the checkpoint the run started with, and the last carries
+the highest `cursor_field` value seen (compared as RFC 3339 instants or as integers per
+`cursor_type`; a record with a missing or unparsable value is still read and does not move it).
+An API may return records in any order, so a per-page high-water mark could skip records; the cost
+is that a run that loses its lease re-reads from where it started, which costs requests and not
+correctness, because applying a record twice changes nothing.
+
+**Deletes and a suggested mapping.** A record whose value at `delete_signal.path` (a dotted path)
+equals the literal is read as deleted, and the run removes it like any deleted record. A stream's
+`mapping` is only a seed: when discovery first stores a stream, the seed is written as its mapping if
+it passes the same checks as a saved one (traits that do not exist drop it, and the stream is left
+unmapped); it never replaces a mapping and is not used on a later discovery. A manifest cannot add
+people to a list.
+
+**Validation.** `POST /api/v1/workspaces/{ws}/source-manifests/validate` with `{"manifest": ...}`
+(an admin; a body up to 65 KiB) answers 200 with `{valid, issues: [{code, path}], streams}` and
+writes nothing; saving a source with the same manifest answers 422 with the same codes under
+`config.manifest<path>`. An issue holds a code and a JSON pointer, never a value. The codes:
+`required`, `invalid_type`, `invalid_value`, `out_of_range`, `invalid_length`, `invalid_url`,
+`unknown_field`, `expression_not_supported` (a script-like key such as `script` or `eval`, or a string
+holding `{{`, `${`, `{%` or `<%`), `unsupported_version`, `manifest_too_large` (64 KiB),
+`too_many_streams`, `too_many_fields`, `too_deep` (12 levels), `too_many_headers`,
+`forbidden_header`, `invalid_header`, `too_many_query`, `path_invalid`, `invalid_pointer`,
+`duplicate_stream`, `duplicate_field`, `invalid_field_name`, `primary_key_empty`,
+`primary_key_unknown_field`, `cursor_field_unknown`, `invalid_mapping`, `list_target_not_allowed`,
+and the mapping codes of the Mapping reference.
+
+**Sample.** `POST .../sources/{id}/manifest/sample` with `{"stream": "...", "limit": 1-20,
+"manifest": ...}` (an admin; the draft is optional and checked as a save is) reads from the start,
+with the stored credential and account tokens, and returns the raw records. A draft must keep
+the saved base URL and `auth` section (otherwise 409 `manifest_draft_auth_changed`, before anything
+is opened): save those changes first. It writes nothing and is not audited.
+
+**Connect account.** For an `oauth2_authorization_code` manifest, an admin opens the source and
+chooses **Connect account**: the page asks the server for the provider's consent URL
+(`POST .../sources/{id}/oauth/start`, a signed-in person, never an API key) and navigates to it. The
+server stores a single-use state (hashed, ten minutes) with the PKCE verifier. Register
+`<server.public_url>/api/v1/oauth/callback` as the redirect URI at the provider; without
+`server.public_url` the start answers 409 `public_url_not_configured`. The callback exchanges the
+code through the guarded client and stores the access and refresh token in one sealed secret, then
+returns to the source page with a success or failure banner. On any failure (an unknown or reused
+state, another person's session, a manifest whose authentication changed since the consent started, a provider error, a refused exchange, a response with no refresh
+token) nothing is stored. Refresh tokens that rotate are stored by whoever refreshes (a sync run or a
+test), serialized across processes so a single-use token is never used twice. Audit entries
+(`source.oauth_started`, `source.oauth_connected`, `source.oauth_failed` with a reason,
+`source.oauth_disconnected`) hold ids and reasons only, and the counter
+`zirv_flow_source_oauth_total{outcome}` has no other label.
+
 ### Database sources
 
 The `postgres` and `mysql` source types read the tables and queries of one schema (PostgreSQL) or
@@ -1839,12 +1948,18 @@ Every HTTP source makes its calls through the connector runtime in `zirv-flow-co
 type implements them itself. A test connection, a discovery and a sync run of one source all use it.
 
 **Auth.** API key (in a header or a query parameter), basic, bearer, and OAuth2 client
-credentials (the client proves itself in the form body or with basic auth). The plaintext
+credentials and the OAuth2 authorization-code grant with PKCE and refresh (the client proves itself in the form body or with basic auth). The plaintext
 credential is borrowed for the duration of a call. An OAuth2 token is fetched when there is none or
 when less than 60 seconds of it remain; a `401` on a token that was already cached refreshes it
-once and retries the call once, and a second `401` is a refused credential. The refreshed token is
-handed back to the caller (`take_refreshed_token`) to store; the runtime never writes to the
-database. The authorization-code grant is not supported yet. Auth is attached only to requests for
+once and retries the call once, and a second `401` is a refused credential. A refreshed client-credentials token is
+handed back to the caller (`take_refreshed_token`); the runtime never writes to the database. For
+the authorization-code grant the refresh token is the source's long-lived credential: the
+code is exchanged once at consent, and a refresh that returns a new refresh token (rotation)
+replaces the old one. A caller that persists tokens gives the context a token store, and the
+refresh then runs through it so that processes refreshing the same source take turns: the api and
+the sync worker lock the source's token secret, reload it, call the provider only if nobody else
+has, and save the result in the same transaction. Both tokens live in one sealed secret per source,
+linked from the source and never returned. Auth is attached only to requests for
 the source's base origin (scheme, host and port); a request for any other origin, such as a
 pagination link that points elsewhere, is refused before it is sent. Redirects are followed only
 within the same origin: a redirect to another origin, including `http` to `https` on the same host,
@@ -1862,7 +1977,8 @@ status.
 source and waits for it before each request. The limit is **per process**: it is shared by the sync
 runs, test connections and discoveries of that source in one process, but several workers each have
 their own bucket and can exceed the limit together. Honouring `Retry-After` reduces that overshoot
-and does not prevent it. Enforcing the limit across workers is decided with open question OQ-9 (M6).
+and does not prevent it. A source type may declare the rate once for all its sources, and an `http`
+source declares it in its manifest; editing it takes effect on the next call. Enforcing the limit across workers is decided with open question OQ-9 (M6).
 
 **Pagination.** Four drivers read an API to its end as a stream of pages: cursor (the next cursor
 at a JSON pointer, a missing, null or empty cursor ends it), offset (ends on a page shorter than

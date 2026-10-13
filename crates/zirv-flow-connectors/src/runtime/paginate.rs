@@ -62,6 +62,8 @@ pub enum Pagination<'a> {
     /// The next page is the `rel="next"` target of the `Link` header (RFC 8288). The end is a
     /// response without one.
     LinkHeader,
+    /// One request: the first page is the only one.
+    None,
 }
 
 /// One page: the parsed body and the items found in it.
@@ -83,19 +85,34 @@ pub fn paginate<'a>(
     style: Pagination<'a>,
     items: &'a str,
 ) -> BoxStream<'a, Result<Page, RuntimeError>> {
-    let driver = Driver::new(ctx, auth, first, style, items);
-    stream::unfold(driver, |mut driver| async move {
-        let page = driver.step().await?;
-        Some((page, driver))
+    let params = Params {
+        ctx,
+        auth,
+        style,
+        items,
+    };
+    let pager = Pager::new(first, style);
+    stream::unfold((params, pager), |(params, mut pager)| async move {
+        let page = pager.step(&params).await?;
+        Some((page, (params, pager)))
     })
     .boxed()
 }
 
-struct Driver<'a> {
+/// What a page read needs besides the pager's own state.
+#[derive(Clone, Copy)]
+struct Params<'a> {
     ctx: &'a SourceContext,
     auth: &'a Auth<'a>,
     style: Pagination<'a>,
     items: &'a str,
+}
+
+/// The state of a paginated read, without any borrow: the position in the stream, the loop guards
+/// and the request to send next. A source that cannot hold a stream that borrows its own data
+/// (the manifest it built the auth from) keeps a `Pager` and passes the auth, style and items to
+/// [`Pager::next_page`] on every call instead of using [`paginate`].
+pub struct Pager {
     /// The request to send next; `None` once the last page has been read or an error ended it.
     next: Option<RequestSpec>,
     /// An error found while reading the page just returned, reported on the next poll.
@@ -112,17 +129,13 @@ struct Driver<'a> {
     position: u64,
 }
 
-impl<'a> Driver<'a> {
-    fn new(
-        ctx: &'a SourceContext,
-        auth: &'a Auth<'a>,
-        first: RequestSpec,
-        style: Pagination<'a>,
-        items: &'a str,
-    ) -> Self {
+impl Pager {
+    /// A pager that starts with `first`, the request for the first page.
+    pub fn new(first: RequestSpec, style: Pagination<'_>) -> Self {
         let mut seen = HashSet::new();
         let (first, position) = match style {
             Pagination::Cursor { .. } => (first, 0),
+            Pagination::None => (first, 0),
             Pagination::Offset {
                 param,
                 limit_param,
@@ -148,10 +161,6 @@ impl<'a> Driver<'a> {
             }
         };
         Self {
-            ctx,
-            auth,
-            style,
-            items,
             next: Some(first),
             deferred: None,
             seen,
@@ -163,30 +172,52 @@ impl<'a> Driver<'a> {
         }
     }
 
-    async fn step(&mut self) -> Option<Result<Page, RuntimeError>> {
+    /// The next page, or `None` once the last one has been read or an error ended the stream.
+    /// `auth`, `style` and `items` must be the same on every call.
+    pub async fn next_page(
+        &mut self,
+        ctx: &SourceContext,
+        auth: &Auth<'_>,
+        style: Pagination<'_>,
+        items: &str,
+    ) -> Option<Result<Page, RuntimeError>> {
+        self.step(&Params {
+            ctx,
+            auth,
+            style,
+            items,
+        })
+        .await
+    }
+
+    async fn step(&mut self, params: &Params<'_>) -> Option<Result<Page, RuntimeError>> {
         if let Some(error) = self.deferred.take() {
             return Some(Err(error));
         }
         let spec = self.next.take()?;
         self.pages += 1;
-        let result = self.fetch(spec).await;
+        let result = self.fetch(params, spec).await;
         if result.is_err() {
             self.next = None;
         }
         Some(result)
     }
 
-    async fn fetch(&mut self, spec: RequestSpec) -> Result<Page, RuntimeError> {
-        let response = self.ctx.send(self.auth, spec.clone()).await?;
+    async fn fetch(
+        &mut self,
+        params: &Params<'_>,
+        spec: RequestSpec,
+    ) -> Result<Page, RuntimeError> {
+        let response = params.ctx.send(params.auth, spec.clone()).await?;
         let mut body = response.json()?;
-        let found = take_items(&mut body, self.items)?;
+        let found = take_items(&mut body, params.items)?;
         let count = found.len() as u64;
-        if self.repeats_previous_page(&found) {
+        if self.repeats_previous_page(params.style, &found) {
             self.next = None;
             return Err(RuntimeError::PaginationLoop);
         }
 
-        match self.advance(&spec, &response, &body, count) {
+        match self.advance(params.style, &spec, &response, &body, count) {
             Ok(next) => self.next = next,
             // The page itself is good: hand it over, then report why there is no next one.
             Err(error) => self.deferred = Some(error),
@@ -203,8 +234,8 @@ impl<'a> Driver<'a> {
     /// (rows with few distinct values), so they are not enough, and a short page is the last one.
     /// Without a known size (a page stream with no `size_param`) nothing is detected here and
     /// the page cap ends the stream. Remembers this page for the next comparison.
-    fn repeats_previous_page(&mut self, found: &[Value]) -> bool {
-        let size = match self.style {
+    fn repeats_previous_page(&mut self, style: Pagination<'_>, found: &[Value]) -> bool {
+        let size = match style {
             Pagination::Offset { limit, .. } => Some(u64::from(limit.max(1))),
             Pagination::Page {
                 size_param: Some((_, size)),
@@ -229,12 +260,13 @@ impl<'a> Driver<'a> {
     /// The request for the page after the one just read, or `None` at the end.
     fn advance(
         &mut self,
+        style: Pagination<'_>,
         spec: &RequestSpec,
         response: &RuntimeResponse,
         body: &Value,
         count: u64,
     ) -> Result<Option<RequestSpec>, RuntimeError> {
-        match self.style {
+        match style {
             Pagination::Cursor { param, next } => {
                 let Some(cursor) = cursor_at(body, next)? else {
                     return Ok(None);
@@ -266,6 +298,7 @@ impl<'a> Driver<'a> {
                 let url = with_param(spec.url(), param, &self.position.to_string());
                 Ok(Some(spec.with_url(url)))
             }
+            Pagination::None => Ok(None),
             Pagination::LinkHeader => {
                 let Some(target) = next_link(response, spec.url())? else {
                     return Ok(None);
@@ -474,6 +507,62 @@ mod tests {
         assert_eq!(ids(&pages), vec![0, 1, 2, 3]);
         assert_eq!(mock.hits(), 3);
         assert_eq!(pages[2].as_ref().unwrap().items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_pager_reads_the_same_pages_as_the_stream_with_nothing_borrowed_between_calls() {
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|RawQuery(query): RawQuery| async move {
+                let body = match param(&query, "after").as_deref() {
+                    None => json!({"data": items(0..2), "meta": {"next": "c2"}}),
+                    Some("c2") => json!({"data": items(2..3), "meta": {"next": null}}),
+                    Some(_) => return StatusCode::BAD_REQUEST.into_response(),
+                };
+                axum::Json(body).into_response()
+            }),
+        ))
+        .await;
+        let ctx = context("paged", "s");
+        let first = RequestSpec::get(&mock.base(), mock.url("/items"));
+        let mut pager = Pager::new(
+            first,
+            Pagination::Cursor {
+                param: "after",
+                next: "/meta/next",
+            },
+        );
+
+        let mut pages = Vec::new();
+        loop {
+            // The style and the auth are rebuilt for each call, as a source that owns its
+            // manifest does.
+            let style = Pagination::Cursor {
+                param: "after",
+                next: "/meta/next",
+            };
+            match pager.next_page(&ctx, &Auth::None, style, "/data").await {
+                Some(page) => pages.push(page),
+                None => break,
+            }
+        }
+
+        assert_eq!(ids(&pages), vec![0, 1, 2]);
+        assert_eq!(mock.hits(), 2);
+    }
+
+    #[tokio::test]
+    async fn without_pagination_the_first_page_is_the_only_one() {
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|| async { axum::Json(json!({"data": items(0..3), "next": "more"})) }),
+        ))
+        .await;
+
+        let pages = read(&mock, Pagination::None, &Auth::None).await;
+
+        assert_eq!(ids(&pages), vec![0, 1, 2]);
+        assert_eq!(mock.hits(), 1);
     }
 
     #[tokio::test]
@@ -898,11 +987,17 @@ mod tests {
             limit_param: "limit",
             limit: 2,
         };
-        let mut driver = Driver::new(&ctx, &Auth::None, first, style, "/data");
+        let mut driver = Pager::new(first, style);
+        let params = Params {
+            ctx: &ctx,
+            auth: &Auth::None,
+            style,
+            items: "/data",
+        };
         driver.max_pages = 3;
 
         let mut results = Vec::new();
-        while let Some(result) = driver.step().await {
+        while let Some(result) = driver.step(&params).await {
             results.push(result);
         }
 
@@ -991,11 +1086,17 @@ mod tests {
             first: 1,
             size_param: None,
         };
-        let mut driver = Driver::new(&ctx, &Auth::None, first, style, "/data");
+        let mut driver = Pager::new(first, style);
+        let params = Params {
+            ctx: &ctx,
+            auth: &Auth::None,
+            style,
+            items: "/data",
+        };
         driver.max_pages = 5;
 
         let mut results = Vec::new();
-        while let Some(result) = driver.step().await {
+        while let Some(result) = driver.step(&params).await {
             results.push(result);
         }
 

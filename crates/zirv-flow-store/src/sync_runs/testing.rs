@@ -77,6 +77,7 @@ pub(crate) async fn source_with_stream(
             cursor_field: cursor,
             primary_key: &[],
             descriptor: &descriptor,
+            suggested_mapping: None,
         }],
     )
     .await

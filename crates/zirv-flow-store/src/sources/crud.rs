@@ -17,6 +17,10 @@ pub struct Source {
     pub name: String,
     pub config: Value,
     pub credential_secret_id: Option<Uuid>,
+    /// The sealed OAuth2 tokens of the source (purpose `oauth_token`), once an admin has
+    /// connected an account. A reference, never a value.
+    pub oauth_secret_id: Option<Uuid>,
+    pub oauth_connected_at: Option<OffsetDateTime>,
     /// The names of the credential fields that are set; never their values.
     pub credential_fields: Vec<String>,
     pub schedule: Option<String>,
@@ -29,8 +33,8 @@ pub struct Source {
 /// The columns of [`Source`].
 macro_rules! source_columns {
     () => {
-        "id, kind, name, config, credential_secret_id, credential_fields, schedule, enabled, \
-         created_by, created_at, updated_at"
+        "id, kind, name, config, credential_secret_id, oauth_secret_id, oauth_connected_at, \
+         credential_fields, schedule, enabled, created_by, created_at, updated_at"
     };
 }
 
@@ -215,8 +219,8 @@ pub async fn update_source(
     Ok(source)
 }
 
-/// Deletes a source with its streams and its credential secret, and returns what was deleted.
-/// `None` when there is no such source. The caller holds a transaction, so the source and its
+/// Deletes a source with its streams, its credential secret and its token secret, and returns
+/// what was deleted. `None` when there is no such source. The caller holds a transaction, so the source and its
 /// secret go together.
 pub async fn delete_source(
     connection: &mut PgConnection,
@@ -236,6 +240,9 @@ pub async fn delete_source(
         .as_ref()
         .and_then(|source| source.credential_secret_id)
     {
+        secrets::delete(&mut *connection, workspace, SecretId::from_uuid(secret)).await?;
+    }
+    if let Some(secret) = deleted.as_ref().and_then(|source| source.oauth_secret_id) {
         secrets::delete(&mut *connection, workspace, SecretId::from_uuid(secret)).await?;
     }
     Ok(deleted)

@@ -1,6 +1,7 @@
 import type { components } from "../../api";
 import { formatAgo, formatDuration } from "../../ui";
 
+import { analyze } from "./manifest";
 import { parseQueries, queriesValid } from "./queries";
 
 export type Source = components["schemas"]["SourceBody"];
@@ -36,7 +37,8 @@ export function initialValues(fields: FieldSpec[], config: Record<string, unknow
   const values: Values = {};
   for (const field of fields) {
     const current = config[field.key];
-    values[field.key] = field.secret ? "" : showValue(current);
+    // A JSON setting is edited as indented text.
+    values[field.key] = field.secret ? "" : field.kind === "json" && current !== undefined ? JSON.stringify(current, null, 2) : showValue(current);
   }
   return values;
 }
@@ -50,12 +52,27 @@ export function withoutSecrets(fields: FieldSpec[], values: Values): Values {
   return kept;
 }
 
+/** The text as a JSON object, or null when it is not one. */
+export function parseJsonObject(text: string): Record<string, unknown> | null {
+  const analysis = analyze(text);
+  if (!analysis.ok) return null;
+  const value = analysis.value;
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
 /** The settings object to send: empty optional fields are left out, numbers and booleans typed. */
 export function configFrom(fields: FieldSpec[], values: Values): Record<string, unknown> {
   const config: Record<string, unknown> = {};
   for (const field of fields) {
     const text = (values[field.key] ?? "").trim();
     if (text === "") continue;
+    if (field.kind === "json") {
+      // The form keeps the object as text; text that is not an object is left out and caught by
+      // shapesValid before anything is sent.
+      const parsed = parseJsonObject(text);
+      if (parsed !== null) config[field.key] = parsed;
+      continue;
+    }
     if (field.kind === "queries") {
       // The form keeps the list as JSON text; an empty list is a setting that is not there.
       const rows = parseQueries(text);
@@ -140,6 +157,8 @@ export function runErrorText(code: string, threshold: number): string {
     sweep_limit:
       "This run would have removed more records than the stream allows, so it removed none. Raise the limit on the stream to allow it.",
     source_kind_unavailable: "This build of the server does not include this type of source.",
+    source_config_invalid:
+      "The source's settings no longer pass the checks, so nothing was read. Open the source, fix the manifest, then run it again.",
     kafka_offset_out_of_range:
       "The topic no longer has the position this stream was at, so it may have been deleted and created again. Nothing was read. Stored positions cannot be reset from the app yet, so this needs an operator.",
     kafka_auth_failed: "The brokers refused the user name and password. Check the credential, then run the stream again.",
@@ -157,7 +176,11 @@ export function runErrorText(code: string, threshold: number): string {
  * shape of: for now, the queries of a database source. Blocks saving a form edited into nonsense.
  */
 export function shapesValid(fields: FieldSpec[], values: Values): boolean {
-  return fields.every((field) => field.kind !== "queries" || queriesValid(values[field.key] ?? ""));
+  return fields.every(
+    (field) =>
+      (field.kind !== "queries" || queriesValid(values[field.key] ?? "")) &&
+      (field.kind !== "json" || parseJsonObject(values[field.key] ?? "") !== null),
+  );
 }
 
 export type Freshness = components["schemas"]["FreshnessBody"];
@@ -208,6 +231,122 @@ export function thresholdLabel(freshness: Pick<Freshness, "threshold_seconds" | 
   if (freshness.threshold_seconds === null || freshness.threshold_seconds === undefined) return "None";
   const text = formatDuration(freshness.threshold_seconds);
   return freshness.threshold_is_default ? `${text} (default)` : text;
+}
+
+/** Every code the manifest validator can return, as the server documents them, plus the one the editor adds. */
+export const MANIFEST_ISSUE_CODES = [
+  "syntax_error",
+  "required",
+  "invalid_type",
+  "invalid_value",
+  "out_of_range",
+  "invalid_length",
+  "invalid_url",
+  "unknown_field",
+  "expression_not_supported",
+  "unsupported_version",
+  "manifest_too_large",
+  "too_many_streams",
+  "too_many_fields",
+  "too_deep",
+  "too_many_headers",
+  "forbidden_header",
+  "invalid_header",
+  "too_many_query",
+  "path_invalid",
+  "invalid_pointer",
+  "duplicate_stream",
+  "duplicate_field",
+  "invalid_field_name",
+  "primary_key_empty",
+  "primary_key_unknown_field",
+  "cursor_field_unknown",
+  "invalid_mapping",
+  "list_target_not_allowed",
+  "no_identifier",
+  "too_many_rules",
+  "unknown_column",
+  "invalid_identifier_kind",
+  "invalid_trait_key",
+  "unknown_trait",
+  "archived_trait",
+  "duplicate_trait",
+  "invalid_transform",
+  "invalid_event_name",
+  "invalid_event_property",
+  "duplicate_event_property",
+  "too_many_event_properties",
+] as const;
+
+const ISSUE_TEXT: Record<(typeof MANIFEST_ISSUE_CODES)[number], string> = {
+  syntax_error: "This is not valid JSON. Check the commas, quotes and brackets near here.",
+  required: "A required setting is missing here.",
+  invalid_type: "This has the wrong kind of value, for example text where a number or a list is expected.",
+  invalid_value: "This is not one of the values allowed here.",
+  out_of_range: "This number or list size is outside what is allowed.",
+  invalid_length: "This text is empty or too long.",
+  invalid_url: "This is not an allowed address. It must be a full https address without a user name or fragment.",
+  unknown_field: "This setting does not exist in a manifest. Check the spelling.",
+  expression_not_supported:
+    "Expressions and scripts are not supported. Use a plain value, and the structure the manifest offers.",
+  unsupported_version: 'Only manifest version "v1" is supported.',
+  manifest_too_large: "The manifest is larger than 64 KiB.",
+  too_many_streams: "A manifest can describe at most 20 streams.",
+  too_many_fields: "A stream can declare at most 200 fields.",
+  too_deep: "The manifest is nested too deeply (at most 12 levels).",
+  too_many_headers: "At most 10 fixed headers are allowed.",
+  forbidden_header: "This header is set by zirv-flow itself and cannot be fixed in a manifest.",
+  invalid_header: "This header name or value is not allowed.",
+  too_many_query: "A stream can have at most 20 fixed query parameters.",
+  path_invalid: "A stream path must start with / and have no //, .., ? or # in it.",
+  invalid_pointer: 'This must be a JSON pointer such as /data/items, or "" for a top-level list.',
+  duplicate_stream: "Two streams have the same name.",
+  duplicate_field: "Two fields of this stream have the same name.",
+  invalid_field_name: "A field name cannot be blank.",
+  primary_key_empty: "A stream needs at least one primary key field.",
+  primary_key_unknown_field: "The primary key names a field the stream does not declare.",
+  cursor_field_unknown: "The cursor field is not one of the stream's declared fields.",
+  invalid_mapping: "The mapping is not in the shape the mapping editor saves.",
+  list_target_not_allowed: "A manifest cannot add people to a list. Set that up in the mapping of the stream.",
+  no_identifier: "The mapping needs at least one column that becomes an identifier.",
+  too_many_rules: "The mapping has too many rules.",
+  unknown_column: "The mapping uses a column that is not one of the stream's declared fields.",
+  invalid_identifier_kind: "The mapping gives an identifier a kind that does not exist.",
+  invalid_trait_key: "The mapping uses a trait key that is not a valid key.",
+  unknown_trait: "The mapping uses a trait the workspace does not have.",
+  archived_trait: "The mapping uses a trait that has been archived.",
+  duplicate_trait: "Two columns of the mapping fill the same trait.",
+  invalid_transform: "A step in the mapping is not valid.",
+  invalid_event_name: "The event name in the mapping is not valid.",
+  invalid_event_property: "An event property in the mapping is not valid.",
+  duplicate_event_property: "Two event properties in the mapping have the same name.",
+  too_many_event_properties: "The mapping's event has too many properties.",
+};
+
+/** What a validation code means, in a sentence. A code this build does not know is said plainly. */
+export function issueText(code: string): string {
+  return (ISSUE_TEXT as Record<string, string>)[code] ?? "This part of the manifest is not valid.";
+}
+
+/** What the page shows after the account connection came back to it. */
+export function oauthReasonText(reason: string | null): string {
+  const texts: Record<string, string> = {
+    unknown_state: "The sign-in link had expired or was already used. Start again with Connect account.",
+    state_mismatch:
+      "The sign-in was finished by a different person or session than the one that started it, or the source's connection settings changed in between. Start again while signed in as yourself.",
+    provider_error: "The provider did not allow the connection. Start again and approve the request.",
+    exchange_failed: "The provider refused to hand over the account tokens. Check the client ID and secret, then try again.",
+    no_refresh_token:
+      "The provider did not give a refresh token, so syncs could not run unattended. Allow offline access in the provider's settings and the manifest's scopes, then try again.",
+    source_gone: "The source changed or was deleted while you were signing in. Open it and try again.",
+  };
+  return texts[reason ?? ""] ?? "Connecting the account did not work. Try again.";
+}
+
+/** A JSON setting in a fact list: a manifest by its stream count, anything else as set. */
+export function describeJson(value: unknown): string {
+  const streams = (value as { streams?: unknown } | null)?.streams;
+  return Array.isArray(streams) ? plural(streams.length, "stream", "streams") + " described" : "Set";
 }
 
 export type Webhook = components["schemas"]["WebhookBody"];

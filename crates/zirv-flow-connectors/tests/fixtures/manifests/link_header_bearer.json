@@ -1,0 +1,20 @@
+{
+  "version": "v1",
+  "base_url": "https://api.example.test",
+  "auth": { "type": "bearer" },
+  "rate_limit": { "requests": 5, "per_seconds": 1 },
+  "streams": [
+    {
+      "name": "events",
+      "path": "/events",
+      "pagination": { "type": "link_header" },
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "seq", "type": "number" },
+        { "name": "payload", "type": "json" }
+      ],
+      "primary_key": ["id"],
+      "incremental": { "cursor_field": "seq", "request_param": "after", "cursor_type": "integer" }
+    }
+  ]
+}

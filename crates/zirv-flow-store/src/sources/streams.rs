@@ -60,6 +60,9 @@ pub struct DiscoveredStream<'a> {
     pub cursor_field: Option<&'a str>,
     pub primary_key: &'a [String],
     pub descriptor: &'a Value,
+    /// A mapping to write into a stream that is new, which the source suggests. Never replaces a
+    /// mapping, and is not used for a stream already known. The caller has checked it.
+    pub suggested_mapping: Option<&'a Value>,
 }
 
 /// What the user chose for a stream. Replaces the previous settings whole.
@@ -98,8 +101,8 @@ pub async fn upsert_discovered_streams(
     for stream in found {
         sqlx::query(
             "INSERT INTO streams (id, workspace_id, source_id, name, sync_mode, cursor_field, \
-                primary_key, discovered) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                primary_key, discovered, mapping) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (source_id, name) \
              DO UPDATE SET discovered = EXCLUDED.discovered, updated_at = now()",
         )
@@ -111,6 +114,7 @@ pub async fn upsert_discovered_streams(
         .bind(stream.cursor_field)
         .bind(stream.primary_key)
         .bind(stream.descriptor)
+        .bind(stream.suggested_mapping)
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
@@ -329,6 +333,7 @@ mod tests {
             cursor_field: None,
             primary_key: pk,
             descriptor,
+            suggested_mapping: None,
         }
     }
 
@@ -398,6 +403,66 @@ mod tests {
         assert_eq!(a.id, chosen.id);
         assert_eq!(again[1].discovered, first);
         assert!(!again[2].enabled);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_suggested_mapping_is_written_on_insert_and_never_on_rediscovery(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let source_id = source(&pool, ws).await;
+        let pk = vec!["id".to_owned()];
+        let descriptor = json!({"v": 1});
+        let suggested = json!({"columns": [{"column": "id", "target": {"type": "ignore"}}]});
+        let edited = json!({"columns": [{"column": "email", "target": {"type": "ignore"}}]});
+        let with = |suggestion| DiscoveredStream {
+            suggested_mapping: suggestion,
+            ..found("a", &descriptor, &pk)
+        };
+
+        let mut tx = begin(&pool).await.unwrap();
+        let first = upsert_discovered_streams(&mut tx, ws, source_id, &[with(Some(&suggested))])
+            .await
+            .unwrap()
+            .unwrap();
+        commit(tx).await.unwrap();
+        assert_eq!(first[0].mapping.as_ref(), Some(&suggested));
+
+        // The user edits the mapping; a later discovery with another suggestion leaves it.
+        set_stream_mapping(&pool, ws, source_id, "a", &edited)
+            .await
+            .unwrap();
+        let other = json!({"columns": []});
+        let mut tx = begin(&pool).await.unwrap();
+        let again = upsert_discovered_streams(&mut tx, ws, source_id, &[with(Some(&other))])
+            .await
+            .unwrap()
+            .unwrap();
+        commit(tx).await.unwrap();
+        assert_eq!(again[0].mapping.as_ref(), Some(&edited));
+
+        // No suggestion leaves a new stream unmapped.
+        let mut tx = begin(&pool).await.unwrap();
+        let plain = upsert_discovered_streams(
+            &mut tx,
+            ws,
+            source_id,
+            &[DiscoveredStream {
+                name: "b",
+                ..with(None)
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        commit(tx).await.unwrap();
+        assert!(
+            plain
+                .iter()
+                .find(|stream| stream.name == "b")
+                .unwrap()
+                .mapping
+                .is_none()
+        );
     }
 
     #[sqlx::test]

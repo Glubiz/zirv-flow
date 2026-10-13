@@ -299,6 +299,25 @@ fn routes() -> Router<AppState> {
             post(sources::actions::discover),
         )
         .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/oauth/start",
+            post(sources::oauth::start),
+        )
+        .route("/api/v1/oauth/callback", get(sources::oauth::callback))
+        .route(
+            "/api/v1/workspaces/{ws}/source-manifests/validate",
+            post(sources::manifest::validate).layer(DefaultBodyLimit::max(
+                zirv_flow_connectors::manifest::MAX_MANIFEST_BYTES
+                    + sources::manifest::ENVELOPE_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample",
+            post(sources::manifest::sample).layer(DefaultBodyLimit::max(
+                zirv_flow_connectors::manifest::MAX_MANIFEST_BYTES
+                    + sources::manifest::ENVELOPE_BYTES,
+            )),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/sources/{id}/streams",
             get(sources::streams::list),
         )

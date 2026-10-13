@@ -386,6 +386,7 @@ fn descriptor(topic: &str, sampled: &[serde_json::Map<String, Value>]) -> Stream
         sync_modes: vec![SyncMode::Stream],
         default_cursor_field: None,
         default_primary_key: vec![KEY_FIELD.to_owned()],
+        suggested_mapping: None,
     }
 }
 

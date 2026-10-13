@@ -14,6 +14,7 @@ pub(crate) fn descriptor(name: String) -> StreamDescriptor {
         sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
         default_cursor_field: None,
         default_primary_key: Vec::new(),
+        suggested_mapping: None,
     }
 }
 

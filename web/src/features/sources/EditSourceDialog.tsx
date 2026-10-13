@@ -78,7 +78,15 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
           maxLength={128}
           autoComplete="off"
         />
-        <FieldInputs fields={kind.config_fields} values={values} onChange={change} disabled={busy} />
+        <FieldInputs
+          fields={kind.config_fields}
+          values={values}
+          onChange={change}
+          disabled={busy}
+          kind={kind.kind}
+          workspaceId={workspaceId}
+          sourceId={source.id}
+        />
         <TextField
           label="Schedule (optional)"
           hint="A cron expression in UTC, such as 0 * * * *. Leave empty for none."

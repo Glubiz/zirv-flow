@@ -24,7 +24,23 @@ pub struct RateLimit {
 /// test and a discovery of the same source draw from the same bucket.
 #[derive(Debug, Default)]
 pub struct RateLimits {
-    buckets: Mutex<HashMap<String, Bucket>>,
+    state: Mutex<State>,
+}
+
+/// The buckets and the reservation counter they share. The counter belongs to the registry, not
+/// to a bucket, so a number is never handed out twice even when a bucket is replaced: a cancelled
+/// reservation of an old bucket can never match a re-created one.
+#[derive(Debug, Default)]
+struct State {
+    buckets: HashMap<String, Bucket>,
+    next_number: u64,
+}
+
+impl State {
+    fn fresh_number(&mut self) -> u64 {
+        self.next_number += 1;
+        self.next_number
+    }
 }
 
 #[derive(Debug)]
@@ -48,13 +64,13 @@ impl Bucket {
     }
 
     /// Takes a token and returns how long until it is available.
-    fn take(&mut self, now: Instant) -> Duration {
+    fn take(&mut self, now: Instant, number: u64) -> Duration {
         let per_second = per_second(self.rate);
         let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
         self.tokens = (self.tokens + elapsed * per_second).min(capacity(self.rate));
         self.updated = now;
         self.tokens -= 1.0;
-        self.latest += 1;
+        self.latest = number;
         if self.tokens >= 0.0 {
             Duration::ZERO
         } else {
@@ -104,17 +120,20 @@ impl RateLimits {
     /// after it. A later one is already scheduled behind it, so the token cannot be handed out
     /// again without two callers sharing a slot: the abandoned slot is idle time instead.
     fn refund(&self, source: &str, rate: RateLimit, number: u64) {
-        let mut buckets = self
-            .buckets
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(bucket) = buckets
+        let fresh = state.fresh_number();
+        if let Some(bucket) = state
+            .buckets
             .get_mut(source)
             .filter(|bucket| bucket.rate == rate && bucket.latest == number)
         {
             bucket.tokens = (bucket.tokens + 1.0).min(capacity(rate));
-            // The next reservation is the tail's successor, not a replacement for it.
-            bucket.latest = bucket.latest.wrapping_add(1);
+            // The next reservation is the tail's successor, not a replacement for it, and the
+            // fresh number cannot match a reservation of any bucket, old or new.
+            bucket.latest = fresh;
         }
     }
 
@@ -125,18 +144,20 @@ impl RateLimits {
 
     /// As `reserve`, with the number of the reservation for `refund`.
     fn reserve_numbered(&self, source: &str, rate: RateLimit, now: Instant) -> (Duration, u64) {
-        let mut buckets = self
-            .buckets
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let bucket = buckets
+        let number = state.fresh_number();
+        let bucket = state
+            .buckets
             .entry(source.to_owned())
             .or_insert_with(|| Bucket::new(rate, now));
         if bucket.rate != rate {
             *bucket = Bucket::new(rate, now);
         }
-        let wait = bucket.take(now);
-        (wait, bucket.latest)
+        let wait = bucket.take(now, number);
+        (wait, number)
     }
 }
 
@@ -299,6 +320,59 @@ mod tests {
 
         // B goes at t=2 and C a full interval after it, at t=3: they do not share a slot.
         assert!(start + second + c >= start + b + second);
+    }
+
+    #[test]
+    fn a_cancelled_reservation_of_a_replaced_bucket_cannot_touch_the_recreated_one() {
+        let one_per_second = RateLimit {
+            requests: 1,
+            per: Duration::from_secs(1),
+        };
+        let other = RateLimit {
+            requests: 5,
+            per: Duration::from_secs(1),
+        };
+        let limits = RateLimits::new();
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        // Rate A: the first reservation is free, the second is the queued tail.
+        limits.reserve("a", one_per_second, start);
+        let (_, stale) = limits.reserve_numbered("a", one_per_second, start);
+        // A -> B -> A: each change replaces the bucket.
+        limits.reserve("a", other, start);
+        let (free, _) = limits.reserve_numbered("a", one_per_second, start);
+        let (queued, _) = limits.reserve_numbered("a", one_per_second, start);
+        assert_eq!((free, queued), (Duration::ZERO, second));
+
+        // The stale reservation is dropped. With numbers restarting per bucket it would carry the
+        // number of the new bucket's tail and refund the token of a reservation it never made.
+        limits.refund("a", one_per_second, stale);
+
+        // The next caller goes a full interval after the queued one: they do not share a slot.
+        let (next, _) = limits.reserve_numbered("a", one_per_second, start);
+        assert_eq!(next, 2 * second);
+    }
+
+    #[test]
+    fn reservation_numbers_never_repeat_across_bucket_replacement() {
+        let a = RateLimit {
+            requests: 1,
+            per: Duration::from_secs(1),
+        };
+        let b = RateLimit {
+            requests: 2,
+            per: Duration::from_secs(1),
+        };
+        let limits = RateLimits::new();
+        let start = Instant::now();
+        let mut seen = Vec::new();
+        for rate in [a, b, a, b, a] {
+            seen.push(limits.reserve_numbered("s", rate, start).1);
+        }
+        let mut sorted = seen.clone();
+        sorted.dedup();
+        assert_eq!(sorted, seen);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

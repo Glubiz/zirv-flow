@@ -78,6 +78,19 @@ export const POSTGRES_KIND: SourceKind = {
   capabilities: { push: false, incremental: true, full_refresh: true, emits_deletes: false },
 };
 
+/** The HTTP manifest source type as `GET /api/v1/source-kinds` lists it. */
+export const HTTP_KIND: SourceKind = {
+  kind: "http",
+  label: "HTTP API (manifest)",
+  description: "Any HTTP API, described by a manifest.",
+  config_fields: [setting("manifest", "Manifest", "json", { required: true, help: "A JSON description of the API." })],
+  credential_fields: [
+    setting("client_id", "Client ID", "text", { secret: true }),
+    setting("client_secret", "Client secret", "text", { secret: true }),
+  ],
+  capabilities: { incremental: true, full_refresh: true, emits_deletes: true, push: false },
+};
+
 export function aSource(change: Partial<Source> = {}): Source {
   return {
     id: "src-1",
@@ -85,6 +98,7 @@ export function aSource(change: Partial<Source> = {}): Source {
     name: "CRM",
     config: { streams: 2 },
     credential_fields_set: ["token"],
+    oauth: { required: false, connected: false, connected_at: null },
     schedule: null,
     enabled: true,
     freshness: null,

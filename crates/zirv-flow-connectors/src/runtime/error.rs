@@ -17,6 +17,12 @@ pub enum RuntimeError {
     Unauthorized,
     /// The OAuth2 token endpoint did not give a token.
     TokenEndpoint { status: Option<u16> },
+    /// A code exchange answered with an access token and no refresh token: a sync cannot run
+    /// unattended on an access token.
+    NoRefreshToken,
+    /// The only refresh token held was issued for another token endpoint, client or scopes: the
+    /// account has to be connected again. Nothing was sent.
+    ReconnectRequired,
     /// The upstream answered with a status the runtime does not retry.
     Status(u16),
     /// Every attempt failed with a retryable outcome. `last_status` is `None` for a transport
@@ -51,6 +57,10 @@ impl fmt::Display for RuntimeError {
             } => write!(f, "the token endpoint answered with status {status}"),
             Self::TokenEndpoint { status: None } => {
                 f.write_str("the token endpoint did not give a usable token")
+            }
+            Self::NoRefreshToken => f.write_str("the token endpoint gave no refresh token"),
+            Self::ReconnectRequired => {
+                f.write_str("the account was connected under another configuration")
             }
             Self::Status(status) => write!(f, "the source answered with status {status}"),
             Self::RetriesExhausted {
@@ -101,6 +111,10 @@ impl From<RuntimeError> for SourceError {
     fn from(error: RuntimeError) -> Self {
         match error {
             RuntimeError::Unauthorized | RuntimeError::TokenEndpoint { .. } => Self::Auth,
+            RuntimeError::ReconnectRequired => Self::Config {
+                field: "oauth".to_owned(),
+                reason: "is not connected: connect the account first".to_owned(),
+            },
             RuntimeError::Status(status) => Self::Upstream(status),
             RuntimeError::RetriesExhausted {
                 last_status: Some(status),
@@ -161,6 +175,10 @@ mod tests {
             SourceError::from(RuntimeError::TokenEndpoint { status: None }),
             SourceError::Auth
         );
+        assert!(matches!(
+            SourceError::from(RuntimeError::ReconnectRequired),
+            SourceError::Config { field, .. } if field == "oauth"
+        ));
         assert_eq!(
             SourceError::from(RuntimeError::Status(404)),
             SourceError::Upstream(404)

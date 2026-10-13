@@ -59,6 +59,14 @@ fn walk<'a>(root: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
     Some(current)
 }
 
+/// The value at the dotted `path` of a record: a top-level field with exactly that name wins,
+/// otherwise the path is walked, a segment of digits indexing an array and any other segment
+/// selecting an object key. `None` when the value is not an object or the path leads nowhere.
+pub fn resolve_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    object.get(path).or_else(|| walk(object, path))
+}
+
 impl JsonRecord {
     /// Reads `object` for `mapping`: the top-level fields as [`JsonRecord::new`] does, and
     /// every dotted path the mapping names, resolved once. `declared` names the fields the
@@ -148,6 +156,18 @@ mod tests {
 
     fn record(value: &Value, declared: &[&str]) -> JsonRecord {
         JsonRecord::from_value(value, declared.iter().copied())
+    }
+
+    #[test]
+    fn resolve_path_prefers_an_exact_field_and_otherwise_walks_the_path() {
+        let value = json!({"a.b": 1, "a": {"b": 2, "c": [{"d": 3}]}, "n": null});
+
+        assert_eq!(resolve_path(&value, "a.b"), Some(&json!(1)));
+        assert_eq!(resolve_path(&value, "a.c.0.d"), Some(&json!(3)));
+        assert_eq!(resolve_path(&value, "n"), Some(&Value::Null));
+        assert_eq!(resolve_path(&value, "a.c.9"), None);
+        assert_eq!(resolve_path(&value, "x"), None);
+        assert_eq!(resolve_path(&json!([1]), "a"), None);
     }
 
     #[test]

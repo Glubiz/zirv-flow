@@ -4,13 +4,14 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use zirv_flow_core::SecretString;
 use zirv_flow_core::egress::EgressPolicy;
 
 use super::error::SourceError;
 use crate::http::{GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup, check_all};
 use crate::runtime::{
     AccessToken, Auth, RateLimit, RateLimits, RequestSpec, RetryPolicy, RuntimeError,
-    RuntimeResponse, TokenSlot, send,
+    RuntimeResponse, TokenSlot, TokenStore, send,
 };
 
 /// The most addresses [`SourceContext::resolve_checked`] hands to a driver.
@@ -39,6 +40,8 @@ pub struct SourceContext {
     token: Arc<Mutex<TokenSlot>>,
     /// Held while a token is fetched, so concurrent calls make one request between them.
     flight: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes authorization-code refreshes across processes, when the caller provides it.
+    token_store: Option<Arc<dyn TokenStore>>,
 }
 
 impl SourceContext {
@@ -80,6 +83,7 @@ impl SourceContext {
             retry: RetryPolicy::default(),
             token: Arc::default(),
             flight: Arc::default(),
+            token_store: None,
         }
     }
 
@@ -104,6 +108,16 @@ impl SourceContext {
             // A seed is not a refresh: the caller already has it.
             self.slot().current = Some(token);
         }
+        self
+    }
+
+    /// Hands authorization-code refreshes to `store`, which persists and serializes them. Without
+    /// one the runtime refreshes directly and the caller saves what [`take_refreshed_token`]
+    /// returns.
+    ///
+    /// [`take_refreshed_token`]: SourceContext::take_refreshed_token
+    pub fn with_token_store(mut self, store: Arc<dyn TokenStore>) -> Self {
+        self.token_store = Some(store);
         self
     }
 
@@ -202,10 +216,27 @@ impl SourceContext {
         self.flight.lock().await
     }
 
-    pub(crate) fn store_token(&self, token: AccessToken) {
+    /// Keeps `token` as the current one; `handed_back` also queues it for the caller to store.
+    pub(crate) fn store_token(&self, token: AccessToken, handed_back: bool) {
         let mut slot = self.slot();
         slot.current = Some(token.clone());
-        slot.refreshed = Some(token);
+        if handed_back {
+            slot.refreshed = Some(token);
+        }
+    }
+
+    /// The newest refresh token the slot holds for the configuration `binding`.
+    pub(crate) fn held_refresh_token(&self, binding: &str) -> Option<Arc<SecretString>> {
+        let slot = self.slot();
+        let token = slot
+            .current
+            .as_ref()
+            .filter(|token| token.binding() == Some(binding))?;
+        token.shared_refresh_token()
+    }
+
+    pub(crate) fn token_store(&self) -> Option<&Arc<dyn TokenStore>> {
+        self.token_store.as_ref()
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, TokenSlot> {

@@ -2794,6 +2794,7 @@ mod tests {
                     cursor_field: None,
                     primary_key: &["_key".to_owned()],
                     descriptor: &descriptor,
+                    suggested_mapping: None,
                 }],
             )
             .await

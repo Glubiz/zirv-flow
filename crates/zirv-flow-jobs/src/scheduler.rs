@@ -1177,6 +1177,7 @@ mod tests {
                 cursor_field: None,
                 primary_key: &[],
                 descriptor: &descriptor,
+                suggested_mapping: None,
             })
             .collect();
         let mut tx = begin(pool).await.unwrap();

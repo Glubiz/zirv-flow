@@ -1,0 +1,40 @@
+{
+  "version": "v1",
+  "base_url": "https://api.example.test/v1",
+  "auth": {
+    "type": "oauth2_authorization_code",
+    "authorize_url": "https://auth.example.test/authorize",
+    "token_url": "https://auth.example.test/token",
+    "scopes": ["contacts.read"]
+  },
+  "rate_limit": { "requests": 100, "per_seconds": 60 },
+  "streams": [
+    {
+      "name": "contacts",
+      "path": "/contacts",
+      "query": { "limit": 2 },
+      "records_path": "/data",
+      "pagination": { "type": "cursor", "param": "cursor", "next": "/next_cursor" },
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "email", "type": "string" },
+        { "name": "updated_at", "type": "timestamp" },
+        { "name": "status", "type": "string" }
+      ],
+      "primary_key": ["id"],
+      "incremental": {
+        "cursor_field": "updated_at",
+        "request_param": "since",
+        "cursor_type": "timestamp"
+      },
+      "delete_signal": { "path": "status", "equals": "deleted" },
+      "mapping": {
+        "key_column": "id",
+        "columns": [
+          { "column": "email", "target": { "type": "identifier", "kind": "email" }, "transforms": [{ "op": "lower" }] },
+          { "column": "status", "target": { "type": "trait", "key": "crm_status" } }
+        ]
+      }
+    }
+  ]
+}

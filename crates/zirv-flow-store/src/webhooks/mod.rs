@@ -135,6 +135,7 @@ pub(crate) mod fixtures {
                 cursor_field: None,
                 primary_key: &[],
                 descriptor: &descriptor,
+                suggested_mapping: None,
             }],
         )
         .await

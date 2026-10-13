@@ -201,6 +201,41 @@ impl ApiError {
         }
     }
 
+    /// A consent was asked for before the operator set `server.public_url`: the provider could not be
+    /// told where to send the browser back.
+    pub(crate) fn public_url_not_configured() -> Self {
+        Self {
+            code: Some("public_url_not_configured"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "connecting an account needs server.public_url to be set",
+            )
+        }
+    }
+
+    /// A sample was asked for with a draft that changes where requests go or how they authenticate:
+    /// the saved account and credential must not be used with an endpoint they were not set up for.
+    pub(crate) fn manifest_draft_auth_changed() -> Self {
+        Self {
+            code: Some("manifest_draft_auth_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "save the manifest to sample with a changed base URL or authentication",
+            )
+        }
+    }
+
+    /// A consent was asked for a source whose manifest does not use the authorization-code grant.
+    pub(crate) fn oauth_not_configured() -> Self {
+        Self {
+            code: Some("oauth_not_configured"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "this source does not use an OAuth2 authorization-code manifest",
+            )
+        }
+    }
+
     /// A run was asked for a stream that has no mapping, or for a source with none mapped.
     pub(crate) fn stream_not_mapped(detail: impl Into<String>) -> Self {
         Self {
@@ -435,6 +470,20 @@ mod tests {
             ApiError::internal().status,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn the_consent_refusals_are_conflicts_with_a_code() {
+        for (error, code) in [
+            (
+                ApiError::public_url_not_configured(),
+                "public_url_not_configured",
+            ),
+            (ApiError::oauth_not_configured(), "oauth_not_configured"),
+        ] {
+            assert_eq!(error.status(), StatusCode::CONFLICT);
+            assert_eq!(error.code, Some(code));
+        }
     }
 
     #[test]

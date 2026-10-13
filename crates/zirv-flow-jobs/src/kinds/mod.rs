@@ -19,6 +19,7 @@ mod person_merge_rewrite;
 mod privacy_erase;
 mod privacy_export;
 mod sync_run;
+mod sync_tokens;
 mod traits_recompute;
 
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
