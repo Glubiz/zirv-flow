@@ -1664,6 +1664,67 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enabling_or_disabling_a_source_re_mirrors_its_streams_reconcile_schedules(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let source = format!("/sources/{id}");
+        let tail = format!("{source}/streams/stream_1");
+        let enabled_of = || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT enabled FROM schedules WHERE stream_id IS NOT NULL",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // The cron is set while the source is disabled, so the row is stored disabled.
+        let off = fx
+            .as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "incremental",
+                    "cursor_field": "updated_at", "reconcile_schedule": "0 3 * * *"})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert!(!enabled_of().await);
+
+        let on = fx
+            .as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        assert_eq!(on.status, StatusCode::OK, "{:?}", on.body);
+        assert!(enabled_of().await, "enabling the source enables the row");
+
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        assert!(
+            !enabled_of().await,
+            "disabling the source disables it again"
+        );
+
+        // A disabled stream stays disabled whatever the source does.
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": false})))
+            .await;
+        fx.as_admin("PATCH", &source, Some(json!({"enabled": true})))
+            .await;
+        assert!(!enabled_of().await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn bad_deletion_settings_are_refused_and_store_nothing(pool: PgPool) {
         let fx = fixture(&pool).await;
         let id = fx.mapped_source(1).await;

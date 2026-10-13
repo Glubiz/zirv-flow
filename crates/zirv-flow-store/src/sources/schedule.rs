@@ -121,6 +121,30 @@ pub async fn sync_reconcile_schedule(
     Ok(())
 }
 
+/// Mirrors a source's `enabled` flag onto the reconciliation `schedules` rows of its streams, in
+/// the caller's transaction: a row fires only while the source and its stream are both enabled.
+/// Only the workspace's own rows change.
+pub async fn sync_source_reconcile_schedules(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    source_enabled: bool,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE schedules SET enabled = $3 AND streams.enabled \
+         FROM streams \
+         WHERE schedules.stream_id = streams.id AND schedules.workspace_id = $1 \
+           AND streams.workspace_id = $1 AND streams.source_id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(source_enabled)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

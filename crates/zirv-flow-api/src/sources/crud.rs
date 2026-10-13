@@ -350,6 +350,8 @@ pub(crate) async fn update_source(
         source.enabled,
     )
     .await?;
+    zirv_flow_store::sync_source_reconcile_schedules(&mut tx, workspace, source.id, source.enabled)
+        .await?;
     admin::audit(
         &mut tx,
         context,

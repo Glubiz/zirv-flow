@@ -276,6 +276,27 @@ struct Planned {
     rejected: Vec<SyncReject>,
 }
 
+/// Keeps the last occurrence of each key, in source order: a unit may carry one key twice (a
+/// soft-deleted row and a live one), and the later state is the source's current answer, so a key
+/// is never both applied or seen and deleted, and never applied twice.
+fn last_occurrence_wins(records: Vec<Record>) -> Vec<Record> {
+    let mut last: HashMap<&str, usize> = HashMap::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        last.insert(record.key.as_str(), index);
+    }
+    let keep: Vec<bool> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| last[record.key.as_str()] == index)
+        .collect();
+    drop(last);
+    records
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(record, keep)| keep.then_some(record))
+        .collect()
+}
+
 impl Planner<'_> {
     /// Why `record` is deleted: the connector reported it, or the mapping's delete signal fires
     /// on its cells. The signal is checked before the mapping runs, so a soft-deleted row is
@@ -294,7 +315,7 @@ impl Planner<'_> {
     /// records are not mapped to profile records and nothing is rejected.
     fn plan_keys(&self, records: Vec<Record>) -> Planned {
         let mut planned = Planned::default();
-        for record in records {
+        for record in last_occurrence_wins(records) {
             let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
             match self.deletion(&record, &cells) {
                 Some(why) => planned.deleted.push((record.key, why)),
@@ -308,7 +329,7 @@ impl Planner<'_> {
     /// retract, and the others rejects with a masked sample.
     fn plan(&self, records: Vec<Record>) -> Planned {
         let mut planned = Planned::default();
-        for record in records {
+        for record in last_occurrence_wins(records) {
             let cells = JsonRecord::from_value(&record.data, self.declared.iter().copied());
             if let Some(why) = self.deletion(&record, &cells) {
                 planned.deleted.push((record.key, why));
@@ -1052,6 +1073,9 @@ mod tests {
             )
             .await
             .unwrap();
+            // Both earlier records are gone after the run, which the default limit would refuse; this
+            // test is about the trail of a sweep, not the guard.
+            env.limit(1.0).await;
             env.queue().await
         };
 
@@ -1751,6 +1775,107 @@ mod tests {
         assert_ne!(next.id, run.id, "the stream takes a new run");
     }
 
+    fn duplicate_planner<'a>(
+        mapping: &'a Mapping,
+        catalog: &'a HashMap<String, TraitState>,
+        plain: &'a HashSet<String>,
+        trace: &'a TraceContext,
+    ) -> Planner<'a> {
+        Planner {
+            mapping,
+            catalog,
+            plain,
+            declared: vec!["email", "name"],
+            source: "s",
+            stream: "stream_1",
+            observed_at: OffsetDateTime::now_utc(),
+            trace,
+        }
+    }
+
+    fn row(key: &str, email: &str, deleted: bool) -> Record {
+        Record {
+            key: key.into(),
+            data: json!({"email": email, "name": "n"}),
+            deleted,
+        }
+    }
+
+    /// The keys of a plan: (applied, deleted, rejected, seen).
+    fn shape(planned: &Planned) -> (Vec<&str>, Vec<&str>, Vec<&str>, Vec<&str>) {
+        (
+            planned
+                .upserts
+                .iter()
+                .map(|u| u.record.record_key.as_str())
+                .collect(),
+            planned.deleted.iter().map(|(k, _)| k.as_str()).collect(),
+            planned
+                .rejected
+                .iter()
+                .map(|r| r.record_key.as_str())
+                .collect(),
+            planned.seen.iter().map(String::as_str).collect(),
+        )
+    }
+
+    #[test]
+    fn the_last_occurrence_of_a_key_in_a_unit_wins() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
+
+        // Deleted, then live: the key stays live and is applied once.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", true),
+            row("b", "b@example.com", false),
+            row("a", "a@example.com", false),
+        ]);
+        assert_eq!(shape(&planned), (vec!["b", "a"], vec![], vec![], vec![]));
+
+        // Live, then deleted: the key is removed and not applied.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", false),
+            row("a", "a@example.com", false),
+            row("a", "a@example.com", true),
+        ]);
+        assert_eq!(shape(&planned), (vec![], vec!["a"], vec![], vec![]));
+
+        // Deleted, then rejected: the rejected key is kept and counted as seen, not deleted.
+        let planned = planner.plan(vec![
+            row("a", "a@example.com", true),
+            row("a", "not-an-email", false),
+        ]);
+        assert_eq!(shape(&planned), (vec![], vec![], vec!["a"], vec![]));
+
+        // Rejected, then live: the key is applied and not rejected.
+        let planned = planner.plan(vec![
+            row("a", "not-an-email", false),
+            row("a", "a@example.com", false),
+        ]);
+        assert_eq!(shape(&planned), (vec!["a"], vec![], vec![], vec![]));
+    }
+
+    #[test]
+    fn a_reconciliation_unit_keeps_the_last_occurrence_of_a_key_too() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = duplicate_planner(&mapping, &catalog, &plain, &trace);
+
+        let planned = planner.plan_keys(vec![
+            row("a", "a@example.com", true),
+            row("a", "a@example.com", false),
+            row("b", "b@example.com", false),
+            row("b", "b@example.com", true),
+        ]);
+
+        assert_eq!(shape(&planned), (vec![], vec!["b"], vec![], vec!["a"]));
+    }
+
     #[test]
     fn a_nul_in_a_record_is_rejected_with_a_sample_that_holds_none() {
         let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
@@ -2325,6 +2450,26 @@ mod tests {
         assert_eq!(allowed.state, "succeeded");
         assert_eq!(allowed.records_deleted, 3);
         assert_eq!(env.live_keys().await, keys(0..1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_primary_key_is_refused_by_the_limit_and_removes_nothing(pool: PgPool) {
+        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+        env.finish(RunKind::Sync).await;
+        // The source now names the same four records by new keys: the ledger's old keys stay
+        // behind as four unseen rows next to the four the run inserts and sees.
+        sqlx::query("UPDATE source_records SET record_key = 'old-' || record_key")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let refused = env.finish(RunKind::Sync).await;
+
+        assert_eq!(refused.state, "failed");
+        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+        assert_eq!(refused.records_deleted, 0);
+        assert_eq!(env.live_keys().await.len(), 8);
     }
 
     #[sqlx::test]

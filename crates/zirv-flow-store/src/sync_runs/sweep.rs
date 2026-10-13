@@ -137,11 +137,13 @@ pub async fn sweep_unreached(
     })
 }
 
-/// Whether sweeping would remove more than `limit` of the stream's live records: the share of
-/// live ledger rows the run did not see is over the limit. A stream with no live record is never
-/// over. A read that returned nothing, a partial read and a changed primary key all leave most
-/// live records unseen, so the guard stops the sweep before it deletes people whose state a
-/// later read cannot bring back. The share equal to the limit sweeps.
+/// Whether sweeping would remove more than `limit` of the stream's live records that existed
+/// before the run: the share of them the run did not see is over the limit. Records the run
+/// itself inserted are not counted, or a changed primary key (every record re-keyed, so as many
+/// new rows as old ones) would halve the share and pass. A stream with no earlier live record is
+/// never over. A read that returned nothing, a partial read and a changed primary key all leave
+/// most earlier records unseen, so the guard stops the sweep before it deletes people whose state
+/// a later read cannot bring back. The share equal to the limit sweeps.
 pub async fn sweep_exceeds_limit<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -150,10 +152,11 @@ pub async fn sweep_exceeds_limit<'e>(
     stream: &str,
     limit: f64,
 ) -> Result<bool, StoreError> {
-    let (live, unseen): (i64, i64) = sqlx::query_as(
+    let (earlier, unseen): (i64, i64) = sqlx::query_as(
         "SELECT count(*), count(*) FILTER (WHERE last_seen_run IS DISTINCT FROM $4) \
          FROM source_records \
-         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND deleted_at IS NULL",
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND deleted_at IS NULL \
+           AND created_at < (SELECT created_at FROM sync_runs WHERE workspace_id = $1 AND id = $4)",
     )
     .bind(workspace.as_uuid())
     .bind(source)
@@ -162,7 +165,7 @@ pub async fn sweep_exceeds_limit<'e>(
     .fetch_one(executor)
     .await
     .map_err(StoreError::query)?;
-    Ok(live > 0 && (unseen as f64) / (live as f64) > limit)
+    Ok(earlier > 0 && (unseen as f64) / (earlier as f64) > limit)
 }
 
 #[cfg(test)]
@@ -603,6 +606,27 @@ mod tests {
             .await
             .unwrap();
         assert!(!over(&pool, &fx, 0.5).await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_changed_primary_key_is_measured_against_the_records_before_the_run(pool: PgPool) {
+        let fx = second_run(&pool, 4).await;
+        let source = fx.source_id.to_string();
+        // The source returns the same four records under new keys: four live rows are inserted
+        // and seen, and the four old ones stay unseen. Against all eight that is 50%; against the
+        // four that existed before the run it is 100%.
+        let upserts: Vec<_> = (0..4)
+            .map(|i| upsert(&fx, &format!("n{i}"), &format!("a{i}@example.com")))
+            .collect();
+        let cp = json!({"offset": 4});
+        let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, BatchOutcome::Committed(_)));
+
+        assert!(over(&pool, &fx, 0.5).await);
+        assert!(!over(&pool, &fx, 1.0).await);
     }
 
     #[sqlx::test]

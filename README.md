@@ -1318,8 +1318,8 @@ stream from the beginning for its keys only, applies nothing, never moves the st
 and then sweeps like a full refresh. A full-refresh stream is refused (422
 `reconcile_needs_incremental`), and a firing skips a stream that has an active run.
 
-**Sweep limit.** A sweep that would remove more than `sweep_limit` of the stream's live records
-(default 0.5, set per stream in `PUT .../streams/{name}`, above 0 and at most 1; absent resets
+**Sweep limit.** A sweep that would remove more than `sweep_limit` of the stream's live records that existed before the
+run (default 0.5, set per stream in `PUT .../streams/{name}`, above 0 and at most 1; absent resets
 it) removes nothing and fails the run with `sweep_limit`. This stops an upstream outage that
 returns an empty list, a partial answer, or a changed primary key from deleting people whose
 state a later read cannot bring back. A drop at exactly the limit sweeps. An admin authorizes a
