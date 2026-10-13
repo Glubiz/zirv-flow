@@ -314,11 +314,14 @@ pub(crate) async fn ensure_token(
                 }
                 None => Arc::new(SecretString::new(refresh_token.expose().to_owned())),
             };
+            let token = refresh_code_grant(ctx, auth, &held).await?;
+            // A store may hand back what another process saved since, which can be an account
+            // connected under another configuration: never relabel that as this one's.
+            if token.binding().is_some_and(|issued| issued != binding) {
+                return Err(RuntimeError::ReconnectRequired);
+            }
             // With a store, the store has already persisted it: the caller has nothing to save.
-            (
-                refresh_code_grant(ctx, auth, &held).await?,
-                ctx.token_store().is_none(),
-            )
+            (token, ctx.token_store().is_none())
         }
         _ => (fetch_token(ctx, auth).await?, true),
     };
@@ -1711,6 +1714,45 @@ mod tests {
             ctx.take_refreshed_token().is_none(),
             "the store persisted it; the caller saves nothing"
         );
+    }
+
+    /// A store whose newest tokens were saved by a reconnect under another configuration.
+    struct ReconnectedStore;
+
+    impl TokenStore for ReconnectedStore {
+        fn refresh<'a>(
+            &'a self,
+            _held: &'a SecretString,
+            _refresh: &'a (dyn Fn(SecretString) -> RefreshFuture<'a> + Send + Sync),
+        ) -> RefreshFuture<'a> {
+            Box::pin(async {
+                Ok(
+                    AccessToken::new_unix(SecretString::new("at-other".into()), None)
+                        .with_refresh_token(SecretString::new("rt-other".into()))
+                        .with_binding("another-configuration"),
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tokens_a_store_saved_under_another_binding_are_never_used() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let refresh = SecretString::new("rt-0".into());
+        let ctx = context("oauth", "s").with_token_store(Arc::new(ReconnectedStore));
+
+        let error = call(
+            &ctx,
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeError::ReconnectRequired);
+        assert_eq!(api.hits(), 0, "the other account's token reached no API");
     }
 
     #[tokio::test]
