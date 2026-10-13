@@ -30,13 +30,7 @@ pub(super) fn to_plaintext(
 }
 
 fn from_plaintext(bytes: &SecretBytes) -> Result<Credential, ApiError> {
-    let values: BTreeMap<String, SecretString> =
-        serde_json::from_slice(bytes.expose()).map_err(|_| ApiError::internal())?;
-    let mut credential = Credential::new();
-    for (key, value) in values {
-        credential.insert(key, value);
-    }
-    Ok(credential)
+    Credential::from_json(bytes).map_err(|_| ApiError::internal())
 }
 
 /// The keys that open stored secrets, or 503 when the server was started without them.

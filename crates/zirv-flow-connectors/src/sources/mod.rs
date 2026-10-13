@@ -14,7 +14,7 @@ mod types;
 mod validate;
 
 pub use context::SourceContext;
-pub use credential::Credential;
+pub use credential::{Credential, CredentialFormatError};
 pub use error::SourceError;
 pub use registry::Registry;
 pub use source::{BoxFuture, ErasedSource, Source};
@@ -22,7 +22,9 @@ pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 pub use types::{
     Batch, Checkpoint, FieldDescriptor, FieldType, Record, StreamConfig, StreamDescriptor, SyncMode,
 };
-pub use validate::{FieldError, validate_config, validate_credential};
+pub use validate::{
+    FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
+};
 
 /// The token the fake source's connection test accepts.
 #[cfg(feature = "test-support")]

@@ -9,7 +9,9 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{StreamDescriptor, SyncMode};
+use zirv_flow_connectors::sources::{
+    StreamDescriptor, StreamSettingsInput, SyncMode, validate_stream_settings,
+};
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{Stream, StreamSettings};
 
@@ -127,41 +129,23 @@ fn check_settings(
     descriptor: &StreamDescriptor,
     request: &StreamSettingsRequest,
 ) -> Result<SyncMode, ApiError> {
-    let mut errors: Vec<(String, String)> = Vec::new();
-    let mut problem =
-        |field: &str, reason: &str| errors.push((field.to_owned(), reason.to_owned()));
-    let has_field = |name: &str| descriptor.fields.iter().any(|field| field.name == name);
-
-    let mode = SyncMode::parse(&request.sync_mode);
-    match mode {
-        None => problem("sync_mode", "must be full_refresh or incremental"),
-        Some(mode) if !descriptor.sync_modes.contains(&mode) => {
-            problem("sync_mode", "is not supported by this stream");
-        }
-        Some(_) => {}
-    }
-    match request.cursor_field.as_deref() {
-        Some(cursor) if !has_field(cursor) => {
-            problem("cursor_field", "is not a field of this stream");
-        }
-        None if mode == Some(SyncMode::Incremental) => {
-            problem("cursor_field", "is required for an incremental stream");
-        }
-        _ => {}
-    }
-    if request.primary_key.iter().any(|name| !has_field(name)) {
-        problem("primary_key", "names a field this stream does not have");
-    }
-    if request
-        .staleness_threshold_seconds
-        .is_some_and(|seconds| seconds <= 0)
-    {
-        problem("staleness_threshold_seconds", "must be positive");
-    }
-    match (errors.is_empty(), mode) {
-        (true, Some(mode)) => Ok(mode),
-        _ => Err(problems(errors)),
-    }
+    validate_stream_settings(
+        descriptor,
+        &StreamSettingsInput {
+            sync_mode: &request.sync_mode,
+            cursor_field: request.cursor_field.as_deref(),
+            primary_key: &request.primary_key,
+            staleness_threshold_seconds: request.staleness_threshold_seconds,
+        },
+    )
+    .map_err(|errors| {
+        problems(
+            errors
+                .into_iter()
+                .map(|error| (error.field, error.reason))
+                .collect(),
+        )
+    })
 }
 
 /// Stores the settings of a stream and audits `stream.configured`.

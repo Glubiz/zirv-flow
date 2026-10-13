@@ -3,7 +3,19 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use zirv_flow_core::SecretString;
+use zirv_flow_core::{SecretBytes, SecretString};
+
+/// A secret that is not a JSON object of text values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CredentialFormatError;
+
+impl fmt::Display for CredentialFormatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the stored credential is not a JSON object of text values")
+    }
+}
+
+impl std::error::Error for CredentialFormatError {}
 
 /// The credential fields of one source, wiped on drop. No `Serialize` and no `Clone`, and
 /// `Debug` shows no value and no key.
@@ -24,6 +36,18 @@ impl Credential {
     /// The value of a field the source declared, if it is set.
     pub fn get(&self, key: &str) -> Option<&SecretString> {
         self.fields.get(key)
+    }
+
+    /// Builds a credential from the plaintext of a sealed secret: a JSON object of field name
+    /// to text value. Fails when the bytes are anything else.
+    pub fn from_json(bytes: &SecretBytes) -> Result<Self, CredentialFormatError> {
+        let values: BTreeMap<String, SecretString> =
+            serde_json::from_slice(bytes.expose()).map_err(|_| CredentialFormatError)?;
+        let mut credential = Self::new();
+        for (key, value) in values {
+            credential.insert(key, value);
+        }
+        Ok(credential)
     }
 
     pub fn len(&self) -> usize {
@@ -63,5 +87,24 @@ mod tests {
     #[test]
     fn an_empty_credential_is_empty() {
         assert!(Credential::new().is_empty());
+    }
+
+    #[test]
+    fn a_credential_is_read_from_its_sealed_json_and_nothing_else_is_accepted() {
+        let bytes = SecretBytes::new(br#"{"token":"abc","user":"u"}"#.to_vec());
+
+        let credential = Credential::from_json(&bytes).unwrap();
+
+        assert_eq!(credential.get("token").unwrap().expose(), "abc");
+        assert_eq!(credential.get("user").unwrap().expose(), "u");
+        assert_eq!(credential.len(), 2);
+        for bad in ["[1]", "{\"token\":1}", "not json"] {
+            let bytes = SecretBytes::new(bad.as_bytes().to_vec());
+            assert_eq!(
+                Credential::from_json(&bytes).unwrap_err(),
+                CredentialFormatError,
+                "{bad}"
+            );
+        }
     }
 }
