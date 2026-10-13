@@ -7,14 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use sqlx::Connection;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::model::ImportStatus;
 use super::rejects::{ImportPhase, RejectedRow, insert_rejects};
 use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
-use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_records};
+use crate::people::{
+    ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
+};
 use crate::{PgConnection, PgPool, StoreError, begin, commit};
 
 /// A failed run is judged on its reject rate only once this many rows are done.
@@ -66,11 +67,6 @@ pub enum BatchOutcome {
     ListMissing,
 }
 
-enum Applied {
-    Done(ProfileOutcome),
-    Failed,
-}
-
 /// Counts the outcome of one record and collects the person its lists need.
 #[derive(Default)]
 struct Tally {
@@ -81,20 +77,20 @@ struct Tally {
 }
 
 impl Tally {
-    fn add(&mut self, detail: &RowDetail, result: Applied) {
+    fn add(&mut self, detail: &RowDetail, result: Option<ProfileOutcome>) {
         let person = match result {
-            Applied::Done(ProfileOutcome::Applied { person_id, .. }) => {
+            Some(ProfileOutcome::Applied { person_id, .. }) => {
                 self.applied += 1;
                 person_id
             }
-            Applied::Done(ProfileOutcome::Unchanged { person_id, .. }) => {
+            Some(ProfileOutcome::Unchanged { person_id, .. }) => {
                 self.unchanged += 1;
                 person_id
             }
-            Applied::Done(ProfileOutcome::Rejected { reason }) => {
+            Some(ProfileOutcome::Rejected { reason }) => {
                 return self.reject(detail, reason);
             }
-            Applied::Failed => return self.reject(detail, "apply_failed"),
+            None => return self.reject(detail, "apply_failed"),
         };
         for list in &detail.lists {
             self.members.entry(*list).or_default().push(person);
@@ -130,26 +126,17 @@ pub async fn commit_import_batch(
     }
 
     let mut tally = Tally::default();
-    if singly {
-        for (record, detail) in batch.records.iter().zip(batch.details) {
-            let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-            match apply_profile_record(&mut savepoint, batch.workspace, record).await {
-                Ok(outcome) => {
-                    savepoint.commit().await.map_err(StoreError::query)?;
-                    tally.add(detail, Applied::Done(outcome));
-                }
-                Err(error) if error.is_retryable() => return Err(error),
-                Err(_) => {
-                    savepoint.rollback().await.map_err(StoreError::query)?;
-                    tally.add(detail, Applied::Failed);
-                }
-            }
-        }
+    let outcomes = if singly {
+        apply_profile_records_singly(&mut tx, batch.workspace, batch.records).await?
     } else {
-        let outcomes = apply_profile_records(&mut tx, batch.workspace, batch.records).await?;
-        for (outcome, detail) in outcomes.into_iter().zip(batch.details) {
-            tally.add(detail, Applied::Done(outcome));
-        }
+        apply_profile_records(&mut tx, batch.workspace, batch.records)
+            .await?
+            .into_iter()
+            .map(Some)
+            .collect()
+    };
+    for (outcome, detail) in outcomes.into_iter().zip(batch.details) {
+        tally.add(detail, outcome);
     }
 
     for (list, people) in &tally.members {

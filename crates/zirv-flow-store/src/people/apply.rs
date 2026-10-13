@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
-use sqlx::PgConnection;
+use sqlx::{Connection, PgConnection};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
@@ -89,6 +89,32 @@ pub(crate) async fn apply_profile_records(
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         outcomes.push(apply_profile_record(connection, workspace, record).await?);
+    }
+    Ok(outcomes)
+}
+
+/// [`apply_profile_records`] with each record in a savepoint of its own: a record the store
+/// cannot apply is `None` (the caller rejects it as `apply_failed`) and the rest carry on. A
+/// retryable error still fails the whole batch.
+pub(crate) async fn apply_profile_records_singly(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    records: &[ProfileRecord],
+) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
+    let mut outcomes = Vec::with_capacity(records.len());
+    for record in records {
+        let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
+        match apply_profile_record(&mut savepoint, workspace, record).await {
+            Ok(outcome) => {
+                savepoint.commit().await.map_err(StoreError::query)?;
+                outcomes.push(Some(outcome));
+            }
+            Err(error) if error.is_retryable() => return Err(error),
+            Err(_) => {
+                savepoint.rollback().await.map_err(StoreError::query)?;
+                outcomes.push(None);
+            }
+        }
     }
     Ok(outcomes)
 }

@@ -22,7 +22,7 @@ use zirv_flow_store::{
 };
 
 use super::import_rows::{BATCH_ROWS, Planner, Probe, ReadError, RowReader, hex, load_catalog};
-use super::ingest_drain::retrying;
+use super::ingest_drain::whole_then_singly;
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct ImportRun;
@@ -75,19 +75,12 @@ pub(super) async fn unreadable(
 
 /// One batch: whole when it can be, record by record when a record is poison.
 async fn commit_batch(pool: &PgPool, batch: &ImportBatch<'_>) -> Result<BatchOutcome, JobError> {
-    match retrying(|| commit_import_batch(pool, batch, false)).await {
-        Ok(outcome) => Ok(outcome),
-        Err(error) if error.is_retryable() => Err(CONFLICTED),
-        Err(_) => retrying(|| commit_import_batch(pool, batch, true))
-            .await
-            .map_err(|error| {
-                if error.is_retryable() {
-                    CONFLICTED
-                } else {
-                    JobError::new("the import batch could not be applied")
-                }
-            }),
-    }
+    whole_then_singly(
+        CONFLICTED,
+        "the import batch could not be applied",
+        |singly| commit_import_batch(pool, batch, singly),
+    )
+    .await
 }
 
 /// Runs the import. With `stop_after`, a test simulates a crash after that many batches.

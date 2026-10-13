@@ -39,7 +39,7 @@ use zirv_flow_store::{
 };
 
 use super::import_rows::Probe;
-use super::ingest_drain::retrying;
+use super::ingest_drain::whole_then_singly;
 use crate::metrics::{RunOutcome, record_sync_records, record_sync_run};
 use crate::{JobContext, JobError, JobKind};
 
@@ -310,25 +310,12 @@ async fn open_credential(
 
 /// One batch: whole when it can be, record by record when a record is poison.
 async fn commit_batch(pool: &PgPool, batch: &SyncBatch<'_>) -> Result<SyncBatchOutcome, JobError> {
-    match retrying(|| commit_sync_batch(pool, batch)).await {
-        Ok(outcome) => Ok(outcome),
-        Err(error) if error.is_retryable() => Err(CONFLICTED),
-        Err(_) => {
-            let singly = SyncBatch {
-                singly: true,
-                ..*batch
-            };
-            retrying(|| commit_sync_batch(pool, &singly))
-                .await
-                .map_err(|error| {
-                    if error.is_retryable() {
-                        CONFLICTED
-                    } else {
-                        JobError::new("the sync batch could not be applied")
-                    }
-                })
-        }
-    }
+    whole_then_singly(
+        CONFLICTED,
+        "the sync batch could not be applied",
+        |singly| async move { commit_sync_batch(pool, &SyncBatch { singly, ..*batch }).await },
+    )
+    .await
 }
 
 /// How the run came out of a unit of work.

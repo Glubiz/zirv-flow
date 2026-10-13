@@ -9,12 +9,11 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use sqlx::Connection;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::people::{
-    ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_records,
+    ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
 };
 use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit, lock_lease};
@@ -97,11 +96,6 @@ pub enum BatchOutcome {
     Cancelled,
 }
 
-enum Applied {
-    Done(ProfileOutcome),
-    Failed,
-}
-
 /// A reject to store, with the code that heads it.
 struct Refusal {
     id: Uuid,
@@ -140,7 +134,7 @@ pub async fn commit_sync_batch(
         .filter(|(_, result)| {
             matches!(
                 result,
-                Applied::Done(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
+                Some(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
             )
         })
         .map(|(upsert, _)| upsert.record.record_key.as_str())
@@ -164,7 +158,7 @@ pub async fn commit_sync_batch(
         .collect();
     for (upsert, result) in batch.upserts.iter().zip(results) {
         let reason: &'static str = match result {
-            Applied::Done(ProfileOutcome::Applied { person_id, .. }) => {
+            Some(ProfileOutcome::Applied { person_id, .. }) => {
                 counts.applied += 1;
                 let mut subjects = vec![("person", person_id)];
                 subjects.extend(
@@ -174,12 +168,12 @@ pub async fn commit_sync_batch(
                 decisions.push(decision(batch, "applied", None, subjects));
                 continue;
             }
-            Applied::Done(ProfileOutcome::Unchanged { .. }) => {
+            Some(ProfileOutcome::Unchanged { .. }) => {
                 counts.unchanged += 1;
                 continue;
             }
-            Applied::Done(ProfileOutcome::Rejected { reason }) => reason,
-            Applied::Failed => "apply_failed",
+            Some(ProfileOutcome::Rejected { reason }) => reason,
+            None => "apply_failed",
         };
         refusals.push(Refusal {
             id: Uuid::now_v7(),
@@ -305,36 +299,22 @@ fn decision(
     }
 }
 
-/// Applies the accepted records, all together or, with `singly`, each in a savepoint.
+/// Applies the accepted records, all together or, with `singly`, each in a savepoint. A record
+/// the store cannot apply is `None`.
 async fn apply_upserts(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
-) -> Result<Vec<Applied>, StoreError> {
-    if !batch.singly {
-        let records: Vec<ProfileRecord> = batch
-            .upserts
-            .iter()
-            .map(|upsert| upsert.record.clone())
-            .collect();
-        let outcomes = apply_profile_records(tx, batch.workspace, &records).await?;
-        return Ok(outcomes.into_iter().map(Applied::Done).collect());
+) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
+    let records: Vec<ProfileRecord> = batch
+        .upserts
+        .iter()
+        .map(|upsert| upsert.record.clone())
+        .collect();
+    if batch.singly {
+        return apply_profile_records_singly(tx, batch.workspace, &records).await;
     }
-    let mut results = Vec::with_capacity(batch.upserts.len());
-    for upsert in batch.upserts {
-        let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-        match apply_profile_record(&mut savepoint, batch.workspace, &upsert.record).await {
-            Ok(outcome) => {
-                savepoint.commit().await.map_err(StoreError::query)?;
-                results.push(Applied::Done(outcome));
-            }
-            Err(error) if error.is_retryable() => return Err(error),
-            Err(_) => {
-                savepoint.rollback().await.map_err(StoreError::query)?;
-                results.push(Applied::Failed);
-            }
-        }
-    }
-    Ok(results)
+    let outcomes = apply_profile_records(tx, batch.workspace, &records).await?;
+    Ok(outcomes.into_iter().map(Some).collect())
 }
 
 /// Sets `last_seen_run` on the live ledger rows of `keys` and returns their ids by key.
