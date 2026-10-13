@@ -71,18 +71,30 @@ const INVALID = {
 
 const BASE = { "GET /api/v1/session": () => json(session(OWNER, "csrf-a")) };
 
-function Harness({ onAccept, sample }: { onAccept: (content: unknown) => void; sample?: unknown[] | null }) {
+function Harness({
+  onAccept,
+  sample,
+  confirmAccept,
+}: {
+  onAccept: (content: unknown) => void;
+  sample?: unknown[] | null;
+  confirmAccept?: () => boolean;
+}) {
   const { state } = useSession();
   if (state.status !== "signed-in") return <p>Waiting for the session</p>;
   return (
-    <AssistantPanel workspaceId="ws1" kind="mapping" sourceId="src-1" stream="contacts" sample={sample} onAccept={onAccept} />
+    <AssistantPanel workspaceId="ws1" kind="mapping" sourceId="src-1" stream="contacts" sample={sample} onAccept={onAccept} confirmAccept={confirmAccept} />
   );
 }
 
-function mount(onAccept: (content: unknown) => void = () => undefined, sample?: unknown[] | null) {
+function mount(
+  onAccept: (content: unknown) => void = () => undefined,
+  sample?: unknown[] | null,
+  confirmAccept?: () => boolean,
+) {
   return render(
     <SessionProvider>
-      <Harness onAccept={onAccept} sample={sample} />
+      <Harness onAccept={onAccept} sample={sample} confirmAccept={confirmAccept} />
     </SessionProvider>,
   );
 }
@@ -211,6 +223,29 @@ describe("the assistant panel", () => {
     expect(onAccept).toHaveBeenCalledWith(CONTENT);
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
     expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+  });
+
+  it("sends no accept request and keeps Accept available when the host refuses the replacement", async () => {
+    const calls = mockApi({
+      ...BASE,
+      [SETTINGS]: () => json(settings(true)),
+      [DRAFT]: () => json(VALID),
+      [ACCEPT]: () => json({ id: "d1", kind: "mapping", source_id: "src-1", stream: "contacts", content: CONTENT }),
+    });
+    const onAccept = vi.fn();
+    const confirmAccept = vi.fn(() => false);
+    const user = userEvent.setup();
+    mount(onAccept, undefined, confirmAccept);
+    await ask(user);
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+
+    await user.click(await screen.findByRole("button", { name: "Accept" }));
+
+    expect(confirmAccept).toHaveBeenCalledTimes(1);
+    expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Accept" })).toBeEnabled();
+    expect(screen.queryByText("Loaded into the editor. Save to apply it.")).not.toBeInTheDocument();
   });
 
   it("discards a draft without accepting it", async () => {

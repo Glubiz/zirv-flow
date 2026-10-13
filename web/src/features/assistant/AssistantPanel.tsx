@@ -33,6 +33,11 @@ interface AssistantPanelProps {
   sample?: unknown[] | null;
   /** Called with the validated draft once the person accepts it. It loads the editor's unsaved copy; saving stays theirs. */
   onAccept: (content: unknown) => void;
+  /**
+   * Asked before the accept request, so a refusal accepts nothing on the server: the host returns
+   * false when loading the draft would replace edits the person has not agreed to lose.
+   */
+  confirmAccept?: () => boolean;
 }
 
 /**
@@ -76,7 +81,7 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, personal }: AssistantPanelProps & { personal: boolean }) {
+function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confirmAccept, personal }: AssistantPanelProps & { personal: boolean }) {
   const [prompt, setPrompt] = useState("");
   const [documentation, setDocumentation] = useState("");
   const [run, setRun] = useState<Run>({ status: "idle" });
@@ -129,6 +134,7 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, perso
   }
 
   async function accept(current: Draft) {
+    if (confirmAccept && !confirmAccept()) return;
     setRun({ status: "done", draft: current, accepting: true, accepted: false, acceptFailure: null });
     try {
       const accepted = await unwrap(

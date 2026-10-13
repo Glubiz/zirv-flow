@@ -164,7 +164,6 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
 
   /** Loads an accepted draft as the unsaved mapping; saving stays the person's own action. */
   function acceptDraft(content: unknown) {
-    if (dirty && !window.confirm("Replace the rows you have edited with the assistant's draft?")) return;
     setDraft(mappingToDraft(fieldNames, content as Mapping));
     setPreview(null);
   }
@@ -232,6 +231,7 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
       stream={stream.name}
       sample={push ? (sample?.ok ? sample.sample : null) : undefined}
       onAccept={acceptDraft}
+      confirmAccept={() => !dirty || window.confirm("Replace the rows you have edited with the assistant's draft?")}
     />
   );
 
