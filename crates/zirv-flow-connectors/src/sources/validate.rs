@@ -56,16 +56,16 @@ pub fn validate_config(spec: &SourceSpec, config: &Value) -> Result<(), Vec<Fiel
 
 /// Checks the credential fields given at create time (`complete`) or at replacement: no
 /// undeclared key and no empty value, and with `complete` every required field.
-pub fn validate_credential(
+pub fn validate_credential<V: AsRef<str>>(
     spec: &SourceSpec,
-    values: &BTreeMap<String, String>,
+    values: &BTreeMap<String, V>,
     complete: bool,
 ) -> Result<(), Vec<FieldError>> {
     let mut errors = Vec::new();
     for (key, value) in values {
         if !spec.credential_fields.iter().any(|field| field.key == key) {
             errors.push(error(key, "is not a credential field of this source type"));
-        } else if value.is_empty() {
+        } else if value.as_ref().is_empty() {
             errors.push(error(key, "must not be empty"));
         }
     }

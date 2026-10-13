@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::{validate_config, validate_credential};
-use zirv_flow_core::{SecretId, SecretPurpose, UserId, WorkspaceId};
+use zirv_flow_core::{SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
 use super::{credential, field_problems, invalid, kind_unavailable, registry};
@@ -83,7 +83,8 @@ pub(crate) struct CreateSourceRequest {
     config: Value,
     /// The credential fields by name. Sealed on arrival and never returned.
     #[serde(default)]
-    credential: BTreeMap<String, String>,
+    #[schema(value_type = BTreeMap<String, String>)]
+    credential: BTreeMap<String, SecretString>,
     /// A cron expression in UTC.
     schedule: Option<String>,
 }
@@ -97,7 +98,8 @@ pub(crate) struct UpdateSourceRequest {
     schedule: Option<String>,
     enabled: Option<bool>,
     /// Replaces the whole credential: every required credential field must be given.
-    credential: Option<BTreeMap<String, String>>,
+    #[schema(value_type = Option<BTreeMap<String, String>>)]
+    credential: Option<BTreeMap<String, SecretString>>,
 }
 
 fn check_name(name: &str) -> Result<&str, ApiError> {
@@ -129,7 +131,7 @@ fn name_taken(error: StoreError) -> ApiError {
     }
 }
 
-fn field_names(values: &BTreeMap<String, String>) -> Vec<String> {
+fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
     values.keys().cloned().collect()
 }
 
@@ -249,12 +251,17 @@ pub(crate) async fn update_source(
     }
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // Lock the row first: two changes that both carry a credential must not each create or
+    // replace a secret from the same stale read.
+    let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let mut linked = None;
     let credential_names = request.credential.as_ref().map(field_names);
     if let Some(values) = &request.credential {
         let plaintext = credential::to_plaintext(values)?;
         let keyring = credential::keyring(state)?;
-        match existing.credential_secret_id {
+        match locked.credential_secret_id {
             Some(secret) => {
                 admin::replace_secret_in(
                     &mut tx,
@@ -561,7 +568,10 @@ mod tests {
     #[test]
     fn field_names_are_the_keys_only() {
         let mut values = BTreeMap::new();
-        values.insert("token".to_owned(), "secret-value".to_owned());
+        values.insert(
+            "token".to_owned(),
+            SecretString::new("secret-value".to_owned()),
+        );
 
         assert_eq!(field_names(&values), ["token"]);
     }

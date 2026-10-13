@@ -17,18 +17,24 @@ use crate::AppState;
 use crate::problem::ApiError;
 
 /// The plaintext of a credential secret.
-pub(super) fn to_plaintext(values: &BTreeMap<String, String>) -> Result<SecretBytes, ApiError> {
-    serde_json::to_vec(values)
+pub(super) fn to_plaintext(
+    values: &BTreeMap<String, SecretString>,
+) -> Result<SecretBytes, ApiError> {
+    let fields: BTreeMap<&str, &str> = values
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.expose()))
+        .collect();
+    serde_json::to_vec(&fields)
         .map(SecretBytes::new)
         .map_err(|_| ApiError::internal())
 }
 
 fn from_plaintext(bytes: &SecretBytes) -> Result<Credential, ApiError> {
-    let values: BTreeMap<String, String> =
+    let values: BTreeMap<String, SecretString> =
         serde_json::from_slice(bytes.expose()).map_err(|_| ApiError::internal())?;
     let mut credential = Credential::new();
     for (key, value) in values {
-        credential.insert(key, SecretString::new(value));
+        credential.insert(key, value);
     }
     Ok(credential)
 }
@@ -73,8 +79,8 @@ mod tests {
     #[test]
     fn a_credential_survives_the_trip_through_its_plaintext() {
         let mut values = BTreeMap::new();
-        values.insert("token".to_owned(), "abc".to_owned());
-        values.insert("user".to_owned(), "u".to_owned());
+        values.insert("token".to_owned(), SecretString::new("abc".to_owned()));
+        values.insert("user".to_owned(), SecretString::new("u".to_owned()));
 
         let credential = from_plaintext(&to_plaintext(&values).unwrap()).unwrap();
 

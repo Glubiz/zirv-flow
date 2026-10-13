@@ -121,6 +121,26 @@ pub async fn find_source<'e>(
     .map_err(StoreError::query)
 }
 
+/// Reads a source and locks its row until the transaction ends, so concurrent changes to it
+/// (a credential replaced twice, say) run one after the other. `None` when there is no such
+/// source.
+pub async fn find_source_for_update(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Option<Source>, StoreError> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        source_columns!(),
+        " FROM sources WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Changes the given fields. `None` when there is no such source; a name taken by another
 /// source is a conflict.
 pub async fn update_source<'e>(
@@ -397,6 +417,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_locked_source_makes_a_second_locker_wait_until_the_first_commits(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let config = json!({});
+        let source = create_source(&pool, ws, &new("crm", &config))
+            .await
+            .unwrap();
+        let mut first = begin(&pool).await.unwrap();
+        find_source_for_update(&mut first, ws, source.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let second_pool = pool.clone();
+        let second = tokio::spawn(async move {
+            let mut tx = begin(&second_pool).await.unwrap();
+            let found = find_source_for_update(&mut tx, ws, source.id).await;
+            found.unwrap().is_some()
+        });
+        let early = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            while !second.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(early.is_err(), "the second locker did not wait");
+
+        commit(first).await.unwrap();
+        assert!(second.await.unwrap());
     }
 
     #[sqlx::test]

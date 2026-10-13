@@ -6,8 +6,8 @@ mod crud;
 mod streams;
 
 pub use crud::{
-    NewSource, Source, SourceUpdate, create_source, delete_source, find_source, list_sources,
-    update_source,
+    NewSource, Source, SourceUpdate, create_source, delete_source, find_source,
+    find_source_for_update, list_sources, update_source,
 };
 pub use streams::{
     DiscoveredStream, Stream, StreamSettings, configure_stream, find_stream, list_streams,
