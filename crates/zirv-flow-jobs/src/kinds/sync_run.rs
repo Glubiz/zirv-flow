@@ -2437,7 +2437,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("UPDATE streams SET enabled = false")
+        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
             .execute(&pool)
             .await
             .unwrap();

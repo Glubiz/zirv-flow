@@ -1473,7 +1473,7 @@ pub(super) mod tests {
             .await
             .unwrap();
 
-        sqlx::query("UPDATE streams SET enabled = false WHERE id = $1")
+        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL WHERE id = $1")
             .bind(stream)
             .execute(pool)
             .await
