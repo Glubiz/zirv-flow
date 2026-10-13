@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -104,6 +104,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
 | `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
+| `ingest.max_webhook_bytes` | u64 | 262144 | at least 1; a larger webhook body is refused with 413 |
+| `ingest.rate_per_hook` | u32 | 50 | at least 1; requests per second each webhook may receive, per `serve` process |
+| `ingest.burst_per_hook` | u32 | 200 | at least 1; requests a webhook may receive at once after a quiet period, per `serve` process |
 | `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `ingest.drain_shards` | u32 | 8 | 1 to 16; concurrent drain loops per workspace in `ingest.drain` |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
@@ -1715,13 +1718,119 @@ labels: `zirv_flow_stream_freshness_seconds{workspace,stream}` (age of the data)
 `zirv_flow_streams{workspace,state}` (how many enabled streams are in each state). A stream that
 is disabled or deleted is set to 0, and an instance that stops leading zeroes what it published.
 
-**Other source types.** A pull run reports when it ends. A webhook source (#90) and a stream
-consumer report through the same call, `record_stream_outcome`: a success at a time, or a failure,
-written to the same columns. The Kafka consumer reports within its lag bound as a success and
-above it as a failure (see Kafka sources); a webhook source is not built yet.
+**Other source types.** A pull run reports when it ends. A webhook source reports each accepted
+payload through the same call, `record_stream_outcome` (see Inbound webhooks), and a stream consumer
+reports through it too: a success at a time, or a failure, written to the same columns. The Kafka
+consumer reports within its lag bound as a success and above it as a failure (see Kafka sources). A
+webhook has no schedule, so its threshold is the one you set ("expect a payload at least every");
+without one it is never stale.
 
 **Not done:** stale or failing inputs do not pause sends. That is a later decision (OQ-14, M5);
 for now freshness is shown and exported, nothing acts on it.
+
+## Inbound webhooks
+
+A webhook lets an external system (a form tool, a shop back end, an internal service) push one JSON
+document at a time to Zirv Flow. It is a **push source**: a source of type `webhook` with one stream,
+`payload`, so it has the same mapping editor, preview and freshness as any other stream. Its
+payloads are not read by a run; each one is verified, queued in the durable inbox and mapped to a
+person, an event and list memberships by `ingest.drain`.
+
+**Set up.** Under Sources, add a source and choose Webhook (or `POST .../webhooks`, admins only).
+You give it a name, a **dedupe field** (a dotted path into the payload whose value identifies it,
+such as `id` or `data.order.id`) and, optionally, how often you expect a payload. The response
+carries the **URL** (`/hooks/{id}` on your server's origin) and the **shared secret**
+(`zfwh_` and 64 hex digits). The secret is shown once, in that response, and never again: it is
+stored sealed (purpose `webhook_secret`), and no read, update, audit entry or log line holds it.
+Rotate it with `POST .../webhooks/{id}/rotate-secret`; the old secret stops working at once. The
+id in the URL only locates the hook, it is not a secret, and the signature authorizes.
+
+Then map it: open the stream (Set up, then Map), paste a sample payload, and the mapping editor
+shows what the mapping makes of it, with the same function the drain calls and without writing
+anything (`POST .../streams/payload/preview` with `sample`: 1 to 20 objects, 64 KiB in all).
+Columns name payload fields, a nested one with dots (`order.total`, `items.0.sku`); a field a
+payload lacks is an empty cell. A webhook stream has no key column and no delete signal, and an
+event needs no primary key: the event id comes from the dedupe field. Turn the stream on. Until it
+is on and mapped the URL answers `404`.
+
+**The signature.** Each request carries an HMAC-SHA256 of its body, keyed with the secret's UTF-8
+bytes, as the prefix followed by 64 hex digits (either case). The defaults, all per hook:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `signature_header` | `X-Zirv-Signature` | the header holding the signature |
+| `signature_prefix` | `sha256=` | the text before the digest; may be empty |
+| `timestamp_header` | `X-Zirv-Timestamp` | unix seconds as a decimal number; `null` selects the body-only scheme |
+| `tolerance_seconds` | 300 | how far the timestamp may be from the server's clock, either way (1 to 86400) |
+
+The **timestamped scheme** signs `"{timestamp}.{body}"` (the timestamp text exactly as sent, a dot,
+the raw body bytes) and refuses a timestamp outside the tolerance. The **body-only scheme** signs the
+raw body. It exists because many senders cannot sign a timestamp; its only replay defense is the
+dedupe field. Other algorithms, base64 signatures and handshake protocols are not supported.
+
+```sh
+# The timestamped scheme (the default).
+BODY='{"id":"order-1","email":"ada@example.com"}'
+TS=$(date +%s)
+SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_example' | sed 's/^.* //')
+curl -X POST 'https://flow.example.com/hooks/3f2a9c1e-0b7d-4e55-9c1a-7d4e2b6a8f10' \
+  -H 'Content-Type: application/json' \
+  -H "X-Zirv-Timestamp: $TS" \
+  -H "X-Zirv-Signature: sha256=$SIG" \
+  -d "$BODY"
+
+# The body-only scheme.
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'zfwh_example' | sed 's/^.* //')
+curl -X POST 'https://flow.example.com/hooks/3f2a9c1e-0b7d-4e55-9c1a-7d4e2b6a8f10' \
+  -H 'Content-Type: application/json' -H "X-Zirv-Signature: sha256=$SIG" -d "$BODY"
+```
+
+With the secret `zfwh_example`, the timestamp `1700000000` and the body above, the signature is
+`c8447361d430f2281aef6579aec897c4930f3d15af1920d3da1f83ff8e4f4d56`; a unit test signs that
+example with the same recipe.
+
+**What happens to a request.** In this order, and nothing is written before the signature checks
+out: a declared body over `ingest.max_webhook_bytes` is `413`; an unknown id, or a hook that is not
+receiving (source or stream off, stream not mapped), is `404`; a hook over `ingest.rate_per_hook`
+is `429` with `Retry-After`; the body is read with the same cap (`413`); the signature and, for the
+timestamped scheme, the timestamp are checked, the digest compared in constant time (`401`, code
+`invalid_signature`, one answer for every cause but a stale timestamp, which says so); the body
+must be one JSON object (`400`, `invalid_payload`; arrays and several records per request are not
+supported); the dedupe field must hold a string or number of 1 to 128 characters (`422`,
+`dedupe_missing`); then the payload is appended to the inbox and the answer is `202
+{"accepted":1}`: durable, not yet applied. A database failure is `503` and stores nothing, so
+retry; so is a server started without a master key. The rate limit is a token bucket per hook and
+per `serve` process (`ingest.rate_per_hook`, `ingest.burst_per_hook`), charged only for ids that
+belong to a hook, so a flood of made-up ids costs one indexed lookup each and no memory. Anyone
+who holds the URL can use up a hook's budget with unsigned requests; limit senders by address at
+your edge proxy.
+
+**Dedupe and replay.** The dedupe value becomes the event's message id, namespaced by the hook
+(`wh:{hook}:{value}`), so the same payload sent again, inside or outside the tolerance window, with
+a new signature or the same, leaves one event and the same trait values. The profile record is
+keyed by the person's strongest identifier and observed at the signed timestamp (at the arrival
+time for the body-only scheme), so a replayed older payload never overwrites a trait that a newer
+one set. With the body-only scheme a captured request can be replayed, but only to the same effect.
+
+**Mapping failures.** A payload the mapping refuses (no identifier, a value that does not cast) is
+an ingest reject for the stream, with field names, codes and a masked sample and never a value
+outside non-PII traits, and the rest of the batch applies. A payload queued before the stream lost
+its mapping is rejected as `mapping_unavailable`. Mapping runs in the drain, so an edit to the
+mapping applies to payloads still queued. A webhook reject is not replayable.
+
+**Freshness.** An accepted payload reports through `record_stream_outcome`, at most once a minute
+per hook per process, so the stream shows **fresh**, **stale** (no payload within the stream's
+threshold; set it with "expect a payload at least every" or `staleness_threshold_seconds`) or
+**failing** like any other (see Source freshness). A rejected request writes nothing to the stream.
+A webhook source is created, changed and deleted only through `/webhooks` (the generic source
+routes answer `409`, code `managed_by_webhooks`) and never gets a run (`409`, `push_source`).
+
+**Metrics.** `zirv_flow_webhook_requests_total{outcome}` with `accepted`, `not_found`,
+`rate_limited`, `too_large`, `signature_missing`, `signature_malformed`, `signature_stale`,
+`signature_mismatch`, `invalid_payload`, `dedupe_missing` or `unavailable`; the drain's
+`zirv_flow_ingest_applied_total` carries `kind="webhook"` with the outcomes `applied`,
+`unchanged`, `rejected`, `apply_failed`, `accepted` and `duplicate`. No hook id, workspace or
+value is a label, and nothing logs a body, a header value, a signature or a secret.
 
 ## Connector runtime
 

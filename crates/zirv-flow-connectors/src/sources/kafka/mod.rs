@@ -141,6 +141,7 @@ impl Source for Kafka {
         rate_limit: None,
         config_check: Some(config_check),
         capabilities: Capabilities {
+            push: false,
             incremental: false,
             full_refresh: false,
             emits_deletes: true,

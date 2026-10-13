@@ -177,11 +177,11 @@ checkpoints, deletion detection and freshness marketers can see.
 - **Egress policy** (SSRF protection) for all outbound connections: HTTP, databases, Kafka and AI providers.
 - **Built-in sources.** PostgreSQL and MySQL (tables, or queries with a cursor column); CSV/JSON files over HTTPS.
 - **HTTP manifest v1.** Schema and validation; auth, pagination, incremental cursor, field mapping, delete signal; UI editor and validator; reference manifests tested against a mock server.
-- **Inbound webhooks.** Generic, with signature verification and mapping.
+- **Inbound webhooks.** Generic, with signature verification and mapping. Done (#90): README "Inbound webhooks".
 - **Kafka source.** Topic streams mapped to contacts, events or lists; offsets stored as the checkpoint in the apply-batch transaction; tombstones delete; failed messages become rejects; consumer lag as freshness; SASL/TLS credentials encrypted (architecture 7.6).
 - **Sync runs.** Schedules, manual run, cancel; state machine with lease heartbeat and checkpoint resume; full-refresh mark and sweep; reconciliation runs for incremental streams without a delete signal; reject threshold.
 - **Mapping UI.** Stream to people, events or lists; identifier and trait mapping; bounded transforms; preview on sample records.
-- **Freshness.** Per stream: last success, high-water mark, staleness threshold; stale/failing badges and metrics. Done for pull streams; webhooks (#90) and Kafka (#91) report through `record_stream_outcome`.
+- **Freshness.** Per stream: last success, high-water mark, staleness threshold; stale/failing badges and metrics. Done for pull streams and webhooks (#90); Kafka (#91) reports through `record_stream_outcome`.
 - **Causality.** Each sync record applied, rejected or deleted appends a decision with its trace id, sync-run cause and source-record id.
 - **AI foundation.** `zirv-flow-ai` provider trait with OpenAI-compatible (including configured local base URLs) and Anthropic adapters; deployment provider/model allowlist; encrypted provider keys; per-workspace provider/model, enablement, budget and PII opt-in; per-user rate limits; call audit and configurable transcript retention; bounded repair; golden-prompt evaluation harness and deterministic fake provider for CI. Calls use the egress policy.
 - **Mapping and manifest assistance.** Read-and-draft typed tools create source field mappings and HTTP manifests, validate them with the existing schemas, and show sample dry runs and field diffs before the user accepts an ordinary draft.

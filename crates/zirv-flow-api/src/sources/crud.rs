@@ -17,7 +17,9 @@ use zirv_flow_connectors::sources::{validate_config, validate_credential};
 use zirv_flow_core::{Freshness, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
-use super::{credential, field_problems, invalid, kind_unavailable, registry};
+use super::{
+    credential, field_problems, invalid, is_push, kind_unavailable, managed_by_webhooks, registry,
+};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -130,7 +132,7 @@ pub(crate) struct UpdateSourceRequest {
     credential: Option<BTreeMap<String, SecretString>>,
 }
 
-fn check_name(name: &str) -> Result<&str, ApiError> {
+pub(crate) fn check_name(name: &str) -> Result<&str, ApiError> {
     let name = name.trim();
     let length = name.chars().count();
     if length == 0 || length > MAX_NAME_CHARS || name.chars().any(char::is_control) {
@@ -148,7 +150,7 @@ fn check_schedule(schedule: &str) -> Result<(), ApiError> {
         .map_err(|_| invalid("schedule", "must be a valid cron expression"))
 }
 
-fn name_taken(error: StoreError) -> ApiError {
+pub(crate) fn name_taken(error: StoreError) -> ApiError {
     if error.is_conflict() {
         ApiError::new(
             StatusCode::CONFLICT,
@@ -177,6 +179,9 @@ pub(crate) async fn create_source(
         .get(&request.kind)
         .ok_or_else(|| invalid("kind", "is not a known source type"))?;
     let spec = driver.spec();
+    if spec.capabilities.push {
+        return Err(managed_by_webhooks());
+    }
     let name = check_name(&request.name)?;
     validate_config(spec, &request.config).map_err(|errors| field_problems("config", errors))?;
     validate_credential(spec, &request.credential, true)
@@ -256,6 +261,9 @@ pub(crate) async fn update_source(
         .get(&existing.kind)
         .ok_or_else(kind_unavailable)?
         .spec();
+    if spec.capabilities.push {
+        return Err(managed_by_webhooks());
+    }
     let mut fields: Vec<&'static str> = Vec::new();
     let name = request.name.as_deref().map(check_name).transpose()?;
     if name.is_some() {
@@ -378,6 +386,11 @@ pub(crate) async fn delete_source(
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<(), ApiError> {
+    if let Some(existing) = zirv_flow_store::find_source(pool, workspace, id).await?
+        && is_push(&existing.kind)
+    {
+        return Err(managed_by_webhooks());
+    }
     let mut tx = zirv_flow_store::begin(pool).await?;
     let source = zirv_flow_store::delete_source(&mut tx, workspace, id)
         .await?

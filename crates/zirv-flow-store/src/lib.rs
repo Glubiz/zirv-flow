@@ -25,6 +25,7 @@ mod stream_freshness;
 mod stream_offsets;
 mod suppressions;
 mod sync_runs;
+mod webhooks;
 mod workspaces;
 
 use std::error::Error;
@@ -164,6 +165,10 @@ pub use sync_runs::{
     finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run, queue_runs_for_source,
     rotate_stream_run, run_trace, start_run, start_stream_run, sweep_exceeds_limit,
     sweep_unreached,
+};
+pub use webhooks::{
+    HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,
+    find_for_receive, find_webhook, list_webhooks, replace_webhook_secret, update_webhook,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

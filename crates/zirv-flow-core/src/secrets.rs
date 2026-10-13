@@ -280,6 +280,8 @@ pub enum SecretPurpose {
     OAuthToken,
     /// The API key of an AI provider.
     AiProviderKey,
+    /// The shared secret that signs an inbound webhook.
+    WebhookSecret,
 }
 
 impl SecretPurpose {
@@ -289,6 +291,7 @@ impl SecretPurpose {
             Self::ConnectorCredential => "connector_credential",
             Self::OAuthToken => "oauth_token",
             Self::AiProviderKey => "ai_provider_key",
+            Self::WebhookSecret => "webhook_secret",
         }
     }
 
@@ -298,6 +301,7 @@ impl SecretPurpose {
             Self::ConnectorCredential,
             Self::OAuthToken,
             Self::AiProviderKey,
+            Self::WebhookSecret,
         ]
         .into_iter()
         .find(|purpose| purpose.as_str() == text)
@@ -898,6 +902,7 @@ mod tests {
             SecretPurpose::ConnectorCredential,
             SecretPurpose::OAuthToken,
             SecretPurpose::AiProviderKey,
+            SecretPurpose::WebhookSecret,
         ] {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }

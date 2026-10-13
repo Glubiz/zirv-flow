@@ -8,6 +8,8 @@ import {
   mappingToDraft,
   newProperty,
   newRule,
+  parseSample,
+  sampleKeys,
   startingDraft,
   type Mapping,
   type MappingDraft,
@@ -116,5 +118,31 @@ describe("a stream mapping draft", () => {
 
     draft.event.properties = Array.from({ length: 51 }, (_, at) => property(`p${at}`));
     expect(draftProblems(draft, true)).toContain("An event takes at most 50 properties.");
+  });
+});
+
+describe("pasted sample payloads", () => {
+  it("reads one object or an array of objects", () => {
+    expect(parseSample('{"id": "1"}')).toEqual({ ok: true, sample: [{ id: "1" }] });
+    expect(parseSample('[{"id": "1"}, {"id": "2"}]')).toEqual({ ok: true, sample: [{ id: "1" }, { id: "2" }] });
+  });
+
+  it("says what is wrong without echoing the text", () => {
+    expect(parseSample("")).toEqual({ ok: false, error: "Paste a sample payload." });
+    expect(parseSample("{secret")).toEqual({ ok: false, error: "That is not valid JSON." });
+    expect(parseSample("[]")).toEqual({ ok: false, error: "Paste 1 to 20 payloads." });
+    expect(parseSample("[1]")).toEqual({ ok: false, error: "Each payload must be a JSON object." });
+    expect(parseSample('"text"')).toEqual({ ok: false, error: "Each payload must be a JSON object." });
+    expect(parseSample(JSON.stringify(Array.from({ length: 21 }, () => ({}))))).toEqual({
+      ok: false,
+      error: "Paste 1 to 20 payloads.",
+    });
+    const huge = JSON.stringify([{ x: "y".repeat(40_000) }, { x: "y".repeat(40_000) }]);
+    expect(parseSample(huge)).toEqual({ ok: false, error: "The sample is over 64 KiB." });
+  });
+
+  it("suggests the top-level keys in first-seen order and none for a broken sample", () => {
+    expect(sampleKeys('[{"id": 1, "email": "a"}, {"email": "b", "plan": "x"}]')).toEqual(["id", "email", "plan"]);
+    expect(sampleKeys("{broken")).toEqual([]);
   });
 });

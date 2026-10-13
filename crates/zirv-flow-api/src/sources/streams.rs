@@ -378,6 +378,19 @@ fn descriptor_header(descriptor: &StreamDescriptor) -> Result<Header, ApiError> 
     .map_err(|error| ApiError::source_fields_invalid(error.code()))
 }
 
+/// The header of a push stream: its descriptor lists no fields, so the fields are the first
+/// segments of the columns the mapping reads, and an absent optional field is an empty cell.
+fn push_header(mapping: &Mapping) -> Result<Header, ApiError> {
+    Header::new(
+        mapping
+            .root_fields()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    )
+    .map_err(|error| ApiError::unprocessable(format!("mapping: {}", error.code())))
+}
+
 /// Checks a mapping against the stream's field names (a column may be a dotted path into a
 /// field) and the trait registry, that every list it names exists in the workspace, and that a
 /// mapping with an event has a primary key to hang the event's idempotency on.
@@ -387,9 +400,23 @@ pub(super) async fn checked_mapping(
     descriptor: &StreamDescriptor,
     primary_key: &[String],
     body: &MappingBody,
+    push: bool,
 ) -> Result<Mapping, ApiError> {
     let mapping = body.to_core()?;
-    let header = descriptor_header(descriptor)?;
+    let header = if push {
+        push_header(&mapping)?
+    } else {
+        descriptor_header(descriptor)?
+    };
+    if push {
+        if mapping.key_column.is_some() {
+            return Err(ApiError::unprocessable("mapping: key_column_not_supported")
+                .with_code("key_column_not_supported"));
+        }
+        if mapping.delete_when.is_some() {
+            return Err(ApiError::delete_signal_unsupported());
+        }
+    }
     let catalog = trait_catalog(state, workspace).await?;
     mapping::validate_paths(&mapping, &header, &catalog)
         .map_err(|error| mapping_problem(&error))?;
@@ -405,7 +432,8 @@ pub(super) async fn checked_mapping(
             )));
         }
     }
-    if mapping.has_event() && primary_key.is_empty() {
+    // A push stream has no key: its event id comes from the hook's dedupe field.
+    if !push && mapping.has_event() && primary_key.is_empty() {
         return Err(ApiError::unprocessable(
             "mapping: event_requires_primary_key",
         ));
@@ -431,14 +459,24 @@ pub(crate) async fn configure(
     let source = zirv_flow_store::find_source(&state.pool, workspace, source_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let push = super::is_push(&source.kind);
     let mapping = match &request.mapping {
-        Some(body) => {
-            Some(checked_mapping(state, workspace, &descriptor, &request.primary_key, body).await?)
-        }
+        Some(body) => Some(
+            checked_mapping(
+                state,
+                workspace,
+                &descriptor,
+                &request.primary_key,
+                body,
+                push,
+            )
+            .await?,
+        ),
         None => None,
     };
     // A mapping left as it is must still fit the key this request sets.
-    if mapping.is_none()
+    if !push
+        && mapping.is_none()
         && request.primary_key.is_empty()
         && existing
             .mapping

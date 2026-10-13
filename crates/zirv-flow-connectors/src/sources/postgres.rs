@@ -69,6 +69,7 @@ impl Source for Postgres {
         rate_limit: None,
         config_check: Some(|config| check_config(config, Flavor::Postgres)),
         capabilities: Capabilities {
+            push: false,
             incremental: true,
             full_refresh: true,
             emits_deletes: false,

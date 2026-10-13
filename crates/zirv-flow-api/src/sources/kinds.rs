@@ -26,6 +26,8 @@ pub(crate) struct FieldSpecBody {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CapabilitiesBody {
+    /// Records arrive by push (a webhook): no schedule, no run.
+    push: bool,
     incremental: bool,
     full_refresh: bool,
     emits_deletes: bool,
@@ -71,6 +73,7 @@ impl From<&SourceSpec> for SourceKindBody {
             config_fields: spec.config_fields.iter().map(field).collect(),
             credential_fields: spec.credential_fields.iter().map(field).collect(),
             capabilities: CapabilitiesBody {
+                push: spec.capabilities.push,
                 incremental: spec.capabilities.incremental,
                 full_refresh: spec.capabilities.full_refresh,
                 emits_deletes: spec.capabilities.emits_deletes,

@@ -235,9 +235,12 @@ pub(crate) async fn start_runs(
     source_id: Uuid,
     request: &StartRunRequest,
 ) -> Result<Vec<SyncRun>, ApiError> {
-    find_source(&state.pool, workspace, source_id)
+    let source = find_source(&state.pool, workspace, source_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if super::is_push(&source.kind) {
+        return Err(super::push_source());
+    }
     if request.kind == RunKindBody::Reconcile && request.stream.is_none() {
         return Err(ApiError::unprocessable(
             "a reconciliation runs one stream; name it in stream",

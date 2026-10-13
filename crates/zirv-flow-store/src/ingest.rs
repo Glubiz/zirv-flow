@@ -23,7 +23,10 @@ use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
+use crate::events::{Refusal, insert_record_rejects};
 use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record};
+use crate::webhooks::HookResult;
+use crate::webhooks::{HookConfigs, HookMapped, apply_hook_record, map_hook_row};
 use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue};
 
 /// The job kind that drains a workspace's inbox.
@@ -98,7 +101,7 @@ impl Shard {
 
 /// The bucket of a record key: the first byte of its SHA-256, modulo [`BUCKETS`]. Stored
 /// buckets must match those of later rows of the same key, so the algorithm never changes.
-fn bucket(record_key: &str) -> i16 {
+pub(crate) fn bucket(record_key: &str) -> i16 {
     let digest = Sha256::digest(record_key.as_bytes());
     i16::from(digest[0] % BUCKETS)
 }
@@ -347,21 +350,27 @@ impl DrainOutcome {
 }
 
 #[derive(FromRow)]
-struct InboxRow {
-    id: i64,
-    api_key_id: Uuid,
-    kind: String,
-    item: Value,
-    message_id: String,
-    received_at: OffsetDateTime,
-    trace_id: Uuid,
+pub(crate) struct InboxRow {
+    pub(crate) id: i64,
+    pub(crate) api_key_id: Option<Uuid>,
+    pub(crate) webhook_id: Option<Uuid>,
+    pub(crate) kind: String,
+    pub(crate) item: Value,
+    pub(crate) message_id: String,
+    pub(crate) received_at: OffsetDateTime,
+    pub(crate) trace_id: Uuid,
 }
 
 impl InboxRow {
-    fn trace(&self) -> TraceContext {
+    pub(crate) fn trace(&self) -> TraceContext {
+        let cause = match (self.webhook_id, self.api_key_id) {
+            (Some(hook), _) => Cause::api(format!("webhook:{hook}")),
+            (None, Some(key)) => Cause::api(key.to_string()),
+            (None, None) => Cause::api("unknown"),
+        };
         TraceContext {
             trace_id: TraceId::from_uuid(self.trace_id),
-            cause: Cause::api(self.api_key_id.to_string()),
+            cause,
         }
     }
 }
@@ -371,6 +380,17 @@ enum Mapped {
     /// A native contact, which replaces the stored contact's fields.
     Contact(ProfileRecord),
     Event(EventRecord),
+    /// A webhook payload, mapped by its hook.
+    Hook(HookMapped),
+}
+
+/// [`map_row`] that also maps a webhook row with its hook's configuration.
+fn map_with(row: &InboxRow, hooks: &HookConfigs) -> Option<Mapped> {
+    if row.kind == "webhook" {
+        map_hook_row(row, hooks).map(Mapped::Hook)
+    } else {
+        map_row(row)
+    }
 }
 
 /// Maps a row to the record the apply path takes. A row that cannot be mapped is poison.
@@ -423,7 +443,7 @@ fn map_row(row: &InboxRow) -> Option<Mapped> {
 
 /// The strongest normalised identifier as `kind:value`; equal strengths break by text, so
 /// the key does not depend on the order the client listed them in.
-fn strongest_identifier(identifiers: &[(String, String)]) -> Option<String> {
+pub(crate) fn strongest_identifier(identifiers: &[(String, String)]) -> Option<String> {
     identifiers
         .iter()
         .filter_map(|(kind, value)| Identifier::parse(kind, value).ok())
@@ -477,7 +497,7 @@ async fn take_rows(
     .map_err(StoreError::query)?;
     let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
     let fetched: Vec<InboxRow> = sqlx::query_as(
-        "SELECT id, api_key_id, kind, item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
+        "SELECT id, api_key_id, webhook_id, kind, item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
     )
     .bind(workspace.as_uuid())
     .bind(&ids)
@@ -573,6 +593,54 @@ fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &Profil
     outcome.count(kind, label);
 }
 
+/// Tallies a hook record under kind `webhook`: its profile as `applied`, `unchanged` or
+/// `rejected`, and its event, when it had one, as `accepted`, `duplicate` or `rejected`.
+fn tally_hook(outcome: &mut DrainOutcome, result: &HookResult) {
+    outcome.count(
+        "webhook",
+        match result.profile {
+            ProfileOutcome::Applied { .. } => "applied",
+            ProfileOutcome::Unchanged { .. } => "unchanged",
+            ProfileOutcome::Rejected { .. } => "rejected",
+        },
+    );
+    match &result.event {
+        Some(EventOutcome::Accepted { flags, .. }) => {
+            if flags.contains(&zirv_flow_core::events::EventFlag::Late) {
+                outcome.late += 1;
+            }
+            outcome.count("webhook", "accepted");
+        }
+        Some(EventOutcome::Duplicate { .. }) => outcome.count("webhook", "duplicate"),
+        Some(EventOutcome::Rejected { .. }) => outcome.count("webhook", "rejected"),
+        None => {}
+    }
+}
+
+/// Keeps a payload the hook's mapping refused as a reject of the hook's stream, with codes and
+/// a masked sample.
+async fn reject_hook(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    row: &InboxRow,
+    rejected: &crate::webhooks::HookRejected,
+) -> Result<(), StoreError> {
+    insert_record_rejects(
+        connection,
+        workspace,
+        &rejected.source,
+        &rejected.stream,
+        &row.trace(),
+        None,
+        &[Refusal {
+            id: Uuid::now_v7(),
+            reasons: rejected.reasons.clone(),
+            sample: rejected.sample.clone(),
+        }],
+    )
+    .await
+}
+
 fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
     let label = match result {
         EventOutcome::Accepted { state, flags, .. } => {
@@ -603,6 +671,7 @@ pub async fn drain_batch(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
+    let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
@@ -611,7 +680,7 @@ pub async fn drain_batch(
     };
     let mut events = EventBatch::default();
     for row in &rows {
-        match map_row(row).ok_or_else(StoreError::poison)? {
+        match map_with(row, &hooks).ok_or_else(StoreError::poison)? {
             Mapped::Profile(record) => {
                 let result = apply_profile_record(&mut tx, workspace, &record).await?;
                 tally_profile(&mut outcome, "identify", &result);
@@ -628,6 +697,15 @@ pub async fn drain_batch(
                 let result =
                     apply_event_record(&mut tx, workspace, key, &mut events, &record).await?;
                 tally_event(&mut outcome, &result);
+            }
+            Mapped::Hook(HookMapped::Record(record)) => {
+                let result =
+                    apply_hook_record(&mut tx, workspace, key, &mut events, &record).await?;
+                tally_hook(&mut outcome, &result);
+            }
+            Mapped::Hook(HookMapped::Rejected(rejected)) => {
+                reject_hook(&mut tx, workspace, row, &rejected).await?;
+                outcome.count("webhook", "rejected");
             }
         }
     }
@@ -649,6 +727,7 @@ pub async fn drain_batch_singly(
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
+    let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
@@ -656,7 +735,7 @@ pub async fn drain_batch_singly(
         ..DrainOutcome::default()
     };
     for row in &rows {
-        let mapped = map_row(row);
+        let mapped = map_with(row, &hooks);
         let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
         let mut unstorable = Map::new();
         let applied = match &mapped {
@@ -684,6 +763,23 @@ pub async fn drain_batch_singly(
                     Err(error) => Err(error),
                 }
             }
+            Some(Mapped::Hook(HookMapped::Record(record))) => {
+                let mut events = EventBatch::default();
+                match apply_hook_record(&mut savepoint, workspace, key, &mut events, record).await {
+                    Ok(result) => {
+                        tally_hook(&mut outcome, &result);
+                        events.finish(&mut savepoint, workspace).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Some(Mapped::Hook(HookMapped::Rejected(rejected))) => {
+                let done = reject_hook(&mut savepoint, workspace, row, rejected).await;
+                if done.is_ok() {
+                    outcome.count("webhook", "rejected");
+                }
+                done
+            }
             None => Err(StoreError::poison()),
         };
         match applied {
@@ -703,6 +799,7 @@ pub async fn drain_batch_singly(
                         key,
                         row,
                         Some(&Mapped::Contact(rejected)),
+                        &hooks,
                     )
                     .await?;
                 }
@@ -711,8 +808,10 @@ pub async fn drain_batch_singly(
             Err(error) if error.is_retryable() => return Err(error),
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;
-                reject_row(&mut tx, workspace, key, row, mapped.as_ref()).await?;
-                let kind = if row.kind == "contact" {
+                reject_row(&mut tx, workspace, key, row, mapped.as_ref(), &hooks).await?;
+                let kind = if row.kind == "webhook" {
+                    "webhook"
+                } else if row.kind == "contact" {
                     "contact"
                 } else if row.kind == "identify" {
                     "identify"
@@ -734,6 +833,7 @@ async fn reject_row(
     key: &HmacKey,
     row: &InboxRow,
     mapped: Option<&Mapped>,
+    hooks: &HookConfigs,
 ) -> Result<(), StoreError> {
     let empty = Map::new();
     let trace = row.trace();
@@ -758,6 +858,26 @@ async fn reject_row(
             message_id: Some(&row.message_id),
             trace: &trace,
         },
+        Some(Mapped::Hook(HookMapped::Record(record))) => FailedItem {
+            kind: "record",
+            source: &record.profile.source,
+            name: None,
+            values: &record.profile.traits,
+            timestamp: Some(record.profile.observed_at),
+            received_at: row.received_at,
+            message_id: Some(&row.message_id),
+            trace: &trace,
+        },
+        Some(Mapped::Hook(HookMapped::Rejected(rejected))) => FailedItem {
+            kind: "record",
+            source: &rejected.source,
+            name: None,
+            values: &empty,
+            timestamp: None,
+            received_at: row.received_at,
+            message_id: Some(&row.message_id),
+            trace: &trace,
+        },
         Some(Mapped::Event(record)) => FailedItem {
             kind: "event",
             source: SOURCE,
@@ -774,7 +894,10 @@ async fn reject_row(
             } else {
                 "event"
             },
-            source: SOURCE,
+            source: row
+                .webhook_id
+                .and_then(|hook| hooks.origin(hook))
+                .map_or(SOURCE, |(source, _)| source),
             name: None,
             values: &empty,
             timestamp: None,
@@ -837,7 +960,8 @@ mod tests {
     fn row(kind: &str, item: Value) -> InboxRow {
         InboxRow {
             id: 1,
-            api_key_id: Uuid::nil(),
+            api_key_id: Some(Uuid::nil()),
+            webhook_id: None,
             kind: kind.to_owned(),
             item,
             message_id: "m-1".to_owned(),

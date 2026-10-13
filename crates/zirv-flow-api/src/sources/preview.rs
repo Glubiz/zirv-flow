@@ -13,12 +13,12 @@ use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{Record, StreamConfig, StreamDescriptor, SyncMode};
+use zirv_flow_connectors::sources::{Record, StreamConfig, SyncMode};
 use zirv_flow_core::mapping::{self, JsonRecord, Mapping, TraitState};
 
 use super::actions::{CALL_TIMEOUT, prepare, timed_out, upstream};
-use super::invalid;
 use super::streams::{checked_mapping, descriptor_of, trait_catalog};
+use super::{invalid, is_push};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::imports::MappingBody;
@@ -29,6 +29,8 @@ use crate::problem::{ApiError, Problem};
 const DEFAULT_LIMIT: u32 = 10;
 /// The most records a preview shows.
 const MAX_LIMIT: u32 = 20;
+/// The most bytes a pasted sample may hold, in all.
+const MAX_SAMPLE_BYTES: usize = 64 * 1024;
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,11 @@ pub(crate) struct PreviewRequest {
     /// How many records to show, 1 to 20; 10 when absent.
     #[serde(default)]
     limit: Option<u32>,
+    /// For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all)
+    /// to map as the drain would. Required for a webhook stream and refused for any other.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<std::collections::BTreeMap<String, serde_json::Value>>>)]
+    sample: Option<Vec<Value>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -96,7 +103,7 @@ pub(crate) struct PreviewBody {
 /// Maps one record the way a sync run does.
 fn preview_record(
     mapping: &Mapping,
-    descriptor: &StreamDescriptor,
+    declared: &[&str],
     catalog: &HashMap<String, TraitState>,
     record: &Record,
 ) -> PreviewRecord {
@@ -110,8 +117,7 @@ fn preview_record(
         event: None,
         errors: Vec::new(),
     };
-    let declared = descriptor.fields.iter().map(|field| field.name.as_str());
-    let cells = JsonRecord::from_value_for_mapping(&record.data, mapping, declared);
+    let cells = JsonRecord::from_value_for_mapping(&record.data, mapping, declared.iter().copied());
     if mapping::deletion(mapping, &cells, record.deleted).is_some() {
         return PreviewRecord {
             deleted: true,
@@ -191,6 +197,25 @@ pub(crate) async fn preview(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let descriptor = descriptor_of(&stream)?;
+    let source = zirv_flow_store::find_source(&state.pool, workspace.id, source_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let push = is_push(&source.kind);
+    match (push, &request.sample) {
+        (true, None) => {
+            return Err(ApiError::unprocessable(
+                "sample: a webhook stream has no source to read; send a sample payload",
+            )
+            .with_code("sample_required"));
+        }
+        (false, Some(_)) => {
+            return Err(ApiError::unprocessable(
+                "sample: only a webhook stream previews a sample payload",
+            )
+            .with_code("sample_not_supported"));
+        }
+        _ => {}
+    }
     let draft = match request.mapping {
         Some(body) => body,
         None => stream
@@ -206,9 +231,33 @@ pub(crate) async fn preview(
         &descriptor,
         &stream.primary_key,
         &draft,
+        push,
     )
     .await?;
     let catalog = trait_catalog(&state, workspace.id).await?;
+
+    if let Some(sample) = &request.sample {
+        let objects = checked_sample(sample)?;
+        let declared = mapping.root_fields();
+        let shown: Vec<PreviewRecord> = objects
+            .iter()
+            .enumerate()
+            .map(|(position, data)| {
+                let record = Record {
+                    key: (position + 1).to_string(),
+                    data: data.clone(),
+                    deleted: false,
+                    occurrence: None,
+                };
+                preview_record(&mapping, &declared, &catalog, &record)
+            })
+            .collect();
+        return Ok(Json(PreviewBody {
+            read: u32::try_from(shown.len()).unwrap_or(u32::MAX),
+            records: shown,
+            truncated: false,
+        }));
+    }
 
     // The credential is opened right before the read and dropped with it.
     let call = prepare(&state, workspace.id, source_id).await?;
@@ -244,9 +293,14 @@ pub(crate) async fn preview(
         .map_err(upstream)?;
     let truncated = records.len() > wanted;
     records.truncate(wanted);
+    let declared: Vec<&str> = descriptor
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
     let shown: Vec<PreviewRecord> = records
         .iter()
-        .map(|record| preview_record(&mapping, &descriptor, &catalog, record))
+        .map(|record| preview_record(&mapping, &declared, &catalog, record))
         .collect();
     Ok(Json(PreviewBody {
         read: u32::try_from(shown.len()).unwrap_or(u32::MAX),
@@ -255,29 +309,31 @@ pub(crate) async fn preview(
     }))
 }
 
+/// The sample payloads of a preview: 1 to 20 JSON objects, 64 KiB in all.
+fn checked_sample(sample: &[Value]) -> Result<&[Value], ApiError> {
+    if !(1..=MAX_LIMIT as usize).contains(&sample.len()) {
+        return Err(invalid("sample", "must hold 1 to 20 objects"));
+    }
+    if sample.iter().any(|item| !item.is_object()) {
+        return Err(invalid("sample", "must hold only JSON objects"));
+    }
+    let size: usize = sample
+        .iter()
+        .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |bytes| bytes.len()))
+        .fold(0, usize::saturating_add);
+    if size > MAX_SAMPLE_BYTES {
+        return Err(invalid("sample", "must be at most 64 KiB"));
+    }
+    Ok(sample)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use zirv_flow_connectors::sources::{FieldDescriptor, FieldType};
+
     use zirv_flow_core::people::TraitType;
 
     use super::*;
-
-    fn descriptor() -> StreamDescriptor {
-        StreamDescriptor {
-            name: "records".into(),
-            fields: ["profile", "order"]
-                .into_iter()
-                .map(|name| FieldDescriptor {
-                    name: name.into(),
-                    field_type: FieldType::Json,
-                })
-                .collect(),
-            sync_modes: vec![SyncMode::FullRefresh],
-            default_cursor_field: None,
-            default_primary_key: Vec::new(),
-        }
-    }
 
     fn mapping() -> Mapping {
         serde_json::from_value(json!({
@@ -307,7 +363,7 @@ mod tests {
     fn a_record_shows_its_identifiers_traits_lists_and_event() {
         let shown = preview_record(
             &mapping(),
-            &descriptor(),
+            &["profile", "order"],
             &catalog(),
             &record(
                 json!({"profile": {"email": "A@b.co", "name": "Ada"}, "order": {"sku": "s1"}}),
@@ -328,7 +384,7 @@ mod tests {
     fn a_rejected_record_lists_fields_and_codes_and_no_value() {
         let shown = preview_record(
             &mapping(),
-            &descriptor(),
+            &["profile", "order"],
             &catalog(),
             &record(json!({"profile": {"email": "secret-not-an-email"}}), false),
         );
@@ -344,7 +400,7 @@ mod tests {
     fn a_deleted_record_is_shown_as_deleted_and_not_mapped() {
         let shown = preview_record(
             &mapping(),
-            &descriptor(),
+            &["profile", "order"],
             &catalog(),
             &record(json!({}), true),
         );

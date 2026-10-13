@@ -428,6 +428,31 @@ holds its unique key; the scheduler leader enqueues a drain for each workspace w
 row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 
+As built (M3, webhooks): a hook is a source of kind `webhook` (capability `push`, no config, no
+credential, `read` yields nothing) with one stream `payload`, plus a `webhooks` row that holds
+the random v4 id of the URL, the signature scheme (`core::signature`: HMAC-SHA256 over
+`"{timestamp}.{body}"`, or over the raw body when `timestamp_header` is NULL), the dedupe field
+and the id of the sealed shared secret (`encrypted_secrets`, purpose `webhook_secret`). The
+source, stream, secret and row are created and removed together, and only through
+`/api/v1/workspaces/{ws}/webhooks`. `POST /hooks/{id}` is public and ordered cheapest first: a
+declared length over `ingest.max_webhook_bytes`, the id, one query for the hook (it must be
+receiving), the per-hook token bucket (charged only for ids that resolved, so the limiter holds
+at most one bucket per stored hook), the body read with the same cap, the secret opened into a
+zeroizing buffer, the signature and timestamp verified with a constant-time compare, then the JSON
+object and its dedupe value. Only then does one transaction append an `ingest_inbox` row of kind
+`webhook` (`webhook_id` set, `api_key_id` NULL, `ON DELETE CASCADE` from the hook; the row's
+`item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the hook id, so one hook
+drains in id order in one shard), enqueue `ingest.drain` and, at most once a minute per hook per
+process, report the stream through `record_stream_outcome`. Mapping runs in the drain, not at the
+endpoint: it loads each batch's hooks and the trait catalog once, maps a payload with
+`core::mapping::map_json` (the declared fields are `Mapping::root_fields`, so an absent field is
+an empty cell), and applies the profile record (observed at the signed time, so an older replay
+cannot overwrite a newer trait; the ledger keeps one row per record key, so the drain drops the
+traits a later-observed payload already set), the event (message id `wh:{hook}:{dedupe value}`)
+and the list memberships through the existing apply paths. A refused mapping becomes an
+`ingest_rejects` row through the writer the sync batch uses (`insert_record_rejects`, with no run
+id), and a row that cannot be applied is isolated as `apply_failed` like any inbox row.
+
 As built (CSV import): `POST /imports` streams the file into `import_chunks` (1 MiB each, written
 with the `imports` row in one transaction, so a refused upload leaves nothing) while the SHA-256,
 the row count, the header and the first rows are taken with the pure incremental reader (over `csv-core`) in
@@ -733,7 +758,7 @@ As built (M3, Kafka): `kafka` is one module and one registry line in `zirv-flow-
 is a topic, in the new `stream` sync mode, and the record key is the message key (virtual field
 `_key`, with `_timestamp`). `read` yields batches whose checkpoint is the typed `kafka::Positions`
 (`next` and the high watermark per partition); the job stores them and `sync.run` never looks
-inside. `stream_offsets` (migration 0028) holds `next_offset`, `high_watermark` and `observed_at`
+inside. `stream_offsets` (migration 0027) holds `next_offset`, `high_watermark` and `observed_at`
 per stream and partition; `commit_sync_batch` writes them after the lease fence and before the
 counters, so a batch that is not applied moves none. A message with a null value is a tombstone
 and deletes through `remove_contribution_in`; a malformed one is a reject whose reasons are the

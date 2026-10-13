@@ -81,7 +81,7 @@ impl RateLimiter {
     }
 
     #[cfg(test)]
-    fn tracked(&self) -> usize {
+    pub(crate) fn tracked(&self) -> usize {
         self.buckets.lock().unwrap().by_key.len()
     }
 }
