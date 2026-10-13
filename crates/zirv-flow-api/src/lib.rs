@@ -34,6 +34,7 @@ mod traces;
 mod users;
 mod version;
 mod web;
+mod webhooks;
 mod workspaces;
 
 #[cfg(test)]
@@ -77,6 +78,21 @@ fn routes() -> Router<AppState> {
         .route("/api/v1/ingest/identify", post(ingest::identify))
         .route("/api/v1/ingest/track", post(ingest::track))
         .route("/api/v1/ingest/batch", post(ingest::batch))
+        .route("/hooks/{id}", post(webhooks::receive::receive))
+        .route(
+            "/api/v1/workspaces/{ws}/webhooks",
+            get(webhooks::ops::list).post(webhooks::ops::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/webhooks/{id}",
+            get(webhooks::ops::get)
+                .patch(webhooks::ops::update)
+                .delete(webhooks::ops::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/webhooks/{id}/rotate-secret",
+            post(webhooks::ops::rotate),
+        )
         .route("/api/v1/setup", get(setup::status).post(setup::complete))
         .route("/api/v1/admin/jobs", get(jobs_admin::depth))
         .route("/api/v1/admin/jobs/dead", get(jobs_admin::dead))

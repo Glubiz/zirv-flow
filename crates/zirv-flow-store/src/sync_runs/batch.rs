@@ -9,7 +9,7 @@
 use hashbrown::HashMap;
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
@@ -17,7 +17,8 @@ use uuid::Uuid;
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use crate::events::{
-    EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
+    EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
+    insert_record_rejects, reject_apply_failed,
 };
 use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
 use crate::people::{
@@ -151,13 +152,6 @@ pub enum BatchOutcome {
     Cancelled,
     /// A list the mapping names does not exist: nothing was written.
     ListMissing,
-}
-
-/// A reject to store, with the code that heads it.
-struct Refusal {
-    id: Uuid,
-    reasons: Vec<(String, &'static str)>,
-    sample: Value,
 }
 
 /// Why a unit of work on a run may not proceed.
@@ -319,7 +313,16 @@ pub async fn commit_sync_batch(
     counts.rejected = i64::try_from(refusals.len())
         .unwrap_or(i64::MAX)
         .saturating_add(events.counts.rejected);
-    insert_rejects(&mut tx, batch, &refusals).await?;
+    insert_record_rejects(
+        &mut tx,
+        batch.workspace,
+        batch.source,
+        batch.stream,
+        batch.trace,
+        Some(batch.run_id),
+        &refusals,
+    )
+    .await?;
     for refusal in &refusals {
         let code = refusal
             .reasons
@@ -703,65 +706,6 @@ async fn mark_seen(
     .await
     .map_err(StoreError::query)?;
     Ok(rows.into_iter().collect())
-}
-
-/// Keeps the refused records of the batch, tied to the run.
-async fn insert_rejects(
-    tx: &mut crate::Tx,
-    batch: &SyncBatch<'_>,
-    refusals: &[Refusal],
-) -> Result<(), StoreError> {
-    if refusals.is_empty() {
-        return Ok(());
-    }
-    let ids: Vec<Uuid> = refusals.iter().map(|refusal| refusal.id).collect();
-    let codes: Vec<&str> = refusals
-        .iter()
-        .map(|refusal| {
-            refusal
-                .reasons
-                .first()
-                .map_or("rejected", |(_, code)| *code)
-        })
-        .collect();
-    let reasons: Vec<Value> = refusals
-        .iter()
-        .map(|refusal| {
-            Value::Array(
-                refusal
-                    .reasons
-                    .iter()
-                    .map(|(field, code)| json!({"property": field, "reason": code}))
-                    .collect(),
-            )
-        })
-        .collect();
-    let samples: Vec<Value> = refusals
-        .iter()
-        .map(|refusal| refusal.sample.clone())
-        .collect();
-    sqlx::query(
-        "INSERT INTO ingest_rejects \
-            (id, workspace_id, received_at, source, kind, name, reason, reasons, sample, \
-             payload, trace_id, sync_run_id) \
-         SELECT t.id, $1, now(), $2, 'record', $3, t.reason, t.reasons, t.sample, \
-                '{}'::jsonb, $4, $5 \
-         FROM unnest($6::uuid[], $7::text[], $8::jsonb[], $9::jsonb[]) \
-              AS t(id, reason, reasons, sample)",
-    )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.source)
-    .bind(batch.stream)
-    .bind(batch.trace.trace_id.as_uuid())
-    .bind(batch.run_id)
-    .bind(ids)
-    .bind(codes)
-    .bind(reasons)
-    .bind(samples)
-    .execute(&mut **tx)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(())
 }
 
 #[cfg(test)]

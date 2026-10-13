@@ -799,6 +799,7 @@ mod tests {
             max_batch_items: 2,
             rate_per_key: 1,
             burst_per_key: 2,
+            ..IngestLimits::default()
         };
         let fx = fixture_with(&pool, limits).await;
         let two = json!({"contacts": [{"key": "a"}, {"key": "b"}]});

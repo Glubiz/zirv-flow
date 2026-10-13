@@ -10,6 +10,7 @@ import {
   LoadingState,
   Pill,
   SelectField,
+  TextAreaField,
   TextField,
   TransformEditor,
   type TransformDraft,
@@ -21,6 +22,8 @@ import {
   MAX_EVENT_PROPERTIES,
   newProperty,
   newRule,
+  parseSample,
+  sampleKeys,
   type DeleteRule,
   type EventDraft,
   type IdentifierChoice,
@@ -49,6 +52,7 @@ const REASON_TEXT: Record<string, string> = {
   wrong_type: "the value does not fit its type",
   bad_timestamp: "the date or time could not be read",
   unknown_column: "the stream has no such field",
+  mapping_unavailable: "the stream had no usable mapping",
   invalid_key: "the key is too long",
 };
 
@@ -77,6 +81,8 @@ interface MappingDialogProps {
   workspaceId: string;
   sourceId: string;
   stream: Stream;
+  /** The stream of a webhook: there is no source to read, so the preview maps a pasted sample. */
+  push?: boolean;
   onClose: () => void;
   onSaved: (stream: Stream) => void;
 }
@@ -116,18 +122,22 @@ interface EditorProps extends MappingDialogProps {
   lists: ListItem[];
 }
 
-function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved }: EditorProps) {
-  const fieldNames = stream.discovered.fields.map((field) => field.name);
+function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, onClose, onSaved }: EditorProps) {
+  const [sampleText, setSampleText] = useState("");
+  const fieldNames = push ? sampleKeys(sampleText) : stream.discovered.fields.map((field) => field.name);
   const fieldsId = useId();
-  const [draft, setDraft] = useState<MappingDraft>(() => mappingToDraft(fieldNames, stream.mapping));
+  const [draft, setDraft] = useState<MappingDraft>(() => mappingToDraft(stream.discovered.fields.map((field) => field.name), stream.mapping));
   const [busy, setBusy] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewFailure, setPreviewFailure] = useState<ErrorSummary | null>(null);
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
 
-  const hasKey = stream.primary_key.length > 0;
+  // A webhook payload has no key: its event id comes from the dedupe field.
+  const hasKey = push || stream.primary_key.length > 0;
+  const sample = push ? parseSample(sampleText) : null;
   const problems = draftProblems(draft, hasKey);
+  const previewBlocked = problems.length > 0 || (sample !== null && !sample.ok);
 
   function edit(next: MappingDraft) {
     setDraft(next);
@@ -156,7 +166,7 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
         await unwrap(
           client.POST("/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview", {
             params: { path: { ws: workspaceId, id: sourceId, name: stream.name } },
-            body: { mapping: draftToMapping(draft) },
+            body: { mapping: draftToMapping(draft), ...(sample?.ok ? { sample: sample.sample } : {}) },
           }),
         ),
       );
@@ -206,6 +216,12 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
   return (
     <div className="stack">
       {fieldsList}
+      {push ? (
+        <p className="muted">
+          Choose what each field of a payload becomes. Paste a sample payload under Preview to get the field names as suggestions; type a
+          nested field with dots, such as order.total. A field a payload lacks is simply empty.
+        </p>
+      ) : null}
       <p className="muted">
         Choose what each field of a record becomes. Name a field of the stream, or reach into a nested one with dots, such as
         address.city or items.0.sku.
@@ -442,6 +458,7 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
         ) : null}
       </section>
 
+      {push ? null : (
       <section className="stack-tight" aria-label="Deleted records">
         <h3>Deleted records</h3>
         <TextField
@@ -464,9 +481,31 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
           </SelectField>
         ) : null}
       </section>
+      )}
 
       <section className="stack-tight" aria-label="Preview">
         <h3>Preview</h3>
+        {push ? (
+          <>
+            <TextAreaField
+              label="Sample payload"
+              mono
+              rows={8}
+              value={sampleText}
+              disabled={busy}
+              onChange={(event) => {
+                setSampleText(event.target.value);
+                setPreview(null);
+              }}
+              hint="One JSON object, or an array of up to 20. It is only used here: nothing is saved or sent."
+            />
+            {sampleText.trim() !== "" && sample && !sample.ok ? (
+              <p className="field-error" role="alert">
+                {sample.error}
+              </p>
+            ) : null}
+          </>
+        ) : null}
         {problems.length > 0 ? (
           <ul className="list-plain attention" aria-label="Before you can preview or save">
             {problems.map((problem) => (
@@ -475,15 +514,17 @@ function Editor({ workspaceId, sourceId, stream, traits, lists, onClose, onSaved
           </ul>
         ) : null}
         <div>
-          <Button onClick={() => void runPreview()} disabled={busy || previewing || problems.length > 0}>
-            {previewing ? "Reading the source" : "Preview"}
+          <Button onClick={() => void runPreview()} disabled={busy || previewing || previewBlocked}>
+            {previewing ? (push ? "Mapping the sample" : "Reading the source") : "Preview"}
           </Button>
         </div>
-        {previewing ? <LoadingState label="Reading the first records" /> : null}
+        {previewing ? <LoadingState label={push ? "Mapping the sample" : "Reading the first records"} /> : null}
         {previewFailure ? <InlineError {...previewFailure} /> : null}
         {preview === null && !previewing && !previewFailure ? (
           <p className="faint">
-            Preview reads the first records from the source and shows what the mapping makes of them. Nothing is saved.
+            {push
+              ? "Paste a sample payload to see the result. Nothing is saved."
+              : "Preview reads the first records from the source and shows what the mapping makes of them. Nothing is saved."}
           </p>
         ) : null}
         {preview !== null && preview.records.length === 0 ? (

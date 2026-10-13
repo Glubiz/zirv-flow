@@ -27,6 +27,7 @@ pub use explore::{
 };
 pub use partitions::ensure_event_partitions;
 pub use rejects::{IngestReject, RejectCursor, RejectFilter, list_ingest_rejects};
+pub(crate) use rejects::{Refusal, insert_record_rejects};
 pub use replay::{
     MAX_REPLAY, REPLAY_JOB_KIND, ReplayPrediction, ReplaySelection, ReplayTotals, enqueue_replay,
     preview_replay, replay_rejects, select_rejects,

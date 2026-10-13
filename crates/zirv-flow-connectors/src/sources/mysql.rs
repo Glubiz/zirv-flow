@@ -57,6 +57,7 @@ impl Source for Mysql {
         rate_limit: None,
         config_check: Some(|config| check_config(config, Flavor::MySql)),
         capabilities: Capabilities {
+            push: false,
             incremental: true,
             full_refresh: true,
             emits_deletes: false,

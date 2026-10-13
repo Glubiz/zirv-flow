@@ -1,4 +1,4 @@
-import type { Freshness, Run, RunDetail, Source, SourceKind, Stream } from "./labels";
+import type { Freshness, Run, RunDetail, Source, SourceKind, Stream, Webhook } from "./labels";
 
 /** The fake source type as `GET /api/v1/source-kinds` lists it, for the tests of this feature. */
 export const FAKE_KIND: SourceKind = {
@@ -36,7 +36,7 @@ export const FAKE_KIND: SourceKind = {
       secret: true,
     },
   ],
-  capabilities: { incremental: true, full_refresh: true, emits_deletes: false },
+  capabilities: { push: false, incremental: true, full_refresh: true, emits_deletes: false },
 };
 
 function setting(
@@ -75,7 +75,7 @@ export const POSTGRES_KIND: SourceKind = {
     setting("user", "User", "text", { required: true, secret: true }),
     setting("password", "Password", "text", { required: true, secret: true }),
   ],
-  capabilities: { incremental: true, full_refresh: true, emits_deletes: false },
+  capabilities: { push: false, incremental: true, full_refresh: true, emits_deletes: false },
 };
 
 export function aSource(change: Partial<Source> = {}): Source {
@@ -173,6 +173,34 @@ export function aFreshness(change: Partial<Freshness> = {}): Freshness {
     high_water_mark: null,
     threshold_seconds: null,
     threshold_is_default: false,
+    ...change,
+  };
+}
+
+/** The webhook source type as `GET /api/v1/source-kinds` lists it. */
+export const WEBHOOK_KIND: SourceKind = {
+  kind: "webhook",
+  label: "Webhook",
+  description: "Receives JSON documents that an external system posts to a signed URL.",
+  config_fields: [],
+  credential_fields: [],
+  capabilities: { push: true, incremental: false, full_refresh: true, emits_deletes: false },
+};
+
+export function aWebhook(change: Partial<Webhook> = {}): Webhook {
+  return {
+    id: "hook-1",
+    source_id: "src-hook",
+    stream_id: "str-hook",
+    name: "Orders",
+    path: "/hooks/hook-1",
+    signature_header: "X-Zirv-Signature",
+    signature_prefix: "sha256=",
+    timestamp_header: "X-Zirv-Timestamp",
+    tolerance_seconds: 300,
+    dedupe_field: "id",
+    receiving: true,
+    created_at: "2026-10-01T09:00:00Z",
     ...change,
   };
 }

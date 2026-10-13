@@ -791,4 +791,163 @@ mod tests {
             "the other shards drained theirs"
         );
     }
+
+    /// A mapped, enabled hook of the workspace, built through the store's public surface.
+    async fn hook(pool: &PgPool, ws: WorkspaceId) -> zirv_flow_store::Webhook {
+        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+        use zirv_flow_store::{
+            DiscoveredStream, NewSource, NewWebhook, StreamSettings, configure_stream,
+            create_source, create_webhook, set_stream_mapping, upsert_discovered_streams,
+        };
+
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let secret = SecretId::new();
+        let sealed = seal(
+            &keys,
+            b"zfwh_test",
+            &secret_aad(ws, secret, SecretPurpose::WebhookSecret),
+        );
+        zirv_flow_store::secrets::insert_unchecked(
+            pool,
+            ws,
+            SecretPurpose::WebhookSecret,
+            secret,
+            &sealed,
+        )
+        .await
+        .unwrap();
+        let config = json!({});
+        let source = create_source(
+            pool,
+            ws,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "webhook",
+                name: "orders",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let descriptor = json!({});
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        let streams = upsert_discovered_streams(
+            &mut tx,
+            ws,
+            source.id,
+            &[DiscoveredStream {
+                name: "payload",
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                descriptor: &descriptor,
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let created = create_webhook(
+            &mut tx,
+            ws,
+            &NewWebhook {
+                id: Uuid::new_v4(),
+                source_id: source.id,
+                stream_id: streams[0].id,
+                secret_id: secret,
+                signature_header: "X-Zirv-Signature",
+                signature_prefix: "sha256=",
+                timestamp_header: None,
+                tolerance_seconds: 300,
+                dedupe_field: "id",
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        configure_stream(
+            &mut connection,
+            ws,
+            source.id,
+            "payload",
+            &StreamSettings {
+                enabled: true,
+                sync_mode: "full_refresh",
+                cursor_field: None,
+                primary_key: &[],
+                staleness_threshold_seconds: None,
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
+            },
+        )
+        .await
+        .unwrap();
+        let mapping = json!({
+            "columns": [{"column": "email", "target": {"type": "identifier", "kind": "email"}}],
+            "event": {"name": "order_placed", "properties": []}
+        });
+        set_stream_mapping(pool, ws, source.id, "payload", &mapping)
+            .await
+            .unwrap();
+        created
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_row_drains_beside_track_rows_and_is_counted_under_its_kind(pool: PgPool) {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        let ws = workspace(&pool).await;
+        append(&pool, ws, 2).await;
+        let created = hook(&pool, ws).await;
+        let receive = zirv_flow_store::find_for_receive(&pool, created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let trace = TraceContext::root(Cause::api("hook"));
+        let payload = json!({"id": "o-1", "email": "ada@example.com"});
+        zirv_flow_store::append_webhook(
+            &pool,
+            &receive,
+            &trace,
+            &payload,
+            None,
+            &format!("wh:{}:o-1", created.id),
+            true,
+        )
+        .await
+        .unwrap();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let guard = metrics::set_default_local_recorder(&recorder);
+
+        run_job(&pool, key(), 500).await.unwrap();
+        drop(guard);
+
+        assert_eq!(inbox(&pool).await, 0);
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 3);
+        let output = handle.render();
+        assert!(
+            output
+                .contains("zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"applied\"} 1"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"accepted\"} 1"
+            ),
+            "{output}"
+        );
+        assert!(!output.contains("ada@example.com"), "{output}");
+        assert!(!output.contains(&created.id.to_string()), "{output}");
+    }
 }

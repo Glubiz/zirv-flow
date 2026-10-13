@@ -16,6 +16,8 @@ interface StreamsPanelProps {
   onRun?: (stream: Stream) => void;
   /** Starts a reconciliation of one incremental stream; without it the table offers none. */
   onReconcile?: (stream: Stream) => void;
+  /** The source is a webhook: payloads arrive by push, so the stream has no key, cursor or sweep. */
+  push?: boolean;
   busy?: boolean;
 }
 
@@ -27,16 +29,18 @@ function stalenessCell(stream: Stream): string {
 }
 
 /** The streams of a source with their settings; admins set each one up in a dialog. */
-export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, busy }: StreamsPanelProps) {
+export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, push = false, busy }: StreamsPanelProps) {
   const [editing, setEditing] = useState<Stream | null>(null);
   const [mapping, setMapping] = useState<Stream | null>(null);
 
   if (streams.length === 0) {
     return (
       <EmptyState title="No streams yet">
-        {canManage
-          ? "Discover the streams this source offers, then choose which to read."
-          : "An admin has not discovered the streams of this source yet."}
+        {push
+          ? "The webhook's stream is made with it. Reload the page; if it is still missing, delete the webhook and create it again."
+          : canManage
+            ? "Discover the streams this source offers, then choose which to read."
+            : "An admin has not discovered the streams of this source yet."}
       </EmptyState>
     );
   }
@@ -116,6 +120,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
           workspaceId={workspaceId}
           sourceId={sourceId}
           stream={editing}
+          push={push}
           onClose={() => setEditing(null)}
           onSaved={(saved) => {
             setEditing(null);
@@ -129,6 +134,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
           workspaceId={workspaceId}
           sourceId={sourceId}
           stream={mapping}
+          push={push}
           onClose={() => setMapping(null)}
           onSaved={(saved) => {
             setMapping(null);

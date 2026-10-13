@@ -228,3 +228,44 @@ export function draftProblems(draft: MappingDraft, hasPrimaryKey: boolean): stri
   }
   return problems;
 }
+
+/** The most payloads one preview takes, and the most bytes they may hold in all. */
+export const MAX_SAMPLE_PAYLOADS = 20;
+export const MAX_SAMPLE_BYTES = 64 * 1024;
+
+export type SampleResult = { ok: true; sample: Record<string, unknown>[] } | { ok: false; error: string };
+
+/** Reads a pasted sample: one JSON object, or an array of them. The error says what to fix, never echoes the text. */
+export function parseSample(text: string): SampleResult {
+  if (text.trim() === "") return { ok: false, error: "Paste a sample payload." };
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "That is not valid JSON." };
+  }
+  const items = Array.isArray(value) ? value : [value];
+  if (items.length === 0 || items.length > MAX_SAMPLE_PAYLOADS) {
+    return { ok: false, error: `Paste 1 to ${MAX_SAMPLE_PAYLOADS} payloads.` };
+  }
+  if (!items.every((item) => typeof item === "object" && item !== null && !Array.isArray(item))) {
+    return { ok: false, error: "Each payload must be a JSON object." };
+  }
+  if (new TextEncoder().encode(JSON.stringify(items)).length > MAX_SAMPLE_BYTES) {
+    return { ok: false, error: "The sample is over 64 KiB." };
+  }
+  return { ok: true, sample: items as Record<string, unknown>[] };
+}
+
+/** The top-level keys of the pasted payloads, in first-seen order: suggestions for the field boxes. */
+export function sampleKeys(text: string): string[] {
+  const parsed = parseSample(text);
+  if (!parsed.ok) return [];
+  const keys: string[] = [];
+  for (const payload of parsed.sample) {
+    for (const key of Object.keys(payload)) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+  return keys;
+}
