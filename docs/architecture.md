@@ -46,7 +46,7 @@ drop, duplicate or never delete records; consent and erasure handled elsewhere.
 2. **Every number is explainable.** Counts, memberships and skipped sends link to the data and rule behind them.
 3. **Freshness is a value.** Every segment result and send decision carries the age of its inputs.
 4. **Compliance is data, enforced at one boundary.** Consent, suppression and erasure live in the profile store and are checked in the send pipeline, not left to flow design.
-5. **Deterministic core, effects at the edge.** Segment compiler, flow interpreter and template renderer are pure functions of input and an injected clock; I/O lives in job handlers.
+5. **Deterministic core, effects at the edge.** Segment compiler, flow interpreter and template renderer are pure functions of their input and an explicit `now`; the clock is read at the edges and I/O lives in job handlers (8.2).
 6. **At-least-once execution with idempotency keys.** Exactly-once is never claimed for a system that cannot honour a key.
 7. **The workspace is the isolation unit.** Every row carries `workspace_id`; every query and job is scoped by it.
 8. **API first.** The UI uses the public `/api/v1`; every milestone ships API and UI for its feature together.
@@ -137,7 +137,7 @@ React SPA, Vite, React Flow canvas).
 | Crate | Contents | Independent reason to exist |
 |-------|----------|-----------------------------|
 | `zirv-flow` (bin) | CLI, config, role startup, embedded web assets | The single deliverable; thin composition root |
-| `zirv-flow-core` | Domain types, ids, validation, segment AST, flow graph, `Clock` | Shared vocabulary; dependency set kept pure (no sqlx, HTTP client or tokio networking) |
+| `zirv-flow-core` | Domain types, ids, validation, segment AST, flow graph, `Clock` trait (8.2) | Shared vocabulary; dependency set kept pure (no sqlx, HTTP client or tokio networking) |
 | `zirv-flow-store` | sqlx pool, migrations, repositories, Postgres job queue primitives | Sole owner of the profile store: one migration stream, one sqlx offline cache. Queue SQL lives here because enqueue must join the caller's transaction. |
 | `zirv-flow-segments` | AST to parameterized SQL compiler, dependency analysis, reference evaluator | Most correctness-critical code, own golden corpus. Pure: emits SQL + params that `store` executes. Used by `api` (preview, explain) and `jobs` (recompute). |
 | `zirv-flow-engine` | Deterministic flow interpreter, simulation harness | Pure, so simulation needs no I/O. Used by `api` (test mode) and `jobs`. |
@@ -318,7 +318,7 @@ erDiagram
 
 | Entity | Purpose and key rules |
 |--------|-----------------------|
-| Person | Resolved individual. `traits jsonb` is materialized from contributions; `merged_into` is set on the losing side of a merge. |
+| Person | Resolved individual. `traits jsonb` is materialized from contributions; `merged_into` is set on the losing side of a merge. For traits marked "indexed for segments" (OQ-1, 21.1), `people` also carries a fixed set of generic typed slot columns per promotable scalar type: 8 string, 8 number, 6 timestamp, 4 date and 4 boolean per workspace, each with a partial btree index on `(workspace_id, slot)` where the slot is not null. `string_list` traits stay in `jsonb`. |
 | Identity | `(kind, normalized value)` per person: email, phone, anonymous_id, external id namespaced per source. Unique on `(workspace_id, kind, value)`. |
 | Trait definition | Field registry: key, type (string, number, boolean, timestamp, date, string list), precedence policy, PII flag, channel-address flag. Values are validated on write, so compiled reads cast safely. |
 | Source record | Ledger row per `(source, stream, record key)`: mapped payload, content hash, person, last seen run, deletion mark. These are the per-source contributions traits are computed from. |
@@ -328,7 +328,7 @@ erDiagram
 | Decision log | Append-only, time-partitioned typed records for derived actions and their causes. It stores durable ids and reasons but no personal-data values; `trace_id` links the tree across jobs, events, messages and forwarding. |
 | Consent | Recorded consent: state per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. It is the input to the workspace consent policy (10.1), which decides effective consent. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
-| List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). |
+| List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). Erasure and person deletion remove a person's membership rows; a merge closes the merged person's rows, and the survivor's `merge` change class (7.1) re-evaluates it. |
 | Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
 | Template, template version | Channel (`email`, `webhook`; `sms`, `push`, `in_app` reserved), category, mode (`blocks` or `code`) and a versioned content document (section 11). Versions are immutable once published. |
 | Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
@@ -398,6 +398,13 @@ follow-ups (segment re-evaluation, event triggers, event-wait wakeups); commit
 the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
+
+The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each row carries a
+`smallint` change-class bitmask (traits, events, lists, consent, identifiers, merge), OR-ed
+on conflict, so repeated marks coalesce and keep every class that changed. A mark made after
+`segment.reevaluate` claimed a row re-inserts it (8.4). `segment.*` events never mark a person
+dirty: a membership change reaches dependent segments through topological evaluation, not
+through the dirty set.
 
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
@@ -604,7 +611,7 @@ Deterministic matching only, with rules per identifier kind:
 | Merge policy | Whether a match may merge two existing people | allowed unless a uniqueness rule would break |
 
 - **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case). A review ends in one of two outcomes: keep the people separate, or move the identifier to one of them.
-- **Merge:** the older person survives. One transaction moves identities, contributions, list memberships and consent, recomputes traits and sets `merged_into`. Consent takes the most recent explicit decision per channel/topic (`unsubscribed` wins ties). A `person.merge.rewrite` job then re-points events, memberships, enrollments and messages in batches; meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
+- **Merge:** the older person survives. One transaction moves identities, contributions, list memberships and consent, recomputes traits and sets `merged_into`. Consent takes the most recent explicit decision per channel/topic (`unsubscribed` wins ties). A `person.merge.rewrite` job then re-points events, enrollments and messages in batches (segment membership rows are closed instead, 6); meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
 - **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution.
 - **Precedence:** each trait value is computed from all sources' contributions under the registry policy `latest` (by source observation time, default), `source_priority` (ordered sources) or `first`. Flow actions and the API write as sources (`flow:<id>`, `api`). The profile shows which source supplied each value.
 
@@ -870,37 +877,56 @@ references and window limits against the field registry and event catalog.
 Normalization flattens, pushes `not` inward and folds constants. Lowering emits
 SQL with an `EXISTS` subquery per event condition; every value is a bind
 parameter, column and JSON keys come only from the registry, and relative
-windows bind `$now` from the injected clock, so output is deterministic. Result:
+windows bind `$now` from the explicit `now` the caller passes, so output is deterministic. Result:
 `CompiledSegment { sql, params, deps, time_sensitive }`, where `deps` lists the
 traits, events, lists, segments and consent channels read.
 
+**Clock.** Pure code takes an explicit `now`: the compiler, the reference evaluator and
+refresh planning never read time. A `Clock` at the edges (worker and scheduler context, `api`
+state) supplies it. Reads are async and fallible, and `core` gains no I/O. Production reads the
+database clock; tests advance a manual clock. A refresh captures one timestamp and passes it
+through every compile, plan and evaluation. In M4 only segment paths adopt the clock.
+
 Verification: golden tests (AST fixture to expected SQL, reviewed on change);
 an in-memory **reference evaluator** of the same AST; property tests running
-random ASTs and data through both and comparing. v1 evaluates event aggregates
+random ASTs and data through both and comparing. The AST generators and the golden SQL
+corpus live in `zirv-flow-segments`: `proptest` is a dev-dependency, the generators sit behind
+a `test-support` feature, and golden files are blessed with `ZIRV_FLOW_BLESS`. The PostgreSQL
+comparison tests live in `zirv-flow-jobs`; CI runs them with fixed seeds, and a scheduled
+nightly workflow runs random seeds without filing issues (18). v1 evaluates event aggregates
 on raw events with partition pruning and `(workspace_id, name, occurred_at)`
 indexes; a per-person daily rollup is the first optimization if benchmarks miss
 targets (OQ-2).
 
 ### 8.3 Preview, explain, membership
 
-- **Preview:** count and sample under a `statement_timeout` (default 10 s), optionally on a read replica (`database.read_url`), always with data age.
-- **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile.
-- **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: version, cause `data_change`, `time`, `definition_change` or `initial`), and enqueue batched flow triggers, all in one transaction.
+- **Preview:** count and sample under a `statement_timeout` (default 10 s), always with data age. A read replica (`database.read_url`) is deferred: in M4 preview and explain use the primary under `statement_timeout`, and the replica comes only if the M4 benchmark (#127) shows preview load harming ingestion.
+- **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile. The store loads one bounded **snapshot** of the person in one read-only, consistent transaction: traits; events, limited to the referenced names and the widest window and capped; lists, consent and identifier kinds; and current memberships. The reference evaluator (8.2) runs over the snapshot at the same evaluation time the SQL would use. A node that hit a cap reports "unable to explain", never a false pass or fail. Unknown results propagate unless the known children decide the outcome.
+- **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: segment id, version, cause `data_change`, `time`, `definition_change` or `initial`), and enqueue batched flow triggers, all in one transaction.
 
 ### 8.4 Recompute and versioning
 
 | Mode | When | Scope |
 |------|------|-------|
-| Incremental | `segment.reevaluate` drains coalesced dirty marks | Segments whose `deps` intersect the change, with `person_id = ANY($batch)` |
+| Incremental | `segment.reevaluate` drains coalesced dirty marks (7.1) | Segments whose `deps` classes intersect the batch's combined change classes, plus their transitive segment dependents, with `person_id = ANY($batch)` |
 | Scheduled full | Per-segment cadence, default hourly, minimum 5 min | Whole segment; **required** for `time_sensitive` segments, which change as time passes with no new data ("no order in 30 days") |
 | Manual | "Refresh now" | Whole segment |
 
 Segment-of-segment dependencies are evaluated in topological order; one refresh
 per segment at a time (job unique key); the UI states the cadence ("re-evaluated
 every hour"). Editing a definition creates a new version and applies the diff
-with cause `definition_change`; whether that triggers flows is OQ-6 (proposed:
-no). A flow with a segment-entry trigger chooses at publish whether current
-members enroll or only new entries.
+with cause `definition_change`; events and decisions are recorded, but flow
+segment-entry and segment-exit triggers ignore `definition_change` changes (OQ-6, 21.1).
+A flow with a segment-entry trigger chooses "enroll current members" at publish (M5) when
+current members should enroll rather than only new entries.
+
+**Claim and pass.** `segment.reevaluate` claims a batch with
+`DELETE ... WHERE (workspace_id, person_id) IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n) RETURNING`,
+so concurrent jobs take disjoint people. A mark made later re-inserts a row, and a failed pass
+rolls the claim back. In that one transaction it evaluates every segment whose dependency
+classes intersect the batch's combined classes, plus their transitive segment dependents, in
+topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
+keys) is an optimization, made only if the M4 benchmark misses.
 
 ## 9. Flow engine
 
@@ -1171,6 +1197,11 @@ Events are partitioned by month on `occurred_at` like the decision log, with the
 creating this and next month and the `events.retention` job dropping old ones. Merging people
 does not yet rewrite events.
 
+`segment.entered` and `segment.exited` are reserved system event names: a client cannot send
+any `segment.` name, on any ingestion path. The store writes them with source `segments`.
+Their properties are the segment id, version and cause, and their trace and cause are those of
+the change that caused them.
+
 As built (M3, sync events): an event a sync run yields goes through the same validation,
 redaction and reject handling as one sent over HTTP. A refused event is an `ingest_rejects` row
 of kind `event` that names the run, and the record counts once, as rejected, while its profile
@@ -1239,8 +1270,8 @@ As built (people search, profile and person timeline):
   list and event decisions already had it. Migration `0012_people_timeline.sql` indexes
   `decision_records (workspace_id, (subject_ids ->> 'person'), recorded_at DESC)` for rows that
   have the key, on the partitioned parent so every partition gets it, and adds a GIN
-  `jsonb_path_ops` index on `people.traits` for equality search until OQ-1 decides the
-  indexing. Decisions written before the migration are not backfilled.
+  `jsonb_path_ops` index on `people.traits` for equality search until trait promotion (OQ-1, 21.1)
+  replaces it. Decisions written before the migration are not backfilled.
 - **Search** (`store::people::search_people`). An identifier search is an exact match on the
   normalized value that follows `merged_into` to the survivor. A trait search compares one
   registered field, with the operator checked against the field's type (`eq`, `exists`;
@@ -1324,7 +1355,7 @@ batch in the apply-batch transaction.
 As built (M3): the `sync_run` cause carries the run id, and the run's trace is
 the trace of its jobs and of every decision it writes. An applied record is
 `sync.record`/`applied` with the `person` and `source_record` ids; a rejected record is
-`sync.record`/`rejected` with the reason code and the `ingest_reject` id; a deleted record has
+`sync.record`/`rejected` with the reason code and the `ingest_reject` id, and also the `source_record` ledger row when it has one (#114; a record refused on first sight is named by its reject row alone); a deleted record has
 the `contribution.removed` decision that retracting it writes. Unchanged records write none.
 Both `cause_kind` CHECKs (`jobs`, and the partitioned `decision_records`) list the seventh kind.
 
@@ -1841,6 +1872,10 @@ admin-only, audited and answers 410 after 24 hours, and the leader's hourly upke
 content. A request whose job went dead reads as `failed`. Destination `erase` calls, message and
 enrollment tables and backup-copy handling of the ledger (OQ-13) are not built yet.
 
+Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
+person's rows, current and closed. A merge does not delete them: it closes the merged person's
+rows, and the survivor is re-evaluated through its `merge` change class (7.1).
+
 ## 17. Observability and operations
 
 | Area | Design |
@@ -1858,7 +1893,8 @@ enrollment tables and backup-copy handling of the ledger (OQ-13) are not built y
 
 | Layer | Tests |
 |-------|-------|
-| `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; property tests comparing compiled SQL on Postgres with the reference evaluator |
+| `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; the AST generators (`proptest`, behind a `test-support` feature) and the golden corpus live in `segments`, golden files blessed with `ZIRV_FLOW_BLESS` |
+| Segments on PostgreSQL | Tests in `zirv-flow-jobs` comparing compiled SQL on Postgres with the reference evaluator; CI runs fixed seeds, and a scheduled nightly workflow runs random seeds without filing issues |
 | `engine` | Inline unit tests; deterministic simulation: virtual clock, crash after every effect, randomized event arrival. Invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
@@ -1877,7 +1913,7 @@ recorded in the "As measured" notes below the table. Each milestone measures its
 reference hardware (assumed: PostgreSQL 8 vCPU / 32 GB RAM / NVMe; two
 `zirv-flow` hosts of 4 vCPU). A missed target is fixed or revised in a recorded
 decision, never dropped silently. Beyond the envelope: more workers, a read
-replica for preview and explain, event rollups (OQ-2), then the ADR-003 add-ons
+replica for preview and explain (deferred, 8.3), event rollups (OQ-2), then the ADR-003 add-ons
 (external broker, analytical event store), only on measured need.
 
 | Dimension | v1 TARGET |
@@ -1991,8 +2027,7 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark |
-| OQ-6 | Do membership changes from a definition edit trigger flows? (Proposed: no.) | M4 |
+| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark (#127) |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
@@ -2039,6 +2074,10 @@ they were ruled as their capabilities were added to the plan.
   A capability probe on save checks tool calls and usage; the window comes from
   provider metadata or operator configuration; enablement is refused when a
   requirement is missing (13.1).
+- **OQ-6:** A definition edit writes a new version and applies the membership diff with cause
+  `definition_change`; events and decisions are recorded. Flow segment-entry and segment-exit
+  triggers ignore `definition_change` changes. A flow that wants the current members chooses
+  "enroll current members" at publish (M5). Section 8.4.
 
 - **OQ-1:** Hot traits are promoted to typed columns with btree indexes; every other trait stays in the
   `people.traits` `jsonb`. At 1 million people and 20 mixed-type traits (M2 benchmark, tier M's
@@ -2047,9 +2086,16 @@ they were ruled as their capabilities were added to the plan.
   index-only scans), the three-trait AND count and id scan 1.8 times faster (26 ms against 47 ms), an upsert of
   10,000 trait changes 1.23 times faster (133 ms against 164 ms) and the table 12% smaller; the plain id scans
   are within 6 to 12% (31 against 28 ms, 19 against 18 ms), the one place `jsonb` is ahead. The difference is
-  outside noise, so the simpler design is not kept. Cost: promoting a trait is a migration with a column and
-  a consistent `jsonb` copy while it moves, and a promoted trait has one fixed type. Which traits are hot, and
-  the promotion process, belong to the segment milestone (M4); until then the `jsonb_path_ops` index stays.
+  outside noise, so the simpler design is not kept. Cost: a promoted trait has one fixed type and
+  two copies to keep in step. Promotion needs no per-workspace DDL: `people` gains a fixed set of generic typed slot
+  columns per promotable scalar type, 8 string, 8 number, 6 timestamp, 4 date and 4 boolean per workspace, each with a
+  partial btree index on `(workspace_id, slot)` where the slot is not null. An admin marks a trait "indexed for
+  segments"; the registry assigns a free slot of its type, and a backfill job copies the values race-safely alongside
+  writes. The write path keeps `jsonb` and the slot in step, and the compiler reads the slot only after the backfill
+  completes. Unmarking retires the slot safely before it is cleared or reassigned. Marking is refused when no slot of the type is free; the trait then
+  stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
+  segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
+  traits cover the equality searches.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
