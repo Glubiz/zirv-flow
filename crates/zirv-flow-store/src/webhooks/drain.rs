@@ -6,8 +6,7 @@
 //! Nothing here keeps a payload value outside the apply paths: a refusal holds field names,
 //! codes and a masked sample.
 
-use std::collections::{HashMap, HashSet};
-
+use hashbrown::{HashMap, HashSet};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
