@@ -42,6 +42,8 @@ INSERT INTO __DB__.pairs
 SELECT r.region, c.n, CONCAT(r.region, c.n), TIMESTAMP('2024-02-01 00:00:00') + INTERVAL c.n HOUR
 FROM (SELECT 'eu' AS region UNION ALL SELECT 'us') AS r,
      (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) AS c;
+-- A row with no cursor value, which sorts inside the one page of this small table.
+INSERT INTO __DB__.pairs VALUES ('zz', 1, 'no cursor', NULL);
 
 -- Integer and decimal keys, signed and unsigned.
 CREATE TABLE __DB__.numbers (

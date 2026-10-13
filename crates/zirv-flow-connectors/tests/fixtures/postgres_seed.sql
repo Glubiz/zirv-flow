@@ -38,6 +38,8 @@ CREATE TABLE __SCHEMA__.pairs (
 INSERT INTO __SCHEMA__.pairs
 SELECT r, c, r || c, timestamp '2024-02-01 00:00:00' + c * interval '1 hour'
 FROM unnest(ARRAY['eu', 'us']) AS r, generate_series(1, 6) AS c;
+-- A row with no cursor value, which sorts inside the one page of this small table.
+INSERT INTO __SCHEMA__.pairs VALUES ('zz', 1, 'no cursor', NULL);
 
 -- The role the source connects as: it can only SELECT.
 CREATE ROLE __ROLE__ LOGIN PASSWORD 'zf_test_pw';

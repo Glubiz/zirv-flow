@@ -1521,10 +1521,15 @@ mod tests {
         let batches = fixture.read(&config, &full, None).await.unwrap();
         let by_cursor = fixture.read(&config, &incremental, None).await.unwrap();
 
-        assert_eq!(keys(&batches).len(), 12);
+        assert_eq!(keys(&batches).len(), 13);
         assert_eq!(keys(&batches)[0], r#"["eu","1"]"#);
         assert_eq!(keys(&batches)[11], r#"["us","6"]"#);
-        assert_eq!(batches[0].checkpoint.0, json!({"v": 1, "key": ["us", "6"]}));
+        assert_eq!(keys(&batches)[12], r#"["zz","1"]"#);
+        assert!(
+            !keys(&by_cursor).contains(&r#"["zz","1"]"#.to_owned()),
+            "a NULL cursor is not read"
+        );
+        assert_eq!(batches[0].checkpoint.0, json!({"v": 1, "key": ["zz", "1"]}));
         assert_eq!(
             keys(&by_cursor)[..3],
             [r#"["eu","1"]"#, r#"["us","1"]"#, r#"["eu","2"]"#]
