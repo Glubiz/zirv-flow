@@ -27,6 +27,7 @@ Nextest isolates tests per process; `--no-fail-fast` is mandatory -- diff sorted
 ## Conventions
 
 - Rust edition 2024. Options: `#[serde(default)]` or `Option<T>`.
+- Hash maps and sets are `hashbrown::{HashMap, HashSet}`, never `std::collections`; clippy (`clippy.toml` `disallowed-types`) enforces it (issue #104).
 - Tests stay inline in `#[cfg(test)] mod tests`; `tests/fixtures/` is data only.
 - Crate edges follow the allowlist in architecture section 5.1: pure crates never depend on I/O crates, `api` and `jobs` never depend on each other, and nothing depends on the bin crate.
 - Within a crate, put code in its owning feature module; use `pub(crate)` by default, re-export the supported surface from `mod.rs`/`lib.rs`, and never reach into another feature's internals.
