@@ -25,7 +25,7 @@ use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 128;
 /// The schedules of sources are cron expressions in UTC.
-const SCHEDULE_TIMEZONE: &str = "UTC";
+pub(super) const SCHEDULE_TIMEZONE: &str = "UTC";
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SourceBody {

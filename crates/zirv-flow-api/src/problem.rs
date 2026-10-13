@@ -202,6 +202,40 @@ impl ApiError {
         }
     }
 
+    /// A reconciliation was asked for or scheduled on a stream that is not incremental. A full
+    /// refresh already sweeps after every run.
+    pub(crate) fn reconcile_needs_incremental() -> Self {
+        Self {
+            code: Some("reconcile_needs_incremental"),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "only an incremental stream can be reconciled; a full refresh removes what the source dropped after every run",
+            )
+        }
+    }
+
+    /// The sweep limit of a stream is not a share above 0 and at most 1.
+    pub(crate) fn invalid_sweep_limit() -> Self {
+        Self {
+            code: Some("invalid_sweep_limit"),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "sweep_limit must be above 0 and at most 1",
+            )
+        }
+    }
+
+    /// A CSV import was given a mapping with a delete signal, which only a synced stream reads.
+    pub(crate) fn delete_signal_unsupported() -> Self {
+        Self {
+            code: Some("delete_signal_unsupported"),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "mapping: delete_when is for a synced stream; a CSV import has no deletes",
+            )
+        }
+    }
+
     /// A caller without access to values asked to probe or break down a PII property.
     pub(crate) fn pii_property_not_explorable() -> Self {
         Self {

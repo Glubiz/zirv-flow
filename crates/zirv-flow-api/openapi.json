@@ -9231,7 +9231,7 @@
             }
           },
           "422": {
-            "description": "The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`)",
+            "description": "The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`); a reconciliation of a stream that is not incremental (`reconcile_needs_incremental`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12691,6 +12691,32 @@
           }
         }
       },
+      "DeleteRuleBody": {
+        "type": "string",
+        "description": "How a delete column's cell is read.",
+        "enum": [
+          "truthy",
+          "present"
+        ]
+      },
+      "DeleteWhenBody": {
+        "type": "object",
+        "description": "The delete signal of a synced stream: a column and how its cell is read.",
+        "required": [
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "A field of the stream."
+          },
+          "rule": {
+            "$ref": "#/components/schemas/DeleteRuleBody",
+            "description": "How the cell is read; `truthy` when absent."
+          }
+        },
+        "additionalProperties": false
+      },
       "DepthBody": {
         "type": "object",
         "required": [
@@ -14151,6 +14177,17 @@
               "$ref": "#/components/schemas/ColumnRuleBody"
             }
           },
+          "delete_when": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeleteWhenBody",
+                "description": "The column that marks a record as deleted in its source. Only a synced stream takes it; a\nCSV import refuses a mapping with one. A record whose cell satisfies the rule is removed\ninstead of applied."
+              }
+            ]
+          },
           "key_column": {
             "type": [
               "string",
@@ -15225,6 +15262,7 @@
           "stream",
           "state",
           "trigger",
+          "kind",
           "sync_mode",
           "records_read",
           "records_applied",
@@ -15270,6 +15308,10 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`sync` for a normal run, or `reconcile` for a reconciliation: it lists the keys of an\nincremental stream, applies nothing and removes the live records the source no longer has."
           },
           "records_applied": {
             "type": "integer",
@@ -15357,6 +15399,14 @@
           }
         ],
         "description": "A run with its first 100 rejects."
+      },
+      "RunKindBody": {
+        "type": "string",
+        "description": "What kind of run to start.",
+        "enum": [
+          "sync",
+          "reconcile"
+        ]
       },
       "RunRejectBody": {
         "type": "object",
@@ -15815,6 +15865,10 @@
         "type": "object",
         "description": "Which stream to run.",
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RunKindBody",
+            "description": "`sync` (the default) or `reconcile`. A reconciliation needs `stream`, which must be\nincremental."
+          },
           "stream": {
             "type": [
               "string",
@@ -15845,6 +15899,7 @@
           "enabled",
           "sync_mode",
           "primary_key",
+          "sweep_limit",
           "discovered",
           "updated_at"
         ],
@@ -15886,6 +15941,13 @@
               "type": "string"
             }
           },
+          "reconcile_schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The UTC cron on which the stream is reconciled: its keys are listed and the live records the\nsource no longer has are removed. Null for none. Incremental streams only."
+          },
           "staleness_threshold_seconds": {
             "type": [
               "integer",
@@ -15893,6 +15955,11 @@
             ],
             "format": "int32",
             "description": "How long without new data before the stream counts as stale, in seconds."
+          },
+          "sweep_limit": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest share (above 0, at most 1) of the stream's live records that one sweep, after a\nfull refresh or a reconciliation, may remove. A run that would remove more removes nothing\nand fails with `sweep_limit`. 1 turns the guard off."
           },
           "sync_mode": {
             "type": "string",
@@ -15939,6 +16006,13 @@
             },
             "description": "Fields of the stream that identify a record."
           },
+          "reconcile_schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A UTC cron to reconcile the stream on. Absent or null clears it. Incremental streams only."
+          },
           "staleness_threshold_seconds": {
             "type": [
               "integer",
@@ -15946,6 +16020,15 @@
             ],
             "format": "int32",
             "description": "A positive number of seconds."
+          },
+          "sweep_limit": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The largest share of the stream's live records one sweep may remove: above 0, at most 1.\nAbsent resets it to the default, 0.5.",
+            "example": 0.5
           },
           "sync_mode": {
             "type": "string",

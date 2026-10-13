@@ -16,6 +16,7 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
 use zirv_flow_store::{Stream, StreamSettings};
 
+use super::crud::SCHEDULE_TIMEZONE;
 use super::problems;
 use crate::AppState;
 use crate::admin::{self, Context};
@@ -78,6 +79,13 @@ pub(crate) struct StreamBody {
     primary_key: Vec<String>,
     /// How long without new data before the stream counts as stale, in seconds.
     staleness_threshold_seconds: Option<i32>,
+    /// The UTC cron on which the stream is reconciled: its keys are listed and the live records the
+    /// source no longer has are removed. Null for none. Incremental streams only.
+    reconcile_schedule: Option<String>,
+    /// The largest share (above 0, at most 1) of the stream's live records that one sweep, after a
+    /// full refresh or a reconciliation, may remove. A run that would remove more removes nothing
+    /// and fails with `sweep_limit`. 1 turns the guard off.
+    sweep_limit: f64,
     /// How a record of the stream becomes a person; null until one is set.
     mapping: Option<MappingBody>,
     discovered: DescriptorBody,
@@ -99,6 +107,8 @@ impl TryFrom<&Stream> for StreamBody {
             cursor_field: stream.cursor_field.clone(),
             primary_key: stream.primary_key.clone(),
             staleness_threshold_seconds: stream.staleness_threshold_seconds,
+            reconcile_schedule: stream.reconcile_schedule.clone(),
+            sweep_limit: stream.sweep_limit,
             mapping: stream.mapping.as_ref().and_then(|value| {
                 serde_json::from_value::<Mapping>(value.clone())
                     .ok()
@@ -131,10 +141,51 @@ pub(crate) struct StreamSettingsRequest {
     primary_key: Vec<String>,
     /// A positive number of seconds.
     staleness_threshold_seconds: Option<i32>,
+    /// A UTC cron to reconcile the stream on. Absent or null clears it. Incremental streams only.
+    #[serde(default)]
+    reconcile_schedule: Option<String>,
+    /// The largest share of the stream's live records one sweep may remove: above 0, at most 1.
+    /// Absent resets it to the default, 0.5.
+    #[serde(default)]
+    #[schema(example = 0.5)]
+    sweep_limit: Option<f64>,
     /// How a record of the stream becomes a person. Absent leaves the stream's mapping as it is.
     /// Columns are the stream's field names (top level); trait keys must be in the registry.
     #[serde(default)]
     mapping: Option<MappingBody>,
+}
+
+/// The share of live records one sweep may remove unless the stream says otherwise.
+pub(crate) const DEFAULT_SWEEP_LIMIT: f64 = 0.5;
+
+/// The sweep limit and the reconciliation cron of a request, checked: the cron only on an
+/// incremental stream and only if it is a valid cron, the limit above 0 and at most 1.
+fn check_deletion_settings(
+    request: &StreamSettingsRequest,
+    mode: SyncMode,
+) -> Result<(Option<String>, f64), ApiError> {
+    let limit = match request.sweep_limit {
+        None => DEFAULT_SWEEP_LIMIT,
+        Some(limit) if limit.is_finite() && limit > 0.0 && limit <= 1.0 => limit,
+        Some(_) => return Err(ApiError::invalid_sweep_limit()),
+    };
+    let schedule = request
+        .reconcile_schedule
+        .as_deref()
+        .map(str::trim)
+        .filter(|cron| !cron.is_empty());
+    if let Some(cron) = schedule {
+        if mode != SyncMode::Incremental {
+            return Err(ApiError::reconcile_needs_incremental());
+        }
+        zirv_flow_core::schedule::validate(cron, SCHEDULE_TIMEZONE).map_err(|_| {
+            problems(vec![(
+                "reconcile_schedule".to_owned(),
+                "must be a valid cron expression".to_owned(),
+            )])
+        })?;
+    }
+    Ok((schedule.map(str::to_owned), limit))
 }
 
 /// Checks the settings against the descriptor. Returns the sync mode on success.
@@ -228,6 +279,10 @@ pub(crate) async fn configure(
         .ok_or_else(ApiError::not_found)?;
     let descriptor = descriptor_of(&existing)?;
     let mode = check_settings(&descriptor, request)?;
+    let (reconcile_schedule, sweep_limit) = check_deletion_settings(request, mode)?;
+    let source = zirv_flow_store::find_source(&state.pool, workspace, source_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let mapping = match &request.mapping {
         Some(body) => Some(checked_mapping(state, workspace, &descriptor, body).await?),
         None => None,
@@ -244,8 +299,8 @@ pub(crate) async fn configure(
             cursor_field: request.cursor_field.as_deref(),
             primary_key: &request.primary_key,
             staleness_threshold_seconds: request.staleness_threshold_seconds,
-            reconcile_schedule: None,
-            sweep_limit: 0.5,
+            reconcile_schedule: reconcile_schedule.as_deref(),
+            sweep_limit,
         },
     )
     .await?
@@ -259,6 +314,15 @@ pub(crate) async fn configure(
         }
         None => stream,
     };
+    zirv_flow_store::sync_reconcile_schedule(
+        &mut tx,
+        workspace,
+        source_id,
+        stream.id,
+        stream.reconcile_schedule.as_deref(),
+        source.enabled && stream.enabled,
+    )
+    .await?;
     admin::audit(
         &mut tx,
         context,
@@ -271,6 +335,12 @@ pub(crate) async fn configure(
             "enabled": stream.enabled,
             "sync_mode": stream.sync_mode,
             "mapping_set": mapping.is_some(),
+            "delete_signal_set": stream
+                .mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.get("delete_when").is_some()),
+            "reconcile_schedule_set": stream.reconcile_schedule.is_some(),
+            "sweep_limit": stream.sweep_limit,
         }),
     )
     .await?;
@@ -382,6 +452,8 @@ mod tests {
             cursor_field: cursor.map(str::to_owned),
             primary_key: vec!["id".into()],
             staleness_threshold_seconds: Some(60),
+            reconcile_schedule: None,
+            sweep_limit: None,
             mapping: None,
         }
     }

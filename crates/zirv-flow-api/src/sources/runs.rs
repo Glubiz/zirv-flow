@@ -40,6 +40,9 @@ pub(crate) struct RunBody {
     state: String,
     /// `manual` or `schedule`.
     trigger: String,
+    /// `sync` for a normal run, or `reconcile` for a reconciliation: it lists the keys of an
+    /// incremental stream, applies nothing and removes the live records the source no longer has.
+    kind: String,
     /// The stream's sync mode when the run was queued: `full_refresh` or `incremental`.
     sync_mode: String,
     /// Records the source delivered and the run has committed.
@@ -80,6 +83,7 @@ impl From<&SyncRun> for RunBody {
             stream: run.stream_name.clone(),
             state: run.state.clone(),
             trigger: run.trigger.clone(),
+            kind: run.run_kind.clone(),
             sync_mode: run.sync_mode.clone(),
             records_read: run.records_read,
             records_applied: run.records_applied,
@@ -147,6 +151,28 @@ pub(crate) struct RunDetailBody {
 pub(crate) struct StartRunRequest {
     /// The name of one stream. Without it every enabled stream with a mapping is run.
     stream: Option<String>,
+    /// `sync` (the default) or `reconcile`. A reconciliation needs `stream`, which must be
+    /// incremental.
+    #[serde(default)]
+    kind: RunKindBody,
+}
+
+/// What kind of run to start.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunKindBody {
+    #[default]
+    Sync,
+    Reconcile,
+}
+
+impl RunKindBody {
+    fn core(self) -> RunKind {
+        match self {
+            Self::Sync => RunKind::Sync,
+            Self::Reconcile => RunKind::Reconcile,
+        }
+    }
 }
 
 /// The reject as shown: the stored sample, masked again against the registry as it is now, so
@@ -212,6 +238,11 @@ pub(crate) async fn start_runs(
     find_source(&state.pool, workspace, source_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if request.kind == RunKindBody::Reconcile && request.stream.is_none() {
+        return Err(ApiError::unprocessable(
+            "a reconciliation runs one stream; name it in stream",
+        ));
+    }
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let runs = match &request.stream {
         Some(name) => {
@@ -226,12 +257,15 @@ pub(crate) async fn start_runs(
             if !stream.enabled {
                 return Err(ApiError::stream_not_enabled());
             }
+            if request.kind == RunKindBody::Reconcile && stream.sync_mode != "incremental" {
+                return Err(ApiError::reconcile_needs_incremental());
+            }
             let run = queue_run(
                 &mut tx,
                 workspace,
                 source_id,
                 stream.id,
-                RunKind::Sync,
+                request.kind.core(),
                 RunTrigger::Manual,
                 user,
             )
@@ -267,7 +301,7 @@ pub(crate) async fn start_runs(
         Some(workspace),
         "sync_run.started",
         Some(("source", source_id)),
-        json!({"runs": ids}),
+        json!({"runs": ids, "kind": request.kind.core().as_str()}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -293,7 +327,7 @@ pub(crate) async fn start_runs(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The stream already has an active run (`code` is `sync_run_active`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`); a reconciliation of a stream that is not incremental (`reconcile_needs_incremental`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
