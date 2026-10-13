@@ -9836,9 +9836,10 @@ email,b@example.com,
             .await
             .unwrap();
         let request = mapping_request(dispatcher.privacy(), false).unwrap();
-        let wants_ok = |response: &zirv_flow_ai::ChatResponse| match response.text().as_str() {
-            "ok" => Ok(()),
-            other => Err(vec![format!("expected ok, got {other}")]),
+        let wants_ok = async |response: &zirv_flow_ai::ChatResponse| match response.text().as_str()
+        {
+            "ok" => zirv_flow_ai::Verdict::Valid(()),
+            other => zirv_flow_ai::Verdict::Invalid(vec![format!("expected ok, got {other}")]),
         };
         let sent = fake.call_count();
         for word in ["bad", "worse", "worst"] {
@@ -9848,7 +9849,12 @@ email,b@example.com,
         // Two calls fit the per-minute limit, so the third repair attempt is refused at the gate.
         let outcome = zirv_flow_ai::repair(5, &request, &dispatcher, wants_ok).await;
 
-        assert_eq!(outcome, Err(zirv_flow_ai::AiError::RateLimited));
+        assert_eq!(
+            outcome,
+            Err(zirv_flow_ai::RepairError::<()>::Dispatch(
+                zirv_flow_ai::AiError::RateLimited
+            ))
+        );
         assert_eq!(fake.call_count(), sent + 2);
         assert_eq!(ai_calls(&pool).await, 2);
         let second = &fake.requests()[sent + 1];
@@ -10331,6 +10337,130 @@ email,b@example.com,
                 .await
                 .unwrap();
         assert_eq!((outcome.as_str(), cost), ("abandoned", worst_case));
+    }
+
+    /// A provider that takes the request, waits, and then panics, as an adapter bug would after
+    /// the client has gone away.
+    struct PanicsLater {
+        received: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl zirv_flow_ai::Provider for PanicsLater {
+        fn kind(&self) -> zirv_flow_ai::ProviderKind {
+            zirv_flow_ai::ProviderKind::OpenAiCompatible
+        }
+
+        fn complete<'a>(
+            &'a self,
+            _http: &'a zirv_flow_ai::AiHttp,
+            _endpoint: &'a zirv_flow_ai::Endpoint,
+            _key: &'a zirv_flow_core::SecretString,
+            _request: &'a zirv_flow_ai::ChatRequest,
+        ) -> zirv_flow_ai::BoxFuture<'a, Result<zirv_flow_ai::ChatResponse, zirv_flow_ai::AiError>>
+        {
+            self.received
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                panic!("an adapter bug after the handler was dropped")
+            })
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_handler_dropped_before_the_provider_panics_finishes_the_row_abandoned(pool: PgPool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let received = Arc::new(AtomicUsize::new(0));
+        let mut broken = state.clone();
+        broken.ai = crate::assistant::runtime::AiRuntime::new((*state.ai.config).clone())
+            .with_replacement(Arc::new(PanicsLater {
+                received: Arc::clone(&received),
+            }));
+        let request = mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false).unwrap();
+        let model = state.ai.config.model("openai", "big").unwrap().1.clone();
+        let worst_case = model.cost_micros(
+            request.input_tokens_upper_bound(),
+            request.max_output_tokens(),
+        );
+
+        // The client goes away once the provider has the request; the provider panics after.
+        let mut handler = Box::pin(crate::dispatch(
+            &broken,
+            None,
+            workspace,
+            "mapping",
+            |privacy| mapping_request(privacy, false),
+        ));
+        let provider_has_it = async {
+            while received.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut handler => panic!("the call finished before the handler was dropped"),
+            () = provider_has_it => drop(handler),
+        }
+        settled(&pool).await;
+
+        let (outcome, cost): (String, i64) =
+            sqlx::query_as("SELECT outcome, estimated_cost_micros FROM ai_calls")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((outcome.as_str(), cost), ("abandoned", worst_case));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dispatch_dropped_at_any_early_poll_leaves_no_pending_row(pool: PgPool) {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 1000), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let dispatcher = crate::Dispatcher::open(&state, None, workspace, "mapping")
+            .await
+            .unwrap();
+        let request = mapping_request(dispatcher.privacy(), false).unwrap();
+        let draft = uuid::Uuid::now_v7();
+        let dispatcher = dispatcher.for_draft(draft);
+        let sent = fake.call_count();
+
+        for polls in 0..=3 {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+            let mut call = Box::pin(dispatcher.call(&request));
+            for _ in 0..polls {
+                std::future::poll_fn(|cx| {
+                    let _ = call.as_mut().poll(cx);
+                    Poll::Ready(())
+                })
+                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            drop(call);
+        }
+        // Let every started flight run to its end.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        settled(&pool).await;
+
+        let rows = ai_calls(&pool).await;
+        let provider_calls = i64::try_from(fake.call_count() - sent).unwrap();
+        assert_eq!(rows, provider_calls, "every reserved row has its flight");
+        assert_eq!(rows, 3, "a call never polled starts nothing");
+        let linked: i64 = sqlx::query_scalar("SELECT count(*) FROM ai_calls WHERE draft_id = $1")
+            .bind(draft)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(linked, rows, "for_draft links every call");
     }
 
     #[sqlx::test]
