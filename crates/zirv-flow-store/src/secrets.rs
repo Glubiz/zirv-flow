@@ -2,6 +2,8 @@
 //! `deployment_keys`. This module stores and returns [`Sealed`] values only. It never sees a
 //! plaintext and never opens one; callers in `api` and `jobs` do that, right before use.
 
+use std::collections::BTreeSet;
+
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
@@ -56,8 +58,8 @@ async fn check_writer(
 }
 
 /// Locks the HMAC root row `FOR UPDATE` and returns its wrapping key id; `None` when absent.
-/// Rotation takes this before it scans any row.
-pub async fn lock_root_for_rotation(
+/// [`rotate`] takes this before it scans any row.
+async fn lock_root_for_rotation(
     connection: &mut PgConnection,
 ) -> Result<Option<String>, StoreError> {
     sqlx::query_scalar("SELECT key_id FROM deployment_keys WHERE name = $1 FOR UPDATE")
@@ -76,7 +78,7 @@ pub struct StoredSecret {
 
 /// One row that holds a wrapped data key.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WrappedRow {
+enum WrappedRow {
     /// A row of `encrypted_secrets`.
     Secret(SecretId),
     /// A row of `deployment_keys`.
@@ -85,9 +87,9 @@ pub enum WrappedRow {
 
 /// A row a master key still wraps, found for rotation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrappedKey {
-    pub row: WrappedRow,
-    pub sealed: Sealed,
+struct WrappedKey {
+    row: WrappedRow,
+    sealed: Sealed,
 }
 
 #[derive(FromRow)]
@@ -314,7 +316,7 @@ pub async fn insert_hmac_root_if_absent<'e>(
 
 /// Locks and returns every row of both tables whose data key is not wrapped by `key_id`.
 /// All of them are held in memory: rotation is meant for secrets in the thousands.
-pub async fn rows_not_wrapped_by(
+async fn rows_not_wrapped_by(
     connection: &mut PgConnection,
     key_id: &str,
 ) -> Result<Vec<WrappedKey>, StoreError> {
@@ -352,7 +354,7 @@ pub async fn rows_not_wrapped_by(
 }
 
 /// Points a row at a new wrapping key. The nonce and ciphertext are untouched.
-pub async fn set_wrapped_key(
+async fn set_wrapped_key(
     connection: &mut PgConnection,
     row: &WrappedRow,
     key_id: &str,
@@ -377,6 +379,62 @@ pub async fn set_wrapped_key(
         .await
         .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// What a rotation changed.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Rotated {
+    /// How many rows were re-wrapped.
+    pub rows: usize,
+    /// The key ids that wrapped them before.
+    pub from_key_ids: BTreeSet<String>,
+}
+
+/// Why a rotation stopped. The caller rolls its transaction back.
+#[derive(Debug)]
+pub enum RotateError<E> {
+    /// There is no HMAC root row to rotate under.
+    NoRoot,
+    /// The database failed.
+    Store(StoreError),
+    /// `rewrap` refused a row.
+    Rewrap(E),
+}
+
+impl<E> From<StoreError> for RotateError<E> {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// Re-wraps every data key of both tables that `key_id` does not wrap, applying `rewrap` to
+/// each sealed value and storing the result's wrapping key. It takes the HMAC root lock itself,
+/// before it scans any row, so a secret write in flight finishes first and a later one sees the
+/// new key. The caller holds the transaction and commits it. All rows are held in memory:
+/// rotation is meant for secrets in the thousands.
+pub async fn rotate<E>(
+    connection: &mut PgConnection,
+    key_id: &str,
+    mut rewrap: impl FnMut(&Sealed) -> Result<Sealed, E>,
+) -> Result<Rotated, RotateError<E>> {
+    if lock_root_for_rotation(connection).await?.is_none() {
+        return Err(RotateError::NoRoot);
+    }
+    let rows = rows_not_wrapped_by(connection, key_id).await?;
+    let mut rotated = Rotated::default();
+    for found in &rows {
+        let wrapped = rewrap(&found.sealed).map_err(RotateError::Rewrap)?;
+        set_wrapped_key(
+            connection,
+            &found.row,
+            &wrapped.key_id,
+            &wrapped.wrapped_key,
+        )
+        .await?;
+        rotated.from_key_ids.insert(found.sealed.key_id.clone());
+    }
+    rotated.rows = rows.len();
+    Ok(rotated)
 }
 
 #[cfg(test)]
@@ -680,20 +738,15 @@ mod tests {
         let new_id = rotated.current().key_id();
 
         let mut tx = begin(&pool).await.unwrap();
-        let found = rows_not_wrapped_by(&mut tx, &new_id).await.unwrap();
-        assert_eq!(found.len(), 2);
-        for found in &found {
-            let wrapped = rewrap(&rotated, &found.sealed).unwrap();
-            set_wrapped_key(&mut tx, &found.row, &wrapped.key_id, &wrapped.wrapped_key)
-                .await
-                .unwrap();
-        }
-        assert!(
-            rows_not_wrapped_by(&mut tx, &new_id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let report = rotate(&mut tx, &new_id, |sealed| rewrap(&rotated, sealed))
+            .await
+            .unwrap();
+        assert_eq!(report.rows, 2);
+        assert_eq!(report.from_key_ids.len(), 1);
+        let again = rotate(&mut tx, &new_id, |sealed| rewrap(&rotated, sealed))
+            .await
+            .unwrap();
+        assert_eq!(again, Rotated::default());
         commit(tx).await.unwrap();
 
         let stored = get(&pool, ws, id).await.unwrap().unwrap();
@@ -711,6 +764,33 @@ mod tests {
             b"secret"
         );
         assert_eq!(hmac_root(&pool).await.unwrap().unwrap().key_id, new_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_without_an_hmac_root_or_with_a_refused_row_changes_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let old = keyring();
+        let id = SecretId::new();
+        let sealed = sealed_for(&old, ws, id, b"secret");
+        insert_unchecked(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
+            .await
+            .unwrap();
+
+        let mut tx = begin(&pool).await.unwrap();
+        let no_root = rotate(&mut tx, "next", |_| Ok::<_, ()>(sealed.clone())).await;
+        assert!(matches!(no_root, Err(RotateError::NoRoot)));
+        drop(tx);
+
+        let root = seal(&old, b"root", &deployment_key_aad(HMAC_ROOT));
+        insert_hmac_root_if_absent(&pool, &root).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        let refused = rotate(&mut tx, "next", |_| Err("no key")).await;
+        assert!(matches!(refused, Err(RotateError::Rewrap("no key"))));
+        drop(tx);
+
+        let stored = get(&pool, ws, id).await.unwrap().unwrap();
+        assert_eq!(stored.sealed, sealed);
     }
 
     /// Every (table, encoding) whose rows, read as text, hold the marker in UTF-8 or in hex.

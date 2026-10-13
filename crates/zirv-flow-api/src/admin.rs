@@ -506,21 +506,18 @@ pub async fn rotate_master_key(
 ) -> Result<RotationReport, AdminError> {
     let key_id = keyring.current().key_id();
     let mut tx = zirv_flow_store::begin(pool).await?;
-    // The root first: it refuses a deployment with no root before anything changes, and it
-    // makes secret writes in flight finish (or wait) so the scan below sees every row.
-    if secrets::lock_root_for_rotation(&mut tx).await?.is_none() {
-        return Err(AdminError::Conflict(secrets::NO_HMAC_ROOT));
-    }
-    let rows = secrets::rows_not_wrapped_by(&mut tx, &key_id).await?;
-    let mut from_key_ids = std::collections::BTreeSet::new();
-    for row in &rows {
-        let wrapped = rewrap(keyring, &row.sealed)?;
-        secrets::set_wrapped_key(&mut tx, &row.row, &wrapped.key_id, &wrapped.wrapped_key).await?;
-        from_key_ids.insert(row.sealed.key_id.clone());
-    }
+    // The store locks the root first: it refuses a deployment with no root before anything
+    // changes, and it makes secret writes in flight finish (or wait) before it scans.
+    let rotated = secrets::rotate(&mut tx, &key_id, |sealed| rewrap(keyring, sealed))
+        .await
+        .map_err(|error| match error {
+            secrets::RotateError::NoRoot => AdminError::Conflict(secrets::NO_HMAC_ROOT),
+            secrets::RotateError::Store(error) => error.into(),
+            secrets::RotateError::Rewrap(error) => error.into(),
+        })?;
     let report = RotationReport {
-        rows: rows.len(),
-        from_key_ids: from_key_ids.into_iter().collect(),
+        rows: rotated.rows,
+        from_key_ids: rotated.from_key_ids.into_iter().collect(),
         key_id,
     };
     audit(
@@ -606,9 +603,14 @@ pub async fn replace_secret(
         plaintext.expose(),
         &secret_aad(workspace, id, stored.purpose),
     );
-    secrets::replace(&mut tx, &keyring.key_ids(), workspace, id, &sealed)
+    // A replace that matched no row (the secret vanished since the read) is not a success: the
+    // transaction rolls back and nothing is audited.
+    if !secrets::replace(&mut tx, &keyring.key_ids(), workspace, id, &sealed)
         .await
-        .map_err(write_refusal)?;
+        .map_err(write_refusal)?
+    {
+        return Err(AdminError::NotFound("secret"));
+    }
     audit(
         &mut tx,
         context,
@@ -1212,6 +1214,51 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replace_that_matches_no_row_is_not_found_and_writes_no_audit_entry(pool: PgPool) {
+        use std::time::Duration;
+
+        migrated(&pool).await;
+        let a = MasterKey::generate();
+        let keys = keyring(&a, None);
+        let ws = create_workspace(&pool, &Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        seed_root(&pool, &keys).await;
+        let id = write_with(&pool, &keys, ws.id).await.unwrap();
+        // A delete in flight holds the row: the replace reads it, then waits on the update.
+        let mut deleting = zirv_flow_store::begin(&pool).await.unwrap();
+        assert!(secrets::delete(&mut *deleting, ws.id, id).await.unwrap());
+
+        let replacing = {
+            let pool = pool.clone();
+            let keys = keyring(&a, None);
+            let ws = ws.id;
+            tokio::spawn(async move {
+                replace_secret(
+                    &pool,
+                    &Context::system(),
+                    &keys,
+                    ws,
+                    id,
+                    &SecretBytes::new(b"new".to_vec()),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!replacing.is_finished(), "the replace waits for the delete");
+        zirv_flow_store::commit(deleting).await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(10), replacing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(AdminError::NotFound("secret"))));
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        assert!(!actions(&entries).contains(&"secret.replaced"));
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_stale_insert_waits_for_a_rotation_and_is_refused_after_it(pool: PgPool) {
         use std::time::Duration;
 
@@ -1222,12 +1269,16 @@ mod tests {
             .unwrap();
         let only_a = keyring(&a, None);
         seed_root(&pool, &only_a).await;
-        // An in-progress rotation: the root is locked FOR UPDATE.
+        // An in-progress rotation: it re-wraps the root to B and holds the root lock until it
+        // commits.
+        let rotated_keys = keyring(&b, Some(&a));
         let mut rotation = zirv_flow_store::begin(&pool).await.unwrap();
-        secrets::lock_root_for_rotation(&mut rotation)
-            .await
-            .unwrap()
-            .unwrap();
+        let report = secrets::rotate(&mut rotation, &b.key_id(), |sealed| {
+            rewrap(&rotated_keys, sealed)
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.rows, 1);
 
         let writer = {
             let pool = pool.clone();
@@ -1237,13 +1288,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(!writer.is_finished(), "the insert waits for the rotation");
 
-        // The rotation re-wraps the root to B and commits.
-        let root = secrets::hmac_root(&mut *rotation).await.unwrap().unwrap();
-        let wrapped = rewrap(&keyring(&b, Some(&a)), &root).unwrap();
-        let row = secrets::WrappedRow::Deployment(secrets::HMAC_ROOT.to_owned());
-        secrets::set_wrapped_key(&mut rotation, &row, &wrapped.key_id, &wrapped.wrapped_key)
-            .await
-            .unwrap();
         zirv_flow_store::commit(rotation).await.unwrap();
 
         let error = tokio::time::timeout(Duration::from_secs(10), writer)
