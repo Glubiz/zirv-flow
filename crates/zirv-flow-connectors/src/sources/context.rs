@@ -7,9 +7,8 @@ use zirv_flow_core::egress::EgressPolicy;
 use crate::http::{GuardedClient, HttpError, HttpLimits};
 use crate::runtime::{
     AccessToken, Auth, RateLimit, RateLimits, RequestSpec, RetryPolicy, RuntimeError,
-    RuntimeResponse,
+    RuntimeResponse, TokenSlot, send,
 };
-use crate::runtime::{TokenSlot, send};
 
 /// The guarded HTTP client and the egress policy behind it. A source that speaks HTTP makes its
 /// calls with [`SourceContext::send`], which adds auth, retries and the rate limit; one that
@@ -86,7 +85,8 @@ impl SourceContext {
     /// Seeds the OAuth2 token slot with the token the caller stored last time, so the first call
     /// does not fetch one.
     pub fn with_access_token(self, token: AccessToken) -> Self {
-        self.store_token_quietly(token);
+        // A seed is not a refresh: the caller already has it.
+        self.slot().current = Some(token);
         self
     }
 
@@ -131,11 +131,6 @@ impl SourceContext {
         let mut slot = self.slot();
         slot.current = Some(token.clone());
         slot.refreshed = Some(token);
-    }
-
-    /// A seed is not a refresh: the caller already has it.
-    fn store_token_quietly(&self, token: AccessToken) {
-        self.slot().current = Some(token);
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, TokenSlot> {

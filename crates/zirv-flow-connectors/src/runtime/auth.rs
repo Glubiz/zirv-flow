@@ -215,7 +215,7 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
     ))
 }
 
-/// A token's stated lifetime is capped at a year, so a absurd value cannot overflow the date.
+/// A token's stated lifetime is capped at a year, so an absurd value cannot overflow the date.
 const MAX_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
 
 fn sensitive(text: String) -> Result<HeaderValue, RuntimeError> {
@@ -227,6 +227,12 @@ fn sensitive(text: String) -> Result<HeaderValue, RuntimeError> {
 fn basic_value(username: &str, password: &SecretString) -> Result<HeaderValue, RuntimeError> {
     let encoded = STANDARD.encode(format!("{username}:{}", password.expose()));
     sensitive(format!("Basic {encoded}"))
+}
+
+fn bearer(request: &mut Request, token: &SecretString) -> Result<(), RuntimeError> {
+    let value = sensitive(format!("Bearer {}", token.expose()))?;
+    request.headers_mut().insert(AUTHORIZATION, value);
+    Ok(())
 }
 
 /// Attaches the auth to a request about to be sent. The caller has already checked the origin.
@@ -262,18 +268,10 @@ pub(crate) fn apply(
                 .headers_mut()
                 .insert(AUTHORIZATION, basic_value(username, password)?);
         }
-        Auth::Bearer { token } => {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                sensitive(format!("Bearer {}", token.expose()))?,
-            );
-        }
+        Auth::Bearer { token } => bearer(request, token)?,
         Auth::OAuth2ClientCredentials { .. } => {
             let token = token.ok_or(RuntimeError::InvalidRequest)?;
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                sensitive(format!("Bearer {}", token.token().expose()))?,
-            );
+            bearer(request, token.token())?;
         }
     }
     Ok(())

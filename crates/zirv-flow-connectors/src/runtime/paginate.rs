@@ -299,43 +299,34 @@ fn links(header: &str) -> Vec<(String, String)> {
 /// Reads `; name=value` parameters up to the comma that starts the next link value. Returns them
 /// and what follows that comma.
 fn split_parameters(text: &str) -> (Vec<(String, String)>, &str) {
-    let mut parameters = Vec::new();
-    let mut quoted = false;
-    let mut end = text.len();
-    let mut after = "";
-    for (at, character) in text.char_indices() {
-        match character {
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                end = at;
-                after = &text[at + 1..];
-                break;
-            }
-            _ => {}
-        }
-    }
-    let section = &text[..end];
-    quoted = false;
-    let mut start = 0;
-    let mut pieces = Vec::new();
-    for (at, character) in section.char_indices() {
-        match character {
-            '"' => quoted = !quoted,
-            ';' if !quoted => {
-                pieces.push(&section[start..at]);
-                start = at + 1;
-            }
-            _ => {}
-        }
-    }
-    pieces.push(&section[start..]);
-    for piece in pieces {
-        if let Some((name, value)) = piece.split_once('=') {
+    let section = split_unquoted(text, ',')[0];
+    let after = text.get(section.len() + 1..).unwrap_or("");
+    let parameters = split_unquoted(section, ';')
+        .into_iter()
+        .filter_map(|piece| piece.split_once('='))
+        .map(|(name, value)| {
             let value = value.trim().trim_matches('"');
-            parameters.push((name.trim().to_owned(), value.to_owned()));
+            (name.trim().to_owned(), value.to_owned())
+        })
+        .collect();
+    (parameters, after)
+}
+
+/// The pieces of `text` between each `separator` outside a quoted string; always at least one.
+fn split_unquoted(text: &str, separator: char) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, character) in text.char_indices() {
+        if character == '"' {
+            quoted = !quoted;
+        } else if character == separator && !quoted {
+            pieces.push(&text[start..at]);
+            start = at + 1;
         }
     }
-    (parameters, after)
+    pieces.push(&text[start..]);
+    pieces
 }
 
 #[cfg(test)]
