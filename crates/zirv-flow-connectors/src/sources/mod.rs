@@ -7,6 +7,7 @@ mod credential;
 mod error;
 #[cfg(feature = "test-support")]
 mod fake;
+mod file;
 mod registry;
 mod source;
 mod spec;
@@ -33,4 +34,5 @@ pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
 pub(crate) static ALL: &[&dyn ErasedSource] = &[
     #[cfg(feature = "test-support")]
     &fake::Fake,
+    &file::File,
 ];

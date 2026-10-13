@@ -176,7 +176,6 @@ impl CsvParser {
         let held = std::mem::take(&mut self.prefix);
         let body = held.strip_prefix(&BOM).unwrap_or(&held);
         self.consumed = (held.len() - body.len()) as u64;
-        self.boundary = self.consumed;
         if body.is_empty() {
             return Ok(());
         }
