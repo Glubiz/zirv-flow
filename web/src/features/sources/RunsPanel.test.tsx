@@ -83,8 +83,8 @@ describe("the runs of a source", () => {
     expect(within(rows[0]!).getByText("Manual")).toBeInTheDocument();
     expect(within(rows[1]!).getByText("Running")).toBeInTheDocument();
     expect(within(rows[1]!).getByText("Schedule")).toBeInTheDocument();
-    expect(within(rows[1]!).getByText("500", { selector: "td:nth-child(7)" })).toBeInTheDocument();
-    expect(within(rows[1]!).getByText("2", { selector: "td:nth-child(4)" })).toBeInTheDocument();
+    expect(within(rows[1]!).getByText("500", { selector: "td:nth-child(8)" })).toBeInTheDocument();
+    expect(within(rows[1]!).getByText("2", { selector: "td:nth-child(5)" })).toBeInTheDocument();
     expect(within(rows[2]!).getByText("Failed")).toBeInTheDocument();
   });
 
@@ -252,5 +252,92 @@ describe("the runs of a source", () => {
     const settled = reads;
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(reads).toBe(settled);
+  });
+
+  it("shows the kind of each run and the removed records of a run in its details", async () => {
+    mockApi(
+      routes("member", {
+        [`GET ${BASE}/runs`]: () =>
+          json({
+            runs: [aRun(), aRun({ id: "run-2", kind: "reconcile", records_deleted: 3 })],
+            next_cursor: null,
+          }),
+        [`GET ${BASE}/runs/run-2`]: () =>
+          json(aRunDetail({ id: "run-2", kind: "reconcile", records_deleted: 3, rejects: [] })),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const table = await runsTable();
+    const rows = table.getAllByRole("row").slice(1);
+    expect(within(rows[0]!).getByText("Sync")).toBeInTheDocument();
+    expect(within(rows[1]!).getByText("Reconciliation")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Details of the stream_1 run" })[1]!);
+    const dialog = within(await screen.findByRole("dialog", { name: "Run details" }));
+    expect(await dialog.findByText("Removed records")).toBeInTheDocument();
+    expect(dialog.getByText("Reconciliation")).toBeInTheDocument();
+    expect(dialog.getByText(/the source no longer lists, or marks as deleted/)).toBeInTheDocument();
+  });
+
+  it("explains a run that was stopped by the sweep limit", async () => {
+    mockApi(
+      routes("member", {
+        [`GET ${BASE}/runs/run-1`]: () =>
+          json(aRunDetail({ state: "failed", error_code: "sweep_limit", rejects: [] })),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Details of the stream_1 run" }));
+
+    const dialog = within(await screen.findByRole("dialog", { name: "Run details" }));
+    expect(
+      await dialog.findByText(/removed more records than the stream allows, so it removed none/),
+    ).toBeInTheDocument();
+  });
+
+  it("lets an admin reconcile an incremental stream", async () => {
+    const incremental = aStream({
+      enabled: true,
+      sync_mode: "incremental",
+      mapping: { key_column: null, columns: [{ column: "email", target: { type: "ignore" }, transforms: [] }] },
+    });
+    const calls = mockApi(
+      routes("admin", {
+        [`GET ${BASE}/streams`]: () => json([incremental]),
+        [`POST ${BASE}/runs`]: () => json([aRun({ kind: "reconcile", state: "queued" })], 202),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Reconcile stream_1 now" }));
+
+    expect(await screen.findByText("Started a reconciliation.")).toBeInTheDocument();
+    const post = calls.find((call) => call.method === "POST");
+    expect(post!.body).toEqual({ stream: "stream_1", kind: "reconcile" });
+  });
+
+  it("offers no reconciliation for a full refresh stream", async () => {
+    mockApi(routes("admin"));
+    mount();
+
+    await screen.findByRole("button", { name: "Run stream_1 now" });
+    expect(screen.queryByRole("button", { name: /^Reconcile/ })).not.toBeInTheDocument();
+  });
+
+  it("offers a member no reconciliation", async () => {
+    mockApi(
+      routes("member", {
+        [`GET ${BASE}/streams`]: () =>
+          json([aStream({ enabled: true, sync_mode: "incremental", mapping: { columns: [] } })]),
+      }),
+    );
+    mount();
+
+    await screen.findByRole("table", { name: "Streams of this source" });
+    expect(screen.queryByRole("button", { name: /^Reconcile/ })).not.toBeInTheDocument();
   });
 });

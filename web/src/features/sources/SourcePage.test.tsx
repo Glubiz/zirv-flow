@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -245,5 +245,97 @@ describe("a source", () => {
 
     expect(dialog.getByText("Choose a cursor field for an incremental stream.")).toBeInTheDocument();
     expect(dialog.getByRole("button", { name: "Save stream" })).toBeDisabled();
+  });
+
+  it("edits and clears the delete signal, the reconciliation cron and the sweep limit", async () => {
+    const mapped = aStream({
+      enabled: true,
+      sync_mode: "incremental",
+      mapping: {
+        key_column: "id",
+        columns: [{ column: "email", target: { type: "ignore" }, transforms: [] }],
+        delete_when: { column: "updated_at", rule: "present" },
+      },
+      reconcile_schedule: "0 3 * * *",
+      sweep_limit: 0.25,
+    });
+    const calls = mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([mapped]),
+      "PUT /api/v1/workspaces/ws1/sources/src-1/streams/stream_1": () => json(mapped),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+    expect(dialog.getByLabelText("Deleted column")).toHaveValue("updated_at");
+    expect(dialog.getByLabelText("A record is deleted when the column")).toHaveValue("present");
+    expect(dialog.getByLabelText("Reconciliation schedule")).toHaveValue("0 3 * * *");
+    expect(dialog.getByLabelText("Largest share a run may remove (%)")).toHaveValue(25);
+    await user.selectOptions(dialog.getByLabelText("A record is deleted when the column"), "truthy");
+    await user.selectOptions(dialog.getByLabelText("Deleted column"), "name");
+    await user.clear(dialog.getByLabelText("Largest share a run may remove (%)"));
+    await user.type(dialog.getByLabelText("Largest share a run may remove (%)"), "100");
+    await user.click(dialog.getByRole("button", { name: "Save stream" }));
+
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1));
+    expect(calls.find((call) => call.method === "PUT")!.body).toMatchObject({
+      reconcile_schedule: "0 3 * * *",
+      sweep_limit: 1,
+      mapping: { delete_when: { column: "name", rule: "truthy" }, key_column: "id" },
+    });
+
+    // Clearing both sends no delete signal and no cron.
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    const again = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+    await user.selectOptions(again.getByLabelText("Deleted column"), "");
+    await user.clear(again.getByLabelText("Reconciliation schedule"));
+    await user.click(again.getByRole("button", { name: "Save stream" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2));
+    const cleared = calls.filter((call) => call.method === "PUT")[1]!;
+    expect(cleared.body).toMatchObject({ reconcile_schedule: null, sweep_limit: 0.25 });
+    expect((cleared.body as { mapping: object }).mapping).not.toHaveProperty("delete_when");
+  });
+
+  it("hides the cron for a full refresh stream and says what a sweep does", async () => {
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([aStream()]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+
+    expect(dialog.queryByLabelText("Reconciliation schedule")).not.toBeInTheDocument();
+    expect(dialog.getByText(/removed after each successful run/)).toBeInTheDocument();
+    expect(dialog.getByText(/Set up a mapping for this stream/)).toBeInTheDocument();
+    await user.selectOptions(dialog.getByLabelText("Sync mode"), "incremental");
+    expect(dialog.getByLabelText("Reconciliation schedule")).toBeInTheDocument();
+  });
+
+  it("refuses a sweep limit outside 0 to 100 percent and shows the refusal of the server", async () => {
+    mockApi({
+      ...ADMIN,
+      "PUT /api/v1/workspaces/ws1/sources/src-1/streams/stream_1": () =>
+        problem(422, "Unprocessable Entity", "only an incremental stream can be reconciled"),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+    const limit = dialog.getByLabelText("Largest share a run may remove (%)");
+    await user.clear(limit);
+    await user.type(limit, "150");
+    expect(dialog.getByText("Use a number above 0 and up to 100.")).toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "Save stream" })).toBeDisabled();
+    await user.clear(limit);
+    await user.type(limit, "50");
+    await user.click(dialog.getByRole("button", { name: "Save stream" }));
+
+    expect(await dialog.findByText(/only an incremental stream can be reconciled/)).toBeInTheDocument();
   });
 });

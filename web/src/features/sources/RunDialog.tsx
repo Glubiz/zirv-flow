@@ -8,6 +8,7 @@ import {
   isActiveRun,
   plural,
   runErrorText,
+  runKindLabel,
   runStateLabel,
   runStateTone,
   showValue,
@@ -71,6 +72,10 @@ export function RunDialog({ workspaceId, sourceId, runId, pollMs, onClose }: Run
             </p>
             <dl className="facts">
               <div className="fact">
+                <dt>Kind</dt>
+                <dd>{runKindLabel(run.kind)}</dd>
+              </div>
+              <div className="fact">
                 <dt>Started by</dt>
                 <dd>{triggerLabel(run.trigger)}</dd>
               </div>
@@ -107,10 +112,13 @@ export function RunDialog({ workspaceId, sourceId, runId, pollMs, onClose }: Run
                 <dd>{run.records_rejected}</dd>
               </div>
               <div className="fact">
-                <dt>Deleted</dt>
+                <dt>Removed records</dt>
                 <dd>{run.records_deleted}</dd>
               </div>
             </dl>
+            <p className="muted">
+              Removed records are ones the source no longer lists, or marks as deleted. Their events go with them.
+            </p>
             {run.attempt > 1 ? (
               <p className="muted">
                 An earlier attempt was lost, so this run picked up from its last saved point without applying anything

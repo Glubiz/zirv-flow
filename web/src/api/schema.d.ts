@@ -2505,6 +2505,18 @@ export interface components {
             /** @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`. */
             trace_id: string;
         };
+        /**
+         * @description How a delete column's cell is read.
+         * @enum {string}
+         */
+        DeleteRuleBody: "truthy" | "present";
+        /** @description The delete signal of a synced stream: a column and how its cell is read. */
+        DeleteWhenBody: {
+            /** @description A field of the stream. */
+            column: string;
+            /** @description How the cell is read; `truthy` when absent. */
+            rule?: components["schemas"]["DeleteRuleBody"];
+        };
         DepthBody: {
             /** @description Sorted by kind. */
             kinds: components["schemas"]["KindDepthBody"][];
@@ -3110,6 +3122,7 @@ export interface components {
         /** @description How the columns of a file become identifiers, traits and lists. */
         MappingBody: {
             columns: components["schemas"]["ColumnRuleBody"][];
+            delete_when?: null | components["schemas"]["DeleteWhenBody"];
             /**
              * @description The column whose value is the record key. Without it the key is the file's hash and the
              *     row number, so only the same file can be run again without changes.
@@ -3553,6 +3566,11 @@ export interface components {
             finished_at?: string | null;
             /** Format: uuid */
             id: string;
+            /**
+             * @description `sync` for a normal run, or `reconcile` for a reconciliation: it lists the keys of an
+             *     incremental stream, applies nothing and removes the live records the source no longer has.
+             */
+            kind: string;
             /** Format: int64 */
             records_applied: number;
             /** Format: int64 */
@@ -3596,6 +3614,11 @@ export interface components {
             /** @description Oldest first, at most 100; `records_rejected` is the total. */
             rejects: components["schemas"]["RunRejectBody"][];
         };
+        /**
+         * @description What kind of run to start.
+         * @enum {string}
+         */
+        RunKindBody: "sync" | "reconcile";
         /** @description A record the run refused. */
         RunRejectBody: {
             /** Format: uuid */
@@ -3772,6 +3795,11 @@ export interface components {
         };
         /** @description Which stream to run. */
         StartRunRequest: {
+            /**
+             * @description `sync` (the default) or `reconcile`. A reconciliation needs `stream`, which must be
+             *     incremental.
+             */
+            kind?: components["schemas"]["RunKindBody"];
             /** @description The name of one stream. Without it every enabled stream with a mapping is run. */
             stream?: string | null;
         };
@@ -3790,10 +3818,22 @@ export interface components {
             name: string;
             primary_key: string[];
             /**
+             * @description The UTC cron on which the stream is reconciled: its keys are listed and the live records the
+             *     source no longer has are removed. Null for none. Incremental streams only.
+             */
+            reconcile_schedule?: string | null;
+            /**
              * Format: int32
              * @description How long without new data before the stream counts as stale, in seconds.
              */
             staleness_threshold_seconds?: number | null;
+            /**
+             * Format: double
+             * @description The largest share (above 0, at most 1) of the stream's live records that one sweep, after a
+             *     full refresh or a reconciliation, may remove. A run that would remove more removes nothing
+             *     and fails with `sweep_limit`. 1 turns the guard off.
+             */
+            sweep_limit: number;
             /** @description `full_refresh` or `incremental`. */
             sync_mode: string;
             /** Format: date-time */
@@ -3806,11 +3846,20 @@ export interface components {
             mapping?: null | components["schemas"]["MappingBody"];
             /** @description Fields of the stream that identify a record. */
             primary_key?: string[];
+            /** @description A UTC cron to reconcile the stream on. Absent or null clears it. Incremental streams only. */
+            reconcile_schedule?: string | null;
             /**
              * Format: int32
              * @description A positive number of seconds.
              */
             staleness_threshold_seconds?: number | null;
+            /**
+             * Format: double
+             * @description The largest share of the stream's live records one sweep may remove: above 0, at most 1.
+             *     Absent resets it to the default, 0.5.
+             * @example 0.5
+             */
+            sweep_limit?: number | null;
             /**
              * @description `full_refresh` or `incremental`; one the stream supports.
              * @example incremental
@@ -10432,7 +10481,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`) */
+            /** @description The stream has no mapping (`code` is `stream_not_mapped`) or is not enabled (`stream_not_enabled`); a reconciliation of a stream that is not incremental (`reconcile_needs_incremental`) */
             422: {
                 headers: {
                     [name: string]: unknown;

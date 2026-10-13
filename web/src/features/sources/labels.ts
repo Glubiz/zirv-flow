@@ -95,6 +95,10 @@ export function runStateTone(state: string): "neutral" | "attention" | "error" {
   return state === "failed" ? "error" : state === "succeeded" ? "neutral" : "attention";
 }
 
+export function runKindLabel(kind: string): string {
+  return kind === "reconcile" ? "Reconciliation" : kind === "sync" ? "Sync" : kind;
+}
+
 export function triggerLabel(trigger: string): string {
   return trigger === "schedule" ? "Schedule" : trigger === "manual" ? "Manual" : trigger;
 }
@@ -112,6 +116,8 @@ export function runErrorText(code: string, threshold: number): string {
     job_failed: "The run could not finish after several tries. Run it again; if it keeps failing, look at the jobs page.",
     source_missing: "The source is gone.",
     stream_missing: "The stream is gone. Discover the streams again.",
+    sweep_limit:
+      "This run would have removed more records than the stream allows, so it removed none. Raise the limit on the stream to allow it.",
     source_kind_unavailable: "This build of the server does not include this type of source.",
   };
   return texts[code] ?? `The run failed (${code}).`;

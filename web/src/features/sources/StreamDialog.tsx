@@ -4,6 +4,8 @@ import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
 import { syncModeLabel, type Stream } from "./labels";
 
+type DeleteRule = "truthy" | "present";
+
 interface StreamDialogProps {
   workspaceId: string;
   sourceId: string;
@@ -25,12 +27,29 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
   const [staleness, setStaleness] = useState(
     stream.staleness_threshold_seconds ? String(stream.staleness_threshold_seconds) : "",
   );
+  const [deleteColumn, setDeleteColumn] = useState(stream.mapping?.delete_when?.column ?? "");
+  const [deleteRule, setDeleteRule] = useState<DeleteRule>(stream.mapping?.delete_when?.rule ?? "truthy");
+  const [reconcile, setReconcile] = useState(stream.reconcile_schedule ?? "");
+  const [limit, setLimit] = useState(String(Math.round(stream.sweep_limit * 1000) / 10));
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
   const needsCursor = syncMode === "incremental" && cursor === "";
   const stalenessValue = staleness.trim() === "" ? null : Number(staleness);
   const stalenessOk = stalenessValue === null || (Number.isInteger(stalenessValue) && stalenessValue > 0);
+
+  const limitValue = Number(limit);
+  const limitOk = limit.trim() !== "" && Number.isFinite(limitValue) && limitValue > 0 && limitValue <= 100;
+  const incremental = syncMode === "incremental";
+
+  /** The stream's mapping with the delete signal chosen here; none when the stream has no mapping. */
+  function mappingToSend(): Stream["mapping"] {
+    const current = stream.mapping;
+    if (!current) return undefined;
+    const rest = { ...current };
+    delete rest.delete_when;
+    return deleteColumn === "" ? rest : { ...rest, delete_when: { column: deleteColumn, rule: deleteRule } };
+  }
 
   function togglePrimaryKey(name: string, on: boolean) {
     setPrimaryKey((current) => (on ? [...current, name] : current.filter((entry) => entry !== name)));
@@ -50,6 +69,9 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             cursor_field: cursor === "" ? null : cursor,
             primary_key: primaryKey,
             staleness_threshold_seconds: stalenessValue,
+            reconcile_schedule: incremental && reconcile.trim() !== "" ? reconcile.trim() : null,
+            sweep_limit: limitValue / 100,
+            mapping: mappingToSend(),
           },
         }),
       );
@@ -110,10 +132,63 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
           onChange={(event) => setStaleness(event.target.value)}
           error={stalenessOk ? undefined : "Use a whole number above zero."}
         />
+        <fieldset className="stack">
+          <legend>Deleted records</legend>
+          {incremental ? (
+            <TextField
+              label="Reconciliation schedule"
+              hint="Optional. A UTC cron such as 0 3 * * *. It lists the source's keys and removes records that are gone."
+              value={reconcile}
+              onChange={(event) => setReconcile(event.target.value)}
+            />
+          ) : (
+            <p className="muted">Records the source no longer lists are removed after each successful run.</p>
+          )}
+          {stream.mapping ? (
+            <>
+              <SelectField
+                label="Deleted column"
+                value={deleteColumn}
+                onChange={(event) => setDeleteColumn(event.target.value)}
+                hint="A column that marks a record as deleted, such as a soft-delete flag or a deleted-at time."
+              >
+                <option value="">None</option>
+                {fields.map((field) => (
+                  <option key={field.name} value={field.name}>
+                    {field.name}
+                  </option>
+                ))}
+              </SelectField>
+              {deleteColumn !== "" ? (
+                <SelectField
+                  label="A record is deleted when the column"
+                  value={deleteRule}
+                  onChange={(event) => setDeleteRule(event.target.value as DeleteRule)}
+                >
+                  <option value="truthy">is true</option>
+                  <option value="present">has a value</option>
+                </SelectField>
+              ) : null}
+            </>
+          ) : (
+            <p className="muted">Set up a mapping for this stream to choose a column that marks deleted records.</p>
+          )}
+          <TextField
+            label="Largest share a run may remove (%)"
+            hint="A run that would remove more than this share of the stream's records removes none and fails. 100 turns the guard off."
+            type="number"
+            min={1}
+            max={100}
+            step="any"
+            value={limit}
+            onChange={(event) => setLimit(event.target.value)}
+            error={limitOk ? undefined : "Use a number above 0 and up to 100."}
+          />
+        </fieldset>
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={busy || needsCursor || !stalenessOk}>
+          <Button type="submit" variant="primary" disabled={busy || needsCursor || !stalenessOk || !limitOk}>
             {busy ? "Saving" : "Save stream"}
           </Button>
         </div>
