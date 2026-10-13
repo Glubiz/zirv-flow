@@ -134,22 +134,25 @@ impl IngestState {
         self.hook_limiter.tracked()
     }
 
-    /// Whether this request should report the hook's freshness: at most once per window per
-    /// hook per process, so a busy hook does not serialize on its stream row.
-    pub(crate) fn report_due(&self, hook: Uuid) -> bool {
+    /// The slot this request takes when it should report the hook's freshness: at most once per
+    /// window per hook per process, so a busy hook does not serialize on its stream row.
+    pub(crate) fn report_due(&self, hook: Uuid) -> Option<Instant> {
         self.report_due_at(hook, Instant::now())
     }
 
     /// Gives back the slot [`Self::report_due`] took, when the append it was for failed, so the
-    /// next request reports instead.
-    pub(crate) fn release_report(&self, hook: Uuid) {
-        self.reported
+    /// next request reports instead. A slot a later request has taken since stays.
+    pub(crate) fn release_report(&self, hook: Uuid, taken: Instant) {
+        let mut reported = self
+            .reported
             .lock()
-            .expect("the report lock is never held across a panic")
-            .remove(&hook);
+            .expect("the report lock is never held across a panic");
+        if reported.get(&hook) == Some(&taken) {
+            reported.remove(&hook);
+        }
     }
 
-    fn report_due_at(&self, hook: Uuid, now: Instant) -> bool {
+    fn report_due_at(&self, hook: Uuid, now: Instant) -> Option<Instant> {
         let mut reported = self
             .reported
             .lock()
@@ -158,11 +161,11 @@ impl IngestState {
             .get(&hook)
             .is_some_and(|last| now.saturating_duration_since(*last) < REPORT_EVERY)
         {
-            return false;
+            return None;
         }
         reported.retain(|_, last| now.saturating_duration_since(*last) < REPORT_EVERY);
         reported.insert(hook, now);
-        true
+        Some(now)
     }
 }
 
@@ -570,10 +573,23 @@ mod tests {
         let hook = Uuid::from_u128(1);
         let now = Instant::now();
 
-        assert!(state.report_due_at(hook, now));
-        assert!(!state.report_due_at(hook, now));
-        state.release_report(hook);
-        assert!(state.report_due_at(hook, now));
+        let taken = state.report_due_at(hook, now).unwrap();
+        assert_eq!(state.report_due_at(hook, now), None);
+        state.release_report(hook, taken);
+        assert_eq!(state.report_due_at(hook, now), Some(now));
+    }
+
+    #[test]
+    fn a_stale_release_leaves_a_later_requests_slot() {
+        let state = IngestState::new(IngestLimits::default());
+        let hook = Uuid::from_u128(1);
+        let first = Instant::now();
+        let later = first + REPORT_EVERY;
+
+        let stale = state.report_due_at(hook, first).unwrap();
+        assert_eq!(state.report_due_at(hook, later), Some(later));
+        state.release_report(hook, stale);
+        assert_eq!(state.report_due_at(hook, later), None);
     }
 
     use std::time::Duration;

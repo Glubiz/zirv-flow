@@ -242,12 +242,12 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         &Value::Object(payload),
         signed_at,
         &message_id,
-        report,
+        report.is_some(),
     )
     .await
     .map_err(|_| {
-        if report {
-            state.ingest.release_report(hook.id);
+        if let Some(taken) = report {
+            state.ingest.release_report(hook.id, taken);
         }
         unavailable()
     })
