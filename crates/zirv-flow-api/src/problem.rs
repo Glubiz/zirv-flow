@@ -116,6 +116,18 @@ impl ApiError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
 
+    /// The source reported field names no mapping can address (blank or duplicate). The code names
+    /// the rule, never a field.
+    pub(crate) fn source_fields_invalid(code: &'static str) -> Self {
+        Self {
+            code: Some(code),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the source reported field names that cannot be mapped",
+            )
+        }
+    }
+
     /// A caller without access to values asked for an order or prefix search on a PII trait.
     pub(crate) fn pii_trait_not_searchable() -> Self {
         Self {

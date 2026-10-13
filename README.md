@@ -1291,7 +1291,9 @@ lost its lease resumes there and neither repeats nor skips a row. Every later wi
 `If-Range`; if the file's `ETag` (or `Last-Modified`) or size changed between windows the run
 fails with `file_changed`, keeping the units already committed. A record over 1 MiB fails with
 `record_too_large`; text that is not valid CSV or JSON fails with `csv_invalid` or
-`json_invalid`. These codes never quote the file or its address.
+`json_invalid`. A byte-range answer whose `Content-Range`, length or total contradicts itself or the
+request fails with `file_range_invalid`, so a short body is never taken for the end of the file.
+These codes never quote the file or its address.
 
 **Fields and keys.** For CSV the fields are the header names (blank or repeated names are
 refused), all text. For JSON they are the top-level keys of the first 100 records, typed from

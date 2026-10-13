@@ -72,6 +72,7 @@ describe("source forms", () => {
     for (const code of [
       "file_changed",
       "file_range_unsupported",
+      "file_range_invalid",
       "record_too_large",
       "csv_invalid",
       "json_invalid",

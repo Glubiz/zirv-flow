@@ -83,10 +83,8 @@ fn read_window(
     let status = response.status().as_u16();
     let (total, ended) = match status {
         206 => {
-            let range = content_range(response).ok_or_else(error::file_range_unsupported)?;
-            if range.first != offset {
-                return Err(error::file_range_unsupported());
-            }
+            let range = content_range(response).ok_or_else(error::file_range_invalid)?;
+            check_range(&range, offset, window, bytes.len() as u64)?;
             let ended = match range.total {
                 Some(total) => range.last.saturating_add(1) >= total,
                 None => (bytes.len() as u64) < window,
@@ -95,7 +93,14 @@ fn read_window(
         }
         // The server ignored `Range` and sent the file whole, which is the first window or a
         // changed file: a read in progress asked with `If-Range` and expects 206.
-        200 if offset == 0 => (Some(bytes.len() as u64), true),
+        200 if offset == 0 => {
+            if let Some(declared) = content_length(response)
+                && declared != bytes.len() as u64
+            {
+                return Err(error::file_range_invalid());
+            }
+            (Some(bytes.len() as u64), true)
+        }
         200 => return Err(error::file_changed()),
         other => return Err(SourceError::Upstream(other)),
     };
@@ -115,6 +120,34 @@ fn read_window(
         validator,
         ended,
     })
+}
+
+/// A `206` is trusted only when its header and its body agree with each other and with the
+/// request: it starts where asked, ends inside the file, is no longer than the window, and the
+/// body is exactly the bytes it names. Otherwise a short body would read as the end of the file.
+fn check_range(
+    range: &ContentRange,
+    offset: u64,
+    window: u64,
+    body_len: u64,
+) -> Result<(), SourceError> {
+    let span = range.last - range.first + 1;
+    let inside = range.total.is_none_or(|total| range.last < total);
+    if range.first != offset || !inside || span > window || body_len != span {
+        return Err(error::file_range_invalid());
+    }
+    Ok(())
+}
+
+fn content_length(response: &RuntimeResponse) -> Option<u64> {
+    response
+        .headers()
+        .get("content-length")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// A strong `ETag`, else `Last-Modified`: the two a later `If-Range` can use. A weak `ETag` never
@@ -162,6 +195,25 @@ fn parse_content_range(value: &str) -> Option<ContentRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_206_must_agree_with_itself_and_the_request() {
+        let range = |first, last, total| ContentRange { first, last, total };
+        let invalid = Err(error::file_range_invalid());
+        // Starts where asked, fits the window, body is the named bytes.
+        assert_eq!(check_range(&range(10, 19, Some(50)), 10, 10, 10), Ok(()));
+        assert_eq!(check_range(&range(40, 49, Some(50)), 40, 20, 10), Ok(()));
+        assert_eq!(check_range(&range(10, 19, None), 10, 10, 10), Ok(()));
+        // Starts elsewhere.
+        assert_eq!(check_range(&range(11, 19, Some(50)), 10, 10, 9), invalid);
+        // Ends at or past the total.
+        assert_eq!(check_range(&range(40, 50, Some(50)), 40, 20, 11), invalid);
+        // Longer than the window asked for.
+        assert_eq!(check_range(&range(0, 19, Some(50)), 0, 10, 20), invalid);
+        // The body is shorter or longer than the span.
+        assert_eq!(check_range(&range(0, 9, Some(10)), 0, 10, 4), invalid);
+        assert_eq!(check_range(&range(0, 9, Some(50)), 0, 10, 11), invalid);
+    }
 
     #[test]
     fn a_content_range_is_read_with_its_total_or_without() {

@@ -17,6 +17,11 @@ pub(super) fn file_range_unsupported() -> SourceError {
     code("file_range_unsupported")
 }
 
+/// A `206` or `200` answer whose range, length or total contradicts itself or the request.
+pub(super) fn file_range_invalid() -> SourceError {
+    code("file_range_invalid")
+}
+
 /// One record is over 1 MiB.
 pub(super) fn record_too_large() -> SourceError {
     code("record_too_large")
@@ -54,6 +59,7 @@ mod tests {
         for (error, code) in [
             (file_changed(), "file_changed"),
             (file_range_unsupported(), "file_range_unsupported"),
+            (file_range_invalid(), "file_range_invalid"),
             (record_too_large(), "record_too_large"),
             (csv_invalid(), "csv_invalid"),
             (json_invalid(), "json_invalid"),

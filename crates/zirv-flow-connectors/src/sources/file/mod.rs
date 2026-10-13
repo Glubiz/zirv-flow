@@ -596,6 +596,11 @@ fn infer_fields<'a>(records: impl Iterator<Item = &'a Map<String, Value>>) -> Ve
     let mut fields: Vec<FieldDescriptor> = Vec::new();
     for record in records {
         for (name, value) in record {
+            // A blank name can be no column of a mapping header, and a header that holds one is
+            // refused whole; a mapping reaches such a key by no path.
+            if name.trim().is_empty() {
+                continue;
+            }
             let seen = match value {
                 Value::Null => FieldType::Unknown,
                 Value::String(_) => FieldType::String,
@@ -658,6 +663,8 @@ mod tests {
         /// Requests from this one on answer 412.
         precondition_failed_after: usize,
         required_authorization: Option<String>,
+        /// A `206` carries only this many bytes of the range its `Content-Range` names.
+        short_range_body: Option<usize>,
         /// The first requests answer 429 with `Retry-After: 0`.
         throttled: usize,
         hits: AtomicUsize,
@@ -676,6 +683,7 @@ mod tests {
                 precondition_failed_after: usize::MAX,
                 required_authorization: None,
                 throttled: 0,
+                short_range_body: None,
                 hits: AtomicUsize::new(0),
                 log: Mutex::new(Vec::new()),
             }
@@ -767,11 +775,15 @@ mod tests {
                 .unwrap();
         }
         let last = last.min(body.len() - 1);
+        let sent = match fixture.short_range_body {
+            Some(short) => first + short.min(last - first + 1),
+            None => last + 1,
+        };
         with_etag(Response::builder().status(206).header(
             "content-range",
             format!("bytes {first}-{last}/{}", body.len()),
         ))
-        .body(Body::from(body[first..=last].to_vec()))
+        .body(Body::from(body[first..sent].to_vec()))
         .unwrap()
     }
 
@@ -1280,6 +1292,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_206_whose_body_is_shorter_than_its_content_range_fails_instead_of_ending_the_file() {
+        let body: String = (0..30).map(|n| format!("{n}\n")).collect();
+        let mut fixture = Fixture::new(format!("a\n{body}"));
+        fixture.short_range_body = Some(5);
+        let (base, _) = serve(fixture).await;
+
+        let (committed, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "csv"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                FILE_WINDOW_BYTES,
+                FILE_SLICE_BYTES,
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(error, SourceError::Other("file_range_invalid".into()));
+        assert!(committed.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_checkpoint_at_the_end_of_the_file_reads_nothing_and_a_foreign_one_is_refused() {
         let (base, fixture) = serve(Fixture::new("a\n1\n")).await;
         let config = config(&base, "csv");
@@ -1764,6 +1801,23 @@ mod tests {
             .map(|f| (f.name.as_str(), f.field_type))
             .collect();
         assert_eq!(types, [("a", FieldType::Number), ("b", FieldType::Unknown)]);
+    }
+
+    #[test]
+    fn a_blank_key_is_not_a_discovered_field() {
+        let records = [
+            json!({"a": 1, "": 2, "  ": 3, "	": 4}),
+            json!({"b": 5, " ": 6}),
+        ];
+
+        let fields = infer_fields(records.iter().map(|value| value.as_object().unwrap()));
+
+        let names: Vec<_> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(
+            zirv_flow_core::mapping::Header::new(fields.into_iter().map(|f| f.name).collect())
+                .is_ok()
+        );
     }
 
     #[test]

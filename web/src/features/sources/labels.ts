@@ -114,6 +114,8 @@ export function runErrorText(code: string, threshold: number): string {
     file_changed: "The file changed while it was being read, so the run stopped. Records read before that were kept. Run it again.",
     file_range_unsupported:
       "The file is over 10 MiB and its server does not answer byte ranges. Ask the host to support them, or split the file.",
+    file_range_invalid:
+      "The file's server answered a byte range that does not add up, so the run stopped. Records read before that were kept. Run it again.",
     record_too_large: "One record is over 1 MiB, so the file could not be read.",
     csv_invalid: "The file is not valid CSV text.",
     json_invalid: "The file is not valid JSON.",

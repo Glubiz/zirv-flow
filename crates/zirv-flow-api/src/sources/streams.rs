@@ -258,6 +258,19 @@ pub(super) async fn trait_catalog(
     )
 }
 
+/// The stream's field names as a mapping header. A source can report names a header refuses (a
+/// blank or repeated one); that is the source's answer being unusable, not a server fault.
+fn descriptor_header(descriptor: &StreamDescriptor) -> Result<Header, ApiError> {
+    Header::new(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
+    )
+    .map_err(|error| ApiError::source_fields_invalid(error.code()))
+}
+
 /// Checks a mapping against the stream's field names (a column may be a dotted path into a
 /// field) and the trait registry, that every list it names exists in the workspace, and that a
 /// mapping with an event has a primary key to hang the event's idempotency on.
@@ -269,14 +282,7 @@ pub(super) async fn checked_mapping(
     body: &MappingBody,
 ) -> Result<Mapping, ApiError> {
     let mapping = body.to_core()?;
-    let header = Header::new(
-        descriptor
-            .fields
-            .iter()
-            .map(|field| field.name.clone())
-            .collect(),
-    )
-    .map_err(|_| ApiError::internal())?;
+    let header = descriptor_header(descriptor)?;
     let catalog = trait_catalog(state, workspace).await?;
     mapping::validate_paths(&mapping, &header, &catalog)
         .map_err(|error| mapping_problem(&error))?;
