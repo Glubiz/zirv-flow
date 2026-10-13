@@ -195,6 +195,39 @@ describe("the source wizard", () => {
     expect(await screen.findByRole("button", { name: "Choose Fake source" })).toBeInTheDocument();
   });
 
+  it("shows a loading state while the access loads, and an error with a retry when it fails", async () => {
+    mockApi({ ...BASE, "GET /api/v1/workspaces/ws1/members": () => new Promise<Response>(() => undefined) });
+    const loading = mount();
+
+    expect(await screen.findByText("Checking your access")).toBeInTheDocument();
+    loading.unmount();
+
+    let attempts = 0;
+    mockApi({
+      ...BASE,
+      "GET /api/v1/workspaces/ws1/members": () => {
+        attempts += 1;
+        return attempts === 1
+          ? problem(500, "Internal Server Error", "internal error")
+          : json(members("admin", OWNER.id));
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByRole("button", { name: "Choose Fake source" })).toBeInTheDocument();
+  });
+
+  it("says when no source types are available", async () => {
+    mockApi({ ...BASE, "GET /api/v1/source-kinds": () => json([]) });
+    mount();
+
+    expect(await screen.findByText("No source types are available on this deployment.")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Source types" })).not.toBeInTheDocument();
+  });
+
   it("shows a loading state while the source types load", async () => {
     mockApi({ ...BASE, "GET /api/v1/source-kinds": () => new Promise<Response>(() => undefined) });
     mount();
