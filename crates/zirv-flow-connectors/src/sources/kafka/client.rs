@@ -37,6 +37,12 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long connecting and reading the first metadata may take in all.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the client keeps retrying a failed request. rskafka counts only the sleeps between
+/// attempts, not the attempts, so this sits well below the timeouts above: a refused login (which
+/// rskafka retries like a lost connection) then ends as `kafka_auth_failed`, not as a timeout.
+/// The job retries a longer outage on the next slice.
+const RETRY_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How the client authenticates with SASL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Mechanism {
@@ -146,7 +152,7 @@ impl Session {
                 init_backoff: Duration::from_millis(100),
                 max_backoff: Duration::from_secs(2),
                 base: 2.0,
-                deadline: Some(Duration::from_secs(15)),
+                deadline: Some(RETRY_DEADLINE),
             })
             .socks5_proxy(relay.proxy());
         if let Some(tls) = tls {
