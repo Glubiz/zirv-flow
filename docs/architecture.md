@@ -483,6 +483,21 @@ rejects already use, with reason and raw values and a `sync_run_id` that ties
 each to its run. A Kafka stream has no `sync.run`: its consumer job (7.6, 14)
 applies the same reject rule per message.
 
+As built (M3): `sync_runs` holds the state, trigger, counters, per-run checkpoint, attempt,
+trace id and error code; a partial unique index allows one `queued` or `running` run per
+stream. A unit of at least 500 records commits in one transaction that first locks the job's
+lease (`store::lock_lease`) and then the run row, so a lost lease or a cancel writes nothing.
+An expired lease does not return the run to `queued`: the row stays `running`, the job system
+re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
+checkpoint; only the last failed attempt marks the run `failed` (`source_error` for a read error,
+else `job_failed`). An incremental stream also keeps `streams.checkpoint`, written in the same
+transaction except for a batch that fails the run on its rejects. The reject check applies from
+100 records read (`SYNC_REJECT_CHECK_MIN_RECORDS`) at 5%, stored per run. A source's cron is
+mirrored to a `schedules` row (`schedules.source_id`, cascading); the leader's firing queues
+one run per enabled, mapped stream without an active run, each with its own job
+(`sync:run:<run_id>`) under the run's trace. The sweep for full refresh is not built yet:
+runs only set `last_seen_run`.
+
 **Mapping** is declarative: field path to identifier kind, trait, event field or
 list, with a bounded transform set (trim, case, cast, timestamp parse,
 concatenate, constant, value map, split) and nested JSON path selection for
@@ -1135,10 +1150,17 @@ or deleted; identity merges; consent and trait changes; segment entry and exit;
 enrollment and flow step outcomes; sends or skips with the gate reason;
 delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
 action type, outcome, durable domain ids and one typed cause: `event`,
-`trait_change`, `schedule`, `manual`, `api` or `definition_change`, with the
+`trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`, with the
 cause id. It never stores identifier, trait or event-property values.
 A sync writes one decision per record, appended with one multi-row insert per
 batch in the apply-batch transaction.
+
+As built (M3): the `sync_run` cause carries the run id, and the run's trace is
+the trace of its jobs and of every decision it writes. An applied record is
+`sync.record`/`applied` with the `person` and `source_record` ids; a rejected record is
+`sync.record`/`rejected` with the reason code and the `ingest_reject` id; a deleted record has
+the `contribution.removed` decision that retracting it writes. Unchanged records write none.
+Both `cause_kind` CHECKs (`jobs`, and the partitioned `decision_records`) list the seventh kind.
 
 The `trace_id` and cause cross transactional job enqueue, retries and external
 effects. Retries add attempts under the same logical record rather than hiding
