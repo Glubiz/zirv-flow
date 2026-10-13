@@ -582,6 +582,8 @@ mod tests {
             name: "CRM".into(),
             config: json!({"streams": 2}),
             credential_secret_id: Some(Uuid::nil()),
+            oauth_secret_id: None,
+            oauth_connected_at: None,
             credential_fields: vec!["token".into()],
             schedule: None,
             enabled: true,

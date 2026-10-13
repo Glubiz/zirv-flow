@@ -221,6 +221,31 @@ pub async fn get<'e>(
     .transpose()
 }
 
+/// As [`get`], and locks the row until the transaction ends, so concurrent writers of one secret run
+/// one after the other.
+pub async fn get_for_update(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: SecretId,
+) -> Result<Option<StoredSecret>, StoreError> {
+    let row: Option<SecretRow> = sqlx::query_as(
+        "SELECT purpose, key_id, wrapped_key, nonce, ciphertext \n         FROM encrypted_secrets WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id.as_uuid())
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    row.map(|row| {
+        Ok(StoredSecret {
+            purpose: SecretPurpose::parse(&row.purpose)
+                .ok_or_else(|| corrupt("unknown purpose"))?,
+            sealed: row.sealed.into_sealed()?,
+        })
+    })
+    .transpose()
+}
+
 /// Why a stored secret could not be opened.
 #[derive(Debug)]
 pub enum OpenError {

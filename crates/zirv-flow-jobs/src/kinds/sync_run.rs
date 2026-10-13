@@ -950,6 +950,7 @@ mod tests {
                 cursor_field: cursor,
                 primary_key: &key,
                 descriptor: json,
+                suggested_mapping: None,
             })
             .collect();
         let mut tx = begin(pool).await.unwrap();
@@ -3059,6 +3060,7 @@ mod tests {
                 cursor_field: None,
                 primary_key: &key,
                 descriptor: &descriptor,
+                suggested_mapping: None,
             }],
         )
         .await

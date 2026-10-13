@@ -204,6 +204,7 @@ pub(crate) async fn discover_source(
             cursor_field: stream.default_cursor_field.as_deref(),
             primary_key: &stream.default_primary_key,
             descriptor,
+            suggested_mapping: None,
         })
         .collect();
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
