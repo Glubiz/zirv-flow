@@ -112,6 +112,30 @@ fn initial(descriptor: &StreamDescriptor) -> SyncMode {
     }
 }
 
+const MAX_STREAM_NAME_CHARS: usize = 256;
+
+/// Checks what discovery reported before anything is stored: a name of 1 to 256 characters and
+/// no name twice. A source that reports otherwise has failed, whatever its streams are.
+fn check_discovered(found: &[StreamDescriptor]) -> Result<(), ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    for stream in found {
+        let length = stream.name.chars().count();
+        if length == 0 || length > MAX_STREAM_NAME_CHARS {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "the source reported a stream name that is not 1 to 256 characters",
+            ));
+        }
+        if !seen.insert(stream.name.as_str()) {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "the source reported the same stream name twice",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Asks the source for its streams, stores them (new ones disabled, known ones refreshed, the
 /// user's settings untouched) and audits `source.discovered`.
 pub(crate) async fn discover_source(
@@ -129,6 +153,7 @@ pub(crate) async fn discover_source(
     .await
     .map_err(|_| timed_out())?
     .map_err(upstream)?;
+    check_discovered(&found)?;
 
     let descriptors: Vec<serde_json::Value> = found
         .iter()
@@ -264,6 +289,25 @@ mod tests {
         assert_eq!(initial(&with_cursor), SyncMode::Incremental);
         assert_eq!(initial(&without_cursor), SyncMode::FullRefresh);
     }
+    #[test]
+    fn discovered_names_must_be_1_to_256_characters_and_unique() {
+        let named = |name: &str| StreamDescriptor {
+            name: name.into(),
+            ..descriptor(vec![SyncMode::FullRefresh])
+        };
+
+        assert!(check_discovered(&[named("a"), named("b"), named(&"x".repeat(256))]).is_ok());
+        for bad in [
+            vec![named("")],
+            vec![named(&"x".repeat(257))],
+            vec![named("a"), named("a")],
+        ] {
+            let error = check_discovered(&bad).unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+            assert!(!error.detail().contains("xxx"));
+        }
+    }
+
     #[test]
     fn a_failed_call_is_a_bad_gateway_with_the_sources_own_text() {
         let error = upstream(SourceError::Auth);
