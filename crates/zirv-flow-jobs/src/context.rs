@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_connectors::runtime::RateLimits;
+use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use zirv_flow_store::{
-    ClaimedJob, EventRetention, HmacKey, NewDecision, NewJob, PgConnection, PgPool,
+    ClaimedJob, EventRetention, HmacKey, Keyring, NewDecision, NewJob, PgConnection, PgPool,
 };
 
 use crate::JobError;
@@ -34,6 +36,9 @@ pub struct JobContext<'a> {
     event_retention: EventRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
+    keyring: Option<Arc<Keyring>>,
+    egress: Arc<EgressPolicy>,
+    rate_limits: Arc<RateLimits>,
 }
 
 impl<'a> JobContext<'a> {
@@ -44,6 +49,9 @@ impl<'a> JobContext<'a> {
             event_retention: EventRetention::default(),
             ingest: None,
             identifier_key: None,
+            keyring: None,
+            egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 
@@ -68,6 +76,40 @@ impl<'a> JobContext<'a> {
     pub(crate) fn with_identifier_key(mut self, key: Option<Arc<HmacKey>>) -> Self {
         self.identifier_key = key;
         self
+    }
+
+    /// Gives the handler the master keys that open stored secrets and the egress policy that
+    /// outbound calls follow.
+    pub(crate) fn with_outbound(
+        mut self,
+        keyring: Option<Arc<Keyring>>,
+        egress: Arc<EgressPolicy>,
+        rate_limits: Arc<RateLimits>,
+    ) -> Self {
+        self.keyring = keyring;
+        self.egress = egress;
+        self.rate_limits = rate_limits;
+        self
+    }
+
+    /// The master keys that open stored secrets; none when the worker has no master key.
+    pub(crate) fn keyring(&self) -> Option<&Arc<Keyring>> {
+        self.keyring.as_ref()
+    }
+
+    /// Which non-public destinations outbound connections may reach.
+    pub(crate) fn rate_limits(&self) -> &Arc<RateLimits> {
+        &self.rate_limits
+    }
+
+    pub(crate) fn egress(&self) -> &Arc<EgressPolicy> {
+        &self.egress
+    }
+
+    /// The token of the lease this attempt holds. Writes that must not happen after the lease
+    /// is lost lock it first (`zirv_flow_store::lock_lease`).
+    pub(crate) fn lease_token(&self) -> Uuid {
+        self.job.lease_token
     }
 
     /// The key that hashes identifiers; none when the worker has no master key.

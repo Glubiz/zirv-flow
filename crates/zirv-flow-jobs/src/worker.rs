@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
+use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
@@ -45,7 +46,7 @@ pub struct WorkerConfig {
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
     pub identifier_key: Option<Arc<HmacKey>>,
-    /// The master keys that open stored secrets; no job kind opens one yet.
+    /// The master keys that open stored secrets; `sync.run` opens a source credential with them.
     pub keyring: Option<Arc<Keyring>>,
     /// Inbox rows `ingest.drain` applies per transaction.
     pub ingest_drain_batch_size: u32,
@@ -53,6 +54,8 @@ pub struct WorkerConfig {
     pub ingest_drain_shards: u32,
     /// Which non-public destinations outbound connections may reach.
     pub egress: Arc<EgressPolicy>,
+    /// The rate-limit buckets of outbound source calls, shared by every run in this process.
+    pub rate_limits: Arc<RateLimits>,
 }
 
 impl WorkerConfig {
@@ -71,6 +74,7 @@ impl WorkerConfig {
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 }
@@ -354,6 +358,11 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
+            .with_outbound(
+                shared.config.keyring.clone(),
+                Arc::clone(&shared.config.egress),
+                Arc::clone(&shared.config.rate_limits),
+            )
             .with_ingest(IngestSettings {
                 pool: shared.pool.clone(),
                 redaction_key: shared.config.redaction_key.clone(),
@@ -578,6 +587,7 @@ mod tests {
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 
@@ -1166,7 +1176,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unregistered_kind_is_left_in_the_queue(pool: PgPool) {
         migrated(&pool).await;
-        enqueue(&pool, &new_job("sync.run")).await.unwrap();
+        enqueue(&pool, &new_job("sync.unknown")).await.unwrap();
         enqueue(&pool, &new_job("maintenance.noop")).await.unwrap();
         let (stop, handle) = start(&pool, test_config(1));
 
@@ -1177,7 +1187,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(kind, "sync.run");
+        assert_eq!(kind, "sync.unknown");
     }
 
     #[sqlx::test]

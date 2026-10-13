@@ -291,6 +291,18 @@ fn routes() -> Router<AppState> {
             put(sources::streams::put),
         )
         .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/runs",
+            get(sources::runs::list).post(sources::runs::start),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}",
+            get(sources::runs::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel",
+            post(sources::runs::cancel),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/lists",
             get(lists::crud::list).post(lists::crud::create),
         )

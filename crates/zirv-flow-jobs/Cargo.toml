@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures-util = { workspace = true, features = ["std"] }
 getrandom.workspace = true
 metrics.workspace = true
 serde_json.workspace = true
@@ -15,9 +16,12 @@ time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zirv-flow-connectors.workspace = true
 zirv-flow-core.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]
+zirv-flow-connectors = { workspace = true, features = ["test-support"] }
+zirv-flow-store = { workspace = true, features = ["test-support"] }
 metrics-exporter-prometheus.workspace = true
 tracing-subscriber.workspace = true

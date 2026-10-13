@@ -831,4 +831,495 @@ mod tests {
         assert_eq!(tested.body["ok"], false);
         assert_eq!(tested.body["error"], "the source could not be reached");
     }
+
+    fn trait_definition(key: &str, pii: bool) -> zirv_flow_store::NewTraitDefinition {
+        zirv_flow_store::NewTraitDefinition {
+            key: key.into(),
+            trait_type: zirv_flow_core::people::TraitType::String,
+            precedence: zirv_flow_core::people::Precedence::Latest,
+            source_order: Vec::new(),
+            pii,
+            channel_address: false,
+            inferred: false,
+            description: String::new(),
+        }
+    }
+
+    fn mapping_body() -> Value {
+        json!({"key_column": "id", "columns": [
+            {"column": "email", "target": {"type": "identifier", "kind": "email"}},
+            {"column": "name", "target": {"type": "trait", "key": "plan"}}
+        ]})
+    }
+
+    impl Fixture {
+        /// A source with `streams` discovered streams, `stream_1` enabled with a mapping.
+        async fn mapped_source(&self, streams: u32) -> String {
+            zirv_flow_store::create_trait_definition(
+                &self.pool,
+                self.ws,
+                &trait_definition("plan", false),
+            )
+            .await
+            .unwrap();
+            let id = self.create_ok("CRM", "ok", streams).await;
+            self.as_admin("POST", &format!("/sources/{id}/discover"), None)
+                .await;
+            let put = self
+                .as_admin(
+                    "PUT",
+                    &format!("/sources/{id}/streams/stream_1"),
+                    Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                        "mapping": mapping_body()})),
+                )
+                .await;
+            assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+            id
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_mapping_is_checked_against_the_streams_fields_and_the_registry(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        zirv_flow_store::create_trait_definition(&pool, fx.ws, &trait_definition("plan", false))
+            .await
+            .unwrap();
+        let id = fx.create_ok("CRM", "ok", 1).await;
+        fx.as_admin("POST", &format!("/sources/{id}/discover"), None)
+            .await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let settings = |mapping: Value| json!({"enabled": true, "sync_mode": "full_refresh", "mapping": mapping});
+
+        let unknown_column = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(settings(json!({"columns": [
+                    {"column": "mail", "target": {"type": "identifier", "kind": "email"}}]}))),
+            )
+            .await;
+        let unknown_trait = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(settings(json!({"columns": [
+                    {"column": "email", "target": {"type": "identifier", "kind": "email"}},
+                    {"column": "name", "target": {"type": "trait", "key": "nope"}}]}))),
+            )
+            .await;
+        let list_target = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(settings(json!({"columns": [
+                    {"column": "email", "target": {"type": "identifier", "kind": "email"}},
+                    {"column": "name", "target": {"type": "list",
+                        "list_id": "00000000-0000-0000-0000-000000000000"}}]}))),
+            )
+            .await;
+        let none = fx
+            .as_admin("GET", &format!("/sources/{id}/streams"), None)
+            .await;
+        assert_eq!(unknown_column.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            unknown_column.body["detail"],
+            "mapping: unknown_column (column \"mail\")"
+        );
+        assert_eq!(unknown_trait.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(list_target.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(none.body[0]["mapping"], Value::Null);
+
+        let saved = fx
+            .as_admin("PUT", &tail, Some(settings(mapping_body())))
+            .await;
+        // A later change of the other settings leaves the mapping as it is.
+        let kept = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": false, "sync_mode": "full_refresh"})),
+            )
+            .await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["mapping"]["key_column"], "id");
+        assert_eq!(kept.body["enabled"], false);
+        assert_eq!(kept.body["mapping"], saved.body["mapping"]);
+        let member = fx
+            .send(
+                "PUT",
+                &tail,
+                Some(settings(mapping_body())),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn admins_start_and_cancel_runs_members_read_them_and_both_are_audited(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(2).await;
+        let runs = format!("/sources/{id}/runs");
+        // stream_2 is enabled but has no mapping.
+        fx.as_admin(
+            "PUT",
+            &format!("/sources/{id}/streams/stream_2"),
+            Some(json!({"enabled": true, "sync_mode": "full_refresh"})),
+        )
+        .await;
+
+        let unmapped = fx
+            .as_admin("POST", &runs, Some(json!({"stream": "stream_2"})))
+            .await;
+        let unknown = fx
+            .as_admin("POST", &runs, Some(json!({"stream": "nope"})))
+            .await;
+        let member = fx
+            .send("POST", &runs, Some(json!({})), Auth::Session(&fx.member))
+            .await;
+        let reader = fx
+            .send("POST", &runs, Some(json!({})), Auth::Key(&fx.read))
+            .await;
+        let started = fx
+            .as_admin("POST", &runs, Some(json!({"stream": "stream_1"})))
+            .await;
+        let again = fx
+            .as_admin("POST", &runs, Some(json!({"stream": "stream_1"})))
+            .await;
+        let all = fx.as_admin("POST", &runs, Some(json!({}))).await;
+
+        assert_eq!(unmapped.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unmapped.body["code"], "stream_not_mapped");
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(reader.status, StatusCode::FORBIDDEN);
+        assert_eq!(started.status, StatusCode::ACCEPTED, "{:?}", started.body);
+        let run = &started.body[0];
+        assert_eq!(started.body.as_array().unwrap().len(), 1);
+        assert_eq!(run["state"], "queued");
+        assert_eq!(run["trigger"], "manual");
+        assert_eq!(run["stream"], "stream_1");
+        assert_eq!(run["attempt"], 0);
+        assert_eq!(run["trace_id"].as_str().unwrap().len(), 32);
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(again.body["code"], "sync_run_active");
+        assert_eq!(
+            all.status,
+            StatusCode::CONFLICT,
+            "every eligible stream is active"
+        );
+        let run_id = run["id"].as_str().unwrap().to_owned();
+
+        // The queued run has a job under the run's trace, caused by the run.
+        let job: (String, String, uuid::Uuid) = sqlx::query_as(
+            "SELECT cause_kind, cause_id, trace_id FROM jobs WHERE kind = 'sync.run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (job.0.as_str(), job.1.as_str()),
+            ("sync_run", run_id.as_str())
+        );
+        assert_eq!(
+            job.2.simple().to_string(),
+            run["trace_id"].as_str().unwrap()
+        );
+
+        // Members and read keys list and read; a foreign id is a 404.
+        for who in ["member", "key"] {
+            let list = fx.send("GET", &runs, None, who_is(&fx, who)).await;
+            assert_eq!(list.status, StatusCode::OK, "{who}");
+            assert_eq!(list.body["runs"][0]["id"], run_id.as_str());
+            assert_eq!(list.body["next_cursor"], Value::Null);
+            let one = fx
+                .send("GET", &format!("{runs}/{run_id}"), None, who_is(&fx, who))
+                .await;
+            assert_eq!(one.status, StatusCode::OK, "{who}");
+            assert_eq!(one.body["id"], run_id.as_str());
+            assert_eq!(one.body["rejects"], json!([]));
+            let denied = fx
+                .send(
+                    "POST",
+                    &format!("{runs}/{run_id}/cancel"),
+                    None,
+                    who_is(&fx, who),
+                )
+                .await;
+            assert_eq!(denied.status, StatusCode::FORBIDDEN, "{who}");
+        }
+        let other_stream = fx
+            .as_admin("GET", &format!("{runs}?stream=stream_2"), None)
+            .await;
+        assert_eq!(other_stream.body["runs"], json!([]));
+        let missing = fx
+            .as_admin("GET", &format!("{runs}/{}", uuid::Uuid::now_v7()), None)
+            .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        let bad_limit = fx.as_admin("GET", &format!("{runs}?limit=0"), None).await;
+        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+
+        let cancelled = fx
+            .as_admin("POST", &format!("{runs}/{run_id}/cancel"), None)
+            .await;
+        let twice = fx
+            .as_admin("POST", &format!("{runs}/{run_id}/cancel"), None)
+            .await;
+        let unknown_run = fx
+            .as_admin(
+                "POST",
+                &format!("{runs}/{}/cancel", uuid::Uuid::now_v7()),
+                None,
+            )
+            .await;
+        assert_eq!(cancelled.status, StatusCode::OK, "{:?}", cancelled.body);
+        assert_eq!(cancelled.body["state"], "cancelled");
+        assert_eq!(twice.status, StatusCode::CONFLICT);
+        assert_eq!(unknown_run.status, StatusCode::NOT_FOUND);
+
+        // Paging: three runs of the stream, two per page.
+        for _ in 0..2 {
+            let more = fx
+                .as_admin("POST", &runs, Some(json!({"stream": "stream_1"})))
+                .await;
+            let id = more.body[0]["id"].as_str().unwrap().to_owned();
+            fx.as_admin("POST", &format!("{runs}/{id}/cancel"), None)
+                .await;
+        }
+        let first = fx.as_admin("GET", &format!("{runs}?limit=2"), None).await;
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
+        let second = fx
+            .as_admin("GET", &format!("{runs}?limit=2&cursor={cursor}"), None)
+            .await;
+        assert_eq!(first.body["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(second.body["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(second.body["runs"][0]["id"], run_id.as_str());
+
+        // Audited, with ids only.
+        let actions = fx.audit_actions().await;
+        assert_eq!(
+            actions.iter().filter(|a| *a == "sync_run.started").count(),
+            3
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| *a == "sync_run.cancelled")
+                .count(),
+            3
+        );
+        let entries = zirv_flow_store::list_audit(&pool, 200).await.unwrap();
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.action.starts_with("sync_run."))
+        {
+            let shown = entry.summary.to_string();
+            assert!(
+                !shown.contains("example.com") && !shown.contains("ok"),
+                "{shown}"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reject_sample_shows_only_values_the_mapping_sends_to_non_pii_traits(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let (stream_id, source_id): (uuid::Uuid, uuid::Uuid) =
+            sqlx::query_as("SELECT id, source_id FROM streams WHERE name = 'stream_1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let run_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO sync_runs (id, workspace_id, source_id, stream_id, state, trigger, \
+                sync_mode, trace_id, records_read, records_rejected, error_code) \
+             VALUES ($1, $2, $3, $4, 'failed', 'manual', 'full_refresh', gen_random_uuid(), 2, 1, \
+                     'reject_threshold')",
+        )
+        .bind(run_id)
+        .bind(fx.ws.as_uuid())
+        .bind(source_id)
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A sample stored with raw values, as if the trait had been public when it was written.
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, name, reason, \
+                reasons, sample, trace_id, sync_run_id) \
+             VALUES ($1, $2, now(), 's', 'record', 'stream_1', 'invalid_email', \
+                '[{\"property\": \"email\", \"reason\": \"invalid_email\"}]', $3, gen_random_uuid(), $4)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(fx.ws.as_uuid())
+        .bind(json!({"properties": {"name": "Ada Lovelace", "email": "zz-pii-marker@example.com",
+            "id": "zz-key-marker"}, "masked": []}))
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let tail = format!("/sources/{id}/runs/{run_id}");
+
+        let public = fx.send("GET", &tail, None, Auth::Session(&fx.member)).await;
+        sqlx::query("UPDATE trait_definitions SET pii = true WHERE key = 'plan'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let after = fx.send("GET", &tail, None, Auth::Key(&fx.read)).await;
+
+        assert_eq!(public.status, StatusCode::OK, "{:?}", public.body);
+        let reject = &public.body["rejects"][0];
+        assert_eq!(reject["reason"], "invalid_email");
+        assert_eq!(reject["reasons"][0]["property"], "email");
+        assert_eq!(reject["sample"]["properties"]["name"], "Ada Lovelace");
+        assert_eq!(reject["sample"]["properties"]["email"], Value::Null);
+        assert_eq!(reject["sample"]["properties"]["id"], Value::Null);
+        assert_eq!(reject["sample"]["masked"], json!(["email", "id"]));
+        let shown = public.body.to_string();
+        assert!(!shown.contains("zz-pii-marker") && !shown.contains("zz-key-marker"));
+        // Once the trait is marked PII, its old samples hide the value too.
+        assert_eq!(
+            after.body["rejects"][0]["sample"]["properties"]["name"],
+            Value::Null
+        );
+        assert!(!after.body.to_string().contains("Ada Lovelace"));
+        assert_eq!(public.body["error_code"], "reject_threshold");
+        assert_eq!(public.body["records_rejected"], 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sources_schedule_is_mirrored_to_the_schedule_the_leader_fires(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let rows = || async {
+            sqlx::query_as::<_, (String, String, bool)>(
+                "SELECT kind, cron, enabled FROM schedules WHERE source_id IS NOT NULL",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({"kind": "fake", "name": "CRM", "config": {},
+                    "credential": {"token": "ok"}, "schedule": "0 * * * *"})),
+            )
+            .await;
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            rows().await,
+            [("sync.run".to_owned(), "0 * * * *".to_owned(), true)]
+        );
+
+        fx.as_admin(
+            "PATCH",
+            &format!("/sources/{id}"),
+            Some(json!({"schedule": "30 * * * *"})),
+        )
+        .await;
+        assert_eq!(
+            rows().await,
+            [("sync.run".to_owned(), "30 * * * *".to_owned(), true)]
+        );
+        fx.as_admin(
+            "PATCH",
+            &format!("/sources/{id}"),
+            Some(json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(
+            rows().await,
+            [("sync.run".to_owned(), "30 * * * *".to_owned(), false)]
+        );
+        fx.as_admin(
+            "PATCH",
+            &format!("/sources/{id}"),
+            Some(json!({"schedule": ""})),
+        )
+        .await;
+        assert!(
+            rows().await.is_empty(),
+            "clearing the schedule stops the firing"
+        );
+        fx.as_admin(
+            "PATCH",
+            &format!("/sources/{id}"),
+            Some(json!({"schedule": "0 * * * *", "enabled": true})),
+        )
+        .await;
+        assert_eq!(rows().await.len(), 1);
+        let deleted = fx.as_admin("DELETE", &format!("/sources/{id}"), None).await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert!(
+            rows().await.is_empty(),
+            "deleting the source stops the firing"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn changing_a_cursor_or_a_source_config_during_an_active_run_is_a_409(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let stream = format!("/sources/{id}/streams/stream_1");
+        let started = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "stream_1"})),
+            )
+            .await;
+        let run_id = started.body[0]["id"].as_str().unwrap().to_owned();
+        let incremental = json!({"enabled": true, "sync_mode": "incremental",
+            "cursor_field": "updated_at", "mapping": mapping_body()});
+
+        let cursor = fx.as_admin("PUT", &stream, Some(incremental.clone())).await;
+        let config = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"config": {"streams": 3}})),
+            )
+            .await;
+        let staleness = fx
+            .as_admin(
+                "PUT",
+                &stream,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "staleness_threshold_seconds": 60})),
+            )
+            .await;
+        let name = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"name": "CRM 2"})),
+            )
+            .await;
+
+        for refused in [&cursor, &config] {
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "sync_run_active");
+            assert!(
+                refused.body["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cancel it")
+            );
+        }
+        assert_eq!(staleness.status, StatusCode::OK, "{:?}", staleness.body);
+        assert_eq!(name.status, StatusCode::OK);
+        fx.as_admin("POST", &format!("/sources/{id}/runs/{run_id}/cancel"), None)
+            .await;
+        let after = fx.as_admin("PUT", &stream, Some(incremental)).await;
+        assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
+        assert_eq!(after.body["sync_mode"], "incremental");
+    }
 }

@@ -22,6 +22,7 @@ pub mod secrets;
 mod sessions;
 mod sources;
 mod suppressions;
+mod sync_runs;
 mod workspaces;
 
 use std::error::Error;
@@ -132,14 +133,22 @@ pub use sessions::{
 };
 pub use sources::{
     DiscoveredStream, NewSource, Source, SourceUpdate, Stream, StreamSettings, configure_stream,
-    create_source, delete_source, find_source, find_source_for_update, find_stream, list_sources,
-    list_streams, update_source, upsert_discovered_streams,
+    create_source, delete_source, find_source, find_source_for_update, find_stream,
+    find_stream_by_id, list_sources, list_streams, set_stream_mapping, sync_schedule,
+    update_source, upsert_discovered_streams,
 };
 pub use sqlx::PgConnection;
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,
     is_suppressed, list_suppressions, remove_suppression,
+};
+pub use sync_runs::{
+    BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
+    Counts as SyncCounts, FanOut, Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, RunCursor,
+    RunEnd, RunReject, RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SyncBatch, SyncReject, SyncRun,
+    SyncUpsert, cancel_run, commit_sync_batch, fail_orphaned_runs, fail_run, find_run, finish_run,
+    list_run_rejects, list_runs, queue_run, queue_runs_for_source, run_trace, start_run,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,
@@ -171,6 +180,7 @@ enum StoreErrorKind {
     Conflict,
     Retryable,
     Timeout,
+    RunActive,
 }
 
 impl StoreError {
@@ -275,6 +285,16 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::Retryable)
     }
 
+    /// A change the stream's active sync run would undo: it was refused and nothing was written.
+    pub(crate) fn run_active() -> Self {
+        Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether the change was refused because a sync run is queued or running.
+    pub fn is_run_active(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::RunActive)
+    }
+
     /// Whether the query ran past its statement timeout and PostgreSQL cancelled it.
     pub fn is_timeout(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Timeout)
@@ -339,6 +359,7 @@ impl fmt::Display for StoreError {
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
+            StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
             StoreErrorKind::Retryable => {
                 formatter
                     .write_str("the transaction conflicted with another and can be retried")?;

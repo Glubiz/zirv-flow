@@ -34,6 +34,7 @@ const ADMIN = {
   "GET /api/v1/source-kinds": () => json([FAKE_KIND]),
   "GET /api/v1/workspaces/ws1/sources/src-1": () => json(aSource()),
   "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([aStream()]),
+  "GET /api/v1/workspaces/ws1/sources/src-1/runs": () => json({ runs: [], next_cursor: null }),
 };
 
 describe("a source", () => {

@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams and sync runs, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1242,7 +1242,7 @@ type (a source type is one module plus one line in the source registry of
 cron schedule in UTC, and an enabled flag. It offers **streams**, such as a table or an
 endpoint; a stream is read only when you turn it on, and you choose its sync mode (full
 refresh, or incremental with a cursor field), its primary key and a staleness threshold.
-Running a sync comes with a later change; this one stores and tests the configuration.
+A run reads a stream and applies it to people (see Sync runs below).
 
 Open **Sources** in the web UI. The setup wizard walks through choosing a type, filling in its
 settings, saving and testing the connection, and discovering and setting up the streams. The
@@ -1269,6 +1269,70 @@ on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `
 `sync_mode`, `cursor_field`, `primary_key` and `staleness_threshold_seconds`. Settings are
 checked against the type and, for streams, against what discovery reported; a refusal is a 422
 that names each field, for example `incremental` without a `cursor_field`.
+
+### Sync runs
+
+A **run** reads one stream of a source from a checkpoint and applies the records to people.
+Start one with **Run now** on the source page (for every enabled stream that has a mapping, or
+for one), with `POST /api/v1/workspaces/{ws}/sources/{id}/runs` (`{}` or `{"stream": "name"}`,
+admins only, 202), or let the source's cron schedule start them. A stream needs a **mapping**
+before it can run: send it as `mapping` in `PUT .../streams/{name}` (the same shape as a CSV
+import's, with the stream's field names as columns; a trait must be in the registry, and a list
+target is refused because a run does not add people to lists). The mapping editor comes later.
+
+**How a run goes.** The `sync.run` job reads the source in batches, maps each record, and
+commits a unit of at least 500 records (a source batch is never split) in one transaction: the
+profile changes, the retracted records, the rejects, one decision per record, the counters and
+the checkpoint. The transaction is fenced twice. It locks the job's lease, so a worker whose
+lease was taken over commits nothing, and it locks the run, so a cancelled run is not applied.
+Records are kept under the source id and the stream name, with `last_seen_run` set to the run;
+nothing is swept (deleting what a full refresh no longer lists is a later change). A record the
+source reports as deleted retracts its contribution.
+
+**Checkpoints.** Each run keeps its own checkpoint, so a retried run resumes where it stopped
+without reading or applying a committed unit again; the run shows its **attempt** number. An
+incremental stream also keeps its cursor on the stream: the next run starts there, while a full
+refresh always starts from the beginning. A run that fails on its rejects does not move the
+stream's cursor, so after the mapping is fixed the next run reads those records again. Changing a
+stream's sync mode, cursor field or primary key, or a source's settings, clears the stream's
+cursor, since it belonged to the old ones. Such a change is refused with a 409 (`sync_run_active`)
+while a run of the stream (for a source's settings, of any of its streams) is queued or running,
+since that run would write the old cursor back: wait for it or cancel it first. Other changes,
+such as the staleness threshold, enabled, the name, the schedule or the mapping, stay allowed.
+
+**Cancel** with `POST .../runs/{run_id}/cancel` (admins only; 409 when the run has ended). The
+run stops at its next unit: the unit in flight is not applied, and the checkpoint stays at the
+last committed one.
+
+**Rejects.** A record the mapping or the store refuses is kept in `ingest_rejects` with the run
+id, reason codes, and a sample in which a value is shown only when the stream's mapping sends
+that field to a trait the registry marks non-PII; every other value is null and listed as
+masked. A run fails with `reject_threshold` when, after at least 100 records, more than 5% were
+refused. The units applied before stay applied. Sync rejects age out after 30 days like the
+others and hold no person id, so an erasure does not need to reach them.
+
+**Settings are checked again.** Before reading, a run checks the stream's settings against the
+descriptor discovery last reported, and fails with `stream_settings_invalid` when they no longer
+fit (a cursor field that disappeared, say). A stream without a mapping fails with
+`stream_not_mapped`; other codes are `source_error` and `job_failed` (the last attempt failed),
+`mapping_invalid`, `source_missing`, `stream_missing` and `source_kind_unavailable`.
+
+**Schedules.** A source's cron schedule (UTC) is mirrored to a `schedules` row, kept in step in
+the same transaction as the source: clearing the schedule, disabling the source or deleting it
+stops the firing. When the scheduler leader fires it, the job queues a run for each enabled,
+mapped stream that has no active run; a stream with an active run is skipped. One active run
+per stream is enforced by the database. The leader also fails (`job_failed`) a run whose job was
+buried by the job system or deleted, at most a minute later, so a lost job cannot keep a stream
+blocked.
+
+**Reading.** `GET .../runs?stream=&limit=&cursor=` lists runs newest first, and `GET
+.../runs/{run_id}` returns one with its counters, state, attempt, error code, trace id and its
+first 100 rejects. Any member or `read` key can read; starting and cancelling are audited as
+`sync_run.started` and `sync_run.cancelled` with run ids only. Everything a run changes is under
+one trace (`GET .../traces/{trace_id}`): each applied, refused or deleted record has a decision
+with the `sync_run` cause and a durable id (the source record, the person, or the reject), never
+a value. Metrics: `zirv_flow_sync_runs_total{outcome}`, `zirv_flow_sync_records_total{outcome}`
+and `zirv_flow_sync_run_duration_seconds`, with no source, stream or workspace label.
 
 ## Connector runtime
 

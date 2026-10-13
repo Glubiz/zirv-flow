@@ -117,11 +117,13 @@ mod tests {
                 "privacy.erase",
                 "privacy.export",
                 "import.dry_run",
-                "import.run"
+                "import.run",
+                "sync.run"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
-        assert!(registry.get("sync.run").is_none());
+        assert!(registry.get("sync.run").is_some());
+        assert!(registry.get("sync.nope").is_none());
     }
 
     #[test]
@@ -153,6 +155,7 @@ mod tests {
                 "privacy.export",
                 "import.dry_run",
                 "import.run",
+                "sync.run",
                 "test.first",
                 "test.second"
             ]

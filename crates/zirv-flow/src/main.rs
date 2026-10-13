@@ -392,6 +392,7 @@ async fn run_roles_reporting(
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
         worker_config.egress = config.egress_policy();
+        share_rate_limits(state.as_ref(), &mut worker_config);
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
             zirv_flow_jobs::Registry::built_in(),
@@ -573,6 +574,18 @@ async fn start_ops(addr: SocketAddr, state: zirv_flow_api::OpsState) -> Result<O
         drain,
         task,
     })
+}
+
+/// Makes the worker use the API state's rate-limit buckets, so a process that runs both
+/// `serve` and a worker keeps one bucket per source across them. A worker-only process keeps
+/// its own.
+fn share_rate_limits(
+    state: Option<&zirv_flow_api::AppState>,
+    worker: &mut zirv_flow_jobs::WorkerConfig,
+) {
+    if let Some(state) = state {
+        worker.rate_limits = Arc::clone(state.rate_limits());
+    }
 }
 
 type Render = Arc<dyn Fn() -> String + Send + Sync>;
@@ -1649,6 +1662,23 @@ endpoint = \"http://collector:4318/\""
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_worker_and_the_api_share_one_set_of_rate_limit_buckets() {
+        let state = state();
+        let mut worker = zirv_flow_jobs::WorkerConfig::new(1);
+        let own = Arc::clone(&worker.rate_limits);
+
+        share_rate_limits(None, &mut worker);
+        assert!(
+            Arc::ptr_eq(&worker.rate_limits, &own),
+            "a worker-only process keeps its own"
+        );
+
+        share_rate_limits(Some(&state), &mut worker);
+        assert!(Arc::ptr_eq(&worker.rate_limits, state.rate_limits()));
+        assert!(!Arc::ptr_eq(&worker.rate_limits, &own));
     }
 
     fn state() -> zirv_flow_api::AppState {

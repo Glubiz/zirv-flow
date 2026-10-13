@@ -28,7 +28,7 @@ pub(crate) struct TraceBody {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CauseBody {
-    /// `event`, `trait_change`, `schedule`, `manual`, `api` or `definition_change`.
+    /// `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
     #[schema(example = "api")]
     kind: String,
     /// What caused the work: a request id for `api`, otherwise a record id.

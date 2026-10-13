@@ -13,10 +13,11 @@ use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
     enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
-    expire_exports, inbox_heads, prune_debugger_feed, queue_depths, reap_expired, try_lead,
+    expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
+    reap_expired, try_lead,
 };
 
-use crate::metrics::{QueueGauges, set_inbox_age};
+use crate::metrics::{QueueGauges, RunOutcome, record_sync_run, set_inbox_age};
 
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
@@ -29,6 +30,8 @@ const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 const IMPORT_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 /// The longest between prunes of the debugger feed.
 const FEED_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// How often runs whose job is gone are failed.
+const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -84,6 +87,8 @@ pub struct Scheduler {
     imports_checked: Option<Instant>,
     /// When the debugger feed was last pruned; none until this instance leads.
     feed_pruned: Option<Instant>,
+    /// When the sync runs were last reconciled with their jobs; none until this instance leads.
+    sync_reconciled: Option<Instant>,
 }
 
 impl Scheduler {
@@ -96,6 +101,7 @@ impl Scheduler {
             partitions_checked: None,
             imports_checked: None,
             feed_pruned: None,
+            sync_reconciled: None,
         }
     }
 
@@ -134,6 +140,7 @@ impl Scheduler {
         self.keep_partitions(now).await;
         self.keep_imports().await;
         self.keep_debugger_feed().await;
+        self.keep_sync_runs().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -147,6 +154,7 @@ impl Scheduler {
         self.keep_partitions(now).await;
         self.keep_imports().await;
         self.keep_debugger_feed().await;
+        self.keep_sync_runs().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -217,6 +225,34 @@ impl Scheduler {
         }
     }
 
+    /// Fails the sync runs whose job is dead or gone: on gaining leadership, then at most every
+    /// minute. The generic job system does not know about runs, so a job it buried or deleted
+    /// would leave its run active, and its stream blocked, for good. A failure is logged and
+    /// retried at the next check.
+    async fn keep_sync_runs(&mut self) {
+        let due = self
+            .sync_reconciled
+            .is_none_or(|checked| checked.elapsed() >= SYNC_RECONCILE_INTERVAL);
+        if !due {
+            return;
+        }
+        self.sync_reconciled = Some(Instant::now());
+        match fail_orphaned_runs(&self.pool).await {
+            Ok(runs) => {
+                for _ in &runs {
+                    record_sync_run(RunOutcome::Failed, 0.0);
+                }
+                if !runs.is_empty() {
+                    warn!(
+                        "failed {} sync run(s) whose job is dead or gone",
+                        runs.len()
+                    );
+                }
+            }
+            Err(error) => warn!("could not reconcile the sync runs: {error}"),
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -229,6 +265,7 @@ impl Scheduler {
             self.partitions_checked = None;
             self.imports_checked = None;
             self.feed_pruned = None;
+            self.sync_reconciled = None;
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")

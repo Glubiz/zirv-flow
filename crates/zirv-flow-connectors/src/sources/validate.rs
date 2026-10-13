@@ -7,6 +7,7 @@ use serde_json::Value;
 use url::Url;
 
 use super::spec::{FieldKind, FieldSpec, SourceSpec};
+use super::types::{StreamDescriptor, SyncMode};
 
 /// One setting that failed validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +81,64 @@ pub fn validate_credential<V: AsRef<str>>(
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+/// The settings of a stream a user chose, as they are stored.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamSettingsInput<'a> {
+    pub sync_mode: &'a str,
+    pub cursor_field: Option<&'a str>,
+    pub primary_key: &'a [String],
+    pub staleness_threshold_seconds: Option<i32>,
+}
+
+/// Checks a stream's settings against the descriptor discovery last reported: the sync mode is
+/// one the stream supports, the cursor field and primary key name fields it has, an incremental
+/// stream has a cursor field, and a staleness threshold is positive. Returns the sync mode, or
+/// every rule broken. The API checks a change with it and a run re-checks before it reads.
+pub fn validate_stream_settings(
+    descriptor: &StreamDescriptor,
+    settings: &StreamSettingsInput<'_>,
+) -> Result<SyncMode, Vec<FieldError>> {
+    let mut errors = Vec::new();
+    let has_field = |name: &str| descriptor.fields.iter().any(|field| field.name == name);
+
+    let mode = SyncMode::parse(settings.sync_mode);
+    match mode {
+        None => errors.push(error("sync_mode", "must be full_refresh or incremental")),
+        Some(mode) if !descriptor.sync_modes.contains(&mode) => {
+            errors.push(error("sync_mode", "is not supported by this stream"));
+        }
+        Some(_) => {}
+    }
+    match settings.cursor_field {
+        Some(cursor) if !has_field(cursor) => {
+            errors.push(error("cursor_field", "is not a field of this stream"));
+        }
+        None if mode == Some(SyncMode::Incremental) => {
+            errors.push(error(
+                "cursor_field",
+                "is required for an incremental stream",
+            ));
+        }
+        _ => {}
+    }
+    if settings.primary_key.iter().any(|name| !has_field(name)) {
+        errors.push(error(
+            "primary_key",
+            "names a field this stream does not have",
+        ));
+    }
+    if settings
+        .staleness_threshold_seconds
+        .is_some_and(|seconds| seconds <= 0)
+    {
+        errors.push(error("staleness_threshold_seconds", "must be positive"));
+    }
+    match (errors.is_empty(), mode) {
+        (true, Some(mode)) => Ok(mode),
+        _ => Err(errors),
     }
 }
 
@@ -222,5 +281,92 @@ mod tests {
         values.clear();
         values.insert("token".to_owned(), "ok".to_owned());
         assert!(validate_credential(&SPEC, &values, true).is_ok());
+    }
+
+    fn descriptor() -> StreamDescriptor {
+        use super::super::types::{FieldDescriptor, FieldType};
+        StreamDescriptor {
+            name: "contacts".into(),
+            fields: ["id", "updated_at"]
+                .into_iter()
+                .map(|name| FieldDescriptor {
+                    name: name.into(),
+                    field_type: FieldType::String,
+                })
+                .collect(),
+            sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
+            default_cursor_field: Some("updated_at".into()),
+            default_primary_key: vec!["id".into()],
+        }
+    }
+
+    fn settings<'a>(
+        mode: &'a str,
+        cursor: Option<&'a str>,
+        key: &'a [String],
+    ) -> StreamSettingsInput<'a> {
+        StreamSettingsInput {
+            sync_mode: mode,
+            cursor_field: cursor,
+            primary_key: key,
+            staleness_threshold_seconds: Some(60),
+        }
+    }
+
+    #[test]
+    fn stream_settings_that_fit_the_descriptor_return_the_sync_mode() {
+        let key = vec!["id".to_owned()];
+
+        let mode = validate_stream_settings(
+            &descriptor(),
+            &settings("incremental", Some("updated_at"), &key),
+        );
+
+        assert_eq!(mode.unwrap(), SyncMode::Incremental);
+        assert!(
+            validate_stream_settings(&descriptor(), &settings("full_refresh", None, &key)).is_ok()
+        );
+    }
+
+    #[test]
+    fn every_stream_setting_the_descriptor_cannot_serve_is_reported() {
+        let key = vec!["missing".to_owned()];
+        let mut bad = settings("weekly", Some("nope"), &key);
+        bad.staleness_threshold_seconds = Some(0);
+
+        let errors = fields_of(validate_stream_settings(&descriptor(), &bad).map(|_| ()));
+
+        assert_eq!(
+            errors,
+            [
+                "sync_mode: must be full_refresh or incremental",
+                "cursor_field: is not a field of this stream",
+                "primary_key: names a field this stream does not have",
+                "staleness_threshold_seconds: must be positive",
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_needs_a_cursor_and_a_mode_the_stream_offers() {
+        let key = vec![];
+        let mut only_full = descriptor();
+        only_full.sync_modes = vec![SyncMode::FullRefresh];
+
+        let no_cursor =
+            validate_stream_settings(&descriptor(), &settings("incremental", None, &key));
+        let unsupported = validate_stream_settings(
+            &only_full,
+            &settings("incremental", Some("updated_at"), &key),
+        );
+
+        assert_eq!(
+            fields_of(no_cursor.map(|_| ())),
+            ["cursor_field: is required for an incremental stream"]
+        );
+        assert_eq!(
+            fields_of(unsupported.map(|_| ())),
+            ["sync_mode: is not supported by this stream"]
+        );
     }
 }

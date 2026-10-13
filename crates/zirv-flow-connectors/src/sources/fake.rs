@@ -17,7 +17,7 @@ use super::types::{
 /// The only token `check` accepts.
 pub const GOOD_TOKEN: &str = "ok";
 
-/// How many records every stream holds, and how many one batch carries.
+/// How many records every stream holds, and how many one batch carries, unless the config says.
 const RECORDS: u64 = 5;
 const BATCH: u64 = 2;
 
@@ -45,6 +45,46 @@ impl Source for Fake {
                 required: false,
                 secret: false,
             },
+            FieldSpec {
+                key: "records",
+                label: "Records",
+                help: "How many records every stream holds (default 5).",
+                kind: FieldKind::Number,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
+                key: "batch",
+                label: "Batch size",
+                help: "How many records one batch carries (default 2).",
+                kind: FieldKind::Number,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
+                key: "deleted",
+                label: "Deleted ids",
+                help: "Comma-separated record ids emitted as deleted.",
+                kind: FieldKind::Text,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
+                key: "invalid",
+                label: "Invalid ids",
+                help: "Comma-separated record ids whose email is not an email.",
+                kind: FieldKind::Text,
+                required: false,
+                secret: false,
+            },
+            FieldSpec {
+                key: "fail_after_batches",
+                label: "Fail after batches",
+                help: "A read error after this many batches.",
+                kind: FieldKind::Number,
+                required: false,
+                secret: false,
+            },
         ],
         credential_fields: &[FieldSpec {
             key: "token",
@@ -58,7 +98,7 @@ impl Source for Fake {
         capabilities: Capabilities {
             incremental: true,
             full_refresh: true,
-            emits_deletes: false,
+            emits_deletes: true,
         },
     };
 
@@ -97,6 +137,10 @@ impl Source for Fake {
                         field_type: FieldType::String,
                     },
                     FieldDescriptor {
+                        name: "email".into(),
+                        field_type: FieldType::String,
+                    },
+                    FieldDescriptor {
                         name: "updated_at".into(),
                         field_type: FieldType::Timestamp,
                     },
@@ -111,37 +155,63 @@ impl Source for Fake {
     fn read<'a>(
         &'a self,
         _ctx: &'a SourceContext,
-        _config: &'a Value,
+        config: &'a Value,
         _credential: &'a Credential,
         stream: &'a StreamConfig,
         checkpoint: Option<Checkpoint>,
     ) -> BoxStream<'a, Result<Batch, SourceError>> {
+        let records = config["records"].as_u64().unwrap_or(RECORDS).min(100_000);
+        let batch = config["batch"].as_u64().unwrap_or(BATCH).clamp(1, 100_000);
+        let deleted = id_set(&config["deleted"]);
+        let invalid = id_set(&config["invalid"]);
+        let fail_after = config["fail_after_batches"].as_u64();
         let start = checkpoint
             .and_then(|checkpoint| checkpoint.0["offset"].as_u64())
             .unwrap_or(0)
-            .min(RECORDS);
+            .min(records);
         let mut batches = Vec::new();
         let mut offset = start;
-        while offset < RECORDS {
-            let end = (offset + BATCH).min(RECORDS);
-            let records = (offset..end)
+        while offset < records {
+            if fail_after == Some(batches.len() as u64) {
+                batches.push(Err(SourceError::Other("the fake source failed".into())));
+                break;
+            }
+            let end = (offset + batch).min(records);
+            let batch_records = (offset..end)
                 .map(|id| Record {
                     key: format!("{}-{id}", stream.name),
                     data: json!({
                         "id": id,
                         "name": format!("{} record {id}", stream.name),
-                        "updated_at": format!("2026-01-{:02}T00:00:00Z", id + 1),
+                        "email": if invalid.contains(&id) {
+                            "not-an-email".to_owned()
+                        } else {
+                            format!("{}-{id}@example.com", stream.name)
+                        },
+                        "updated_at": format!("2026-01-{:02}T00:00:00Z", id % 28 + 1),
                     }),
-                    deleted: false,
+                    deleted: deleted.contains(&id),
                 })
                 .collect();
             batches.push(Ok(Batch {
-                records,
+                records: batch_records,
                 checkpoint: Checkpoint(json!({"offset": end})),
             }));
             offset = end;
         }
         stream::iter(batches).boxed()
+    }
+}
+
+/// The ids of a comma-separated text, or of an array of numbers.
+fn id_set(value: &Value) -> Vec<u64> {
+    match value {
+        Value::String(text) => text
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect(),
+        Value::Array(items) => items.iter().filter_map(Value::as_u64).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -258,5 +328,36 @@ mod tests {
         assert_eq!(all[2].checkpoint, Checkpoint(json!({"offset": 5})));
         assert_eq!(resumed, all[1..]);
         assert_eq!(all[0].records[0].key, "stream_1-0");
+    }
+
+    #[tokio::test]
+    async fn the_config_knobs_shape_size_deletes_invalid_records_and_failures() {
+        let ctx = context();
+        let credential = Credential::new();
+        let stream = stream();
+        let config = json!({"records": 7, "batch": 3, "deleted": "1, 4", "invalid": [2]});
+
+        let batches: Vec<Batch> = Fake
+            .read(&ctx, &config, &credential, &stream, None)
+            .map(|batch| batch.unwrap())
+            .collect()
+            .await;
+
+        let sizes: Vec<_> = batches.iter().map(|batch| batch.records.len()).collect();
+        assert_eq!(sizes, [3, 3, 1]);
+        let all: Vec<&Record> = batches.iter().flat_map(|b| &b.records).collect();
+        let deleted: Vec<_> = all.iter().filter(|r| r.deleted).map(|r| &r.key).collect();
+        assert_eq!(deleted, ["stream_1-1", "stream_1-4"]);
+        assert_eq!(all[2].data["email"], "not-an-email");
+        assert_eq!(all[0].data["email"], "stream_1-0@example.com");
+
+        let failing = json!({"fail_after_batches": 1});
+        let results: Vec<_> = Fake
+            .read(&ctx, &failing, &credential, &stream, None)
+            .collect()
+            .await;
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
     }
 }

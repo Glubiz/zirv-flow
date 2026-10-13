@@ -82,6 +82,7 @@ pub enum CauseKind {
     Manual,
     Api,
     DefinitionChange,
+    SyncRun,
 }
 
 impl CauseKind {
@@ -93,6 +94,7 @@ impl CauseKind {
             Self::Manual => "manual",
             Self::Api => "api",
             Self::DefinitionChange => "definition_change",
+            Self::SyncRun => "sync_run",
         }
     }
 }
@@ -114,6 +116,7 @@ impl FromStr for CauseKind {
             "manual" => Ok(Self::Manual),
             "api" => Ok(Self::Api),
             "definition_change" => Ok(Self::DefinitionChange),
+            "sync_run" => Ok(Self::SyncRun),
             _ => Err(ValidationError::new("cause_kind", "is not a known cause")),
         }
     }
@@ -148,6 +151,10 @@ impl Cause {
 
     pub fn trait_change(id: Uuid) -> Self {
         Self::of(CauseKind::TraitChange, id)
+    }
+
+    pub fn sync_run(id: Uuid) -> Self {
+        Self::of(CauseKind::SyncRun, id)
     }
 
     pub fn definition_change(id: Uuid) -> Self {
@@ -224,6 +231,8 @@ mod tests {
         assert_eq!(Cause::manual(user).id, user.to_string());
         assert_eq!(Cause::event(uuid).kind, CauseKind::Event);
         assert_eq!(Cause::trait_change(uuid).kind, CauseKind::TraitChange);
+        assert_eq!(Cause::sync_run(uuid).kind, CauseKind::SyncRun);
+        assert_eq!(Cause::sync_run(uuid).id, uuid.to_string());
         assert_eq!(
             Cause::definition_change(uuid).kind,
             CauseKind::DefinitionChange
@@ -239,6 +248,7 @@ mod tests {
             CauseKind::Manual,
             CauseKind::Api,
             CauseKind::DefinitionChange,
+            CauseKind::SyncRun,
         ] {
             assert_eq!(kind.as_str().parse::<CauseKind>().unwrap(), kind);
         }

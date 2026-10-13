@@ -160,6 +160,48 @@ impl ApiError {
         }
     }
 
+    /// The stream already has a queued or running sync run.
+    pub(crate) fn sync_run_active() -> Self {
+        Self {
+            code: Some("sync_run_active"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the stream already has a run that is queued or running",
+            )
+        }
+    }
+
+    /// A change of a sync mode, cursor field, primary key or source setting while a sync run is
+    /// queued or running: the run would undo it.
+    pub(crate) fn sync_run_blocks_change() -> Self {
+        Self {
+            code: Some("sync_run_active"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "a sync run is queued or running; wait for it to finish or cancel it, then change the sync mode, cursor field, primary key or source settings",
+            )
+        }
+    }
+
+    /// A run was asked for a stream that has no mapping, or for a source with none mapped.
+    pub(crate) fn stream_not_mapped(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("stream_not_mapped"),
+            ..Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
+        }
+    }
+
+    /// A run was asked for a stream that is not enabled.
+    pub(crate) fn stream_not_enabled() -> Self {
+        Self {
+            code: Some("stream_not_enabled"),
+            ..Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the stream is not enabled; enable it before running it",
+            )
+        }
+    }
+
     /// A caller without access to values asked to probe or break down a PII property.
     pub(crate) fn pii_property_not_explorable() -> Self {
         Self {
@@ -270,6 +312,8 @@ impl From<zirv_flow_store::StoreError> for ApiError {
     fn from(error: zirv_flow_store::StoreError) -> Self {
         if error.is_timeout() {
             Self::search_timeout()
+        } else if error.is_run_active() {
+            Self::sync_run_blocks_change()
         } else {
             Self::internal()
         }

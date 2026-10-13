@@ -202,6 +202,31 @@ where
     }
 }
 
+/// Runs a batch commit whole, and again with `singly` set when it fails with an error that
+/// retrying cannot cure. `conflicted` is the failure for a conflict that outlasts the retries;
+/// `unapplied` is the one for a batch that cannot be applied even record by record.
+pub(super) async fn whole_then_singly<T, F, Fut>(
+    conflicted: JobError,
+    unapplied: &'static str,
+    mut commit: F,
+) -> Result<T, JobError>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: Future<Output = Result<T, StoreError>>,
+{
+    match retrying(|| commit(false)).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if error.is_retryable() => Err(conflicted),
+        Err(_) => retrying(|| commit(true)).await.map_err(|error| {
+            if error.is_retryable() {
+                conflicted
+            } else {
+                JobError::new(unapplied)
+            }
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

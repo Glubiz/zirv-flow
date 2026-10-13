@@ -10,10 +10,13 @@ interface StreamsPanelProps {
   streams: Stream[];
   canManage: boolean;
   onChanged: (stream: Stream) => void;
+  /** Starts a run of one stream; without it the table offers no run. */
+  onRun?: (stream: Stream) => void;
+  busy?: boolean;
 }
 
 /** The streams of a source with their settings; admins set each one up in a dialog. */
-export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged }: StreamsPanelProps) {
+export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, busy }: StreamsPanelProps) {
   const [editing, setEditing] = useState<Stream | null>(null);
 
   if (streams.length === 0) {
@@ -60,6 +63,11 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                 <td className="num">{stream.staleness_threshold_seconds ?? "None"}</td>
                 {canManage ? (
                   <td className="num">
+                    {onRun && stream.enabled && stream.mapping ? (
+                      <Button onClick={() => onRun(stream)} disabled={busy === true} aria-label={`Run ${stream.name} now`}>
+                        Run now
+                      </Button>
+                    ) : null}
                     <Button onClick={() => setEditing(stream)} aria-label={`Set up ${stream.name}`}>
                       Set up
                     </Button>
