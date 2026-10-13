@@ -13,8 +13,10 @@ chrono.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
 metrics.workspace = true
 rand.workspace = true
+rskafka.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-platform-verifier.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +31,8 @@ zirv-flow-core.workspace = true
 test-support = []
 
 [dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 axum.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus.workspace = true

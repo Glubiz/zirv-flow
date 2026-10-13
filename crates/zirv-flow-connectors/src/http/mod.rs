@@ -9,3 +9,4 @@ pub use body::DEFAULT_MAX_BODY_BYTES;
 pub use client::{GuardedClient, GuardedResponse, HttpLimits};
 pub use error::HttpError;
 pub use resolver::Lookup;
+pub(crate) use resolver::{SystemLookup, check_all};

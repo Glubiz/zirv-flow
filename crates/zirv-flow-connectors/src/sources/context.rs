@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use zirv_flow_core::egress::EgressPolicy;
 
-use crate::http::{GuardedClient, HttpError, HttpLimits};
+use crate::http::{GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup};
 use crate::runtime::{
     AccessToken, Auth, RateLimit, RateLimits, RequestSpec, RetryPolicy, RuntimeError,
     RuntimeResponse, TokenSlot, send,
@@ -30,6 +30,8 @@ pub struct SourceContext {
     token: Arc<Mutex<TokenSlot>>,
     /// Held while a token is fetched, so concurrent calls make one request between them.
     flight: Arc<tokio::sync::Mutex<()>>,
+    /// Resolves the names of sources that dial by IP themselves (Kafka).
+    lookup: Arc<dyn Lookup>,
 }
 
 impl SourceContext {
@@ -70,6 +72,7 @@ impl SourceContext {
             retry: RetryPolicy::default(),
             token: Arc::default(),
             flight: Arc::default(),
+            lookup: Arc::new(SystemLookup),
         }
     }
 
@@ -95,6 +98,17 @@ impl SourceContext {
             self.slot().current = Some(token);
         }
         self
+    }
+
+    /// Resolves names through `lookup` where a source dials by IP itself. The egress policy still
+    /// applies to whatever it returns.
+    pub fn with_lookup(mut self, lookup: Arc<dyn Lookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    pub(crate) fn lookup(&self) -> Arc<dyn Lookup> {
+        Arc::clone(&self.lookup)
     }
 
     pub fn http(&self) -> &GuardedClient {
