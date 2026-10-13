@@ -8964,4 +8964,1076 @@ email,b@example.com,
         let live = again.take(1).await;
         assert_eq!(live[0].event, "item");
     }
+
+    // ---- The AI provider layer ----
+
+    const AI_KEY: &str = "sk-live-hunter2-0123456789";
+    const AI_PROMPT: &str = "PROMPT-MARKER-4f1c9a";
+
+    fn ai_model(name: &str, context: u32) -> crate::AiModelConfig {
+        crate::AiModelConfig {
+            name: name.to_owned(),
+            context_window_tokens: context,
+            input_price_per_mtok: 3_000_000,
+            output_price_per_mtok: 15_000_000,
+        }
+    }
+
+    fn ai_config(local_port: Option<u16>, rate_limit: u32) -> crate::AiConfig {
+        let mut providers = vec![crate::AiProviderConfig {
+            id: "openai".into(),
+            kind: zirv_flow_ai::ProviderKind::OpenAiCompatible,
+            base_url: "https://api.openai.com/v1".into(),
+            models: vec![ai_model("big", 128_000), ai_model("small", 8_192)],
+        }];
+        if let Some(port) = local_port {
+            providers.push(crate::AiProviderConfig {
+                id: "local".into(),
+                kind: zirv_flow_ai::ProviderKind::OpenAiCompatible,
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                models: vec![ai_model("local-model", 65_536)],
+            });
+        }
+        crate::AiConfig {
+            providers,
+            rate_limit_per_user_per_minute: rate_limit,
+            max_repair_attempts: 2,
+        }
+    }
+
+    fn probe_ok() -> Result<zirv_flow_ai::ChatResponse, zirv_flow_ai::AiError> {
+        Ok(zirv_flow_ai::fake::tool_call_response(
+            "probe",
+            json!({"status": "ready"}),
+            20,
+            5,
+        ))
+    }
+
+    /// A router and state whose AI calls go to `fake` (when given) or to the real adapters.
+    async fn ai_state(
+        pool: &PgPool,
+        fake: Option<&Arc<zirv_flow_ai::fake::FakeProvider>>,
+        config: crate::AiConfig,
+        egress: &[&str],
+    ) -> AppState {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let keys = Arc::new(
+            zirv_flow_core::Keyring::new(zirv_flow_core::MasterKey::generate(), None).unwrap(),
+        );
+        let root = zirv_flow_core::HmacRoot::bootstrap_from(keys.current());
+        let sealed = zirv_flow_core::seal(
+            &keys,
+            root.to_secret_bytes().expose(),
+            &zirv_flow_core::deployment_key_aad(zirv_flow_store::secrets::HMAC_ROOT),
+        );
+        zirv_flow_store::secrets::insert_hmac_root_if_absent(pool, &sealed)
+            .await
+            .unwrap();
+        let allow: Vec<String> = egress.iter().map(|entry| (*entry).to_owned()).collect();
+        let mut state = AppState::new(pool.clone(), Arc::new(String::new))
+            .with_hmac_root(&root)
+            .with_keyring(keys)
+            .with_egress_policy(Arc::new(
+                zirv_flow_core::egress::EgressPolicy::parse(&allow).unwrap(),
+            ))
+            .with_ai_config(config);
+        if let Some(fake) = fake {
+            state.ai = state.ai.clone().with_replacement(Arc::clone(fake) as _);
+        }
+        state
+    }
+
+    fn ai_uri(ws: &str, tail: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/ai/{tail}")
+    }
+
+    fn ai_put(overrides: Value) -> Value {
+        let mut body = json!({
+            "enabled": true,
+            "provider_id": "openai",
+            "model": "big",
+            "monthly_budget_micros": 1_000_000,
+            "pii_opt_in": false,
+            "transcript_days": null,
+            "provider_key": AI_KEY,
+        });
+        for (key, value) in overrides.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body
+    }
+
+    async fn put_ai(router: &Router, owner: &Login, ws: &str, body: Value) -> Reply {
+        call(
+            router,
+            "PUT",
+            &ai_uri(ws, "settings"),
+            Some(body),
+            Auth::Session(owner),
+        )
+        .await
+    }
+
+    /// Every table of the schema as text, the way a dump would show it.
+    async fn dump_text(pool: &PgPool) -> String {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT tablename::text FROM pg_tables WHERE schemaname = current_schema()",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let mut text = String::new();
+        for table in tables {
+            let rows: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT string_agg(t::text, E'\\n') FROM \"{table}\" t"
+            )))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            text.push_str(&rows.unwrap_or_default());
+        }
+        text
+    }
+
+    async fn ai_calls(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM ai_calls")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn owner_id(pool: &PgPool) -> UserId {
+        let email = zirv_flow_core::Email::parse(OWNER_EMAIL).unwrap();
+        zirv_flow_store::find_user_by_email(pool, &email)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    }
+
+    /// A workspace with the assistant enabled on `fake`, its probe consumed.
+    async fn enabled_workspace(
+        pool: &PgPool,
+        fake: &Arc<zirv_flow_ai::fake::FakeProvider>,
+        config: crate::AiConfig,
+        overrides: Value,
+    ) -> (AppState, Router, Login, String) {
+        let state = ai_state(pool, Some(fake), config, &[]).await;
+        let router = router(state.clone());
+        let owner = owner(pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        fake.push(probe_ok());
+        let reply = put_ai(&router, &owner, &ws, ai_put(overrides)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        (state, router, owner, ws)
+    }
+
+    fn mapping_request(
+        privacy: zirv_flow_ai::Privacy,
+        personal: bool,
+    ) -> Result<zirv_flow_ai::ChatRequest, zirv_flow_ai::AiError> {
+        let content = if personal {
+            zirv_flow_ai::Content::Personal(format!("{AI_PROMPT} ada@example.com"))
+        } else {
+            zirv_flow_ai::Content::Schema(format!("{AI_PROMPT} columns: Email, Name"))
+        };
+        Ok(zirv_flow_ai::RequestBuilder::new(privacy)
+            .user(vec![content])?
+            .build())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn ai_settings_start_off_and_are_admin_only_and_the_models_list_the_allowlist(
+        pool: PgPool,
+    ) {
+        let state = ai_state(&pool, None, ai_config(None, 20), &[]).await;
+        let router = router(state);
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+
+        let defaults = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let models = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "models"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let usage = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "usage"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let mut member_replies = Vec::new();
+        for (method, tail, body) in [
+            ("GET", "settings", None),
+            ("PUT", "settings", Some(ai_put(json!({})))),
+            ("GET", "models", None),
+            ("GET", "usage", None),
+        ] {
+            member_replies.push(
+                call(
+                    &router,
+                    method,
+                    &ai_uri(&ws, tail),
+                    body,
+                    Auth::Session(&member),
+                )
+                .await,
+            );
+        }
+        let anonymous = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Anonymous,
+        )
+        .await;
+
+        assert_eq!(defaults.status, StatusCode::OK);
+        assert_eq!(defaults.body["enabled"], false);
+        assert_eq!(defaults.body["provider_key_set"], false);
+        assert_eq!(defaults.body["monthly_budget_micros"], 0);
+        assert_eq!(defaults.body["pii_opt_in"], false);
+        assert!(defaults.body["transcript_days"].is_null());
+        assert_eq!(models.status, StatusCode::OK);
+        assert_eq!(models.body["min_context_window_tokens"], 32768);
+        let models_list = &models.body["providers"][0]["models"];
+        assert_eq!(models_list[0]["name"], "big");
+        assert_eq!(models_list[0]["meets_minimum_context"], true);
+        assert_eq!(models_list[1]["meets_minimum_context"], false);
+        assert_eq!(usage.status, StatusCode::OK);
+        assert_eq!(usage.body["spent_micros"], 0);
+        for reply in &member_replies {
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{:?}", reply.body);
+        }
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enabling_probes_the_model_and_the_key_is_never_echoed_logged_or_stored_in_plaintext(
+        pool: PgPool,
+    ) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (_state, router, owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            ai_config(None, 20),
+            json!({"transcript_days": 7, "pii_opt_in": true}),
+        )
+        .await;
+
+        let got = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(fake.call_count(), 1);
+        let probe = &fake.requests()[0];
+        assert_eq!(probe.tools()[0].name, "probe");
+        assert_eq!(got.body["enabled"], true);
+        assert_eq!(got.body["provider_key_set"], true);
+        assert_eq!(got.body["transcript_days"], 7);
+        assert_eq!(got.body["last_probe"]["ok"], true);
+        assert!(got.body.get("provider_key").is_none());
+        let dump = dump_text(&pool).await;
+        assert!(!dump.contains(AI_KEY), "the key appears in plaintext");
+        assert!(!got.body.to_string().contains(AI_KEY));
+        let sealed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM encrypted_secrets WHERE purpose = 'ai_provider_key'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sealed, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_model_without_tool_calls_usage_or_a_big_enough_window_is_refused_with_the_reason(
+        pool: PgPool,
+    ) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let state = ai_state(&pool, Some(&fake), ai_config(None, 20), &[]).await;
+        let router = router(state);
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ready", 20, 5)));
+        let no_tools = put_ai(&router, &owner, &ws, ai_put(json!({}))).await;
+        fake.push(Err(zirv_flow_ai::AiError::Capability("usage".into())));
+        let no_usage = put_ai(&router, &owner, &ws, ai_put(json!({}))).await;
+        let before = fake.call_count();
+        let small = put_ai(&router, &owner, &ws, ai_put(json!({"model": "small"}))).await;
+        let after = fake.call_count();
+        let got = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        for (reply, field) in [
+            (&no_tools, "tool_calls"),
+            (&no_usage, "usage"),
+            (&small, "context_window"),
+        ] {
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+            assert_eq!(reply.body["code"], "ai_capability_missing");
+            assert_eq!(reply.body["errors"][0]["field"], field, "{:?}", reply.body);
+            assert!(
+                !reply.body["errors"][0]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            small.body["errors"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("8192")
+        );
+        // A window below 32k is refused without calling the model at all.
+        assert_eq!(before, after);
+        // Nothing was saved, and no secret was stored for a refused enablement.
+        assert_eq!(got.body["enabled"], false);
+        assert_eq!(got.body["provider_key_set"], false);
+        assert!(!dump_text(&pool).await.contains(AI_KEY));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn invalid_settings_are_422s_naming_the_field(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let state = ai_state(&pool, Some(&fake), ai_config(None, 20), &[]).await;
+        let router = router(state);
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+
+        let cases = [
+            (json!({"model": "nope"}), "model"),
+            (json!({"provider_id": "nope"}), "model"),
+            (json!({"model": null}), "provider_id and model"),
+            (json!({"provider_id": null, "model": null}), "model"),
+            (
+                json!({"monthly_budget_micros": -5}),
+                "monthly_budget_micros",
+            ),
+            (json!({"transcript_days": 31}), "transcript_days"),
+            (json!({"transcript_days": 0}), "transcript_days"),
+            (json!({"provider_key": "  "}), "provider_key"),
+            (json!({"provider_key": null}), "provider_key"),
+        ];
+        for (overrides, field) in cases {
+            let reply = put_ai(&router, &owner, &ws, ai_put(overrides.clone())).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{overrides}"
+            );
+            assert!(
+                reply.body["detail"].as_str().unwrap().starts_with(field),
+                "{overrides}: {:?}",
+                reply.body
+            );
+        }
+        assert_eq!(fake.call_count(), 0);
+        let unknown = call(
+            &router,
+            "PUT",
+            &ai_uri(&ws, "settings"),
+            Some(json!({"enabled": false, "extra": 1})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert!(unknown.status.is_client_error());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn changing_settings_is_audited_with_the_changed_fields_and_never_the_key(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (_state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        // A transcript window, a budget change and a new key; the model is probed again for the key.
+        fake.push(probe_ok());
+        let changed = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({
+                "transcript_days": 14,
+                "monthly_budget_micros": 2_000_000,
+                "provider_key": "sk-new-key-0000-hunter3",
+            })),
+        )
+        .await;
+        // Unchanged settings without a key do not probe and are not audited again.
+        let again = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({
+                "transcript_days": 14,
+                "monthly_budget_micros": 2_000_000,
+                "provider_key": null,
+            })),
+        )
+        .await;
+        let off = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({
+                "enabled": false,
+                "transcript_days": null,
+                "monthly_budget_micros": 2_000_000,
+                "provider_key": null,
+            })),
+        )
+        .await;
+
+        assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.body);
+        assert_eq!(again.status, StatusCode::OK, "{:?}", again.body);
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        assert_eq!(fake.call_count(), 2, "only enabling and the new key probe");
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let updates: Vec<&zirv_flow_store::AuditEntry> = entries
+            .iter()
+            .filter(|entry| entry.action == "ai.settings.updated")
+            .collect();
+        assert_eq!(updates.len(), 3, "{updates:?}");
+        // Newest first: switched off, then the transcript window and budget and key, then enabling.
+        assert_eq!(
+            updates[0].summary["changed"],
+            json!(["enabled", "transcript_days"])
+        );
+        assert_eq!(updates[0].summary["values"]["enabled"], false);
+        assert!(updates[0].summary["values"]["transcript_days"].is_null());
+        let changed_fields = updates[1].summary["changed"].as_array().unwrap();
+        for field in ["monthly_budget_micros", "transcript_days", "provider_key"] {
+            assert!(changed_fields.contains(&json!(field)), "{field}");
+        }
+        assert_eq!(updates[1].summary["values"]["transcript_days"], 14);
+        assert!(updates[1].summary["values"].get("provider_key").is_none());
+        assert!(
+            updates
+                .iter()
+                .all(|entry| entry.object_kind.as_deref() == Some("ai_settings"))
+        );
+        assert!(updates.iter().all(|entry| entry.actor_kind == "user"));
+        let text = format!("{entries:?}");
+        assert!(!text.contains("hunter"), "{text}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dispatched_call_leaves_one_content_free_row_with_tokens_and_cost(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let user = owner_id(&pool).await;
+        fake.push(Ok(zirv_flow_ai::fake::text_response(
+            "RESPONSE-MARKER-77",
+            1_000,
+            500,
+        )));
+
+        let response = crate::dispatch(&state, Some(user), workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response.text(), "RESPONSE-MARKER-77");
+        assert_eq!(ai_calls(&pool).await, 1);
+        let (feature, provider, model, input, output, cost, outcome, user_id): (
+            String,
+            String,
+            String,
+            i32,
+            i32,
+            i64,
+            String,
+            Option<uuid::Uuid>,
+        ) = sqlx::query_as(
+            "SELECT feature, provider_id, model, input_tokens, output_tokens, \
+                    estimated_cost_micros, outcome, user_id FROM ai_calls",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (feature.as_str(), provider.as_str(), model.as_str()),
+            ("mapping", "openai", "big")
+        );
+        assert_eq!((input, output), (1_000, 500));
+        // 1000 input tokens at 3.00 per million plus 500 output tokens at 15.00 per million.
+        assert_eq!(cost, 3_000 + 7_500);
+        assert_eq!(outcome, "ok");
+        assert_eq!(user_id, Some(user.as_uuid()));
+        let log: String = sqlx::query_scalar("SELECT string_agg(t::text, ' ') FROM ai_calls t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !log.contains(AI_PROMPT) && !log.contains("RESPONSE-MARKER"),
+            "{log}"
+        );
+        assert!(!log.contains("Email, Name"), "{log}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_call_is_logged_with_its_outcome_and_no_cost_and_the_error_is_a_502(
+        pool: PgPool,
+    ) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        fake.push(Err(zirv_flow_ai::AiError::Http(503)));
+
+        let error = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap_err();
+
+        let problem = crate::problem::ApiError::from(error);
+        assert_eq!(problem.status_code(), StatusCode::BAD_GATEWAY);
+        let (outcome, cost, user_id): (String, i64, Option<uuid::Uuid>) =
+            sqlx::query_as("SELECT outcome, estimated_cost_micros, user_id FROM ai_calls")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((outcome.as_str(), cost, user_id), ("http_error", 0, None));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn crossing_the_budget_stops_the_call_before_dispatch_and_records_nothing(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            ai_config(None, 20),
+            json!({"monthly_budget_micros": 20_000}),
+        )
+        .await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let user = owner_id(&pool).await;
+        let sent = fake.call_count();
+        // 10_500 per call: two calls cross a 20_000 budget.
+        for _ in 0..2 {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 1_000, 500)));
+            crate::dispatch(&state, Some(user), workspace, "mapping", |privacy| {
+                mapping_request(privacy, false)
+            })
+            .await
+            .unwrap();
+        }
+        let rows = ai_calls(&pool).await;
+
+        let refused = crate::dispatch(&state, Some(user), workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            fake.call_count(),
+            sent + 2,
+            "no request was made once the budget was spent"
+        );
+        assert_eq!(ai_calls(&pool).await, rows, "a refusal records nothing");
+        let problem = crate::problem::ApiError::from(refused);
+        assert_eq!(problem.status_code(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            problem.detail(),
+            "the workspace's monthly AI budget is spent"
+        );
+        // The usage page shows the spend against the budget.
+        let usage = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "usage"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(usage.body["spent_micros"], 21_000);
+        assert_eq!(usage.body["budget_micros"], 20_000);
+        assert_eq!(usage.body["by_feature"][0]["feature"], "mapping");
+        assert_eq!(usage.body["by_feature"][0]["calls"], 2);
+        assert_eq!(usage.body["by_user"][0]["calls"], 2);
+        assert_eq!(usage.body["recent"].as_array().unwrap().len(), 2);
+        assert!(!usage.body.to_string().contains(AI_PROMPT));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_zero_budget_allows_no_calls(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            ai_config(None, 20),
+            json!({"monthly_budget_micros": 0}),
+        )
+        .await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let sent = fake.call_count();
+
+        let refused = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert!(matches!(
+            refused,
+            Err(crate::DispatchError::Ai(
+                zirv_flow_ai::AiError::BudgetExceeded
+            ))
+        ));
+        assert_eq!((fake.call_count(), ai_calls(&pool).await), (sent, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_user_over_the_rate_limit_is_refused_before_dispatch_and_others_are_not(
+        pool: PgPool,
+    ) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 2), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let (other_id, _other) = user(&pool, &router, "other@example.com").await;
+        let _ = owner;
+        let ada = owner_id(&pool).await;
+        let sent = fake.call_count();
+        for _ in 0..2 {
+            fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+            crate::dispatch(&state, Some(ada), workspace, "mapping", |privacy| {
+                mapping_request(privacy, false)
+            })
+            .await
+            .unwrap();
+        }
+
+        let refused = crate::dispatch(&state, Some(ada), workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap_err();
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+        let other = crate::dispatch(&state, Some(other_id), workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert_eq!(fake.call_count(), sent + 3, "the refused call sent nothing");
+        assert_eq!(ai_calls(&pool).await, 3);
+        let problem = crate::problem::ApiError::from(refused);
+        assert_eq!(problem.status_code(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(other.is_ok(), "the limit is per user");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn personal_content_is_refused_without_the_opt_in_and_sent_with_it(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let sent = fake.call_count();
+
+        let refused = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, true)
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(fake.call_count(), sent, "no request was built or sent");
+        assert_eq!(ai_calls(&pool).await, 0);
+        let problem = crate::problem::ApiError::from(refused);
+        assert_eq!(problem.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The admin opts in; the same request now goes out, labelled personal.
+        let opted = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({"pii_opt_in": true, "provider_key": null})),
+        )
+        .await;
+        assert_eq!(opted.status, StatusCode::OK, "{:?}", opted.body);
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
+        crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, true)
+        })
+        .await
+        .unwrap();
+        let request = fake.requests().pop().unwrap();
+        assert!(request.contents().any(zirv_flow_ai::Content::is_personal));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_that_is_off_or_whose_model_left_the_allowlist_is_disabled(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let sent = fake.call_count();
+        let mut trimmed = (*state.ai.config).clone();
+        trimmed.providers.clear();
+        let mut gone = state.clone();
+        gone.ai = crate::assistant::runtime::AiRuntime::new(trimmed)
+            .with_replacement(Arc::clone(&fake) as _);
+
+        let removed = crate::dispatch(&gone, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+        let off = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({"enabled": false, "provider_key": null})),
+        )
+        .await;
+        let disabled = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+        let unknown = crate::dispatch(
+            &state,
+            None,
+            zirv_flow_core::WorkspaceId::new(),
+            "mapping",
+            |privacy| mapping_request(privacy, false),
+        )
+        .await;
+
+        assert_eq!(off.status, StatusCode::OK);
+        for refused in [removed, disabled, unknown] {
+            assert!(matches!(
+                refused,
+                Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::Disabled))
+            ));
+        }
+        assert_eq!((fake.call_count(), ai_calls(&pool).await), (sent, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn transcripts_are_stored_only_when_opted_in_and_expire_after_the_window(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        fake.push(Ok(zirv_flow_ai::fake::text_response(
+            "RESPONSE-MARKER-77",
+            10,
+            10,
+        )));
+        crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap();
+        let without: i64 = sqlx::query_scalar("SELECT count(*) FROM ai_transcripts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let opted = put_ai(
+            &router,
+            &owner,
+            &ws,
+            ai_put(json!({"transcript_days": 3, "provider_key": null})),
+        )
+        .await;
+        assert_eq!(opted.status, StatusCode::OK, "{:?}", opted.body);
+        fake.push(Ok(zirv_flow_ai::fake::text_response(
+            "RESPONSE-MARKER-77",
+            10,
+            10,
+        )));
+        crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(without, 0);
+        let (days, content): (f64, serde_json::Value) = sqlx::query_as(
+            "SELECT (extract(epoch FROM expires_at - created_at) / 86400)::float8, content \
+             FROM ai_transcripts",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!((days - 3.0).abs() < 0.01, "{days}");
+        let text = content.to_string();
+        assert!(
+            text.contains(AI_PROMPT) && text.contains("RESPONSE-MARKER-77"),
+            "{text}"
+        );
+        assert!(!text.contains(AI_KEY));
+        // The call log still holds no content, with or without the transcript.
+        let log: String = sqlx::query_scalar("SELECT string_agg(t::text, ' ') FROM ai_calls t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!log.contains(AI_PROMPT));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_repair_attempt_is_its_own_dispatch_and_passes_the_gates(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 2), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let user = owner_id(&pool).await;
+        let dispatcher = crate::Dispatcher::open(&state, Some(user), workspace, "mapping")
+            .await
+            .unwrap();
+        let request = mapping_request(dispatcher.privacy(), false).unwrap();
+        let wants_ok = |response: &zirv_flow_ai::ChatResponse| match response.text().as_str() {
+            "ok" => Ok(()),
+            other => Err(vec![format!("expected ok, got {other}")]),
+        };
+        let sent = fake.call_count();
+        for word in ["bad", "worse", "worst"] {
+            fake.push(Ok(zirv_flow_ai::fake::text_response(word, 10, 10)));
+        }
+
+        // Two calls fit the per-minute limit, so the third repair attempt is refused at the gate.
+        let outcome = zirv_flow_ai::repair(5, &request, &dispatcher, wants_ok).await;
+
+        assert_eq!(outcome, Err(zirv_flow_ai::AiError::RateLimited));
+        assert_eq!(fake.call_count(), sent + 2);
+        assert_eq!(ai_calls(&pool).await, 2);
+        let second = &fake.requests()[sent + 1];
+        assert!(second.messages().len() > request.messages().len());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_local_model_server_on_a_private_address_is_blocked_until_it_is_allowlisted(
+        pool: PgPool,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let server = Router::new().fallback(axum::routing::post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "model": "local-model",
+                    "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [
+                        {"id": "c1", "type": "function",
+                         "function": {"name": "probe", "arguments": "{\"status\":\"ready\"}"}}]}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4}
+                }))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let body = ai_put(json!({"provider_id": "local", "model": "local-model"}));
+
+        let blocked_state = ai_state(&pool, None, ai_config(Some(port), 20), &[]).await;
+        let blocked_router = router(blocked_state.clone());
+        let owner = owner(&pool, &blocked_router).await;
+        let ws = workspace(&blocked_router, &owner, "Alpha").await;
+        let blocked = put_ai(&blocked_router, &owner, &ws, body.clone()).await;
+        let blocked_hits = hits.load(Ordering::SeqCst);
+
+        // The same deployment with the loopback address allowlisted (and so a fresh client).
+        let allow = zirv_flow_core::egress::EgressPolicy::parse(&["127.0.0.1/32".to_owned()]);
+        let allowed_state = blocked_state
+            .with_egress_policy(Arc::new(allow.unwrap()))
+            .with_ai_config(ai_config(Some(port), 20));
+        let allowed_router = router(allowed_state);
+        let allowed = put_ai(&allowed_router, &owner, &ws, body).await;
+
+        assert_eq!(
+            blocked.status,
+            StatusCode::BAD_GATEWAY,
+            "{:?}",
+            blocked.body
+        );
+        assert_eq!(blocked.body["code"], "ai_provider_error");
+        assert!(
+            blocked.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("loopback"),
+            "{:?}",
+            blocked.body
+        );
+        assert_eq!(blocked_hits, 0, "the server was never contacted");
+        let got = call(
+            &blocked_router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(
+            got.body["enabled"], true,
+            "the second router's save is visible"
+        );
+        assert_eq!(got.body["provider_id"], "local");
+        assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(!dump_text(&pool).await.contains(AI_KEY));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn ai_data_is_isolated_per_workspace(pool: PgPool) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, router, owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let second = self::workspace(&router, &owner, "Beta").await;
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 100, 100)));
+        crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await
+        .unwrap();
+
+        let other_settings = call(
+            &router,
+            "GET",
+            &ai_uri(&second, "settings"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let other_usage = call(
+            &router,
+            "GET",
+            &ai_uri(&second, "usage"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let own_usage = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "usage"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let refused = crate::dispatch(
+            &state,
+            None,
+            second.parse().unwrap(),
+            "mapping",
+            |privacy| mapping_request(privacy, false),
+        )
+        .await;
+
+        assert_eq!(other_settings.body["enabled"], false);
+        assert_eq!(other_settings.body["provider_key_set"], false);
+        assert_eq!(other_usage.body["spent_micros"], 0);
+        assert_eq!(other_usage.body["recent"].as_array().unwrap().len(), 0);
+        assert_eq!(own_usage.body["recent"].as_array().unwrap().len(), 1);
+        assert!(matches!(
+            refused,
+            Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::Disabled))
+        ));
+        // A key of another workspace cannot read or write these.
+        let (_id, key) = make_key(&router, &owner, &second, &["admin"]).await;
+        let cross = call(
+            &router,
+            "GET",
+            &ai_uri(&ws, "settings"),
+            None,
+            Auth::Key(&key),
+        )
+        .await;
+        assert_eq!(cross.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn calls_and_refusals_are_counted_by_feature_outcome_and_reason(pool: PgPool) {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) = enabled_workspace(
+            &pool,
+            &fake,
+            ai_config(None, 20),
+            json!({"monthly_budget_micros": 10_000}),
+        )
+        .await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 1_000, 500)));
+        fake.push(Err(zirv_flow_ai::AiError::Timeout));
+
+        let first = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+        let second = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+            mapping_request(privacy, false)
+        })
+        .await;
+
+        assert!(first.is_ok());
+        assert!(second.is_err());
+        let output = handle.render();
+        for expected in [
+            r#"zirv_flow_ai_calls_total{feature="mapping",outcome="ok"} 1"#,
+            r#"zirv_flow_ai_refusals_total{reason="budget_exceeded"} 1"#,
+        ] {
+            assert!(output.contains(expected), "{expected} in {output}");
+        }
+    }
 }

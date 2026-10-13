@@ -1,6 +1,7 @@
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
+use crate::assistant;
 use crate::consent::{person, suppressions, topics};
 use crate::contacts;
 use crate::events::{
@@ -58,6 +59,10 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         keys::list,
         keys::create,
         keys::revoke,
+        assistant::settings::get_settings,
+        assistant::settings::put_settings,
+        assistant::settings::models,
+        assistant::settings::usage,
         people::registry::list,
         people::registry::create,
         people::registry::update,
@@ -165,6 +170,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         RoleBody,
         ApiKeyBody,
         CreatedApiKeyBody,
+        assistant::settings::AiSettingsBody,
+        assistant::settings::PutAiSettingsRequest,
+        assistant::settings::ProbeBody,
+        assistant::settings::MissingBody,
+        assistant::settings::AiModelsBody,
+        assistant::settings::ProviderBody,
+        assistant::settings::ModelBody,
+        assistant::settings::AiUsageBody,
+        assistant::settings::FeatureUsageBody,
+        assistant::settings::UserUsageBody,
+        assistant::settings::AiCallBody,
         CreateApiKeyRequest,
         TraitBody,
         CreateTraitRequest,

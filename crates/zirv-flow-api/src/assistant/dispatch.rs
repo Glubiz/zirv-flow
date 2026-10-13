@@ -1,0 +1,388 @@
+//! The gated dispatch: the only way product code calls a model.
+//!
+//! A call is refused before anything is sent when the assistant is off, the user is over the
+//! per-minute limit or the workspace's monthly budget is spent. Both counts are read from the
+//! call log in the database, so they hold across instances. A dispatched call always leaves a
+//! content-free row in `ai_calls`; a transcript is stored only when an admin opted in. The key is
+//! opened right before the call and dropped after it.
+
+use std::time::Instant;
+
+use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
+use zirv_flow_ai::{
+    AiError, BoxFuture, ChatRequest, ChatResponse, Endpoint, Message, Part, Privacy, Sender,
+};
+use zirv_flow_core::{
+    SecretId, SecretPurpose, SecretString, UserId, WorkspaceId, open, secret_aad,
+};
+use zirv_flow_store::{AiSettings, CallOutcome, NewAiCall, StoreError, secrets};
+
+use super::config::{AiModelConfig, AiProviderConfig};
+use crate::AppState;
+use crate::problem::ApiError;
+
+/// Why a dispatch did not return a response.
+#[derive(Debug)]
+pub enum DispatchError {
+    /// A gate refused it, or the provider failed.
+    Ai(AiError),
+    /// The call log or the settings could not be read or written.
+    Store(StoreError),
+    /// The provider key cannot be opened: the deployment has no master key.
+    SecretsUnavailable,
+    /// The stored provider key could not be opened.
+    KeyUnusable,
+}
+
+impl From<AiError> for DispatchError {
+    fn from(error: AiError) -> Self {
+        Self::Ai(error)
+    }
+}
+
+impl From<StoreError> for DispatchError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<DispatchError> for ApiError {
+    fn from(error: DispatchError) -> Self {
+        match error {
+            DispatchError::Ai(error) => match error {
+                AiError::Disabled => Self::ai_disabled(),
+                AiError::BudgetExceeded => Self::ai_budget_exceeded(),
+                AiError::RateLimited => Self::ai_rate_limited(),
+                AiError::PersonalDataNotAllowed => Self::ai_personal_data_not_allowed(),
+                AiError::Schema(_) => Self::internal(),
+                other => Self::ai_provider_failed(other.to_string()),
+            },
+            DispatchError::Store(error) => error.into(),
+            DispatchError::SecretsUnavailable => Self::secrets_unavailable(),
+            DispatchError::KeyUnusable => Self::internal(),
+        }
+    }
+}
+
+/// Counts a gate refusal.
+fn refused(reason: &'static str) {
+    metrics::counter!("zirv_flow_ai_refusals_total", "reason" => reason).increment(1);
+}
+
+/// What the call log records for a failed call.
+fn outcome_of(error: &AiError) -> CallOutcome {
+    match error {
+        AiError::Http(_) => CallOutcome::HttpError,
+        AiError::Timeout => CallOutcome::Timeout,
+        AiError::Egress { .. } => CallOutcome::EgressDenied,
+        AiError::Capability(_) => CallOutcome::Capability,
+        AiError::Malformed => CallOutcome::Malformed,
+        _ => CallOutcome::Transport,
+    }
+}
+
+/// Opens a workspace's provider key. Call it right before the request that needs it.
+pub(crate) async fn open_provider_key(
+    state: &AppState,
+    workspace: WorkspaceId,
+    secret: SecretId,
+) -> Result<SecretString, DispatchError> {
+    let keyring = state.keyring().ok_or(DispatchError::SecretsUnavailable)?;
+    let stored = secrets::get(&state.pool, workspace, secret)
+        .await?
+        .ok_or(DispatchError::KeyUnusable)?;
+    let bytes = open(
+        keyring,
+        &stored.sealed,
+        &secret_aad(workspace, secret, stored.purpose),
+    )
+    .map_err(|_| DispatchError::KeyUnusable)?;
+    if stored.purpose != SecretPurpose::AiProviderKey {
+        return Err(DispatchError::KeyUnusable);
+    }
+    SecretString::try_from(bytes).map_err(|_| DispatchError::KeyUnusable)
+}
+
+/// One workspace's gated access to its configured model for one feature.
+pub struct Dispatcher<'a> {
+    state: &'a AppState,
+    user: Option<UserId>,
+    workspace: WorkspaceId,
+    feature: &'static str,
+    settings: AiSettings,
+    provider: &'a AiProviderConfig,
+    model: &'a AiModelConfig,
+    key: SecretId,
+}
+
+impl<'a> Dispatcher<'a> {
+    /// Step 1: loads the settings and refuses with `Disabled` when the workspace is not enabled,
+    /// has no key, or its model is no longer on the deployment's allowlist.
+    pub async fn open(
+        state: &'a AppState,
+        user: Option<UserId>,
+        workspace: WorkspaceId,
+        feature: &'static str,
+    ) -> Result<Dispatcher<'a>, DispatchError> {
+        let settings = zirv_flow_store::find_ai_settings(&state.pool, workspace)
+            .await?
+            .filter(|settings| settings.enabled);
+        let chosen = settings.as_ref().and_then(|settings| {
+            let (provider, model) = state
+                .ai
+                .config
+                .model(settings.provider_id.as_deref()?, settings.model.as_deref()?)?;
+            Some((provider, model, settings.provider_key_secret_id?))
+        });
+        let (Some(settings), Some((provider, model, key))) = (settings, chosen) else {
+            refused("disabled");
+            return Err(AiError::Disabled.into());
+        };
+        Ok(Self {
+            state,
+            user,
+            workspace,
+            feature,
+            settings,
+            provider,
+            model,
+            key,
+        })
+    }
+
+    /// The privacy level the workspace's opt-in allows.
+    pub fn privacy(&self) -> Privacy {
+        Privacy::from_opt_in(self.settings.pii_opt_in)
+    }
+
+    /// Steps 2 and 3: the per-user rate limit, then the monthly budget. Nothing is sent and
+    /// nothing is recorded when either refuses.
+    pub async fn check_gates(&self) -> Result<(), DispatchError> {
+        let limit = i64::from(self.state.ai.config.rate_limit_per_user_per_minute);
+        let recent =
+            zirv_flow_store::calls_in_last_minute(&self.state.pool, self.workspace, self.user)
+                .await?;
+        if recent >= limit {
+            refused("rate_limited");
+            return Err(AiError::RateLimited.into());
+        }
+        let spent = zirv_flow_store::spent_this_month(
+            &self.state.pool,
+            self.workspace,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+        if spent >= self.settings.monthly_budget_micros {
+            refused("budget_exceeded");
+            return Err(AiError::BudgetExceeded.into());
+        }
+        Ok(())
+    }
+
+    /// Steps 5 to 8: opens the key, calls the provider, records the call and, when the workspace
+    /// opted in, a transcript. The gates must have passed.
+    pub async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, DispatchError> {
+        let key = open_provider_key(self.state, self.workspace, self.key).await?;
+        let http = self.state.ai.http(self.state.egress_policy())?;
+        let provider = self.state.ai.provider(self.provider.kind);
+        let endpoint = Endpoint {
+            base_url: self.provider.base_url.clone(),
+            model: self.model.name.clone(),
+        };
+
+        let started = Instant::now();
+        let result = provider.complete(http, &endpoint, &key, request).await;
+        let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        drop(key);
+
+        let (outcome, usage) = match &result {
+            Ok(response) => (CallOutcome::Ok, Some(response.usage)),
+            Err(error) => (outcome_of(error), None),
+        };
+        let (input_tokens, output_tokens) =
+            usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
+        let call = Uuid::now_v7();
+        let mut tx = zirv_flow_store::begin(&self.state.pool).await?;
+        zirv_flow_store::record_ai_call(
+            &mut tx,
+            &NewAiCall {
+                id: call,
+                workspace_id: self.workspace,
+                user_id: self.user,
+                feature: self.feature,
+                provider_id: &self.provider.id,
+                model: &self.model.name,
+                input_tokens,
+                output_tokens,
+                estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
+                latency_ms,
+                outcome,
+                draft_id: None,
+            },
+        )
+        .await?;
+        if let Some(days) = self.settings.transcript_days {
+            zirv_flow_store::insert_ai_transcript(
+                &mut tx,
+                self.workspace,
+                call,
+                self.user,
+                &transcript(request, result.as_ref().ok()),
+                OffsetDateTime::now_utc() + Duration::days(i64::from(days)),
+            )
+            .await?;
+        }
+        zirv_flow_store::commit(tx).await?;
+        metrics::counter!(
+            "zirv_flow_ai_calls_total",
+            "feature" => self.feature,
+            "outcome" => outcome.as_str(),
+        )
+        .increment(1);
+        result.map_err(Into::into)
+    }
+}
+
+/// Every repair attempt is a separate dispatch and passes the gates again.
+impl Sender for Dispatcher<'_> {
+    fn send<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+    ) -> BoxFuture<'a, Result<ChatResponse, AiError>> {
+        Box::pin(async move {
+            let sent = async {
+                self.check_gates().await?;
+                self.call(request).await
+            }
+            .await;
+            sent.map_err(|error| match error {
+                DispatchError::Ai(error) => error,
+                DispatchError::Store(_) => {
+                    AiError::Transport("the call log could not be used".to_owned())
+                }
+                DispatchError::SecretsUnavailable | DispatchError::KeyUnusable => AiError::Disabled,
+            })
+        })
+    }
+}
+
+/// Dispatches one request: the settings, the gates, the request built under the workspace's
+/// privacy level, then the call. A refusal at a gate sends and records nothing.
+pub async fn dispatch(
+    state: &AppState,
+    user: Option<UserId>,
+    workspace: WorkspaceId,
+    feature: &'static str,
+    build: impl FnOnce(Privacy) -> Result<ChatRequest, AiError>,
+) -> Result<ChatResponse, DispatchError> {
+    let dispatcher = Dispatcher::open(state, user, workspace, feature).await?;
+    dispatcher.check_gates().await?;
+    let request = build(dispatcher.privacy()).inspect_err(|error| {
+        if *error == AiError::PersonalDataNotAllowed {
+            refused("personal_data");
+        }
+    })?;
+    dispatcher.call(&request).await
+}
+
+/// The request and the response as stored in a transcript. Only called for a workspace that opted
+/// in, and never includes the key.
+fn transcript(request: &ChatRequest, response: Option<&ChatResponse>) -> Value {
+    let messages: Vec<Value> = request
+        .messages()
+        .iter()
+        .map(|message| match message {
+            Message::User(contents) => json!({
+                "role": "user",
+                "content": contents.iter().map(|content| content.render()).collect::<Vec<_>>(),
+            }),
+            Message::Assistant(parts) => json!({"role": "assistant", "parts": parts}),
+            Message::ToolResult { call_id, content } => json!({
+                "role": "tool", "call_id": call_id, "content": content.render(),
+            }),
+        })
+        .collect();
+    json!({
+        "request": {
+            "system": request.system_text(),
+            "messages": messages,
+            "tools": request.tools().iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+        },
+        "response": response.map(|response| json!({
+            "parts": response.parts.iter().collect::<Vec<&Part>>(),
+            "model": response.model,
+        })),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use zirv_flow_ai::{Content, RequestBuilder};
+
+    use super::*;
+
+    #[test]
+    fn failures_are_logged_under_their_outcome() {
+        let outcome = |error: AiError| outcome_of(&error).as_str();
+        assert_eq!(outcome(AiError::Http(500)), "http_error");
+        assert_eq!(outcome(AiError::Timeout), "timeout");
+        assert_eq!(
+            outcome(AiError::Egress {
+                host: "h".into(),
+                class: zirv_flow_core::egress::AddressClass::Private
+            }),
+            "egress_denied"
+        );
+        assert_eq!(outcome(AiError::Capability("usage".into())), "capability");
+        assert_eq!(outcome(AiError::Malformed), "malformed");
+        assert_eq!(outcome(AiError::InvalidEndpoint), "transport");
+    }
+
+    #[test]
+    fn dispatch_errors_become_the_documented_problems() {
+        let status = |error: DispatchError| ApiError::from(error).status_code().as_u16();
+        assert_eq!(status(AiError::Disabled.into()), 409);
+        assert_eq!(status(AiError::BudgetExceeded.into()), 402);
+        assert_eq!(status(AiError::RateLimited.into()), 429);
+        assert_eq!(status(AiError::PersonalDataNotAllowed.into()), 422);
+        assert_eq!(status(AiError::Http(500).into()), 502);
+        assert_eq!(status(AiError::Schema("x".into()).into()), 500);
+        assert_eq!(status(DispatchError::SecretsUnavailable), 503);
+        assert_eq!(status(DispatchError::KeyUnusable), 500);
+    }
+
+    #[test]
+    fn a_provider_failure_detail_is_fixed_text_without_the_provider_message() {
+        let error = ApiError::from(DispatchError::Ai(AiError::Http(503)));
+        assert_eq!(error.detail(), "the provider answered with status 503");
+    }
+
+    #[test]
+    fn a_transcript_holds_the_request_and_response_text_and_tool_names_only() {
+        let request = RequestBuilder::new(Privacy::PersonalAllowed)
+            .system(Content::Instruction("Map columns.".into()))
+            .unwrap()
+            .user(vec![Content::Personal("ada@example.com".into())])
+            .unwrap()
+            .build();
+        let response = ChatResponse {
+            parts: vec![Part::Text {
+                text: "done".into(),
+            }],
+            usage: Default::default(),
+            model: "m".into(),
+        };
+
+        let stored = transcript(&request, Some(&response));
+
+        assert_eq!(stored["request"]["system"], "Map columns.");
+        assert_eq!(
+            stored["request"]["messages"][0]["content"][0],
+            "ada@example.com"
+        );
+        assert_eq!(stored["response"]["parts"][0]["text"], "done");
+        assert!(transcript(&request, None)["response"].is_null());
+    }
+}

@@ -3,6 +3,9 @@
 //! admin-only settings, models and usage endpoints.
 
 pub(crate) mod config;
+pub(crate) mod dispatch;
 pub(crate) mod runtime;
+pub(crate) mod settings;
 
 pub use config::{AiConfig, AiConfigError, AiModelConfig, AiProviderConfig};
+pub use dispatch::{DispatchError, Dispatcher, dispatch};
