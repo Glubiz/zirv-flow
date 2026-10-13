@@ -181,6 +181,7 @@ describe("webhook labels", () => {
     expect(timestamped).toContain(`printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_secret'`);
     expect(timestamped).toContain(`-H "X-Zirv-Timestamp: $TS"`);
     expect(timestamped).toContain(`-H "X-Zirv-Signature: sha256=$SIG"`);
+    expect(timestamped).toContain(`curl -X POST 'https://flow.example.test/hooks/hook-1' \\\n  -H 'Content-Type`);
     const bodyOnly = curlExample("https://x/hooks/h", aWebhook({ timestamp_header: null }), "zfwh_secret");
     expect(bodyOnly).toContain(`printf '%s' "$BODY" | openssl dgst`);
     expect(bodyOnly).not.toContain("$TS");

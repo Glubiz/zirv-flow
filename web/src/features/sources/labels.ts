@@ -217,7 +217,7 @@ export function curlExample(
   const curl = [`curl -X POST '${url}'`, `  -H 'Content-Type: application/json'`];
   if (hook.timestamp_header !== null) curl.push(`  -H "${hook.timestamp_header}: $TS"`);
   curl.push(`  -H "${hook.signature_header}: ${hook.signature_prefix}$SIG"`, `  -d "$BODY"`);
-  return [...lines, curl.join(" \\n")].join("\n");
+  return [...lines, curl.join(" \\\n")].join("\n");
 }
 
 /** What a code the hooks API or a reject carries means, in plain words. */
