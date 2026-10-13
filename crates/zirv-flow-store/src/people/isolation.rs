@@ -868,4 +868,122 @@ mod tests {
             .unwrap();
         assert_eq!(people, 0);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sync_events_event_rejects_and_list_members_stay_inside_their_workspace(pool: PgPool) {
+        use crate::sync_runs::testing::{batch, fixture, upsert};
+        use crate::{
+            RejectFilter, SyncBatchOutcome, SyncEvent, SyncUpsert, commit_sync_batch,
+            list_ingest_rejects, list_run_rejects,
+        };
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
+
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let one = fixture(&pool, "one", "full_refresh").await;
+        let two = fixture(&pool, "two", "full_refresh").await;
+        let news = create_list(&pool, one.ws, "news", "", None)
+            .await
+            .unwrap()
+            .id;
+        // A block-mode schema in the first workspace only: its event is refused there.
+        crate::create_event_schema(
+            &pool,
+            one.ws,
+            &crate::NewEventSchema {
+                name: "order_placed".into(),
+                mode: zirv_flow_core::events::EventMode::Block,
+                description: String::new(),
+                properties: vec![zirv_flow_core::events::SchemaProperty {
+                    name: "total".into(),
+                    property_type: zirv_flow_core::events::PropertyType::Number,
+                    required: true,
+                    enum_values: None,
+                    description: String::new(),
+                    pii: false,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        crate::publish_schema_draft(&mut tx, one.ws, "order_placed", None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        let with = |fx: &crate::sync_runs::testing::Fixture, record: &str, total, lists| {
+            let mut item: SyncUpsert = upsert(fx, record, &format!("{record}@example.com"));
+            item.lists = lists;
+            item.event = Some(SyncEvent {
+                name: "order_placed".into(),
+                properties: json!({ "total": total }).as_object().cloned().unwrap(),
+                timestamp: None,
+            });
+            item
+        };
+        let upserts = [
+            with(&one, "ok", json!(1), vec![news]),
+            with(&one, "bad", json!("x"), vec![news]),
+        ];
+        let cp = json!({"offset": 2});
+        let source = one.source_id.to_string();
+        let done = commit_sync_batch(
+            &pool,
+            &crate::SyncBatch {
+                redaction_key: Some(&key),
+                ..batch(&one, &source, &upserts, &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(done, SyncBatchOutcome::Committed(_)));
+
+        // The second workspace sees none of it, however it asks.
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
+            .bind(two.ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 0);
+        let (rejects, _) = list_ingest_rejects(&pool, two.ws, RejectFilter::default(), None, 10)
+            .await
+            .unwrap();
+        assert!(rejects.is_empty());
+        assert!(
+            list_run_rejects(&pool, two.ws, one.run.id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let (other_members, _) = members(&pool, two.ws, news, 10, None).await.unwrap();
+        assert!(other_members.is_empty());
+        let (own_rejects, _) =
+            list_ingest_rejects(&pool, one.ws, RejectFilter::default(), None, 10)
+                .await
+                .unwrap();
+        assert_eq!(own_rejects.len(), 1);
+
+        // A batch of the second workspace naming the first one's list finds no such list, and
+        // writes nothing.
+        let foreign = [with(&two, "ok", json!(1), vec![news])];
+        let other_source = two.source_id.to_string();
+        let refused = commit_sync_batch(
+            &pool,
+            &crate::SyncBatch {
+                redaction_key: Some(&key),
+                ..batch(&two, &other_source, &foreign, &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(refused, SyncBatchOutcome::ListMissing));
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE workspace_id = $1")
+            .bind(two.ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 0);
+        let (still, _) = members(&pool, one.ws, news, 10, None).await.unwrap();
+        assert_eq!(still.len(), 2);
+    }
 }
