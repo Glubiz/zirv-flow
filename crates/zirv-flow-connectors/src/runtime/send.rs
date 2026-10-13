@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use chrono::Utc;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER};
 use reqwest::{Method, Request, StatusCode};
 use serde_json::Value;
 use url::{Origin, Url};
@@ -163,6 +163,15 @@ fn count_request(kind: &'static str, outcome: &'static str) {
     .increment(1);
 }
 
+/// Whether a redirect response points off the source's base origin.
+fn leaves_origin(spec: &RequestSpec, from: &Url, headers: &HeaderMap) -> bool {
+    headers
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|target| from.join(target).ok())
+        .is_some_and(|target| !spec.owns(&target))
+}
+
 fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
     parse_retry_after(value, Utc::now())
@@ -210,6 +219,13 @@ pub(crate) async fn send(
                 count_request(kind, outcome(status));
                 // A redirect can have led off the base origin, past the check above.
                 if !spec.owns(response.url()) {
+                    return Err(RuntimeError::CrossOrigin);
+                }
+                // The guarded client does not follow a redirect to another origin; it hands the
+                // 3xx back, and the credential was never sent there.
+                if status.is_redirection()
+                    && leaves_origin(&spec, response.url(), response.headers())
+                {
                     return Err(RuntimeError::CrossOrigin);
                 }
                 if status == StatusCode::UNAUTHORIZED {
@@ -586,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_redirect_off_the_base_origin_is_not_returned_to_the_source() {
+    async fn a_redirect_off_the_base_origin_is_stopped_before_any_credential_reaches_it() {
         let other = serve(Router::new().route("/r", get(|| async { "theirs" }))).await;
         let target = other.url("/r").to_string();
         let source = serve(Router::new().route(
@@ -598,9 +614,35 @@ mod tests {
         ))
         .await;
 
-        let error = get_r(&context("probe", "s"), &source).await.unwrap_err();
+        let key = SecretString::new("redirect-key-5d1".into());
+        let ctx = context("probe", "s");
+        for auth in [
+            Auth::ApiKey {
+                placement: ApiKeyPlacement::Header("x-api-key"),
+                value: &key,
+            },
+            Auth::ApiKey {
+                placement: ApiKeyPlacement::Query("api_key"),
+                value: &key,
+            },
+        ] {
+            let spec = RequestSpec::get(&source.base(), source.url("/r"));
+            let error = ctx.send(&auth, spec).await.unwrap_err();
 
-        assert_eq!(error, RuntimeError::CrossOrigin);
+            assert_eq!(error, RuntimeError::CrossOrigin);
+            let text = format!("{error} {error:?}");
+            assert!(
+                !text.contains("http") && !text.contains("127.0.0.1"),
+                "{text}"
+            );
+        }
+
+        assert_eq!(
+            other.hits(),
+            0,
+            "the credential never reached the other origin"
+        );
+        assert_eq!(source.hits(), 2);
     }
 
     #[derive(Clone, Default)]
