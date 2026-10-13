@@ -1651,6 +1651,10 @@ mod tests {
         /// in `sync_mode`. `items` holds `ROWS` rows; row `n` has `updated_at` n minutes after
         /// the epoch of the fixture.
         async fn setup_database(pool: &PgPool, sync_mode: &str) -> Database {
+            setup_rows(pool, sync_mode, ROWS).await
+        }
+
+        async fn setup_rows(pool: &PgPool, sync_mode: &str, rows: u32) -> Database {
             zirv_flow_store::migrate(pool).await.unwrap();
             let ws = create_workspace(
                 pool,
@@ -1684,7 +1688,7 @@ mod tests {
                 format!(
                     "INSERT INTO items SELECT n, 'user' || n || '@example.com', 'User ' || n, \
                         timestamptz '2024-01-01 00:00:00+00' + n * interval '1 minute' \
-                     FROM generate_series(1, {ROWS}) AS n"
+                     FROM generate_series(1, {rows}) AS n"
                 ),
                 format!("CREATE ROLE {role} LOGIN PASSWORD 'zf_job_pw'"),
                 format!("GRANT SELECT ON items TO {role}"),
@@ -2068,6 +2072,38 @@ mod tests {
             );
             assert_eq!((rejected.records_read, rejected.records_applied), (0, 0));
             assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+            db.drop_role().await;
+        }
+
+        /// A measurement, not a check: with `ZIRV_FLOW_MEASURE_ROWS` set it seeds that many rows,
+        /// runs the stream once and prints the records per second the run took. Without the
+        /// variable it does nothing, so the ignored suite stays quick. Build with
+        /// `ZIRV_FLOW_BENCH_BUILD=1 --features zirv-flow-store/bench-no-decisions` for the same
+        /// run without decision appends; the difference is their overhead at batch 500.
+        #[sqlx::test]
+        #[ignore = "a measurement; set ZIRV_FLOW_MEASURE_ROWS to run it"]
+        async fn measure_records_per_second(pool: PgPool) {
+            let Some(rows) = std::env::var("ZIRV_FLOW_MEASURE_ROWS")
+                .ok()
+                .and_then(|text| text.parse::<u32>().ok())
+            else {
+                return;
+            };
+            let db = setup_rows(&pool, "full_refresh", rows).await;
+            let (run, job) = db.env.queue().await;
+
+            db.attempt(&job, &Probe::default(), loopback())
+                .await
+                .unwrap();
+
+            let done = db.env.run(run.id).await;
+            let seconds = (done.finished_at.unwrap() - done.started_at.unwrap()).as_seconds_f64();
+            println!(
+                "MEASURE rows={} state={} seconds={seconds:.2} records_per_second={:.0}",
+                done.records_read,
+                done.state,
+                done.records_read as f64 / seconds
+            );
             db.drop_role().await;
         }
     }
