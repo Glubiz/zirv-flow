@@ -1,4 +1,5 @@
 //! Fixtures for the tests of sync runs: a workspace with a source, a mapped stream, a queued run
+#![cfg(test)]
 //! and the claimed job that works it.
 
 use std::time::Duration;

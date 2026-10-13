@@ -495,3 +495,50 @@ pub(crate) async fn get(
             .collect(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use zirv_flow_core::mapping::{ColumnRule, Target};
+
+    use super::*;
+
+    #[test]
+    fn the_query_reads_stream_limit_and_cursor() {
+        let id = Uuid::now_v7();
+        let cursor = encode_cursor((OffsetDateTime::UNIX_EPOCH, id));
+        let (stream, parsed, limit) =
+            parse_query(&format!("stream=a%20b&limit=7&cursor={cursor}")).unwrap();
+        assert_eq!(stream.as_deref(), Some("a b"));
+        assert_eq!(limit, 7);
+        assert_eq!(parsed.unwrap().id, id);
+        assert_eq!(parse_query("").unwrap().2, DEFAULT_LIMIT);
+        assert!(parse_query("limit=0").is_err());
+        assert!(parse_query("cursor=zz").is_err());
+    }
+
+    #[test]
+    fn a_sample_is_masked_again_against_the_mapping_and_the_registry() {
+        let mapping = Mapping {
+            key_column: None,
+            columns: vec![ColumnRule {
+                column: "plan".into(),
+                target: Target::Trait { key: "plan".into() },
+                transforms: Vec::new(),
+            }],
+        };
+        let reject = RunReject {
+            id: Uuid::nil(),
+            received_at: OffsetDateTime::UNIX_EPOCH,
+            reason: "x".into(),
+            reasons: json!([]),
+            sample: json!({"properties": {"plan": "pro", "email": "a@b.c"}, "masked": []}),
+        };
+        let open = shown(reject.clone(), Some(&mapping), &|key| key == "plan");
+        let closed = shown(reject.clone(), Some(&mapping), &|_| false);
+        let unmapped = shown(reject, None, &|_| true);
+        assert_eq!(open.sample["properties"]["plan"], "pro");
+        assert_eq!(open.sample["properties"]["email"], Value::Null);
+        assert_eq!(closed.sample["properties"]["plan"], Value::Null);
+        assert_eq!(unmapped.sample["properties"]["plan"], Value::Null);
+    }
+}
