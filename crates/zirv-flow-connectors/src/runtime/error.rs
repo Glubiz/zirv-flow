@@ -17,6 +17,9 @@ pub enum RuntimeError {
     Unauthorized,
     /// The OAuth2 token endpoint did not give a token.
     TokenEndpoint { status: Option<u16> },
+    /// A code exchange answered with an access token and no refresh token: a sync cannot run
+    /// unattended on an access token.
+    NoRefreshToken,
     /// The upstream answered with a status the runtime does not retry.
     Status(u16),
     /// Every attempt failed with a retryable outcome. `last_status` is `None` for a transport
@@ -52,6 +55,7 @@ impl fmt::Display for RuntimeError {
             Self::TokenEndpoint { status: None } => {
                 f.write_str("the token endpoint did not give a usable token")
             }
+            Self::NoRefreshToken => f.write_str("the token endpoint gave no refresh token"),
             Self::Status(status) => write!(f, "the source answered with status {status}"),
             Self::RetriesExhausted {
                 last_status: Some(status),

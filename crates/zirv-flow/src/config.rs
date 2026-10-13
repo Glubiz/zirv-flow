@@ -776,6 +776,16 @@ impl Config {
         self.ops.bind
     }
 
+    /// The configured public URL without a trailing slash, when there is one. Unlike
+    /// [`Config::base_url`] it never falls back to the bind address: an OAuth2 provider is told
+    /// this address as the redirect URI.
+    pub(crate) fn public_url(&self) -> Option<String> {
+        self.server
+            .public_url
+            .as_deref()
+            .map(|url| url.trim_end_matches('/').to_owned())
+    }
+
     /// Where browsers reach the server: the public URL without a trailing slash, else the
     /// bind address over plain HTTP.
     pub(crate) fn base_url(&self) -> String {
@@ -1606,6 +1616,12 @@ auto_create_users = true
 
         assert_eq!(public.base_url(), "https://flow.example.com");
         assert_eq!(bound.base_url(), "http://127.0.0.1:8080");
+        // The public URL itself never falls back to the bind address.
+        assert_eq!(
+            public.public_url().as_deref(),
+            Some("https://flow.example.com")
+        );
+        assert_eq!(bound.public_url(), None);
     }
 
     #[test]

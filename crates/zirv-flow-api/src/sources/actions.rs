@@ -7,22 +7,26 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::http::HttpLimits;
+use zirv_flow_connectors::runtime::RateLimit;
 use zirv_flow_connectors::sources::{
-    Credential, ErasedSource, SourceContext, SourceError, SourceSpec, StreamDescriptor, SyncMode,
+    Credential, ErasedSource, Record, SourceContext, SourceError, StreamConfig, StreamDescriptor,
+    SyncMode,
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{DiscoveredStream, Source};
 
-use super::streams::{StreamBody, bodies};
-use super::{credential, kind_unavailable, registry};
+use super::streams::{StreamBody, bodies, checked_mapping};
+use super::{credential, kind_unavailable, registry, tokens};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::imports::MappingBody;
 use crate::problem::{ApiError, Problem};
 
 /// The longest a test or a discovery may take.
@@ -44,23 +48,25 @@ pub(super) struct Prepared {
     pub(super) context: SourceContext,
 }
 
-/// The network context of a call for source `id` of type `spec`. Its requests are counted by the
-/// source type and limited by the process-wide bucket of `id`, so a test, a discovery and a sync
-/// run of the same source draw from one bucket. A token the call refreshes is dropped: it is
-/// short-lived, and the next call fetches its own.
-fn network_context(
+/// The network context of a call for source `id` of type `kind`. Its requests are counted by the
+/// source type and limited by the process-wide bucket of `id` at `rate_limit` (the source
+/// driver's [`rate_limit`](zirv_flow_connectors::sources::ErasedSource::rate_limit) for the
+/// source's settings), so a test, a discovery and a sync run of the same source draw from one
+/// bucket. Tokens are seeded and persisted by [`super::tokens::prepare`], not here.
+pub(super) fn network_context(
     state: &AppState,
-    spec: &'static SourceSpec,
+    kind: &'static str,
+    rate_limit: Option<RateLimit>,
     id: Uuid,
 ) -> Result<SourceContext, ApiError> {
     SourceContext::new(
         state.egress_policy().clone(),
         HttpLimits::default(),
-        spec.kind,
+        kind,
         id.to_string(),
         Arc::clone(state.rate_limits()),
     )
-    .map(|context| context.with_rate_limit(spec.rate_limit))
+    .map(|context| context.with_rate_limit(rate_limit))
     .map_err(|_| ApiError::internal())
 }
 
@@ -73,8 +79,15 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let driver = registry().get(&source.kind).ok_or_else(kind_unavailable)?;
-    let credential = credential::load(state, workspace, source.credential_secret_id).await?;
-    let context = network_context(state, driver.spec(), id)?;
+    let mut credential = credential::load(state, workspace, source.credential_secret_id).await?;
+    let context = network_context(
+        state,
+        driver.spec().kind,
+        driver.rate_limit(&source.config),
+        id,
+    )?;
+    // An account connected by consent: its tokens seed the context, and refreshes are stored.
+    let context = tokens::prepare(state, workspace, &source, &mut credential, context).await?;
     Ok(Prepared {
         source,
         driver,
@@ -171,6 +184,24 @@ fn check_discovered(found: &[StreamDescriptor]) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The mapping a source suggests for a stream, when it passes the checks a saved mapping does
+/// (the stream's fields, the trait registry, the lists of the workspace). A suggestion that
+/// fails is dropped and the stream is left unmapped: it is a head start, never an error.
+async fn checked_seed(
+    state: &AppState,
+    workspace: WorkspaceId,
+    stream: &StreamDescriptor,
+) -> Option<serde_json::Value> {
+    let suggested = stream.suggested_mapping.as_ref()?;
+    let mapping =
+        serde_json::from_value::<zirv_flow_core::mapping::Mapping>(suggested.clone()).ok()?;
+    let body = MappingBody::from_core(&mapping)?;
+    let checked = checked_mapping(state, workspace, stream, &stream.default_primary_key, &body)
+        .await
+        .ok()?;
+    serde_json::to_value(checked).ok()
+}
+
 /// Asks the source for its streams, stores them (new ones disabled, known ones refreshed, the
 /// user's settings untouched) and audits `source.discovered`.
 pub(crate) async fn discover_source(
@@ -195,16 +226,21 @@ pub(crate) async fn discover_source(
         .map(serde_json::to_value)
         .collect::<Result<_, _>>()
         .map_err(|_| ApiError::internal())?;
+    let mut seeds: Vec<Option<serde_json::Value>> = Vec::with_capacity(found.len());
+    for stream in &found {
+        seeds.push(checked_seed(state, workspace, stream).await);
+    }
     let discovered: Vec<DiscoveredStream<'_>> = found
         .iter()
         .zip(&descriptors)
-        .map(|(stream, descriptor)| DiscoveredStream {
+        .zip(&seeds)
+        .map(|((stream, descriptor), seed)| DiscoveredStream {
             name: &stream.name,
             sync_mode: initial(stream).as_str(),
             cursor_field: stream.default_cursor_field.as_deref(),
             primary_key: &stream.default_primary_key,
             descriptor,
-            suggested_mapping: None,
+            suggested_mapping: seed.as_ref(),
         })
         .collect();
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -223,6 +259,40 @@ pub(crate) async fn discover_source(
     zirv_flow_store::commit(tx).await?;
     // Discovery is for admins, who may see the high-water mark.
     bodies(state, workspace, id, &streams, true).await
+}
+
+/// Reads the first records of `stream` from its start, with the source's stored credential and
+/// tokens, and writes nothing. At most `limit` are returned; the flag says the stream has more.
+/// `config` is the saved settings, or a draft the caller has validated. The whole read is under
+/// [`CALL_TIMEOUT`].
+pub(super) async fn read_sample(
+    call: &Prepared,
+    config: &serde_json::Value,
+    stream: &StreamConfig,
+    limit: usize,
+) -> Result<(Vec<Record>, bool), ApiError> {
+    let read = async {
+        let mut batches = call
+            .driver
+            .read(&call.context, config, &call.credential, stream, None);
+        let mut records: Vec<Record> = Vec::new();
+        // One more than shown, to know whether the stream has more.
+        while records.len() <= limit {
+            match batches.next().await {
+                Some(Ok(batch)) => records.extend(batch.records),
+                Some(Err(error)) => return Err(error),
+                None => break,
+            }
+        }
+        Ok(records)
+    };
+    let mut records = tokio::time::timeout(CALL_TIMEOUT, read)
+        .await
+        .map_err(|_| timed_out())?
+        .map_err(upstream)?;
+    let truncated = records.len() > limit;
+    records.truncate(limit);
+    Ok((records, truncated))
 }
 
 /// A failed call to the source, shown as the source's own failure.
@@ -298,7 +368,7 @@ pub(crate) async fn discover(
 
 #[cfg(test)]
 mod tests {
-    use zirv_flow_connectors::sources::{FieldDescriptor, FieldType};
+    use zirv_flow_connectors::sources::{FieldDescriptor, FieldType, SourceSpec};
 
     use super::*;
 
@@ -414,8 +484,8 @@ mod tests {
     async fn test_and_discovery_contexts_of_one_source_share_its_rate_limit_bucket() {
         let state = state();
         let id = Uuid::new_v4();
-        let test = network_context(&state, &LIMITED, id).unwrap();
-        let discovery = network_context(&state, &LIMITED, id).unwrap();
+        let test = network_context(&state, LIMITED.kind, LIMITED.rate_limit, id).unwrap();
+        let discovery = network_context(&state, LIMITED.kind, LIMITED.rate_limit, id).unwrap();
         let started = std::time::Instant::now();
 
         for round in 0..5 {
@@ -452,8 +522,12 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let state = state();
-                let busy = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
-                let fresh = network_context(&state, &LIMITED, Uuid::new_v4()).unwrap();
+                let busy =
+                    network_context(&state, LIMITED.kind, LIMITED.rate_limit, Uuid::new_v4())
+                        .unwrap();
+                let fresh =
+                    network_context(&state, LIMITED.kind, LIMITED.rate_limit, Uuid::new_v4())
+                        .unwrap();
                 // Two requests per second: the third and fourth calls wait.
                 for _ in 0..4 {
                     refused_call(&busy).await;

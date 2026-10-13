@@ -56,6 +56,9 @@ pub struct AppState {
     rate_limits: Arc<RateLimits>,
     /// The deployment's model allowlist and the guarded client for model calls.
     pub(crate) ai: AiRuntime,
+    /// Where browsers reach the server (`server.public_url`), without a trailing slash. Absent
+    /// when the operator did not set it; an OAuth2 consent needs it for the redirect URI.
+    public_url: Option<String>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -92,6 +95,7 @@ impl AppState {
             egress: Arc::default(),
             rate_limits: Arc::default(),
             ai: AiRuntime::default(),
+            public_url: None,
         }
     }
 
@@ -126,6 +130,17 @@ impl AppState {
     pub fn with_rate_limits(mut self, limits: Arc<RateLimits>) -> Self {
         self.rate_limits = limits;
         self
+    }
+
+    /// The address browsers reach the server at, for the redirect URI of an OAuth2 consent
+    /// (`<public_url>/api/v1/oauth/callback`). Without it no consent can start.
+    pub fn with_public_url(mut self, public_url: Option<String>) -> Self {
+        self.public_url = public_url.map(|url| url.trim_end_matches('/').to_owned());
+        self
+    }
+
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
     }
 
     /// The request-rate buckets of this process's sources.
@@ -232,6 +247,13 @@ mod tests {
     async fn cookies_are_secure_unless_turned_off() {
         assert!(state().cookie_secure);
         assert!(!state().with_cookie_secure(false).cookie_secure);
+    }
+
+    #[tokio::test]
+    async fn the_public_url_has_no_trailing_slash_and_is_absent_until_set() {
+        assert_eq!(state().public_url(), None);
+        let set = state().with_public_url(Some("https://flow.example.com/".to_owned()));
+        assert_eq!(set.public_url(), Some("https://flow.example.com"));
     }
 
     #[tokio::test]

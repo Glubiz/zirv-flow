@@ -26,7 +26,7 @@ use crate::{AppState, admin, cookies, request_id, session};
 /// Where the identity provider sends the browser back to.
 const CALLBACK_PATH: &str = "/api/v1/session/oidc/callback";
 const FAILED: &str = "sign-in failed";
-const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+pub(crate) const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
 /// The redirect URI to register at the identity provider for a server at `public_url`.
 pub fn redirect_url(public_url: &str) -> String {
@@ -73,14 +73,14 @@ fn conflict_or_error(error: StoreError) -> Failure {
 
 /// The query of the callback, all of it optional so a malformed request is a plain failure.
 #[derive(Default)]
-struct Callback {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
+pub(crate) struct Callback {
+    pub(crate) code: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 impl Callback {
-    fn parse(query: &str) -> Self {
+    pub(crate) fn parse(query: &str) -> Self {
         let mut parsed = Self::default();
         for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
             let slot = match &*key {

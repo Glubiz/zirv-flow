@@ -448,7 +448,7 @@ pub async fn exchange_code(
     )
     .await?;
     let token = parse_token(&parsed)?;
-    let refresh = new_refresh_token(&parsed).ok_or(RuntimeError::TokenEndpoint { status: None })?;
+    let refresh = new_refresh_token(&parsed).ok_or(RuntimeError::NoRefreshToken)?;
     let binding = binding_of(exchange.token_url, exchange.client_id, exchange.scopes);
     Ok(token.with_refresh_token(refresh).with_binding(binding))
 }
@@ -1600,7 +1600,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeError::TokenEndpoint { status: None });
+        assert_eq!(error, RuntimeError::NoRefreshToken);
     }
 
     #[tokio::test]

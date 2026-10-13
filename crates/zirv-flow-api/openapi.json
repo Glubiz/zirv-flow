@@ -535,6 +535,65 @@
         ]
       }
     },
+    "/api/v1/oauth/callback": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Finishes connecting an account: the provider sends the browser here with `code` and `state`.",
+        "description": "Always answers `303` to the source page (or the front page when the state is unknown), with\n`?oauth=connected`, or `?oauth=failed&reason=<code>` and nothing stored. The browser must hold\nthe session of the admin who started.",
+        "operationId": "finish_source_oauth",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "description": "The authorization code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "The single-use state `start` issued",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "description": "Set by the provider when it refused",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the source page with `?oauth=connected`, or `?oauth=failed&reason=` one of `unknown_state`, `state_mismatch`, `provider_error`, `exchange_failed`, `no_refresh_token`, `source_gone`"
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -8440,6 +8499,97 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/source-manifests/validate": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Checks a draft manifest. A bad manifest is a 200 with its issues, not a 422, because the editor\nasks on every pause in typing; saving a source with the same manifest answers 422 with the\nsame codes. Writes nothing and is not audited. Workspace admins only.",
+        "operationId": "validate_source_manifest",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Whether the manifest is valid, its issues, and its streams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over the manifest size cap (64 KiB) plus 1 KiB",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/sources": {
       "get": {
         "tags": [
@@ -9000,6 +9150,258 @@
           },
           "504": {
             "description": "The source did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Reads the first records of a stream with a draft or the saved manifest, using the source's\nstored credential and account tokens, and returns them raw. Reads from the start, never from\na checkpoint, and writes nothing. Workspace admins only; not audited, since it changes\nnothing. A rate-limited or refused call answers as discovery does.",
+        "operationId": "sample_source_manifest",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The raw sample records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SampleBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The source does not use a manifest, or its type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid draft manifest (the same codes as a save), a stream the manifest does not have, or a limit outside 1 to 20",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The API refused or failed the request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The API did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sources/{id}/oauth/start": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Starts connecting an account: stores a single-use state and returns the provider's consent\nURL, which the page navigates to. A person's session is needed; an API key is refused.\nWorkspace admins only. Audited as `source.oauth_started`.",
+        "operationId": "start_source_oauth",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where to send the browser",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, an API key (a consent needs a person), or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or source, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The source does not use the authorization-code grant (`code` is `oauth_not_configured`), or the server has no `server.public_url` (`code` is `public_url_not_configured`), or the type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The source has no `client_id` in its credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14159,6 +14561,24 @@
           }
         }
       },
+      "IssueBody": {
+        "type": "object",
+        "description": "One problem of a manifest: a code and the JSON pointer of the key it concerns. Never a value.",
+        "required": [
+          "code",
+          "path"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable code such as `unknown_field`, `required` or `path_invalid`."
+          },
+          "path": {
+            "type": "string",
+            "description": "A JSON pointer into the manifest; empty for the manifest itself."
+          }
+        }
+      },
       "ItemProblem": {
         "type": "object",
         "description": "One invalid field of one item of an ingestion request.",
@@ -14381,6 +14801,40 @@
               "null"
             ],
             "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "ManifestFieldBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "`string`, `number`, `boolean`, `timestamp`, `json` or `unknown`."
+          }
+        }
+      },
+      "ManifestStreamBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "fields"
+        ],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManifestFieldBody"
+            }
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -14660,6 +15114,31 @@
           "reason": {
             "type": "string",
             "example": "not_found"
+          }
+        }
+      },
+      "OAuthBody": {
+        "type": "object",
+        "description": "Whether and how a source is connected to an account by OAuth2 consent.",
+        "required": [
+          "required",
+          "connected"
+        ],
+        "properties": {
+          "connected": {
+            "type": "boolean",
+            "description": "An account is connected: tokens are stored."
+          },
+          "connected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "required": {
+            "type": "boolean",
+            "description": "The source's manifest uses the authorization-code grant, so an admin must connect an\naccount before it can sync."
           }
         }
       },
@@ -15903,6 +16382,62 @@
           }
         }
       },
+      "SampleBody": {
+        "type": "object",
+        "required": [
+          "records",
+          "read",
+          "truncated"
+        ],
+        "properties": {
+          "read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many records are returned.",
+            "minimum": 0
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "The records exactly as the API returned them (raw values, before any mapping)."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The stream has more records than the sample shows."
+          }
+        }
+      },
+      "SampleRequest": {
+        "type": "object",
+        "required": [
+          "stream"
+        ],
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many records to read, 1 to 20; 10 when absent.",
+            "minimum": 0
+          },
+          "manifest": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "A draft manifest to try, checked exactly as a save is. Absent, the source's saved\nmanifest is used."
+          },
+          "stream": {
+            "type": "string",
+            "description": "The stream to read, by name."
+          }
+        },
+        "additionalProperties": false
+      },
       "SaveDraftRequest": {
         "type": "object",
         "required": [
@@ -16179,6 +16714,7 @@
           "name",
           "config",
           "credential_fields_set",
+          "oauth",
           "enabled",
           "created_at",
           "updated_at"
@@ -16234,6 +16770,10 @@
             "type": "string",
             "example": "CRM"
           },
+          "oauth": {
+            "$ref": "#/components/schemas/OAuthBody",
+            "description": "The OAuth2 consent state; never a token."
+          },
           "schedule": {
             "type": [
               "string",
@@ -16285,6 +16825,18 @@
           },
           "label": {
             "type": "string"
+          }
+        }
+      },
+      "StartBody": {
+        "type": "object",
+        "required": [
+          "authorization_url"
+        ],
+        "properties": {
+          "authorization_url": {
+            "type": "string",
+            "description": "Where to send the browser: the provider's consent page. The page that gets it navigates\nthere; the server never fetches it."
           }
         }
       },
@@ -17429,6 +17981,43 @@
             "description": "Null for calls made with an API key."
           }
         }
+      },
+      "ValidateBody": {
+        "type": "object",
+        "required": [
+          "valid",
+          "issues",
+          "streams"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueBody"
+            },
+            "description": "At most 50, in the order found; empty when the manifest is valid."
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManifestStreamBody"
+            },
+            "description": "The streams the manifest declares, for a stream picker; empty when it is invalid."
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "properties": {
+          "manifest": {
+            "type": "object",
+            "description": "The draft manifest: any JSON value. Whether it is a valid manifest v1 is the answer."
+          }
+        },
+        "additionalProperties": false
       },
       "ValueCountBody": {
         "type": "object",

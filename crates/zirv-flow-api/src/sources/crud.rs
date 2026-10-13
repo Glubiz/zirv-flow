@@ -27,6 +27,19 @@ const MAX_NAME_CHARS: usize = 128;
 /// The schedules of sources are cron expressions in UTC.
 pub(super) const SCHEDULE_TIMEZONE: &str = "UTC";
 
+/// Whether and how a source is connected to an account by OAuth2 consent.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct OAuthBody {
+    /// The source's manifest uses the authorization-code grant, so an admin must connect an
+    /// account before it can sync.
+    required: bool,
+    /// An account is connected: tokens are stored.
+    connected: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    connected_at: Option<OffsetDateTime>,
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SourceBody {
     id: Uuid,
@@ -40,6 +53,8 @@ pub(crate) struct SourceBody {
     config: Value,
     /// The names of the credential fields that are set. Their values are never returned.
     credential_fields_set: Vec<String>,
+    /// The OAuth2 consent state; never a token.
+    oauth: OAuthBody,
     /// A cron expression in UTC, or null.
     schedule: Option<String>,
     enabled: bool,
@@ -64,6 +79,14 @@ impl From<&Source> for SourceBody {
             name: source.name.clone(),
             config: source.config.clone(),
             credential_fields_set: source.credential_fields.clone(),
+            oauth: OAuthBody {
+                required: source
+                    .config
+                    .get("manifest")
+                    .is_some_and(zirv_flow_connectors::manifest::needs_authorization),
+                connected: source.oauth_secret_id.is_some(),
+                connected_at: source.oauth_connected_at,
+            },
             schedule: source.schedule.clone(),
             enabled: source.enabled,
             freshness: None,
@@ -156,6 +179,14 @@ fn name_taken(error: StoreError) -> ApiError {
     } else {
         error.into()
     }
+}
+
+/// The `auth` section of a source's manifest, or null.
+fn auth_of(config: &Value) -> &Value {
+    config
+        .get("manifest")
+        .and_then(|manifest| manifest.get("auth"))
+        .unwrap_or(&Value::Null)
 }
 
 fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
@@ -291,6 +322,13 @@ pub(crate) async fn update_source(
     let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    // A refresh token belongs to one client and scope set: changing how the manifest
+    // authenticates drops the connected account.
+    let disconnect = locked.oauth_secret_id.is_some()
+        && request
+            .config
+            .as_ref()
+            .is_some_and(|config| auth_of(config) != auth_of(&locked.config));
     let mut linked = None;
     let credential_names = request.credential.as_ref().map(field_names);
     if let Some(values) = &request.credential {
@@ -322,6 +360,20 @@ pub(crate) async fn update_source(
                 );
             }
         }
+    }
+    if disconnect && let Some(secret) = locked.oauth_secret_id {
+        zirv_flow_store::clear_tokens(&mut tx, workspace, id).await?;
+        admin::audit(
+            &mut tx,
+            context,
+            Some(workspace),
+            "source.oauth_disconnected",
+            Some(("source", id)),
+            json!({"reason": "auth_changed"}),
+        )
+        .await?;
+        admin::audit_secret_deleted(&mut tx, context, workspace, SecretId::from_uuid(secret))
+            .await?;
     }
     let source = zirv_flow_store::update_source(
         &mut tx,
@@ -387,6 +439,10 @@ pub(crate) async fn delete_source(
     )
     .await?;
     if let Some(secret) = source.credential_secret_id {
+        admin::audit_secret_deleted(&mut tx, context, workspace, SecretId::from_uuid(secret))
+            .await?;
+    }
+    if let Some(secret) = source.oauth_secret_id {
         admin::audit_secret_deleted(&mut tx, context, workspace, SecretId::from_uuid(secret))
             .await?;
     }

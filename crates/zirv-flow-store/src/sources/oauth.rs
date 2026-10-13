@@ -56,7 +56,8 @@ struct WireOut<'a> {
 }
 
 impl StoredTokens {
-    fn to_plaintext(&self) -> Result<SecretBytes, TokenError> {
+    /// The sealed form: the JSON the secret row holds. For the consent, which creates the row.
+    pub fn to_plaintext(&self) -> Result<SecretBytes, TokenError> {
         serde_json::to_vec(&WireOut {
             access_token: self.access_token.expose(),
             refresh_token: self.refresh_token.expose(),
