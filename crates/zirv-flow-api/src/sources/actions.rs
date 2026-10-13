@@ -26,7 +26,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
 
 /// The longest a test or a discovery may take.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TestBody {
@@ -37,11 +37,11 @@ pub(crate) struct TestBody {
 }
 
 /// A source ready to call: its row, its type, its opened credential and its network context.
-struct Prepared {
-    source: Source,
-    driver: &'static dyn ErasedSource,
-    credential: Credential,
-    context: SourceContext,
+pub(super) struct Prepared {
+    pub(super) source: Source,
+    pub(super) driver: &'static dyn ErasedSource,
+    pub(super) credential: Credential,
+    pub(super) context: SourceContext,
 }
 
 /// The network context of a call for source `id` of type `spec`. Its requests are counted by the
@@ -64,7 +64,11 @@ fn network_context(
     .map_err(|_| ApiError::internal())
 }
 
-async fn prepare(state: &AppState, workspace: WorkspaceId, id: Uuid) -> Result<Prepared, ApiError> {
+pub(super) async fn prepare(
+    state: &AppState,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Prepared, ApiError> {
     let source = zirv_flow_store::find_source(&state.pool, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -79,7 +83,7 @@ async fn prepare(state: &AppState, workspace: WorkspaceId, id: Uuid) -> Result<P
     })
 }
 
-fn timed_out() -> ApiError {
+pub(super) fn timed_out() -> ApiError {
     ApiError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "the source did not answer in time",
@@ -220,7 +224,7 @@ pub(crate) async fn discover_source(
 }
 
 /// A failed call to the source, shown as the source's own failure.
-fn upstream(error: SourceError) -> ApiError {
+pub(super) fn upstream(error: SourceError) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, error.to_string())
 }
 
