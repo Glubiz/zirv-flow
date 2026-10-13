@@ -13,7 +13,8 @@
 #   eval "$(scripts/kafka-fixture.sh)"      # starts both, exports the variables
 #   scripts/kafka-fixture.sh stop           # removes the two containers it started
 #
-# Only containers named zf-kafka-* are ever touched.
+# Only containers named zf-kafka-* are ever touched. The brokers keep every topic the tests create,
+# so start fresh fixtures for each full run.
 set -euo pipefail
 
 PORT="${ZIRV_KAFKA_PORT:-19092}"
@@ -34,7 +35,7 @@ fi
   docker rm -f zf-kafka-redpanda zf-kafka-sasl >/dev/null 2>&1 || true
 
   docker run -d --name zf-kafka-redpanda -p "$PORT:$PORT" -p "$TLS_BACKEND:$TLS_BACKEND" "$REDPANDA_IMAGE" \
-    redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M \
+    redpanda start --mode dev-container --smp 1 --memory 1G --reserve-memory 0M \
     --overprovisioned --node-id 0 \
     --kafka-addr "internal://0.0.0.0:$PORT,tls://0.0.0.0:$TLS_BACKEND" \
     --advertise-kafka-addr "internal://localhost:$PORT,tls://localhost:$TLS_FRONT" >/dev/null
