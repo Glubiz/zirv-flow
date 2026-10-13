@@ -3,18 +3,24 @@ import { useState, type SyntheticEvent } from "react";
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
 import { FreshnessBadge } from "./FreshnessBadge";
-import { lastSuccessLabel, syncModeLabel, thresholdLabel, type Stream } from "./labels";
+import { lagLabel, lagTitle, lastSuccessLabel, syncModeLabel, thresholdLabel, type Stream } from "./labels";
 
 interface StreamDialogProps {
   workspaceId: string;
   sourceId: string;
   stream: Stream;
+  /** The stream of a webhook: only whether it receives and when it counts as stale are set here. */
+  push?: boolean;
   onClose: () => void;
   onSaved: (stream: Stream) => void;
 }
 
+function incrementalMode(mode: string): boolean {
+  return mode === "incremental";
+}
+
 /** Whether a stream is read, and how: the sync mode, cursor field, primary key and staleness. */
-export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }: StreamDialogProps) {
+export function StreamDialog({ workspaceId, sourceId, stream, push = false, onClose, onSaved }: StreamDialogProps) {
   const modes = stream.discovered.sync_modes;
   const fields = stream.discovered.fields;
   const [enabled, setEnabled] = useState(stream.enabled);
@@ -31,12 +37,15 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
-  const needsCursor = syncMode === "incremental" && cursor === "";
+  // A streaming stream has no cursor, nothing to reconcile and nothing to sweep: the message key
+  // is its primary key.
+  const streaming = syncMode === "stream";
+  const needsCursor = incrementalMode(syncMode) && cursor === "";
   const stalenessValue = staleness.trim() === "" ? null : Number(staleness);
   const stalenessOk = stalenessValue === null || (Number.isInteger(stalenessValue) && stalenessValue > 0);
 
   const limitValue = Number(limit);
-  const limitOk = limit.trim() !== "" && Number.isFinite(limitValue) && limitValue > 0 && limitValue <= 100;
+  const limitOk = streaming || (limit.trim() !== "" && Number.isFinite(limitValue) && limitValue > 0 && limitValue <= 100);
   const incremental = syncMode === "incremental";
 
   function togglePrimaryKey(name: string, on: boolean) {
@@ -54,11 +63,11 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
           body: {
             enabled,
             sync_mode: syncMode,
-            cursor_field: cursor === "" ? null : cursor,
-            primary_key: primaryKey,
+            cursor_field: streaming || cursor === "" ? null : cursor,
+            primary_key: streaming ? ["_key"] : primaryKey,
             staleness_threshold_seconds: stalenessValue,
             reconcile_schedule: incremental && reconcile.trim() !== "" ? reconcile.trim() : null,
-            sweep_limit: limitValue / 100,
+            sweep_limit: streaming ? 0.5 : limitValue / 100,
             // The mapping is edited in its own dialog; a save here sends it back as it is.
             mapping: stream.mapping ?? undefined,
           },
@@ -69,6 +78,36 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
       setFailure(describeError(error));
       setBusy(false);
     }
+  }
+
+  if (push) {
+    return (
+      <Dialog title={`Set up ${stream.name}`} onClose={onClose}>
+        <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
+          <label className="check">
+            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <span>Receive payloads</span>
+          </label>
+          <p className="muted">The webhook answers 404 until this is on and the stream has a mapping.</p>
+          <TextField
+            label="Expect a payload at least every (seconds)"
+            hint="Optional. Without it the webhook never counts as stale."
+            type="number"
+            min={1}
+            value={staleness}
+            onChange={(event) => setStaleness(event.target.value)}
+            error={stalenessOk ? undefined : "Use a whole number above zero."}
+          />
+          {failure ? <InlineError {...failure} /> : null}
+          <div className="dialog-actions">
+            <Button onClick={onClose}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={busy || !stalenessOk}>
+              {busy ? "Saving" : "Save stream"}
+            </Button>
+          </div>
+        </form>
+      </Dialog>
+    );
   }
 
   return (
@@ -89,6 +128,12 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             <dt>Stale after</dt>
             <dd>{thresholdLabel(stream.freshness)}</dd>
           </div>
+          {lagLabel(stream.freshness) ? (
+            <div className="fact">
+              <dt>Behind by</dt>
+              <dd title={lagTitle(stream.freshness)}>{lagLabel(stream.freshness)?.replace("Lag ", "")} messages</dd>
+            </div>
+          ) : null}
         </dl>
       ) : null}
       <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
@@ -103,6 +148,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             </option>
           ))}
         </SelectField>
+        {streaming ? null : (
         <SelectField
           label="Cursor field"
           value={cursor}
@@ -117,8 +163,15 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             </option>
           ))}
         </SelectField>
-        <fieldset className="checks">
-          <legend>Primary key</legend>
+        )}
+        {streaming ? (
+          <p className="muted">
+            Primary key is the message key. Each message is a record under its key, and a message with a null value
+            removes the record.
+          </p>
+        ) : (
+          <fieldset className="checks">
+            <legend>Primary key</legend>
           {fields.map((field) => (
             <label className="check" key={field.name}>
               <input
@@ -129,7 +182,8 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
               <span>{field.name}</span>
             </label>
           ))}
-        </fieldset>
+          </fieldset>
+        )}
         <TextField
           label="Staleness threshold (seconds)"
           hint="Optional. Seconds without a successful run before the stream counts as stale. Left empty, it is twice the source schedule's interval, or never when the source has no schedule."
@@ -139,6 +193,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
           onChange={(event) => setStaleness(event.target.value)}
           error={stalenessOk ? undefined : "Use a whole number above zero."}
         />
+        {streaming ? null : (
         <fieldset className="stack">
           <legend>Deleted records</legend>
           {incremental ? (
@@ -168,6 +223,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, onClose, onSaved }
             error={limitOk ? undefined : "Use a number above 0 and up to 100."}
           />
         </fieldset>
+        )}
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>

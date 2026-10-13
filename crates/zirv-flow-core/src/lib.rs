@@ -17,6 +17,7 @@ mod role;
 pub mod schedule;
 mod scope;
 mod secrets;
+pub mod signature;
 pub mod token;
 mod trace;
 mod validation;

@@ -9,6 +9,7 @@ mod error;
 mod fake;
 mod file;
 mod http;
+mod kafka;
 mod mysql;
 mod postgres;
 mod record_key;
@@ -18,21 +19,25 @@ mod spec;
 mod sql;
 mod types;
 mod validate;
+mod webhook;
 
 pub use context::SourceContext;
 pub use credential::{Credential, CredentialFormatError};
 pub use error::SourceError;
 pub use http::{REFRESH_TOKEN_KEY, active_binding, seed_refresh_token};
+pub use kafka::{PartitionPosition, Positions, ReadPlan};
 pub use registry::Registry;
 pub use source::{BoxFuture, ErasedSource, Source};
 pub use spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 pub use types::{
-    Batch, Checkpoint, FieldDescriptor, FieldType, Record, StreamConfig, StreamDescriptor, SyncMode,
+    Batch, Checkpoint, FieldDescriptor, FieldType, Record, Refused, StreamConfig, StreamDescriptor,
+    SyncMode,
 };
 pub(crate) use validate::url_problem_https;
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
 };
+pub use webhook::PAYLOAD_STREAM;
 
 /// The token the fake source's connection test accepts.
 #[cfg(feature = "test-support")]
@@ -45,4 +50,6 @@ pub(crate) static ALL: &[&dyn ErasedSource] = &[
     &postgres::Postgres,
     &file::File,
     &http::Http,
+    &kafka::Kafka,
+    &webhook::Webhook,
 ];

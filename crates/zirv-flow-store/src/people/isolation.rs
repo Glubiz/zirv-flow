@@ -1128,6 +1128,168 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn stream_offsets_are_read_written_and_seen_only_in_their_own_workspace_and_go_with_the_stream(
+        pool: PgPool,
+    ) {
+        use crate::sync_runs::testing::{Fixture, batch, fixture};
+        use crate::{
+            PartitionOffset, SyncBatch, SyncLease, commit_sync_batch, delete_source, load_offsets,
+            report_stream_lag, stream_freshness, stream_lag,
+        };
+
+        let fx: Fixture = fixture(&pool, "one", "stream").await;
+        let two = workspace(&pool, "two").await;
+        let source = fx.source_id.to_string();
+        let own = [PartitionOffset {
+            partition: 0,
+            next: 4,
+            end: Some(9),
+        }];
+        let cp = serde_json::json!({});
+        commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                offsets: &own,
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        // Workspace two reads none of it, sees no lag, and its writes against the stream's
+        // run find nothing to write to.
+        assert!(
+            load_offsets(&pool, two, fx.stream_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            stream_lag(&pool, two, fx.source_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let foreign_write = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                workspace: two,
+                offsets: &[PartitionOffset {
+                    partition: 0,
+                    next: 999,
+                    end: Some(999),
+                }],
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(foreign_write, crate::SyncBatchOutcome::Cancelled));
+        let foreign_report = report_stream_lag(
+            &pool,
+            two,
+            fx.stream_id,
+            fx.run.id,
+            SyncLease {
+                job_id: fx.job.id,
+                token: fx.job.lease_token,
+            },
+            &[PartitionOffset {
+                partition: 0,
+                next: 999,
+                end: Some(999),
+            }],
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(foreign_report, crate::LagReport::Cancelled);
+        let now = crate::database_now(&pool).await.unwrap();
+        assert!(
+            stream_freshness(&pool, Some(two), None, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mine = load_offsets(&pool, fx.ws, fx.stream_id).await.unwrap();
+        assert_eq!(
+            mine,
+            [PartitionOffset {
+                partition: 0,
+                next: 4,
+                end: Some(9)
+            }],
+            "the other workspace changed nothing"
+        );
+        let lag = stream_freshness(&pool, Some(fx.ws), None, now)
+            .await
+            .unwrap();
+        assert_eq!(lag[0].lag, Some(5));
+
+        // Deleting the source deletes its streams and, with them, the offsets.
+        assert!(
+            delete_source(&mut pool.acquire().await.unwrap(), fx.ws, fx.source_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_offsets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn webhooks_are_read_changed_and_received_only_in_their_own_workspace(pool: PgPool) {
+        use crate::webhooks::fixtures::{hook, mapping};
+        use crate::{
+            SecretId, WebhookUpdate, delete_source, find_for_receive, find_webhook, list_webhooks,
+            replace_webhook_secret, update_webhook,
+        };
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let mine = hook(&pool, one, "orders", Some(&mapping(&[]))).await;
+        let theirs = hook(&pool, two, "orders", Some(&mapping(&[]))).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let listed = list_webhooks(&pool, one).await.unwrap();
+        assert_eq!(listed.iter().map(|h| h.id).collect::<Vec<_>>(), [mine.id]);
+        assert!(find_webhook(&pool, one, theirs.id).await.unwrap().is_none());
+        let update = WebhookUpdate {
+            dedupe_field: Some("x"),
+            ..WebhookUpdate::default()
+        };
+        assert!(
+            update_webhook(&mut connection, one, theirs.id, &update)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            replace_webhook_secret(&mut connection, one, theirs.id, SecretId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            delete_source(&mut connection, one, theirs.source_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The receive path locates a hook by id and carries its own workspace, so a payload
+        // for the other workspace's hook is queued there and nowhere else.
+        let received = find_for_receive(&pool, theirs.id).await.unwrap().unwrap();
+        assert_eq!(received.workspace(), two);
+        let untouched = find_webhook(&pool, two, theirs.id).await.unwrap().unwrap();
+        assert_eq!(untouched.dedupe_field, "id");
+        assert_eq!(untouched.secret_id, theirs.secret_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn oauth_states_and_tokens_are_taken_and_read_only_in_their_own_workspace(pool: PgPool) {
         use zirv_flow_core::{Email, Keyring, MasterKey};
 

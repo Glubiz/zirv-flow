@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, sync runs with events and lists (including PostgreSQL and MySQL sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -104,6 +104,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
 | `ingest.burst_per_key` | u32 | 20000 | at least `ingest.max_batch_items`; items a key may send at once after a quiet period, per `serve` process |
+| `ingest.max_webhook_bytes` | u64 | 262144 | at least 1; a larger webhook body is refused with 413 |
+| `ingest.rate_per_hook` | u32 | 50 | at least 1; requests per second each webhook may receive, per `serve` process |
+| `ingest.burst_per_hook` | u32 | 200 | at least 1; requests a webhook may receive at once after a quiet period, per `serve` process |
 | `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `ingest.drain_shards` | u32 | 8 | 1 to 16; concurrent drain loops per workspace in `ingest.drain` |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
@@ -1380,6 +1383,13 @@ import's, see the Mapping reference, with the stream's field names or dotted pat
 columns; a trait must be in the registry and a list must exist), or use **Map** on the stream
 in the web UI, which previews the mapping on the first records before it is saved.
 
+**Streaming runs.** A stream in the `stream` sync mode (a Kafka topic) is not read to an end. Its
+run goes on for up to a day, worked by a chain of `kafka.consume` jobs, and ends `cancelled` when
+you cancel it or turn the stream off, and `failed` with a code on an error that retrying cannot
+fix or on the reject threshold. Its counters are cumulative; its `attempt` counts only a lost
+worker, not each slice. Reconciliation and the sweep do not apply to it, so `reconcile_schedule`
+and a `sweep_limit` other than the default are refused for it. See Kafka sources.
+
 **How a run goes.** The `sync.run` job reads the source in batches, maps each record, and
 commits a unit of at least 500 records (a source batch is never split) in one transaction: the
 profile changes, the retracted records, the rejects, one decision per record, the counters and
@@ -1690,6 +1700,96 @@ workspace label): `zirv_flow_source_db_batches_total{source_type}` and
 `zirv_flow_source_db_errors_total{source_type,reason}` with `reason` one of `auth`, `unreachable`,
 `egress`, `timeout`, `tls`, `read_only`, `config` or `query`.
 
+### Kafka sources
+
+The `kafka` source type reads JSON messages from Apache Kafka topics (or a Kafka-compatible
+broker such as Redpanda). A **stream is a topic**, and its sync mode is **streaming**: instead of
+reading to an end, a consumer follows the topic for as long as the stream is on. Add one in the
+setup wizard like any source.
+
+| Setting | Meaning |
+| --- | --- |
+| `brokers` | One to ten `host:port` pairs, comma-separated, without a scheme. IPv6 addresses are not supported. |
+| `topics` | One to twenty topic names, comma-separated. Each is a stream. |
+| `security` | `tls` (default) or `plaintext`. |
+| `sasl` | `none` (default), `plain`, `scram_sha_256` or `scram_sha_512`. |
+| `tls_ca` | A PEM bundle to trust instead of the system roots, for a private authority. |
+| `max_lag` | How many messages, over all partitions, the stream may be behind and still count as fresh. Default 10,000. |
+
+The credential fields are `username` and `password` (needed with `sasl`) and `tls_client_cert`
+and `tls_client_key` (a client certificate and its key, both or neither). All four are secret:
+sealed like any credential and never returned. OAUTHBEARER is not supported.
+
+**Messages.** The **message key** is the record key, as UTF-8 text of 1 to 512 characters, and the
+stream's primary key is the virtual field `_key`. The value must be a JSON object of at most 1 MiB;
+its top-level fields are the stream's fields, plus two virtual ones: `_key` and `_timestamp` (the
+message time, RFC 3339). Those two names win over fields of the same name in the value. Map them
+like any field. Discovery reads up to 50 messages from the start of each topic to list the fields;
+an empty topic reports only the two virtual ones, so discover again once producers write.
+
+**Deleting.** A message with a **null value** (a tombstone) removes the record with that key and
+its linked events, through the same path as a source that reports a deletion. A tombstone for a
+key the stream never saw does nothing. A delete signal in the mapping works as for any stream.
+There is no sweep and no reconciliation: they cannot tell a dropped record from a quiet one.
+
+**Refused messages.** A message that is not a record is a **reject** of the run, with its place
+(`partition 3 offset 1042`) and a code, and never its content: `kafka_key_missing`,
+`kafka_key_not_text`, `kafka_value_not_json` (an empty value counts), `kafka_value_not_object`,
+`kafka_message_too_large`. The partition goes on. A run over the reject threshold stops like any.
+
+**Delivery.** Offsets are kept in the database, one row per partition, never in Kafka: the consumer
+joins no consumer group and commits nothing to the broker. They are written in the same
+transaction that applies the messages they cover, fenced on the job's lease and on the run, so
+**each committed batch applies once and an uncommitted batch is read again** after a crash, a lost
+lease or a restart. A partition with no stored offset starts at its earliest offset, and new
+partitions are found at the start of every slice. Order is kept within a partition; a key that
+appears in several partitions has no defined order. Two messages with one key are never merged:
+each is its own unit of work, so each yields its own event, and a message replayed after a crash
+yields the same event again, which is dropped as a duplicate. Offsets that hold no record
+(transaction markers, compacted-away batches) are skipped, so compacted topics and transactional
+producers do not stall a partition. Messages of aborted transactions are **delivered** (the client
+cannot filter them), so a topic written by aborting transactional producers is not supported. If
+retention removed the stored offset, the consumer jumps to the earliest one and counts it in
+`zirv_flow_kafka_offset_resets_total`. If the stored offset is past the end (the topic was
+deleted and created again) the run fails with `kafka_offset_out_of_range`; stored offsets cannot
+be reset from the app yet.
+
+**Starting and stopping.** Turning on a streaming stream that has a mapping starts its consumer.
+**Run now** and the source's cron schedule start one when none is running, so the schedule is also
+the restart path after a failure; `*/5 * * * *` is a sensible choice. Turning the stream or the
+source off cancels the consumer. The run stays `running` for up to a day and is worked by a chain
+of `kafka.consume` jobs of 60 seconds each; each slice enqueues the next, in the transaction that
+completes it. A day after it started, the run ends `succeeded` and a new run takes over, so its
+trace, counters and reject ratio stay small. A consumer holds one worker slot during its slice: with
+more streaming streams than `worker.concurrency - 1`, other jobs starve. Watch
+`zirv_flow_worker_busy`.
+
+**Lag and freshness.** After each slice (and every 10 seconds within one) the consumer stores the
+log's end for each partition. **Lag** is the end minus the next offset to read. `GET
+.../sources/{id}/streams` carries `freshness.lag` with the `total` and each partition's `lag`
+(counts, which members may read), and the streams table shows `Lag 1,204` next to the badge. Lag
+within `max_lag` counts as a success and lag above it as a failure, so a stream that falls behind
+turns **failing**, and a consumer that stops turns **stale** by the usual time rule, which needs a
+staleness threshold on the stream or a schedule on the source. The lag of a transactional topic can
+include its trailing commit marker, which is never delivered, so `max_lag` should not be 0 for one. The gauge
+`zirv_flow_stream_lag_messages{workspace,stream}` follows it, and `zirv_flow_kafka_fetches_total{outcome}`
+counts fetches.
+
+**Network.** The client has no resolver hook, so every connection goes through a loopback SOCKS5
+relay that resolves the host, checks every address against the egress policy (see Egress), dials
+the checked address and leaves TLS to verify the host name. This covers the bootstrap hosts and
+every broker the cluster names, on every reconnect. A broker whose address is refused fails the
+read with `source_error`, counted in `zirv_flow_egress_denied_total`. While a read runs, another
+process on the same machine could use the relay to reach any destination the policy allows. A broker
+that is private needs an `egress.allow` entry like any private destination. Errors are static
+codes (`kafka_connect_failed`, `kafka_tls_failed`, `kafka_auth_failed`, `kafka_topic_missing`,
+`kafka_timeout`) and never a broker's own text. The client logs host names, never messages. The
+SASL password lives in plain memory inside the client while it runs and cannot be wiped there.
+
+**Limits.** JSON only (no Avro, Protobuf or schema registry), no consumer groups, no producing,
+no topic patterns. At most 1 MiB is fetched per partition per request. Messages are checked after
+decompression only for the 1 MiB record limit.
+
 ### Source freshness
 
 Marketers can see whether the data behind a segment is current. Every enabled stream of an
@@ -1727,12 +1827,119 @@ labels: `zirv_flow_stream_freshness_seconds{workspace,stream}` (age of the data)
 `zirv_flow_streams{workspace,state}` (how many enabled streams are in each state). A stream that
 is disabled or deleted is set to 0, and an instance that stops leading zeroes what it published.
 
-**Other source types.** A pull run reports when it ends. A webhook source (#90) and a stream
-consumer such as Kafka (#91) report through the same call, `record_stream_outcome`: a success at
-a time, or a failure, written to the same columns. Only the pull path exists today.
+**Other source types.** A pull run reports when it ends. A webhook source reports each accepted
+payload through the same call, `record_stream_outcome` (see Inbound webhooks), and a stream consumer
+reports through it too: a success at a time, or a failure, written to the same columns. The Kafka
+consumer reports within its lag bound as a success and above it as a failure (see Kafka sources). A
+webhook has no schedule, so its threshold is the one you set ("expect a payload at least every");
+without one it is never stale.
 
 **Not done:** stale or failing inputs do not pause sends. That is a later decision (OQ-14, M5);
 for now freshness is shown and exported, nothing acts on it.
+
+## Inbound webhooks
+
+A webhook lets an external system (a form tool, a shop back end, an internal service) push one JSON
+document at a time to Zirv Flow. It is a **push source**: a source of type `webhook` with one stream,
+`payload`, so it has the same mapping editor, preview and freshness as any other stream. Its
+payloads are not read by a run; each one is verified, queued in the durable inbox and mapped to a
+person, an event and list memberships by `ingest.drain`.
+
+**Set up.** Under Sources, add a source and choose Webhook (or `POST .../webhooks`, admins only).
+You give it a name, a **dedupe field** (a dotted path into the payload whose value identifies it,
+such as `id` or `data.order.id`) and, optionally, how often you expect a payload. The response
+carries the **URL** (`/hooks/{id}` on your server's origin) and the **shared secret**
+(`zfwh_` and 64 hex digits). The secret is shown once, in that response, and never again: it is
+stored sealed (purpose `webhook_secret`), and no read, update, audit entry or log line holds it.
+Rotate it with `POST .../webhooks/{id}/rotate-secret`; the old secret stops working at once. The
+id in the URL only locates the hook, it is not a secret, and the signature authorizes.
+
+Then map it: open the stream (Set up, then Map), paste a sample payload, and the mapping editor
+shows what the mapping makes of it, with the same function the drain calls and without writing
+anything (`POST .../streams/payload/preview` with `sample`: 1 to 20 objects, 64 KiB in all).
+Columns name payload fields, a nested one with dots (`order.total`, `items.0.sku`); a field a
+payload lacks is an empty cell. A webhook stream has no key column and no delete signal, and an
+event needs no primary key: the event id comes from the dedupe field. Turn the stream on. Until it
+is on and mapped the URL answers `404`.
+
+**The signature.** Each request carries an HMAC-SHA256 of its body, keyed with the secret's UTF-8
+bytes, as the prefix followed by 64 hex digits (either case). The defaults, all per hook:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `signature_header` | `X-Zirv-Signature` | the header holding the signature |
+| `signature_prefix` | `sha256=` | the text before the digest; may be empty |
+| `timestamp_header` | `X-Zirv-Timestamp` | unix seconds as a decimal number; `null` selects the body-only scheme |
+| `tolerance_seconds` | 300 | how far the timestamp may be from the server's clock, either way (1 to 86400) |
+
+The **timestamped scheme** signs `"{timestamp}.{body}"` (the timestamp text exactly as sent, a dot,
+the raw body bytes) and refuses a timestamp outside the tolerance. The **body-only scheme** signs the
+raw body. It exists because many senders cannot sign a timestamp; its only replay defense is the
+dedupe field. Other algorithms, base64 signatures and handshake protocols are not supported.
+
+```sh
+# The timestamped scheme (the default).
+BODY='{"id":"order-1","email":"ada@example.com"}'
+TS=$(date +%s)
+SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_example' | sed 's/^.* //')
+curl -X POST 'https://flow.example.com/hooks/3f2a9c1e-0b7d-4e55-9c1a-7d4e2b6a8f10' \
+  -H 'Content-Type: application/json' \
+  -H "X-Zirv-Timestamp: $TS" \
+  -H "X-Zirv-Signature: sha256=$SIG" \
+  -d "$BODY"
+
+# The body-only scheme.
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'zfwh_example' | sed 's/^.* //')
+curl -X POST 'https://flow.example.com/hooks/3f2a9c1e-0b7d-4e55-9c1a-7d4e2b6a8f10' \
+  -H 'Content-Type: application/json' -H "X-Zirv-Signature: sha256=$SIG" -d "$BODY"
+```
+
+With the secret `zfwh_example`, the timestamp `1700000000` and the body above, the signature is
+`c8447361d430f2281aef6579aec897c4930f3d15af1920d3da1f83ff8e4f4d56`; a unit test signs that
+example with the same recipe.
+
+**What happens to a request.** In this order, and nothing is written before the signature checks
+out: a declared body over `ingest.max_webhook_bytes` is `413`; an unknown id, or a hook that is not
+receiving (source or stream off, stream not mapped), is `404`; a hook over `ingest.rate_per_hook`
+is `429` with `Retry-After`; the body is read with the same cap (`413`); the signature and, for the
+timestamped scheme, the timestamp are checked, the digest compared in constant time (`401`, code
+`invalid_signature`, one answer for every cause but a stale timestamp, which says so); the body
+must be one JSON object (`400`, `invalid_payload`; arrays and several records per request are not
+supported); the dedupe field must hold a string or number of 1 to 128 characters (`422`,
+`dedupe_missing`); then the payload is appended to the inbox and the answer is `202
+{"accepted":1}`: durable, not yet applied. A database failure is `503` and stores nothing, so
+retry; so is a server started without a master key. The rate limit is a token bucket per hook and
+per `serve` process (`ingest.rate_per_hook`, `ingest.burst_per_hook`), charged only for ids that
+belong to a hook, so a flood of made-up ids costs one indexed lookup each and no memory. Anyone
+who holds the URL can use up a hook's budget with unsigned requests; limit senders by address at
+your edge proxy.
+
+**Dedupe and replay.** The dedupe value becomes the event's message id, namespaced by the hook
+(`wh:{hook}:{value}`), so the same payload sent again, inside or outside the tolerance window, with
+a new signature or the same, leaves one event and the same trait values. The profile record is
+keyed by the person's strongest identifier and observed at the signed timestamp (at the arrival
+time for the body-only scheme), so a replayed older payload never overwrites a trait that a newer
+one set. With the body-only scheme a captured request can be replayed, but only to the same effect.
+
+**Mapping failures.** A payload the mapping refuses (no identifier, a value that does not cast) is
+an ingest reject for the stream, with field names, codes and a masked sample and never a value
+outside non-PII traits, and the rest of the batch applies. A payload queued before the stream lost
+its mapping is rejected as `mapping_unavailable`. Mapping runs in the drain, so an edit to the
+mapping applies to payloads still queued. A webhook reject is not replayable.
+
+**Freshness.** An accepted payload reports through `record_stream_outcome`, at most once a minute
+per hook per process, so the stream shows **fresh**, **stale** (no payload within the stream's
+threshold; set it with "expect a payload at least every" or `staleness_threshold_seconds`) or
+**failing** like any other (see Source freshness). A rejected request writes nothing to the stream.
+A webhook source is created, changed and deleted only through `/webhooks` (the generic source
+routes answer `409`, code `managed_by_webhooks`) and never gets a run (`409`, `push_source`).
+
+**Metrics.** `zirv_flow_webhook_requests_total{outcome}` with `accepted`, `not_found`,
+`rate_limited`, `too_large`, `signature_missing`, `signature_malformed`, `signature_stale`,
+`signature_mismatch`, `invalid_payload`, `dedupe_missing` or `unavailable`; the drain's
+`zirv_flow_ingest_applied_total` carries `kind="webhook"` with the outcomes `applied`,
+`unchanged`, `rejected`, `apply_failed`, `accepted` and `duplicate`. No hook id, workspace or
+value is a label, and nothing logs a body, a header value, a signature or a secret.
 
 ## Connector runtime
 

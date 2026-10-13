@@ -22,8 +22,10 @@ pub mod secrets;
 mod sessions;
 mod sources;
 mod stream_freshness;
+mod stream_offsets;
 mod suppressions;
 mod sync_runs;
+mod webhooks;
 mod workspaces;
 
 use std::error::Error;
@@ -145,21 +147,31 @@ pub use sqlx::PgConnection;
 pub use stream_freshness::{
     StreamFreshness, StreamOutcome, record_stream_outcome, stream_freshness,
 };
+pub use stream_offsets::{
+    LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
+    report_stream_lag, stream_lag,
+};
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,
     is_suppressed, list_suppressions, remove_suppression,
 };
 pub use sync_runs::{
-    BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress, CancelOutcome,
-    Counts as SyncCounts, DELETE_BY_SIGNAL as SYNC_DELETE_BY_SIGNAL,
-    DELETE_BY_SOURCE as SYNC_DELETE_BY_SOURCE, EventCounts as SyncEventCounts, FanOut,
-    Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND, ReconcileQueued, RunCursor, RunEnd,
-    RunKind, RunReject, RunTrigger, SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome,
-    SweepUnit, SyncBatch, SyncEvent, SyncReject, SyncRun, SyncUpsert, cancel_run,
-    commit_sync_batch, fail_orphaned_runs, fail_run, find_run, finish_run, list_run_rejects,
-    list_runs, queue_reconcile_run, queue_run, queue_runs_for_source, run_trace, start_run,
-    sweep_exceeds_limit, sweep_unreached,
+    BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,
+    CONSUME_JOB_KIND as SYNC_CONSUME_JOB_KIND, CancelOutcome, Counts as SyncCounts,
+    DELETE_BY_SIGNAL as SYNC_DELETE_BY_SIGNAL, DELETE_BY_SOURCE as SYNC_DELETE_BY_SOURCE,
+    EventCounts as SyncEventCounts, FanOut, Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND,
+    ReconcileQueued, Rotated as SyncRotated, RunCursor, RunEnd, RunKind, RunReject, RunTrigger,
+    SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome, SweepUnit, SyncBatch, SyncEvent,
+    SyncReject, SyncRun, SyncUpsert, cancel_consumer_runs, cancel_run, commit_sync_batch,
+    consume_unique_key as sync_consume_unique_key, fail_orphaned_runs, fail_run, find_run,
+    finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run, queue_runs_for_source,
+    rotate_stream_run, run_trace, start_run, start_stream_run, sweep_exceeds_limit,
+    sweep_unreached,
+};
+pub use webhooks::{
+    HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,
+    find_for_receive, find_webhook, list_webhooks, replace_webhook_secret, update_webhook,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

@@ -61,6 +61,12 @@ impl ApiError {
         }
     }
 
+    /// Sets the stable machine-readable code of the problem.
+    pub(crate) fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
     /// Lists the invalid fields in the body.
     pub(crate) fn with_errors(mut self, errors: Vec<ItemProblem>) -> Self {
         self.errors = Some(errors);

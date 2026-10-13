@@ -15,7 +15,7 @@ pub(crate) struct FieldSpecBody {
     key: String,
     label: String,
     help: String,
-    /// One of `text`, `url`, `number`, `bool`, `select`.
+    /// One of `text`, `url`, `number`, `bool`, `select`, `hosts`, `long_text`, `queries`.
     kind: String,
     /// The allowed values of a `select` field; empty for the other kinds.
     options: Vec<String>,
@@ -26,6 +26,8 @@ pub(crate) struct FieldSpecBody {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CapabilitiesBody {
+    /// Records arrive by push (a webhook): no schedule, no run.
+    push: bool,
     incremental: bool,
     full_refresh: bool,
     emits_deletes: bool,
@@ -71,6 +73,7 @@ impl From<&SourceSpec> for SourceKindBody {
             config_fields: spec.config_fields.iter().map(field).collect(),
             credential_fields: spec.credential_fields.iter().map(field).collect(),
             capabilities: CapabilitiesBody {
+                push: spec.capabilities.push,
                 incremental: spec.capabilities.incremental,
                 full_refresh: spec.capabilities.full_refresh,
                 emits_deletes: spec.capabilities.emits_deletes,
@@ -122,6 +125,35 @@ mod tests {
         assert_eq!(json["credential_fields"][0]["secret"], true);
         assert_eq!(json["credential_fields"][0]["required"], true);
         assert_eq!(json["capabilities"]["incremental"], true);
+    }
+
+    #[test]
+    fn the_kafka_kind_lists_hosts_and_textarea_fields_and_only_secret_credentials() {
+        let registry = Registry::built_in();
+        let body = SourceKindBody::from(registry.get("kafka").unwrap().spec());
+
+        let json = serde_json::to_value(&body).unwrap();
+
+        let kind_of = |list: &str, key: &str| {
+            json[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["key"] == key)
+                .map(|field| field["kind"].clone())
+        };
+        assert_eq!(kind_of("config_fields", "brokers"), Some("hosts".into()));
+        assert_eq!(kind_of("config_fields", "tls_ca"), Some("long_text".into()));
+        assert_eq!(kind_of("config_fields", "max_lag"), Some("number".into()));
+        assert!(
+            json["credential_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|field| field["secret"] == true)
+        );
+        assert_eq!(json["capabilities"]["emits_deletes"], true);
+        assert_eq!(json["capabilities"]["incremental"], false);
     }
 
     #[test]

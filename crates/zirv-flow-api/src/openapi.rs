@@ -28,6 +28,7 @@ use crate::sources;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
+use crate::webhooks;
 use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
 
 #[derive(OpenApi)]
@@ -153,6 +154,13 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         ingest::identify,
         ingest::track,
         ingest::batch,
+        webhooks::receive::receive,
+        webhooks::ops::list,
+        webhooks::ops::create,
+        webhooks::ops::get,
+        webhooks::ops::update,
+        webhooks::ops::rotate,
+        webhooks::ops::remove,
         traces::get,
         setup::status,
         setup::complete,
@@ -290,6 +298,12 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         sources::kinds::FieldSpecBody,
         sources::kinds::CapabilitiesBody,
         sources::crud::SourceBody,
+        webhooks::ops::WebhookBody,
+        webhooks::ops::CreatedWebhookBody,
+        webhooks::ops::RotatedSecretBody,
+        webhooks::ops::CreateWebhookRequest,
+        webhooks::ops::UpdateWebhookRequest,
+        webhooks::receive::WebhookAccepted,
         sources::crud::CreateSourceRequest,
         sources::crud::UpdateSourceRequest,
         sources::actions::TestBody,

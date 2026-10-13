@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, EmptyState, InlineError, PageHeader, Panel, ResourceView, Stepper, TextField } from "../../ui";
@@ -10,8 +10,10 @@ import {
   credentialFrom,
   filled,
   initialValues,
+  isPush,
   shapesValid,
   withoutSecrets,
+  type CreatedWebhook,
   type Source,
   type SourceKind,
   type Stream,
@@ -19,6 +21,8 @@ import {
 } from "./labels";
 import { STEPS, type Step } from "./steps";
 import { StreamsPanel } from "./StreamsPanel";
+import { NewWebhookForm } from "./NewWebhookForm";
+import { WebhookSecretDialog } from "./WebhookSecretDialog";
 
 const MAX_NAME_CHARS = 128;
 
@@ -37,6 +41,7 @@ interface TestResult {
 }
 
 function NewSource({ workspaceId }: { workspaceId: string }) {
+  const navigate = useNavigate();
   const access = useWorkspaceAccess(workspaceId);
   const kinds = useResource(() => unwrap(client.GET("/api/v1/source-kinds")), []);
   const [step, setStep] = useState<Step>("type");
@@ -48,6 +53,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
   const [streams, setStreams] = useState<Stream[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [created, setCreated] = useState<CreatedWebhook | null>(null);
 
   function choose(chosen: SourceKind) {
     setKind(chosen);
@@ -135,7 +141,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
         title="New source"
         lede="Choose a type, fill in its settings, and test the connection. Then discover its streams and pick the ones to read. The credential is stored encrypted and is never shown again."
       />
-      <Stepper steps={STEPS} current={step} label="Source setup steps" />
+      {kind && isPush(kind) ? null : <Stepper steps={STEPS} current={step} label="Source setup steps" />}
       <Panel>
         <ResourceView resource={access} loadingLabel="Checking your access">
           {({ canManage }) =>
@@ -171,6 +177,8 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                   </div>
                 )}
               </ResourceView>
+            ) : step === "settings" && kind && isPush(kind) ? (
+              <NewWebhookForm workspaceId={workspaceId} onCreated={setCreated} />
             ) : step === "settings" && kind ? (
               <form
                 className="stack"
@@ -285,6 +293,14 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
           }
         </ResourceView>
       </Panel>
+      {created ? (
+        <WebhookSecretDialog
+          title="Your webhook is ready"
+          hook={created}
+          secret={created.secret}
+          onClose={() => void navigate(`/w/${workspaceId}/sources/${created.source_id}`)}
+        />
+      ) : null}
     </div>
   );
 }

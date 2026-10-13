@@ -4,7 +4,7 @@ import { Button, EmptyState, formatDateTime, Pill } from "../../ui";
 import { MappingDialog } from "./MappingDialog";
 import { StreamDialog } from "./StreamDialog";
 import { FreshnessBadge } from "./FreshnessBadge";
-import { lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
+import { lagLabel, lagTitle, lastSuccessLabel, syncModeLabel, type Stream } from "./labels";
 
 interface StreamsPanelProps {
   workspaceId: string;
@@ -16,7 +16,24 @@ interface StreamsPanelProps {
   onRun?: (stream: Stream) => void;
   /** Starts a reconciliation of one incremental stream; without it the table offers none. */
   onReconcile?: (stream: Stream) => void;
+  /** The source is a webhook: payloads arrive by push, so the stream has no key, cursor or sweep. */
+  push?: boolean;
   busy?: boolean;
+}
+
+/** The lag of a streaming stream next to its freshness: a number once the consumer has fetched, else a wait. */
+function Lag({ stream }: { stream: Stream }) {
+  if (stream.sync_mode !== "stream" || !stream.enabled) return null;
+  const label = lagLabel(stream.freshness);
+  if (label === null) {
+    return <span className="faint"> Waiting for the first fetch</span>;
+  }
+  return (
+    <span className="mono" title={lagTitle(stream.freshness)}>
+      {" "}
+      {label}
+    </span>
+  );
 }
 
 /** The threshold in force, in seconds, marked when it is the default; the stream's own setting while it is not read. */
@@ -27,16 +44,18 @@ function stalenessCell(stream: Stream): string {
 }
 
 /** The streams of a source with their settings; admins set each one up in a dialog. */
-export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, busy }: StreamsPanelProps) {
+export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChanged, onRun, onReconcile, push = false, busy }: StreamsPanelProps) {
   const [editing, setEditing] = useState<Stream | null>(null);
   const [mapping, setMapping] = useState<Stream | null>(null);
 
   if (streams.length === 0) {
     return (
       <EmptyState title="No streams yet">
-        {canManage
-          ? "Discover the streams this source offers, then choose which to read."
-          : "An admin has not discovered the streams of this source yet."}
+        {push
+          ? "The webhook's stream is made with it. Reload the page; if it is still missing, delete the webhook and create it again."
+          : canManage
+            ? "Discover the streams this source offers, then choose which to read."
+            : "An admin has not discovered the streams of this source yet."}
       </EmptyState>
     );
   }
@@ -73,6 +92,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
                 </td>
                 <td>
                   <FreshnessBadge state={stream.freshness?.state} />
+                  <Lag stream={stream} />
                 </td>
                 <td title={stream.freshness?.last_success_at ? formatDateTime(stream.freshness.last_success_at) : undefined}>
                   {stream.freshness ? lastSuccessLabel(stream.freshness) : "—"}
@@ -116,6 +136,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
           workspaceId={workspaceId}
           sourceId={sourceId}
           stream={editing}
+          push={push}
           onClose={() => setEditing(null)}
           onSaved={(saved) => {
             setEditing(null);
@@ -129,6 +150,7 @@ export function StreamsPanel({ workspaceId, sourceId, streams, canManage, onChan
           workspaceId={workspaceId}
           sourceId={sourceId}
           stream={mapping}
+          push={push}
           onClose={() => setMapping(null)}
           onSaved={(saved) => {
             setMapping(null);

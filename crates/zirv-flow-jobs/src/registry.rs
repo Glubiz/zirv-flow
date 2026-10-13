@@ -118,11 +118,13 @@ mod tests {
                 "privacy.export",
                 "import.dry_run",
                 "import.run",
-                "sync.run"
+                "sync.run",
+                "kafka.consume"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
         assert!(registry.get("sync.run").is_some());
+        assert!(registry.get("kafka.consume").is_some());
         assert!(registry.get("sync.nope").is_none());
     }
 
@@ -156,6 +158,7 @@ mod tests {
                 "import.dry_run",
                 "import.run",
                 "sync.run",
+                "kafka.consume",
                 "test.first",
                 "test.second"
             ]

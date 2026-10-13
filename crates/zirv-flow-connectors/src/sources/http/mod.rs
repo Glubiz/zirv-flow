@@ -85,6 +85,7 @@ impl Source for Http {
             incremental: true,
             full_refresh: true,
             emits_deletes: true,
+            push: false,
         },
     };
 
@@ -295,6 +296,7 @@ impl Reader {
         Batch {
             records,
             checkpoint: checkpoint(since),
+            refused: Vec::new(),
         }
     }
 }
@@ -359,6 +361,7 @@ fn records(
             key,
             data: item,
             deleted,
+            occurrence: None,
         });
     }
     Ok(records)

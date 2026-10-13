@@ -14,7 +14,8 @@ export function plural(count: number, one: string, many: string): string {
 }
 
 export function syncModeLabel(mode: string): string {
-  return mode === "incremental" ? "Incremental" : mode === "full_refresh" ? "Full refresh" : mode;
+  const labels: Record<string, string> = { incremental: "Incremental", full_refresh: "Full refresh", stream: "Streaming" };
+  return labels[mode] ?? mode;
 }
 
 /** The label of a source type, or the type's own id when this build does not list it. */
@@ -158,6 +159,14 @@ export function runErrorText(code: string, threshold: number): string {
     source_kind_unavailable: "This build of the server does not include this type of source.",
     source_config_invalid:
       "The source's settings no longer pass the checks, so nothing was read. Open the source, fix the manifest, then run it again.",
+    kafka_offset_out_of_range:
+      "The topic no longer has the position this stream was at, so it may have been deleted and created again. Nothing was read. Stored positions cannot be reset from the app yet, so this needs an operator.",
+    kafka_auth_failed: "The brokers refused the user name and password. Check the credential, then run the stream again.",
+    kafka_tls_failed:
+      "The secure connection to the brokers failed. Check the certificate authority and the client certificate, then run the stream again.",
+    kafka_topic_missing: "A topic of this stream does not exist on the brokers. Check the topic names, then run the stream again.",
+    kafka_connect_failed:
+      "The brokers could not be reached after several tries. Test the connection, then run the stream again.",
   };
   return texts[code] ?? `The run failed (${code}).`;
 }
@@ -175,6 +184,31 @@ export function shapesValid(fields: FieldSpec[], values: Values): boolean {
 }
 
 export type Freshness = components["schemas"]["FreshnessBody"];
+
+/** How far behind a streaming stream is: "Lag 1,204" once its consumer has looked at the log, else null. */
+export function lagLabel(freshness: Pick<Freshness, "lag"> | null | undefined): string | null {
+  const lag = freshness?.lag;
+  return lag ? `Lag ${lag.total.toLocaleString("en-US")}` : null;
+}
+
+/** The lag of each partition, for a tooltip. */
+export function lagTitle(freshness: Pick<Freshness, "lag"> | null | undefined): string | undefined {
+  const lag = freshness?.lag;
+  if (!lag) return undefined;
+  return lag.partitions.map((entry) => `Partition ${entry.partition}: ${entry.lag.toLocaleString("en-US")}`).join("\n");
+}
+
+/** Why a message was refused, in words; the place (partition and offset) is shown beside it. */
+export function rejectReasonText(code: string): string {
+  const texts: Record<string, string> = {
+    kafka_key_missing: "The message has no key, or an empty one.",
+    kafka_key_not_text: "The message key is not text of up to 512 characters.",
+    kafka_value_not_json: "The message is not JSON.",
+    kafka_value_not_object: "The message is JSON but not an object.",
+    kafka_message_too_large: "The message is over 1 MiB.",
+  };
+  return texts[code] ?? code;
+}
 
 /** The state of a stream or a source in words. Anything the server adds later shows as it is. */
 export function freshnessLabel(state: string): string {
@@ -313,4 +347,65 @@ export function oauthReasonText(reason: string | null): string {
 export function describeJson(value: unknown): string {
   const streams = (value as { streams?: unknown } | null)?.streams;
   return Array.isArray(streams) ? plural(streams.length, "stream", "streams") + " described" : "Set";
+}
+
+export type Webhook = components["schemas"]["WebhookBody"];
+export type CreatedWebhook = components["schemas"]["CreatedWebhookBody"];
+
+/** Whether records of this source type arrive by push (an inbound webhook) instead of being read. */
+export function isPush(kind: Pick<SourceKind, "capabilities"> | null | undefined): boolean {
+  return kind?.capabilities.push === true;
+}
+
+/** The address senders post to: the page's own origin and the hook's path. */
+export function webhookUrl(origin: string, hook: Pick<Webhook, "path">): string {
+  return `${origin}${hook.path}`;
+}
+
+/** The hook's signing scheme in a sentence. */
+export function schemeSummary(hook: Pick<Webhook, "signature_header" | "signature_prefix" | "timestamp_header" | "tolerance_seconds">): string {
+  const prefix = hook.signature_prefix === "" ? "no prefix" : `prefix ${hook.signature_prefix}`;
+  if (hook.timestamp_header === null) {
+    return `HMAC-SHA256 of the body in ${hook.signature_header} (${prefix}); no timestamp, so only the dedupe field stops a replay`;
+  }
+  return `HMAC-SHA256 of "timestamp.body" in ${hook.signature_header} (${prefix}), timestamp in ${hook.timestamp_header}, within ${formatDuration(hook.tolerance_seconds)}`;
+}
+
+/**
+ * A shell command that signs and posts one payload the way the hook expects, for the person to
+ * copy. The secret is written into the command only in the dialog that shows it once.
+ */
+export function curlExample(
+  url: string,
+  hook: Pick<Webhook, "signature_header" | "signature_prefix" | "timestamp_header">,
+  secret: string,
+): string {
+  const lines = [`BODY='{"id":"order-1","email":"ada@example.com"}'`];
+  if (hook.timestamp_header === null) {
+    lines.push(`SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac '${secret}' | sed 's/^.* //')`);
+  } else {
+    lines.push("TS=$(date +%s)");
+    lines.push(`SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac '${secret}' | sed 's/^.* //')`);
+  }
+  const curl = [`curl -X POST '${url}'`, `  -H 'Content-Type: application/json'`];
+  if (hook.timestamp_header !== null) curl.push(`  -H "${hook.timestamp_header}: $TS"`);
+  curl.push(`  -H "${hook.signature_header}: ${hook.signature_prefix}$SIG"`, `  -d "$BODY"`);
+  return [...lines, curl.join(" \\\n")].join("\n");
+}
+
+/** What a code the hooks API or a reject carries means, in plain words. */
+export function webhookCodeText(code: string): string {
+  const texts: Record<string, string> = {
+    invalid_signature: "The signature or its timestamp did not check out.",
+    invalid_payload: "The body was not one JSON object.",
+    dedupe_missing: "The payload has no usable value at the dedupe field.",
+    managed_by_webhooks: "A webhook source is changed under Webhooks, not as a plain source.",
+    push_source: "A webhook source receives records as they are sent; it has no run.",
+    sample_required: "Paste a sample payload to preview a webhook stream.",
+    sample_not_supported: "Only a webhook stream previews a pasted sample.",
+    key_column_not_supported: "A webhook stream has no key column; the dedupe field identifies a payload.",
+    delete_signal_unsupported: "A webhook stream has no delete signal.",
+    mapping_unavailable: "The stream had no usable mapping when the payload was applied.",
+  };
+  return texts[code] ?? code;
 }

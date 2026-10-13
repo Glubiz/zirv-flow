@@ -28,6 +28,9 @@ pub struct SourceSpec {
 /// What a source type can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
+    /// Whether records arrive by push (an inbound webhook) instead of being read. A push source
+    /// has no schedule and no run.
+    pub push: bool,
     pub incremental: bool,
     pub full_refresh: bool,
     /// Whether it reports deleted records.
@@ -61,6 +64,8 @@ pub enum FieldKind {
     Select(&'static [&'static str]),
     /// A JSON object. The setup form shows it as text the person edits.
     Json,
+    /// Comma-separated `host:port` pairs, one to ten, without a scheme.
+    HostList,
     /// Multi-line text, such as a PEM certificate.
     LongText,
     /// A list of named SQL queries (database sources): `[{"name": "...", "sql": "..."}]`.
@@ -77,6 +82,7 @@ impl FieldKind {
             Self::Bool => "bool",
             Self::Select(_) => "select",
             Self::Json => "json",
+            Self::HostList => "hosts",
             Self::LongText => "long_text",
             Self::Queries => "queries",
         }
@@ -95,6 +101,7 @@ mod tests {
         assert_eq!(FieldKind::Bool.name(), "bool");
         assert_eq!(FieldKind::Select(&["a"]).name(), "select");
         assert_eq!(FieldKind::Json.name(), "json");
+        assert_eq!(FieldKind::HostList.name(), "hosts");
         assert_eq!(FieldKind::LongText.name(), "long_text");
         assert_eq!(FieldKind::Queries.name(), "queries");
     }

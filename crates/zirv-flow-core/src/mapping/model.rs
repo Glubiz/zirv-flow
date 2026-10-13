@@ -64,6 +64,19 @@ impl Mapping {
         }
         columns
     }
+
+    /// The first segment of every column or path the mapping reads, without repeats, in first-use
+    /// order. A stream with no declared fields (a webhook) declares these.
+    pub fn root_fields(&self) -> Vec<&str> {
+        let mut roots: Vec<&str> = Vec::new();
+        for column in self.referenced_columns() {
+            let root = column.split('.').next().unwrap_or(column);
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        roots
+    }
 }
 
 /// The event a record yields: its name is fixed, the person is the record's identifiers.
@@ -186,6 +199,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn root_fields_are_the_first_segments_without_repeats() {
+        let mapping: Mapping = serde_json::from_value(json!({
+            "columns": [
+                {"column": "user.email", "target": {"type": "identifier", "kind": "email"}},
+                {"column": "user.name", "target": {"type": "trait", "key": "name"}},
+                {"column": "plan", "target": {"type": "trait", "key": "plan"}}
+            ],
+            "event": {"name": "x", "timestamp": {"column": "at"}, "properties": [{"column": "items.0.sku", "property": "sku"}]}
+        }))
+        .unwrap();
+        assert_eq!(mapping.root_fields(), vec!["user", "plan", "at", "items"]);
+        assert!(Mapping::default().root_fields().is_empty());
+    }
 
     #[test]
     fn a_target_is_tagged_by_type_and_a_transform_by_op() {

@@ -8,19 +8,28 @@ import {
   oauthReasonText,
   parseJsonObject,
   credentialFrom,
+  curlExample,
   filled,
   freshnessLabel,
   freshnessTone,
   initialValues,
+  isPush,
   kindName,
+  lagLabel,
+  lagTitle,
   lastSuccessLabel,
+  rejectReasonText,
   shapesValid,
   runErrorText,
+  schemeSummary,
   showValue,
+  syncModeLabel,
   thresholdLabel,
+  webhookCodeText,
+  webhookUrl,
   withoutSecrets,
 } from "./labels";
-import { aFreshness, FAKE_KIND, POSTGRES_KIND } from "./testData";
+import { aFreshness, aWebhook, FAKE_KIND, POSTGRES_KIND, WEBHOOK_KIND } from "./testData";
 
 const CONFIG = FAKE_KIND.config_fields;
 const CREDENTIAL = FAKE_KIND.credential_fields;
@@ -212,5 +221,95 @@ describe("the manifest settings", () => {
 
   it("explains a run that stopped on a manifest that no longer passes", () => {
     expect(runErrorText("source_config_invalid", 0.05)).toContain("manifest");
+  });
+});
+
+describe("streaming sources", () => {
+  it("names the stream mode and leaves an unknown one as it is", () => {
+    expect([syncModeLabel("stream"), syncModeLabel("full_refresh"), syncModeLabel("incremental")]).toEqual([
+      "Streaming",
+      "Full refresh",
+      "Incremental",
+    ]);
+    expect(syncModeLabel("other")).toBe("other");
+  });
+
+  it("shows lag as a grouped number with the partitions in the title, and nothing before the first fetch", () => {
+    const behind = aFreshness({
+      lag: {
+        total: 1204,
+        partitions: [
+          { partition: 0, lag: 4 },
+          { partition: 2, lag: 1200 },
+        ],
+      },
+    });
+
+    expect(lagLabel(behind)).toBe("Lag 1,204");
+    expect(lagTitle(behind)).toBe("Partition 0: 4\nPartition 2: 1,200");
+    expect(lagLabel(aFreshness({ lag: null }))).toBeNull();
+    expect(lagLabel(null)).toBeNull();
+    expect(lagTitle(null)).toBeUndefined();
+  });
+
+  it("explains each reason a message is refused and leaves a pull reason as it is", () => {
+    for (const code of [
+      "kafka_key_missing",
+      "kafka_key_not_text",
+      "kafka_value_not_json",
+      "kafka_value_not_object",
+      "kafka_message_too_large",
+    ]) {
+      expect(rejectReasonText(code)).not.toBe(code);
+    }
+    expect(rejectReasonText("invalid_identifier")).toBe("invalid_identifier");
+  });
+
+  it("explains each way a consumer fails in plain words", () => {
+    for (const code of [
+      "kafka_offset_out_of_range",
+      "kafka_auth_failed",
+      "kafka_tls_failed",
+      "kafka_topic_missing",
+      "kafka_connect_failed",
+    ]) {
+      const text = runErrorText(code, 0.05);
+      expect(text).not.toContain(code);
+      expect(text).not.toMatch(/^The run failed/);
+    }
+  });
+});
+
+describe("webhook labels", () => {
+  it("tells a push source type from a pulled one and builds the address from the origin and the path", () => {
+    expect(isPush(WEBHOOK_KIND)).toBe(true);
+    expect(isPush(FAKE_KIND)).toBe(false);
+    expect(isPush(null)).toBe(false);
+    expect(webhookUrl("https://flow.example.test", aWebhook())).toBe("https://flow.example.test/hooks/hook-1");
+  });
+
+  it("summarises both signing schemes", () => {
+    expect(schemeSummary(aWebhook())).toBe(
+      'HMAC-SHA256 of "timestamp.body" in X-Zirv-Signature (prefix sha256=), timestamp in X-Zirv-Timestamp, within 5 min',
+    );
+    expect(schemeSummary(aWebhook({ timestamp_header: null, signature_prefix: "" }))).toContain("no prefix");
+    expect(schemeSummary(aWebhook({ timestamp_header: null }))).toContain("only the dedupe field stops a replay");
+  });
+
+  it("writes the example command the README documents, for either scheme", () => {
+    const timestamped = curlExample("https://flow.example.test/hooks/hook-1", aWebhook(), "zfwh_secret");
+    expect(timestamped).toContain(`printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_secret'`);
+    expect(timestamped).toContain(`-H "X-Zirv-Timestamp: $TS"`);
+    expect(timestamped).toContain(`-H "X-Zirv-Signature: sha256=$SIG"`);
+    expect(timestamped).toContain(`curl -X POST 'https://flow.example.test/hooks/hook-1' \\\n  -H 'Content-Type`);
+    const bodyOnly = curlExample("https://x/hooks/h", aWebhook({ timestamp_header: null }), "zfwh_secret");
+    expect(bodyOnly).toContain(`printf '%s' "$BODY" | openssl dgst`);
+    expect(bodyOnly).not.toContain("$TS");
+  });
+
+  it("explains the codes in plain words and shows an unknown one as it is", () => {
+    expect(webhookCodeText("push_source")).toMatch(/no run/);
+    expect(webhookCodeText("mapping_unavailable")).toMatch(/no usable mapping/);
+    expect(webhookCodeText("something_new")).toBe("something_new");
   });
 });

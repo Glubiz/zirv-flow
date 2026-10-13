@@ -18,7 +18,7 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
-const CONFIG_KEYS: [&str; 42] = [
+const CONFIG_KEYS: [&str; 45] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -47,6 +47,9 @@ const CONFIG_KEYS: [&str; 42] = [
     "ingest.max_batch_items",
     "ingest.rate_per_key",
     "ingest.burst_per_key",
+    "ingest.max_webhook_bytes",
+    "ingest.rate_per_hook",
+    "ingest.burst_per_hook",
     "ingest.drain_batch_size",
     "ingest.drain_shards",
     "imports.max_file_bytes",
@@ -307,6 +310,12 @@ struct IngestConfig {
     rate_per_key: u32,
     /// Items a key may send at once after a quiet period, per `serve` process.
     burst_per_key: u32,
+    /// The largest webhook request body, in bytes.
+    max_webhook_bytes: u64,
+    /// Requests per second each webhook may receive, per `serve` process.
+    rate_per_hook: u32,
+    /// Requests a webhook may receive at once after a quiet period, per `serve` process.
+    burst_per_hook: u32,
     /// Inbox rows applied per transaction by `ingest.drain`.
     drain_batch_size: u32,
     /// Concurrent drain loops per workspace in `ingest.drain`.
@@ -475,6 +484,9 @@ impl Config {
             .merge(Serialized::default("ingest.max_batch_items", 500_u32))
             .merge(Serialized::default("ingest.rate_per_key", 10_000_u32))
             .merge(Serialized::default("ingest.burst_per_key", 20_000_u32))
+            .merge(Serialized::default("ingest.max_webhook_bytes", 262_144_u64))
+            .merge(Serialized::default("ingest.rate_per_hook", 50_u32))
+            .merge(Serialized::default("ingest.burst_per_hook", 200_u32))
             .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
             .merge(Serialized::default("ingest.drain_shards", 8_u32))
             .merge(Serialized::default(
@@ -551,6 +563,8 @@ impl Config {
             ("ingest.max_batch_items", config.ingest.max_batch_items),
             ("ingest.rate_per_key", config.ingest.rate_per_key),
             ("ingest.burst_per_key", config.ingest.burst_per_key),
+            ("ingest.rate_per_hook", config.ingest.rate_per_hook),
+            ("ingest.burst_per_hook", config.ingest.burst_per_hook),
             ("ingest.drain_batch_size", config.ingest.drain_batch_size),
             (
                 "explorer.interactive_row_limit",
@@ -709,6 +723,9 @@ impl Config {
         };
         if ingest.max_request_bytes == 0 {
             return Err(fail("ingest.max_request_bytes", "must be at least 1"));
+        }
+        if ingest.max_webhook_bytes == 0 {
+            return Err(fail("ingest.max_webhook_bytes", "must be at least 1"));
         }
         if ingest.burst_per_key < ingest.max_batch_items {
             return Err(fail(
@@ -903,6 +920,9 @@ impl Config {
             max_batch_items: self.ingest.max_batch_items as usize,
             rate_per_key: self.ingest.rate_per_key,
             burst_per_key: self.ingest.burst_per_key,
+            max_webhook_bytes: usize::try_from(self.ingest.max_webhook_bytes).unwrap_or(usize::MAX),
+            rate_per_hook: self.ingest.rate_per_hook,
+            burst_per_hook: self.ingest.burst_per_hook,
         }
     }
 
@@ -1927,6 +1947,54 @@ endpoint = \"http://collector:4318\"
         );
         assert_eq!(config.ingest_drain_batch_size(), 25);
         assert_eq!(config.ingest_drain_shards(), 6);
+    }
+
+    #[test]
+    fn the_webhook_limits_default_to_256_kib_50_per_second_and_a_200_burst_and_can_be_set() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let limits = defaults.ingest_limits();
+        assert_eq!(
+            (
+                limits.max_webhook_bytes,
+                limits.rate_per_hook,
+                limits.burst_per_hook
+            ),
+            (262_144, 50, 200)
+        );
+
+        let mut env = database_env("postgres://localhost/database");
+        for (key, value) in [
+            ("MAX_WEBHOOK_BYTES", "4096"),
+            ("RATE_PER_HOOK", "7"),
+            ("BURST_PER_HOOK", "9"),
+        ] {
+            env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), value.into()));
+        }
+        let limits = Config::load(None, env).unwrap().ingest_limits();
+        assert_eq!(
+            (
+                limits.max_webhook_bytes,
+                limits.rate_per_hook,
+                limits.burst_per_hook
+            ),
+            (4096, 7, 9)
+        );
+    }
+
+    #[test]
+    fn a_zero_webhook_limit_names_its_key() {
+        for (key, name) in [
+            ("MAX_WEBHOOK_BYTES", "ingest.max_webhook_bytes"),
+            ("RATE_PER_HOOK", "ingest.rate_per_hook"),
+            ("BURST_PER_HOOK", "ingest.burst_per_hook"),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), "0".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(name), "{error}");
+        }
     }
 
     #[test]

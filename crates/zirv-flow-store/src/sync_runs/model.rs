@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
-use super::job::{RUN_JOB_KIND, run_trace};
+use super::job::{CONSUME_JOB_KIND, RUN_JOB_KIND, consume_unique_key, run_trace};
 use crate::{
     NewJob, PgPool, StoreError, StreamOutcome, begin, commit, database_now, enqueue, lock_lease,
     record_stream_outcome,
@@ -59,7 +59,7 @@ pub struct SyncRun {
     pub state: String,
     /// `manual` or `schedule`.
     pub trigger: String,
-    /// The stream's sync mode when the run was queued.
+    /// The stream's sync mode when the run was queued: `full_refresh`, `incremental` or `stream`.
     pub sync_mode: String,
     /// `sync` or `reconcile`.
     pub run_kind: String,
@@ -205,7 +205,16 @@ pub async fn queue_run(
     let Some(run) = run else {
         return Ok(None);
     };
-    let mut job = NewJob::new(RUN_JOB_KIND, run_trace(&run));
+    // A stream-mode stream is read by a consumer, which works the run in slices of jobs.
+    let consumer = run.sync_mode == "stream";
+    let mut job = NewJob::new(
+        if consumer {
+            CONSUME_JOB_KIND
+        } else {
+            RUN_JOB_KIND
+        },
+        run_trace(&run),
+    );
     job.workspace_id = Some(workspace);
     job.payload = json!({
         "source_id": source_id,
@@ -213,8 +222,13 @@ pub async fn queue_run(
         "run_id": run.id,
     });
     // One key per run: a retried fan-out cannot queue a run twice, and the next occurrence of
-    // a schedule gets a key of its own.
-    job.unique_key = Some(format!("sync:run:{}", run.id));
+    // a schedule gets a key of its own. A consumer's key carries the generation of the slice.
+    job.unique_key = Some(if consumer {
+        job.payload["generation"] = json!(0);
+        consume_unique_key(run.id, 0)
+    } else {
+        format!("sync:run:{}", run.id)
+    });
     enqueue(&mut *connection, &job).await?;
     Ok(Some(run))
 }
@@ -432,6 +446,34 @@ pub async fn start_run<'e>(
     .map_err(StoreError::query)
 }
 
+/// As [`start_run`] for a consumer slice. A consumer run is started by many jobs, one per
+/// slice, so a start does not count as an attempt; only the first start and a redelivery of the
+/// same job (`redelivered`: the job had been started before, its lease lost) do.
+pub async fn start_stream_run<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    run_id: Uuid,
+    redelivered: bool,
+) -> Result<Option<SyncRun>, StoreError> {
+    sqlx::query_as(concat!(
+        "WITH r AS ( \
+            UPDATE sync_runs SET state = 'running', \
+                attempt = CASE WHEN attempt = 0 OR $3 THEN attempt + 1 ELSE attempt END, \
+                started_at = COALESCE(started_at, now()), updated_at = now() \
+            WHERE workspace_id = $1 AND id = $2 AND state IN ('queued', 'running') \
+            RETURNING *) \
+         SELECT ",
+        run_columns!("r"),
+        " FROM r JOIN streams s ON s.id = r.stream_id"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(run_id)
+    .bind(redelivered)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// What cancelling a run did.
 #[derive(Debug, PartialEq)]
 pub enum CancelOutcome {
@@ -476,6 +518,26 @@ pub async fn cancel_run(
     } else {
         CancelOutcome::NotFound
     })
+}
+
+/// Cancels the active consumer runs (stream-mode) of one stream, or of every stream of the source
+/// when `stream_id` is `None`, in the caller's transaction, and returns their ids. A consumer
+/// notices at its next commit or lag report; a queued slice finds the run over and does nothing.
+pub async fn cancel_consumer_runs(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "UPDATE sync_runs SET state = 'cancelled', finished_at = now(), updated_at = now() \n         WHERE workspace_id = $1 AND source_id = $2 AND sync_mode = 'stream' \n           AND ($3::uuid IS NULL OR stream_id = $3) AND state IN ('queued', 'running') \n         RETURNING id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(stream_id)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// The job and lease token a write of a worker is fenced on.
@@ -563,6 +625,61 @@ pub async fn finish_run(
     fenced_end(pool, workspace, lease, end, StreamOutcome::Succeeded).await
 }
 
+/// What rotating a consumer run did.
+#[derive(Debug, PartialEq)]
+pub enum Rotated {
+    /// The run ended `succeeded` and this run took its place, queued with its first slice.
+    Rotated(Box<SyncRun>),
+    /// The run had ended already (cancelled, say): nothing was written.
+    Over,
+    /// The job's lease is gone: another worker owns the run now. Nothing was written.
+    LeaseLost,
+}
+
+/// Ends a running consumer run as `succeeded` and queues a fresh run of the stream (trigger
+/// `schedule`) with its first slice, in one transaction fenced on the job's lease. A consumer
+/// run lives for days; rotating it bounds the size of its trace, its counters and its reject
+/// ratio.
+pub async fn rotate_stream_run(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    run_id: Uuid,
+    lease: Lease,
+) -> Result<Rotated, StoreError> {
+    let mut tx = begin(pool).await?;
+    if !lock_lease(&mut tx, lease.job_id, lease.token).await? {
+        return Ok(Rotated::LeaseLost);
+    }
+    let ended: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE sync_runs SET state = 'succeeded', finished_at = now(), updated_at = now() \
+         WHERE workspace_id = $1 AND id = $2 AND state = 'running' RETURNING stream_id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let Some(stream_id) = ended else {
+        return Ok(Rotated::Over);
+    };
+    let next = queue_run(
+        &mut tx,
+        workspace,
+        source_id,
+        stream_id,
+        RunKind::Sync,
+        RunTrigger::Schedule,
+        None,
+    )
+    .await?;
+    let Some(next) = next else {
+        return Ok(Rotated::Over);
+    };
+    commit(tx).await?;
+    Ok(Rotated::Rotated(Box::new(next)))
+}
+
 /// Fails every active run whose job is dead or gone, with `job_failed`, and returns the ids.
 ///
 /// A job the reaper buried after its last lease expiry, or that was deleted, never runs its
@@ -578,7 +695,8 @@ pub async fn fail_orphaned_runs(pool: &PgPool) -> Result<Vec<Uuid>, StoreError> 
                 finished_at = now(), updated_at = now() \
             WHERE r.state IN ('queued', 'running') \
               AND NOT EXISTS (SELECT 1 FROM jobs j \
-                              WHERE j.unique_key = 'sync:run:' || r.id::text \
+                              WHERE (j.unique_key = 'sync:run:' || r.id::text \
+                                     OR j.unique_key LIKE 'kafka:consume:' || r.id::text || ':%') \
                                 AND j.state <> 'dead') \
             RETURNING r.id, r.workspace_id, r.stream_id), \
          marked AS ( \
@@ -1491,5 +1609,236 @@ pub(super) mod tests {
             .await
             .unwrap();
         assert!(!fire(true).await, "an unmapped stream does not fire");
+    }
+
+    // Consumer runs (Kafka).
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_job_kind_follows_the_streams_mode_and_a_stream_never_reconciles(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (pull_source, pull_stream) =
+            source_with_stream(&pool, ws, "pull", "full_refresh").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+
+        let pull = queue(&pool, ws, pull_source, pull_stream).await.unwrap();
+        let consumer = queue(&pool, ws, source, stream).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let reconcile = queue_reconcile_run(
+            &mut connection,
+            ws,
+            source,
+            stream,
+            RunTrigger::Schedule,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+
+        assert_eq!(consumer.sync_mode, "stream");
+        let jobs: Vec<(String, Value, Option<String>)> =
+            sqlx::query_as("SELECT kind, payload, unique_key FROM jobs ORDER BY kind")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].0, "kafka.consume");
+        assert_eq!(jobs[0].1["run_id"], json!(consumer.id));
+        assert_eq!(jobs[0].1["generation"], 0);
+        assert_eq!(jobs[0].2, Some(format!("kafka:consume:{}:0", consumer.id)));
+        assert_eq!(jobs[1].0, "sync.run");
+        assert_eq!(jobs[1].2, Some(format!("sync:run:{}", pull.id)));
+        assert_eq!(
+            reconcile,
+            ReconcileQueued::Ineligible,
+            "a stream is never reconciled"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_fan_out_queues_a_consumer_for_a_stream_and_a_pull_run_for_the_rest(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, _) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let fan = queue_runs_for_source(
+            &mut connection,
+            ws,
+            source,
+            RunTrigger::Schedule,
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let again = queue_runs_for_source(
+            &mut connection,
+            ws,
+            source,
+            RunTrigger::Schedule,
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(fan.created.len(), 1);
+        assert_eq!(fan.created[0].sync_mode, "stream");
+        assert_eq!(
+            (again.created.len(), again.skipped_active),
+            (0, 1),
+            "the cron fan-out leaves a running consumer alone"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_consumer_start_counts_the_first_start_and_redeliveries_only(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let run = queue(&pool, ws, source, stream).await.unwrap();
+
+        let first = start_stream_run(&pool, ws, run.id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let next_slice = start_stream_run(&pool, ws, run.id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let redelivered = start_stream_run(&pool, ws, run.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        // The pull start counts every start, as before.
+        let pulled = start_run(&pool, ws, run.id).await.unwrap().unwrap();
+
+        assert_eq!(first.attempt, 1);
+        assert_eq!(next_slice.attempt, 1, "a new slice is not a lost attempt");
+        assert_eq!(redelivered.attempt, 2);
+        assert_eq!(pulled.attempt, 3);
+        assert!(first.started_at.is_some());
+        assert_eq!(first.started_at, redelivered.started_at);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slice_whose_successor_has_the_same_key_loses_it_and_the_next_generation_does_not(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let run = queue(&pool, ws, source, stream).await.unwrap();
+        let claimed = crate::claim_job(
+            &pool,
+            "w",
+            &["kafka.consume"],
+            std::time::Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let successor = |generation: u32| {
+            let mut job = NewJob::new(CONSUME_JOB_KIND, run_trace(&run));
+            job.workspace_id = Some(ws);
+            job.unique_key = Some(consume_unique_key(run.id, generation));
+            job
+        };
+
+        // The running job still holds generation 0: a successor with that key is dropped.
+        let same = enqueue(&pool, &successor(0)).await.unwrap();
+        let next = enqueue(&pool, &successor(1)).await.unwrap();
+
+        assert!(!same, "the same key would drop the successor");
+        assert!(next);
+        assert_eq!(claimed.unique_key, Some(consume_unique_key(run.id, 0)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_consumer_run_whose_job_chain_is_gone_is_failed_and_one_with_a_successor_is_not(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let run = queue(&pool, ws, source, stream).await.unwrap();
+        start_stream_run(&pool, ws, run.id, false).await.unwrap();
+        // The first slice finished and its successor holds the run.
+        sqlx::query("UPDATE jobs SET unique_key = $2 WHERE unique_key = $1")
+            .bind(consume_unique_key(run.id, 0))
+            .bind(consume_unique_key(run.id, 7))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let none = fail_orphaned_runs(&pool).await.unwrap();
+        sqlx::query("UPDATE jobs SET state = 'dead'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dead = fail_orphaned_runs(&pool).await.unwrap();
+
+        assert!(none.is_empty(), "found by the key of its generation");
+        assert_eq!(dead, [run.id]);
+        let found = find_run(&pool, ws, source, run.id).await.unwrap().unwrap();
+        assert_eq!(found.error_code.as_deref(), Some("job_failed"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotating_ends_the_run_and_queues_the_next_in_one_transaction(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let run = queue(&pool, ws, source, stream).await.unwrap();
+        start_stream_run(&pool, ws, run.id, false).await.unwrap();
+        let lease = claim_lease(&pool).await;
+
+        let rotated = rotate_stream_run(&pool, ws, source, run.id, lease)
+            .await
+            .unwrap();
+
+        let Rotated::Rotated(next) = rotated else {
+            panic!("{rotated:?}");
+        };
+        assert_ne!(next.id, run.id);
+        assert_eq!(
+            (next.state.as_str(), next.trigger.as_str()),
+            ("queued", "schedule")
+        );
+        assert_eq!(next.sync_mode, "stream");
+        let old = find_run(&pool, ws, source, run.id).await.unwrap().unwrap();
+        assert_eq!(old.state, "succeeded");
+        let keys: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE id <> $1 ORDER BY unique_key")
+                .bind(lease.job_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [Some(consume_unique_key(next.id, 0))]);
+        // A second rotation of the ended run, or by a worker that lost its lease, does nothing.
+        assert_eq!(
+            rotate_stream_run(&pool, ws, source, run.id, lease)
+                .await
+                .unwrap(),
+            Rotated::Over
+        );
+        let stale = Lease {
+            job_id: lease.job_id,
+            token: Uuid::now_v7(),
+        };
+        assert_eq!(
+            rotate_stream_run(&pool, ws, source, next.id, stale)
+                .await
+                .unwrap(),
+            Rotated::LeaseLost
+        );
+        let after = find_run(&pool, ws, source, next.id).await.unwrap().unwrap();
+        assert_eq!(after.state, "queued", "the lost lease changed nothing");
     }
 }

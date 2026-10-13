@@ -34,6 +34,12 @@ fn leaf(value: &Value) -> Option<String> {
     }
 }
 
+/// Walks `path` from `root` as mapping paths are walked; a webhook's dedupe field is resolved
+/// with it.
+pub fn walk_path<'a>(root: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    walk(root, path)
+}
+
 /// Walks `path` from `root`: a segment of digits indexes an array, any other selects a key.
 fn walk<'a>(root: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
     let mut segments = path.split('.');
