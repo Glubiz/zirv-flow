@@ -5236,6 +5236,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rskafka",
  "rust-embed",
  "serde",
  "serde_json",

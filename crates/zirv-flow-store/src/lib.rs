@@ -158,7 +158,7 @@ pub use sync_runs::{
     EventCounts as SyncEventCounts, FanOut, Lease as SyncLease, RUN_JOB_KIND as SYNC_RUN_JOB_KIND,
     ReconcileQueued, Rotated as SyncRotated, RunCursor, RunEnd, RunKind, RunReject, RunTrigger,
     SYNC_REJECT_CHECK_MIN_RECORDS, SYNC_SWEEP_BATCH, SweepOutcome, SweepUnit, SyncBatch, SyncEvent,
-    SyncReject, SyncRun, SyncUpsert, cancel_run, commit_sync_batch,
+    SyncReject, SyncRun, SyncUpsert, cancel_consumer_runs, cancel_run, commit_sync_batch,
     consume_unique_key as sync_consume_unique_key, fail_orphaned_runs, fail_run, find_run,
     finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run, queue_runs_for_source,
     rotate_stream_run, run_trace, start_run, start_stream_run, sweep_exceeds_limit,

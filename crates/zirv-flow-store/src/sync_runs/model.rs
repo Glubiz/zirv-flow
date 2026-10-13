@@ -520,6 +520,26 @@ pub async fn cancel_run(
     })
 }
 
+/// Cancels the active consumer runs (stream-mode) of one stream, or of every stream of the source
+/// when `stream_id` is `None`, in the caller's transaction, and returns their ids. A consumer
+/// notices at its next commit or lag report; a queued slice finds the run over and does nothing.
+pub async fn cancel_consumer_runs(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source_id: Uuid,
+    stream_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "UPDATE sync_runs SET state = 'cancelled', finished_at = now(), updated_at = now() \n         WHERE workspace_id = $1 AND source_id = $2 AND sync_mode = 'stream' \n           AND ($3::uuid IS NULL OR stream_id = $3) AND state IN ('queued', 'running') \n         RETURNING id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(stream_id)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The job and lease token a write of a worker is fenced on.
 #[derive(Clone, Copy, Debug)]
 pub struct Lease {

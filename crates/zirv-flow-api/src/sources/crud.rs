@@ -352,6 +352,10 @@ pub(crate) async fn update_source(
     .await?;
     zirv_flow_store::sync_source_reconcile_schedules(&mut tx, workspace, source.id, source.enabled)
         .await?;
+    // A disabled source reads nothing: its consumers stop with it.
+    if !source.enabled {
+        zirv_flow_store::cancel_consumer_runs(&mut tx, workspace, source.id, None).await?;
+    }
     admin::audit(
         &mut tx,
         context,

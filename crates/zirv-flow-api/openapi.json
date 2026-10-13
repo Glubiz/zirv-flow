@@ -12914,7 +12914,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The sync modes the stream supports: `full_refresh`, `incremental`."
+            "description": "The sync modes the stream supports: `full_refresh`, `incremental`, `stream`."
           }
         }
       },
@@ -13672,6 +13672,17 @@
           "high_water_mark": {
             "description": "The stream's checkpoint, opaque connector state that may hold a value of a record.\nWorkspace admins only; null for everyone else, for a full refresh and before the first\nbatch."
           },
+          "lag": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LagBody",
+                "description": "For a `stream`-mode stream: how far behind its consumer is, once it has looked at the\nlog. Counts of messages, not record values: members see them."
+              }
+            ]
+          },
           "last_success_at": {
             "type": [
               "string",
@@ -14283,6 +14294,27 @@
           }
         }
       },
+      "LagBody": {
+        "type": "object",
+        "description": "How many messages a consumer is behind.",
+        "required": [
+          "total",
+          "partitions"
+        ],
+        "properties": {
+          "partitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartitionLagBody"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Over all partitions."
+          }
+        }
+      },
       "ListBody": {
         "type": "object",
         "required": [
@@ -14660,6 +14692,23 @@
           "reason": {
             "type": "string",
             "example": "not_found"
+          }
+        }
+      },
+      "PartitionLagBody": {
+        "type": "object",
+        "required": [
+          "partition",
+          "lag"
+        ],
+        "properties": {
+          "lag": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "partition": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -16401,7 +16450,7 @@
           },
           "sync_mode": {
             "type": "string",
-            "description": "`full_refresh` or `incremental`."
+            "description": "`full_refresh`, `incremental` or `stream`."
           },
           "updated_at": {
             "type": "string",
@@ -16470,7 +16519,7 @@
           },
           "sync_mode": {
             "type": "string",
-            "description": "`full_refresh` or `incremental`; one the stream supports.",
+            "description": "`full_refresh`, `incremental` or `stream`; one the stream supports.",
             "example": "incremental"
           }
         }

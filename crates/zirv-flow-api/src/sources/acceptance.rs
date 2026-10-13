@@ -2042,6 +2042,7 @@ mod tests {
             keys,
             [
                 "high_water_mark",
+                "lag",
                 "last_success_at",
                 "state",
                 "threshold_is_default",
@@ -2740,5 +2741,392 @@ mod tests {
             .await;
 
         assert_eq!(started.body[0]["kind"], "sync");
+    }
+
+    // The Kafka source: stream-mode streams, their consumer runs and their lag.
+
+    impl Fixture {
+        /// A Kafka source (nothing connects at creation) whose one stream `orders` is
+        /// discovered in stream mode with the `plan` trait registered.
+        async fn kafka_source(&self) -> String {
+            zirv_flow_store::create_trait_definition(
+                &self.pool,
+                self.ws,
+                &trait_definition("plan", false),
+            )
+            .await
+            .unwrap();
+            let broker =
+                std::env::var("ZIRV_KAFKA_BROKER").unwrap_or_else(|_| "localhost:9092".to_owned());
+            let created = self
+                .as_admin(
+                    "POST",
+                    "/sources",
+                    Some(json!({
+                        "kind": "kafka",
+                        "name": "Events",
+                        "config": {"brokers": broker, "topics": "orders", "security": "plaintext"},
+                    })),
+                )
+                .await;
+            assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+            let id = created.body["id"].as_str().unwrap().to_owned();
+            let descriptor = json!({
+                "name": "orders",
+                "fields": [
+                    {"name": "_key", "field_type": "string"},
+                    {"name": "_timestamp", "field_type": "timestamp"},
+                    {"name": "email", "field_type": "string"},
+                    {"name": "plan", "field_type": "string"},
+                ],
+                "sync_modes": ["stream"],
+                "default_cursor_field": null,
+                "default_primary_key": ["_key"],
+            });
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            zirv_flow_store::upsert_discovered_streams(
+                &mut tx,
+                self.ws,
+                id.parse().unwrap(),
+                &[zirv_flow_store::DiscoveredStream {
+                    name: "orders",
+                    sync_mode: "stream",
+                    cursor_field: None,
+                    primary_key: &["_key".to_owned()],
+                    descriptor: &descriptor,
+                }],
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            id
+        }
+
+        fn consumer_settings(enabled: bool) -> Value {
+            json!({
+                "enabled": enabled, "sync_mode": "stream", "primary_key": ["_key"],
+                "mapping": {"columns": [
+                    {"column": "email", "target": {"type": "identifier", "kind": "email"}},
+                    {"column": "plan", "target": {"type": "trait", "key": "plan"}}
+                ]}
+            })
+        }
+
+        async fn consumer_runs(&self) -> Vec<(String, String)> {
+            sqlx::query_as("SELECT state, sync_mode FROM sync_runs ORDER BY created_at")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap()
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_kafka_stream_is_configured_in_stream_mode_and_enabling_it_starts_one_consumer(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let tail = format!("/sources/{id}/streams/orders");
+
+        let saved = fx
+            .as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["sync_mode"], "stream");
+        assert_eq!(saved.body["discovered"]["sync_modes"], json!(["stream"]));
+        assert_eq!(
+            fx.consumer_runs().await,
+            [("queued".to_owned(), "stream".to_owned())]
+        );
+        let job: (String, Value) = sqlx::query_as("SELECT kind, payload FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(job.0, "kafka.consume");
+        assert_eq!(job.1["generation"], 0);
+        let entry = zirv_flow_store::list_audit(&pool, 5)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "stream.configured")
+            .unwrap();
+        assert_eq!(entry.summary["run_started"], true);
+
+        // Saving again while the run is active starts nothing more.
+        let again = fx
+            .as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+        assert_eq!(again.status, StatusCode::OK);
+        assert_eq!(fx.consumer_runs().await.len(), 1);
+        let entry = zirv_flow_store::list_audit(&pool, 5)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "stream.configured")
+            .unwrap();
+        assert_eq!(entry.summary["run_started"], false);
+
+        // Disabling the stream cancels the consumer.
+        let off = fx
+            .as_admin("PUT", &tail, Some(Fixture::consumer_settings(false)))
+            .await;
+        assert_eq!(off.status, StatusCode::OK);
+        assert_eq!(
+            fx.consumer_runs().await,
+            [("cancelled".to_owned(), "stream".to_owned())]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn disabling_the_source_cancels_its_consumers_and_run_now_refuses_a_second(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let tail = format!("/sources/{id}/streams/orders");
+        fx.as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+
+        let second = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "orders"})),
+            )
+            .await;
+        assert_eq!(second.status, StatusCode::CONFLICT, "{:?}", second.body);
+        let reconcile = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "orders", "kind": "reconcile"})),
+            )
+            .await;
+        assert_eq!(reconcile.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let off = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"enabled": false})),
+            )
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+
+        assert_eq!(
+            fx.consumer_runs().await,
+            [("cancelled".to_owned(), "stream".to_owned())]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_mode_stream_refuses_reconcile_and_sweep_settings_and_other_modes(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let tail = format!("/sources/{id}/streams/orders");
+        let with = |extra: Value| {
+            let mut body = Fixture::consumer_settings(false);
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+
+        let reconcile = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(with(json!({"reconcile_schedule": "0 3 * * *"}))),
+            )
+            .await;
+        let sweep = fx
+            .as_admin("PUT", &tail, Some(with(json!({"sweep_limit": 0.25}))))
+            .await;
+        let incremental = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(with(
+                    json!({"sync_mode": "incremental", "cursor_field": "_timestamp"}),
+                )),
+            )
+            .await;
+        let full = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(with(json!({"sync_mode": "full_refresh"}))),
+            )
+            .await;
+
+        for refused in [&reconcile, &sweep, &incremental, &full] {
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                refused.body
+            );
+        }
+        assert_eq!(fx.consumer_runs().await, []);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn lag_is_shown_to_members_with_the_freshness_and_only_for_a_stream_mode_stream(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let tail = format!("/sources/{id}/streams/orders");
+        fx.as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+        let before = fx.stream_freshness(&id, Auth::Session(&fx.member)).await;
+        assert_eq!(before[0]["freshness"]["lag"], Value::Null, "no fetch yet");
+
+        sqlx::query(
+            "INSERT INTO stream_offsets \
+                (workspace_id, stream_id, partition, next_offset, high_watermark, observed_at) \
+             SELECT workspace_id, id, p, n, w, now() FROM streams, \
+                (VALUES (0, 10::bigint, 14::bigint), (1, 5, 5), (2, 0, 1200)) AS t(p, n, w)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let shown = fx.stream_freshness(&id, Auth::Session(&fx.member)).await;
+
+        let lag = &shown[0]["freshness"]["lag"];
+        assert_eq!(lag["total"], 1204);
+        assert_eq!(
+            lag["partitions"],
+            json!([
+                {"partition": 0, "lag": 4},
+                {"partition": 1, "lag": 0},
+                {"partition": 2, "lag": 1200}
+            ])
+        );
+        // A pull stream of another source has no lag.
+        let fake = fx.create_ok("CRM", "ok", 1).await;
+        fx.as_admin("POST", &format!("/sources/{fake}/discover"), None)
+            .await;
+        fx.as_admin(
+            "PUT",
+            &format!("/sources/{fake}/streams/stream_1"),
+            Some(json!({"enabled": false, "sync_mode": "full_refresh"})),
+        )
+        .await;
+        let pulled = fx.stream_freshness(&fake, Auth::Session(&fx.member)).await;
+        assert_eq!(pulled[0]["freshness"]["lag"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL and a Kafka broker; set DATABASE_URL and run kafka-fixture.sh"]
+    async fn a_preview_of_a_topic_with_fewer_messages_than_the_limit_returns_without_timing_out(
+        pool: PgPool,
+    ) {
+        let broker = std::env::var("ZIRV_KAFKA_BROKER").expect("run kafka-fixture.sh");
+        let topic = format!(
+            "api-preview-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let client = rskafka::client::ClientBuilder::new(vec![broker.clone()])
+            .build()
+            .await
+            .unwrap();
+        client
+            .controller_client()
+            .unwrap()
+            .create_topic(&topic, 1, 1, 10_000)
+            .await
+            .unwrap();
+        let partition = client
+            .partition_client(
+                &topic,
+                0,
+                rskafka::client::partition::UnknownTopicHandling::Retry,
+            )
+            .await
+            .unwrap();
+        let message = |key: &str, value: &str| rskafka::record::Record {
+            key: Some(key.as_bytes().to_vec()),
+            value: Some(value.as_bytes().to_vec()),
+            headers: Default::default(),
+            timestamp: rskafka::chrono::Utc::now(),
+        };
+        partition
+            .produce(
+                vec![
+                    message("k1", r#"{"email":"a@example.com","plan":"pro"}"#),
+                    message("k2", r#"{"email":"b@example.com","plan":"free"}"#),
+                ],
+                rskafka::client::partition::Compression::NoCompression,
+            )
+            .await
+            .unwrap();
+        let fx = fixture_with_egress(
+            &pool,
+            None,
+            Some(
+                zirv_flow_core::egress::EgressPolicy::parse(&[
+                    "127.0.0.0/8".to_owned(),
+                    "::1/128".to_owned(),
+                ])
+                .unwrap(),
+            ),
+        )
+        .await;
+        zirv_flow_store::create_trait_definition(&fx.pool, fx.ws, &trait_definition("plan", false))
+            .await
+            .unwrap();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "kafka", "name": "Events",
+                    "config": {"brokers": broker, "topics": topic, "security": "plaintext"},
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let discovered = fx
+            .as_admin("POST", &format!("/sources/{id}/discover"), None)
+            .await;
+        assert_eq!(discovered.status, StatusCode::OK, "{:?}", discovered.body);
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &format!("/sources/{id}/streams/{topic}"),
+                Some(Fixture::consumer_settings(false)),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let started = std::time::Instant::now();
+        let preview = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/{topic}/preview"),
+                Some(json!({"limit": 10})),
+            )
+            .await;
+
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(preview.body["read"], 2);
+        assert_eq!(preview.body["truncated"], false);
+        let keys: Vec<_> = preview.body["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["key"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(keys, ["k1", "k2"]);
     }
 }
