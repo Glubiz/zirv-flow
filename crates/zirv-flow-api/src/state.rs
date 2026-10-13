@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
@@ -49,6 +50,9 @@ pub struct AppState {
     pub(crate) stop: Option<tokio::sync::watch::Receiver<bool>>,
     /// Which non-public destinations outbound connections may reach.
     egress: Arc<EgressPolicy>,
+    /// The request-rate buckets of this process's sources, shared by every call that reaches
+    /// them. Per process: see `zirv_flow_connectors::runtime::RateLimits`.
+    rate_limits: Arc<RateLimits>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -83,6 +87,7 @@ impl AppState {
             explorer: ExplorerLimits::default(),
             stop: None,
             egress: Arc::default(),
+            rate_limits: Arc::default(),
         }
     }
 
@@ -110,6 +115,18 @@ impl AppState {
     pub fn with_egress_policy(mut self, policy: Arc<EgressPolicy>) -> Self {
         self.egress = policy;
         self
+    }
+
+    /// Uses `limits` for the sources' request rates, so the worker pool of the same process draws
+    /// from the buckets the API does.
+    pub fn with_rate_limits(mut self, limits: Arc<RateLimits>) -> Self {
+        self.rate_limits = limits;
+        self
+    }
+
+    /// The request-rate buckets of this process's sources.
+    pub fn rate_limits(&self) -> &Arc<RateLimits> {
+        &self.rate_limits
     }
 
     /// The egress policy outbound connections are checked against.
@@ -213,6 +230,19 @@ mod tests {
             set.egress_policy().decide(ip),
             zirv_flow_core::egress::Decision::Allow
         );
+    }
+
+    #[tokio::test]
+    async fn clones_share_the_rate_limit_buckets_and_they_can_be_replaced() {
+        let state = state();
+
+        assert!(Arc::ptr_eq(
+            state.rate_limits(),
+            state.clone().rate_limits()
+        ));
+        let shared = Arc::new(RateLimits::new());
+        let set = state.with_rate_limits(Arc::clone(&shared));
+        assert!(Arc::ptr_eq(set.rate_limits(), &shared));
     }
 
     #[tokio::test]
