@@ -8,6 +8,7 @@ import {
   credentialFrom,
   filled,
   initialValues,
+  shapesValid,
   type Source,
   type SourceKind,
   type Values,
@@ -38,7 +39,10 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
 
   const change = (key: string, value: string) => setValues((current) => ({ ...current, [key]: value }));
   const valid =
-    name.trim() !== "" && filled(kind.config_fields, values) && (!replacing || filled(kind.credential_fields, values));
+    name.trim() !== "" &&
+    filled(kind.config_fields, values) &&
+    shapesValid(kind.config_fields, values) &&
+    (!replacing || filled(kind.credential_fields, values));
 
   async function submit(event: SyntheticEvent) {
     event.preventDefault();

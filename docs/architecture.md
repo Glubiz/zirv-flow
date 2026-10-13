@@ -509,6 +509,18 @@ unit, one statement compares the unseen share of the live rows with `streams.swe
 run reads from the beginning, maps records only to split deleted from seen keys, and never writes
 `streams.checkpoint`; its cron is a `schedules` row keyed by `stream_id`.
 
+As built (M3, database sources): `postgres` and `mysql` are two modules and two registry lines in
+`zirv-flow-connectors`, with the settings, TLS roots, keyset checkpoint, error mapping and metrics they
+share in a private `sources::sql` helper (not a registry). A table or a configured `query:<name>`
+is read in pages of 500 rows ordered by `(cursor, primary key)` or `(primary key)`, each page in its
+own read-only transaction with a server-side statement timeout, strictly after the checkpoint
+(`{"v":1,"key":[...]}`, the last row's key as the database printed it), so rows that share a cursor
+value across a page boundary are neither skipped nor repeated. A stream needs a primary key and a
+pageable key type, and an incremental stream does not read rows whose cursor is NULL. Every column
+is read as text. Driver and server messages are dropped: failures are fixed messages, with the
+SQLSTATE or error number logged and `zirv_flow_source_db_errors_total{source_type,reason}` counted.
+The sources set `emits_deletes: false`; sweeping and delete signals for them come later.
+
 **Mapping** is declarative: field path to identifier kind, trait, event field or
 list, with a bounded transform set (trim, case, cast, timestamp parse,
 concatenate, constant, value map, split) and nested JSON path selection for
@@ -1587,8 +1599,9 @@ discovers (Kafka broker metadata) are checked again. No new crate or edge is
 needed (5.1).
 
 As built (M3): `zirv_flow_core::egress` holds the pure policy and `zirv-flow-connectors` enforces it
-for HTTP through `GuardedClient`; the database and Kafka drivers and the `ai` crate call the same
-policy at their own connect points when they land.
+for HTTP through `GuardedClient`. The PostgreSQL and MySQL sources call the same policy at their own
+connect points (`SourceContext::resolve_checked`, below); the Kafka consumer and the `ai` crate will
+call it at theirs when they land.
 
 - **Classes.** An address is public, loopback, private, unique-local, link-local, shared CGNAT,
   metadata, unspecified, multicast, broadcast, documentation, benchmarking or reserved. IPv4-mapped,
@@ -1606,6 +1619,17 @@ policy at their own connect points when they land.
   IP-literal URL never reaches DNS and is decided before sending; each redirect hop is checked
   again; environment proxies are ignored. Denials count in `zirv_flow_egress_denied_total{class}`
   and log the host and class, never the path or query.
+- **Database connect point.** `SourceContext::resolve_checked(host)` resolves the host (an IP literal
+  skips DNS), checks every address with the same policy (one denied address refuses the host; more
+  than 8 distinct addresses are refused only after all were checked), and returns the checked list.
+  Each source calls it at every connect, so a changed DNS answer is checked again, and hands the
+  list, and nothing else, to the driver: PostgreSQL gets one `host`/`hostaddr` pair per address
+  (`hostaddr` is the TCP target, `host` the TLS name) and MySQL `resolved_ips`. Neither driver follows
+  a redirect or a server-supplied endpoint, and the options that could dial something the caller did
+  not name (a Unix socket host, `prefer_socket`, a connection string, local infile) are never set;
+  tests on the built options pin that. TLS is verified by default against the configured CA alone
+  or the compiled-in public roots (never the system store), and `tls = off` is refused when any
+  checked address is public.
 - **Exempt.** The OIDC provider calls in `zirv-flow-identity` stay outside the policy, as above.
 
 ### 16.2 Secrets, RBAC, audit

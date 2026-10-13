@@ -92,6 +92,15 @@ mod tests {
     }
 
     async fn fixture_with(pool: &PgPool, keyring: Option<Arc<Keyring>>) -> Fixture {
+        fixture_with_egress(pool, keyring, None).await
+    }
+
+    /// `fixture_with`, and the egress policy the server enforces when one is given.
+    async fn fixture_with_egress(
+        pool: &PgPool,
+        keyring: Option<Arc<Keyring>>,
+        egress: Option<zirv_flow_core::egress::EgressPolicy>,
+    ) -> Fixture {
         zirv_flow_store::migrate(pool).await.unwrap();
         let name = WorkspaceName::parse("ours").unwrap();
         let slug = Slug::parse("ours").unwrap();
@@ -111,6 +120,9 @@ mod tests {
                 .await
                 .unwrap();
             state = state.with_keyring(keyring);
+        }
+        if let Some(policy) = egress {
+            state = state.with_egress_policy(Arc::new(policy));
         }
         let router = router(state);
         let key = |scopes: &'static [Scope]| {
@@ -2109,6 +2121,297 @@ mod tests {
             fx.stream_freshness(&id, Auth::Key(&fx.admin)).await[0]["freshness"]["high_water_mark"],
             json!({"after": "zz-cursor-marker@example.com"})
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kinds_list_the_database_sources_with_their_setting_kinds(pool: PgPool) {
+        let fx = fixture(&pool).await;
+
+        let kinds = call(
+            &fx.router,
+            "GET",
+            "/api/v1/source-kinds",
+            None,
+            Auth::Key(&fx.read),
+        )
+        .await;
+
+        assert_eq!(kinds.status, StatusCode::OK);
+        for kind in ["postgres", "mysql"] {
+            let entry = kinds
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["kind"] == kind)
+                .unwrap_or_else(|| panic!("{kind} is listed"));
+            let field = |key: &str| {
+                entry["config_fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|field| field["key"] == key)
+                    .unwrap_or_else(|| panic!("{kind} has the setting {key}"))
+            };
+            assert_eq!(field("host")["kind"], "text");
+            assert_eq!(field("host")["required"], true);
+            assert_eq!(field("port")["kind"], "number");
+            assert_eq!(field("ca_certificate")["kind"], "long_text");
+            assert_eq!(field("queries")["kind"], "queries");
+            assert_eq!(field("tls")["kind"], "select");
+            assert_eq!(field("tls")["options"], json!(["verify", "off"]));
+            let credentials: Vec<_> = entry["credential_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| (field["key"].clone(), field["secret"].clone()))
+                .collect();
+            assert_eq!(
+                credentials,
+                [
+                    (json!("user"), json!(true)),
+                    (json!("password"), json!(true))
+                ]
+            );
+            assert_eq!(entry["capabilities"]["emits_deletes"], false);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_database_source_validates_its_settings_and_round_trips_its_queries(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let create = |config: Value| {
+            fx.as_admin(
+                "POST",
+                "/sources",
+                Some(
+                    json!({"kind": "postgres", "name": "warehouse", "config": config,
+                    "credential": {"user": "reader", "password": "pw"}}),
+                ),
+            )
+        };
+        let fields = |reply: &Reply| -> Vec<String> {
+            reply.body["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}: {}",
+                        e["field"].as_str().unwrap(),
+                        e["reason"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+
+        let bad_host = create(json!({"host": "db/../x", "database": "shop"})).await;
+        let bad_query = create(json!({"host": "db.example.com", "database": "shop",
+            "queries": [{"name": "vip", "sql": "DROP TABLE secrets"}]}))
+        .await;
+        let bad_ca = create(json!({"host": "db.example.com", "database": "shop",
+            "ca_certificate": "not a certificate"}))
+        .await;
+
+        assert_eq!(
+            bad_host.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            bad_host.body
+        );
+        assert_eq!(fields(&bad_host).len(), 1);
+        assert!(
+            fields(&bad_host)[0].starts_with("config.host: "),
+            "{:?}",
+            fields(&bad_host)
+        );
+        assert!(
+            fields(&bad_query)[0].starts_with("config.queries: "),
+            "{:?}",
+            fields(&bad_query)
+        );
+        assert!(!fields(&bad_query)[0].contains("secrets"));
+        assert!(
+            fields(&bad_ca)[0].starts_with("config.ca_certificate: "),
+            "{:?}",
+            fields(&bad_ca)
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "a refused source stores nothing");
+
+        let queries = json!([{"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"}]);
+        let created = create(json!({"host": "db.example.com", "database": "shop",
+            "queries": queries}))
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        assert_eq!(created.body["config"]["queries"], queries);
+        assert_eq!(
+            created.body["credential_fields_set"],
+            json!(["password", "user"])
+        );
+
+        let more = json!([
+            {"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"},
+            {"name": "recent", "sql": "SELECT id FROM orders"}
+        ]);
+        let patched = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(
+                    json!({"config": {"host": "db.example.com", "database": "shop",
+                    "queries": more}}),
+                ),
+            )
+            .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        let read = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
+        assert_eq!(read.body["config"]["queries"], more);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_postgres_table_stream_previews_through_the_mapping_editor_without_writing(
+        pool: PgPool,
+    ) {
+        // The test database is the upstream: a table, and a role that can only read it.
+        let role = format!("zf_prev_{}", uuid::Uuid::now_v7().simple());
+        for statement in [
+            "CREATE TABLE items (id bigint PRIMARY KEY, email text NOT NULL, name text, \
+             updated_at timestamptz)"
+                .to_owned(),
+            "INSERT INTO items SELECT n, 'user' || n || '@example.com', 'User ' || n, \
+             timestamptz '2024-01-01 00:00:00+00' + n * interval '1 minute' \
+             FROM generate_series(1, 30) AS n"
+                .to_owned(),
+            format!("CREATE ROLE {role} LOGIN PASSWORD 'zf_prev_pw'"),
+            format!("GRANT SELECT ON items TO {role}"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let policy = zirv_flow_core::egress::EgressPolicy::parse(&[
+            "127.0.0.0/8".to_owned(),
+            "::1/128".to_owned(),
+        ])
+        .unwrap();
+        let fx = fixture_with_egress(
+            &pool,
+            Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap())),
+            Some(policy),
+        )
+        .await;
+        zirv_flow_store::create_trait_definition(&pool, fx.ws, &trait_definition("plan", false))
+            .await
+            .unwrap();
+        let options = pool.connect_options();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "postgres",
+                    "name": "warehouse",
+                    "config": {
+                        "host": options.get_host(),
+                        "port": options.get_port(),
+                        "database": options.get_database().unwrap(),
+                        "tls": "off"
+                    },
+                    "credential": {"user": role, "password": "zf_prev_pw"}
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let discovered = fx
+            .as_admin("POST", &format!("/sources/{id}/discover"), None)
+            .await;
+        assert_eq!(discovered.status, StatusCode::OK, "{:?}", discovered.body);
+        let mapping = json!({
+            "columns": [
+                email_rule(),
+                {"column": "name", "target": {"type": "trait", "key": "plan"}}
+            ],
+            "event": {"name": "seen", "timestamp": {"column": "updated_at"},
+                      "properties": [{"property": "who", "column": "name"}]}
+        });
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &format!("/sources/{id}/streams/items"),
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                            "primary_key": ["id"], "mapping": mapping})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let before: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM people) + (SELECT count(*) FROM events) \
+             + (SELECT count(*) FROM sync_runs) + (SELECT count(*) FROM jobs)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let saved_preview = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/items/preview"),
+                Some(json!({"limit": 3})),
+            )
+            .await;
+        let draft = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/streams/items/preview"),
+                Some(json!({"limit": 20, "mapping": {"columns": [email_rule()]}})),
+            )
+            .await;
+        // A role belongs to the cluster, not the test database: drop it before any assertion.
+        for statement in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            saved_preview.status,
+            StatusCode::OK,
+            "{:?}",
+            saved_preview.body
+        );
+        assert_eq!(saved_preview.body["read"], 3);
+        assert_eq!(saved_preview.body["truncated"], true);
+        let first = &saved_preview.body["records"][0];
+        assert_eq!(first["result"], "mapped");
+        assert_eq!(first["key"], "1");
+        assert_eq!(first["identifiers"][0]["value"], "user1@example.com");
+        assert_eq!(first["traits"]["plan"], "User 1");
+        assert_eq!(first["event"]["properties"]["who"], "User 1");
+        // PostgreSQL hands the bare timestamptz over as text ("2024-01-01 00:01:00+00"); the mapping
+        // reads it as the event time with no transform.
+        assert_eq!(first["event"]["occurred_at"], "2024-01-01T00:01:00Z");
+        assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
+        assert_eq!(draft.body["read"], 20);
+        assert_eq!(draft.body["truncated"], true, "30 rows, 20 shown");
+        assert_eq!(draft.body["records"][19]["key"], "20");
+        let after: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM people) + (SELECT count(*) FROM events) \
+             + (SELECT count(*) FROM sync_runs) + (SELECT count(*) FROM jobs)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "a preview writes nothing");
     }
 
     #[sqlx::test]

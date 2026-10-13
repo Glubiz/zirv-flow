@@ -12,15 +12,20 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
 metrics.workspace = true
+mysql_async.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true
+webpki-roots.workspace = true
 zeroize.workspace = true
 zirv-flow-core.workspace = true
 
@@ -32,5 +37,7 @@ test-support = []
 axum.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus.workspace = true
+rcgen.workspace = true
 tracing-subscriber.workspace = true
-tokio.workspace = true
+tokio-rustls.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
