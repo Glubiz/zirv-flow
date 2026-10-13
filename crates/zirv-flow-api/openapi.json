@@ -13453,6 +13453,44 @@
           }
         }
       },
+      "FreshnessBody": {
+        "type": "object",
+        "description": "Whether a stream's data is current (architecture 7.5). The state is derived on every read.",
+        "required": [
+          "state",
+          "threshold_is_default"
+        ],
+        "properties": {
+          "high_water_mark": {
+            "description": "The stream\\'s checkpoint, opaque connector state that may hold a value of a record.\nWorkspace admins only; null for everyone else, for a full refresh and before the first\nbatch."
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the stream last succeeded; null if it never has."
+          },
+          "state": {
+            "type": "string",
+            "description": "`fresh`, `stale` (past the threshold since the last success) or `failing` (the last run\nfailed).",
+            "example": "fresh"
+          },
+          "threshold_is_default": {
+            "type": "boolean",
+            "description": "Whether `threshold_seconds` is the default of twice the schedule interval and not the\nstream\\'s own."
+          },
+          "threshold_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds without a success before the stream counts as stale; null when it never turns\nstale (no explicit threshold and no schedule)."
+          }
+        }
+      },
       "HistoryBody": {
         "type": "object",
         "required": [
@@ -15744,6 +15782,13 @@
           "enabled": {
             "type": "boolean"
           },
+          "freshness": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The worst freshness among the source's enabled streams (`failing`, then `stale`, then\n`fresh`); null when it has none, or the source is disabled."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -15862,6 +15907,17 @@
             "type": "boolean",
             "description": "Whether runs read this stream. New streams start disabled."
           },
+          "freshness": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FreshnessBody",
+                "description": "Whether the data is current; null while the stream, or its source, is disabled."
+              }
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -15892,7 +15948,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "How long without new data before the stream counts as stale, in seconds."
+            "description": "The stream's own threshold: seconds without a successful run before the stream counts as\nstale. Absent means twice the source schedule's interval, or never stale when the source\nhas no schedule. `freshness.threshold_seconds` is the one in force."
           },
           "sync_mode": {
             "type": "string",

@@ -2,7 +2,7 @@
 //! the transaction that stores the source, and comes back only as the names of its fields.
 //! Each change is audited with ids, names and field names, never a value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::{validate_config, validate_credential};
-use zirv_flow_core::{SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
+use zirv_flow_core::{Freshness, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
 use super::{credential, field_problems, invalid, kind_unavailable, registry};
@@ -43,6 +43,9 @@ pub(crate) struct SourceBody {
     /// A cron expression in UTC, or null.
     schedule: Option<String>,
     enabled: bool,
+    /// The worst freshness among the source's enabled streams (`failing`, then `stale`, then
+    /// `fresh`); null when it has none, or the source is disabled.
+    freshness: Option<String>,
     /// The user who created it; null when an API key did.
     created_by: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
@@ -63,11 +66,34 @@ impl From<&Source> for SourceBody {
             credential_fields_set: source.credential_fields.clone(),
             schedule: source.schedule.clone(),
             enabled: source.enabled,
+            freshness: None,
             created_by: source.created_by,
             created_at: source.created_at,
             updated_at: source.updated_at,
         }
     }
+}
+
+impl SourceBody {
+    fn with_freshness(mut self, freshness: Option<Freshness>) -> Self {
+        self.freshness = freshness.map(|state| state.as_str().to_owned());
+        self
+    }
+}
+
+/// The worst state of each source that has an enabled stream, for the sources of a workspace.
+async fn source_freshness(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    source: Option<Uuid>,
+) -> Result<HashMap<Uuid, Freshness>, ApiError> {
+    let now = zirv_flow_store::database_now(pool).await?;
+    let mut worst: HashMap<Uuid, Freshness> = HashMap::new();
+    for stream in zirv_flow_store::stream_freshness(pool, Some(workspace), source, now).await? {
+        let entry = worst.entry(stream.source_id).or_insert(stream.state);
+        *entry = (*entry).max(stream.state);
+    }
+    Ok(worst)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -387,7 +413,13 @@ pub(crate) async fn list(
 ) -> Result<Json<Vec<SourceBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let sources = zirv_flow_store::list_sources(&state.pool, workspace.id).await?;
-    Ok(Json(sources.iter().map(SourceBody::from).collect()))
+    let worst = source_freshness(&state.pool, workspace.id, None).await?;
+    Ok(Json(
+        sources
+            .iter()
+            .map(|source| SourceBody::from(source).with_freshness(worst.get(&source.id).copied()))
+            .collect(),
+    ))
 }
 
 /// Creates a source and seals its credential. Workspace admins only. Audited as
@@ -455,7 +487,10 @@ pub(crate) async fn get(
     let source = zirv_flow_store::find_source(&state.pool, workspace.id, path_id(&id)?)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(SourceBody::from(&source)))
+    let worst = source_freshness(&state.pool, workspace.id, Some(source.id)).await?;
+    Ok(Json(
+        SourceBody::from(&source).with_freshness(worst.get(&source.id).copied()),
+    ))
 }
 
 /// Changes a source: name, settings, schedule, enabled, or the credential. Workspace admins
@@ -496,7 +531,10 @@ pub(crate) async fn update(
         &body,
     )
     .await?;
-    Ok(Json(SourceBody::from(&source)))
+    let worst = source_freshness(&state.pool, workspace.id, Some(source.id)).await?;
+    Ok(Json(
+        SourceBody::from(&source).with_freshness(worst.get(&source.id).copied()),
+    ))
 }
 
 /// Deletes a source with its streams and its stored credential. Workspace admins only. Audited
