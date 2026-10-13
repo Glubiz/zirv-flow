@@ -129,9 +129,9 @@ mod tests {
                                 {
                                     return (StatusCode::BAD_REQUEST, "no").into_response();
                                 }
-                                *up.valid_access.lock().unwrap() = "acc-0".to_owned();
+                                *up.valid_access.lock().unwrap() = "access-0".to_owned();
                                 let mut answer =
-                                    json!({"access_token": "acc-0", "expires_in": 3600});
+                                    json!({"access_token": "access-0", "expires_in": 3600});
                                 if mode == Exchange::Good {
                                     answer["refresh_token"] = "rt-0".into();
                                 }
@@ -145,8 +145,8 @@ mod tests {
                                 }
                                 let n = up.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
                                 *valid = format!("rt-{n}");
-                                *up.valid_access.lock().unwrap() = format!("acc-{n}");
-                                axum::Json(json!({"access_token": format!("acc-{n}"),
+                                *up.valid_access.lock().unwrap() = format!("access-{n}");
+                                axum::Json(json!({"access_token": format!("access-{n}"),
                                 "refresh_token": format!("rt-{n}"), "expires_in": 3600}))
                                 .into_response()
                             }
@@ -967,7 +967,7 @@ mod tests {
         // Failures with a known state are audited with their reason and no value.
         let details = serde_json::to_string(&fx.audit_details().await).unwrap();
         assert!(details.contains("no_refresh_token") && details.contains("state_mismatch"));
-        for secret in [CODE, CLIENT_SECRET, "acc-0", "rt-0"] {
+        for secret in [CODE, CLIENT_SECRET, "access-0", "rt-0"] {
             assert!(!details.contains(secret), "{secret} in the audit trail");
         }
         assert!(
@@ -1411,9 +1411,9 @@ mod tests {
             CODE,
             CLIENT_SECRET,
             REPLACED_CLIENT_SECRET,
-            "acc-0",
+            "access-0",
             "rt-0",
-            "acc-1",
+            "access-1",
             "rt-1",
         ];
         for secret in secrets {
