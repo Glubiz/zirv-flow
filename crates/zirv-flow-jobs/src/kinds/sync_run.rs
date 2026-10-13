@@ -608,6 +608,7 @@ mod tests {
             transforms: Vec::new(),
         };
         serde_json::to_value(Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![
                 rule(

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::model::{ColumnRule, Mapping, Target};
+use super::model::{ColumnRule, DeleteRule, Mapping, Target};
 use super::transform::{apply_transform, cast, into_json, parse_flag};
 use super::validate::{TraitCatalog, TraitState};
 use crate::people::{Identifier, TraitType, coerce};
@@ -222,6 +222,21 @@ pub fn apply(
     }
 }
 
+/// Whether the mapping's delete signal marks `row` as deleted. False without a signal, for a
+/// column the row lacks and for an empty cell. Never returns the cell.
+pub fn is_deleted(mapping: &Mapping, row: &dyn Cells) -> bool {
+    let Some(signal) = &mapping.delete_when else {
+        return false;
+    };
+    let Some(cell) = row.cell(&signal.column) else {
+        return false;
+    };
+    match signal.rule {
+        DeleteRule::Truthy => parse_flag(cell) == Some(true),
+        DeleteRule::Present => !cell.trim().is_empty(),
+    }
+}
+
 /// A cell after the transforms of its rule.
 fn run_chain(rule: &ColumnRule, cell: &str, row: &dyn Cells) -> Result<Value, RowError> {
     let mut value = Value::String(cell.to_owned());
@@ -367,6 +382,7 @@ mod tests {
         Mapping {
             key_column: None,
             columns,
+            delete_when: None,
         }
     }
 
@@ -374,6 +390,7 @@ mod tests {
     fn a_row_becomes_identifiers_traits_and_lists() {
         let list = Uuid::now_v7();
         let mapping = Mapping {
+            delete_when: None,
             key_column: Some("id".into()),
             columns: vec![
                 email("Email"),
@@ -655,5 +672,63 @@ mod tests {
             Err(HeaderError::Blank)
         );
         assert!(Header::new(vec!["a".into(), "A".into()]).is_ok());
+    }
+
+    fn signalled(rule: DeleteRule) -> Mapping {
+        Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "gone".into(),
+                rule,
+            }),
+            ..mapping(vec![email("Email")])
+        }
+    }
+
+    fn deleted(mapping: &Mapping, names: &[&str], values: &[&str]) -> bool {
+        let header = header(names);
+        let values = cells(values);
+        is_deleted(
+            mapping,
+            &CsvRow {
+                header: &header,
+                cells: &values,
+            },
+        )
+    }
+
+    #[test]
+    fn the_truthy_rule_deletes_on_a_flag_and_on_nothing_else() {
+        let mapping = signalled(DeleteRule::Truthy);
+        for yes in ["true", "1", "yes", " X "] {
+            assert!(deleted(&mapping, &["Email", "gone"], &["a", yes]), "{yes}");
+        }
+        for no in ["false", "0", "", "maybe", "2026-01-01"] {
+            assert!(!deleted(&mapping, &["Email", "gone"], &["a", no]), "{no}");
+        }
+    }
+
+    #[test]
+    fn the_present_rule_deletes_on_any_non_empty_cell() {
+        let mapping = signalled(DeleteRule::Present);
+        assert!(deleted(
+            &mapping,
+            &["Email", "gone"],
+            &["a", "2026-01-01T00:00:00Z"]
+        ));
+        assert!(deleted(&mapping, &["Email", "gone"], &["a", "false"]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a", ""]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a", "  "]));
+    }
+
+    #[test]
+    fn without_a_signal_or_a_column_nothing_is_deleted() {
+        assert!(!deleted(
+            &mapping(vec![email("Email")]),
+            &["Email", "gone"],
+            &["a", "true"]
+        ));
+        let mapping = signalled(DeleteRule::Truthy);
+        assert!(!deleted(&mapping, &["Email"], &["a"]));
+        assert!(!deleted(&mapping, &["Email", "gone"], &["a"]));
     }
 }

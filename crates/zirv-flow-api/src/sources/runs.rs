@@ -519,6 +519,7 @@ mod tests {
     #[test]
     fn a_sample_is_masked_again_against_the_mapping_and_the_registry() {
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),

@@ -102,6 +102,11 @@ pub fn validate(
     {
         return Err(MappingError::UnknownColumn(key.clone()));
     }
+    if let Some(signal) = &mapping.delete_when
+        && !header.contains(&signal.column)
+    {
+        return Err(MappingError::UnknownColumn(signal.column.clone()));
+    }
     let mut identifiers = 0;
     let mut traits = HashSet::new();
     for rule in &mapping.columns {
@@ -185,7 +190,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::super::model::ColumnRule;
+    use super::super::model::{ColumnRule, DeleteRule, DeleteWhen};
     use super::*;
 
     fn header() -> Header {
@@ -229,6 +234,7 @@ mod tests {
             &Mapping {
                 key_column: None,
                 columns,
+                delete_when: None,
             },
             &header(),
             &catalog(),
@@ -272,6 +278,7 @@ mod tests {
             Err(MappingError::UnknownColumn("Ghost".into()))
         );
         let mapping = Mapping {
+            delete_when: None,
             key_column: Some("Ghost".into()),
             columns: vec![email()],
         };
@@ -425,5 +432,23 @@ mod tests {
         assert!(
             serde_json::from_value::<Mapping>(serde_json::json!({"columns": [], "x": 1})).is_err()
         );
+    }
+
+    #[test]
+    fn the_delete_column_must_be_in_the_header() {
+        let mut mapping = Mapping {
+            key_column: None,
+            columns: vec![email()],
+            delete_when: Some(DeleteWhen {
+                column: "Ghost".into(),
+                rule: DeleteRule::Truthy,
+            }),
+        };
+        assert_eq!(
+            validate(&mapping, &header(), &catalog()),
+            Err(MappingError::UnknownColumn("Ghost".into()))
+        );
+        mapping.delete_when.as_mut().unwrap().column = "Last".into();
+        assert_eq!(validate(&mapping, &header(), &catalog()), Ok(()));
     }
 }

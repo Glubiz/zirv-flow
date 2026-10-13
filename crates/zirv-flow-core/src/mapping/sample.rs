@@ -80,6 +80,7 @@ mod tests {
 
     fn mapping() -> Mapping {
         Mapping {
+            delete_when: None,
             key_column: Some("id".into()),
             columns: vec![
                 rule(
@@ -130,6 +131,7 @@ mod tests {
     #[test]
     fn numbers_and_booleans_stay_and_long_strings_are_cut() {
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![
                 rule("a", Target::Trait { key: "plan".into() }),
@@ -153,6 +155,7 @@ mod tests {
     #[test]
     fn a_nul_in_a_name_or_a_kept_value_becomes_a_replacement_character() {
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![rule("pl\0an", Target::Trait { key: "plan".into() })],
         };

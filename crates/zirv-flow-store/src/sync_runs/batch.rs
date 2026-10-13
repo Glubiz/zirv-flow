@@ -924,6 +924,7 @@ mod tests {
         let fx = fixture(&pool, "one", "full_refresh").await;
         let source = fx.source_id.to_string();
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![ColumnRule {
                 column: "plan".into(),

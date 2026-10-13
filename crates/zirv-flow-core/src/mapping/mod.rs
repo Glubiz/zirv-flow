@@ -14,8 +14,9 @@ mod validate;
 
 pub use apply::{
     Cells, CsvRow, Header, HeaderError, MAX_KEY_CHARS, Mapped, RowError, RowErrorReason, apply,
+    is_deleted,
 };
 pub use json_record::JsonRecord;
-pub use model::{ColumnRule, Mapping, Target, Transform};
+pub use model::{ColumnRule, DeleteRule, DeleteWhen, Mapping, Target, Transform};
 pub use sample::{RejectSample, SAMPLE_STRING_CHARS, reject_sample};
 pub use validate::{MappingError, TraitCatalog, TraitState, validate};

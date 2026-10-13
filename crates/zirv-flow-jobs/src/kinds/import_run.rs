@@ -317,6 +317,7 @@ mod tests {
             columns.push(rule("news", Target::List { list_id }, vec![]));
         }
         Mapping {
+            delete_when: None,
             key_column: None,
             columns,
         }

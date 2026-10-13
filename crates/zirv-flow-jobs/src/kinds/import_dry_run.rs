@@ -216,6 +216,7 @@ mod tests {
         .await
         .unwrap();
         let mapping = Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![ColumnRule {
                 column: "email".into(),

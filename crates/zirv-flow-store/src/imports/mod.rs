@@ -54,6 +54,7 @@ mod tests {
 
     fn mapping() -> Mapping {
         Mapping {
+            delete_when: None,
             key_column: None,
             columns: vec![ColumnRule {
                 column: "email".into(),
