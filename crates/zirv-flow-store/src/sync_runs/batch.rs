@@ -16,7 +16,10 @@ use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
 };
-use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit, lock_lease};
+use crate::{
+    NewDecision, PgPool, StoreError, StreamOutcome, append_decisions, begin, commit, database_now,
+    lock_lease, record_stream_outcome,
+};
 
 /// A run is judged on its reject rate only once this many records have been read. Smaller than
 /// the 1,000 rows of a CSV import because incremental runs are usually small.
@@ -251,6 +254,15 @@ pub async fn commit_sync_batch(
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
+        let at = database_now(&mut *tx).await?;
+        record_stream_outcome(
+            &mut tx,
+            batch.workspace,
+            batch.stream_id,
+            StreamOutcome::Failed,
+            at,
+        )
+        .await?;
     } else if batch.incremental {
         // A run that failed on its rejects leaves the stream's cursor where it was, so the
         // next run reads those records again.
@@ -956,5 +968,44 @@ mod tests {
             .unwrap();
         assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
         assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_failed_on_its_rejects_marks_its_stream_failing_in_the_same_transaction(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool, "one", "full_refresh").await;
+        let source = fx.source_id.to_string();
+        let rejects: Vec<SyncReject> = (0..SYNC_REJECT_CHECK_MIN_RECORDS)
+            .map(|_| reject())
+            .collect();
+        let cp = json!({"offset": 100});
+        let before = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!before.last_run_failed);
+
+        let outcome = commit_sync_batch(
+            &pool,
+            &SyncBatch {
+                rejected: &rejects,
+                ..batch(&fx, &source, &[], &cp)
+            },
+        )
+        .await
+        .unwrap();
+
+        let BatchOutcome::Committed(progress) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(progress.threshold_exceeded);
+        let after = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.last_run_failed);
+        assert_eq!(after.last_success_at, None);
     }
 }
