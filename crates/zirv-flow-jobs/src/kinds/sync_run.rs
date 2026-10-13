@@ -1952,6 +1952,43 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_signal_at_a_json_path_removes_the_record_instead_of_applying_it() {
+        let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        mapping.delete_when = Some(zirv_flow_core::mapping::DeleteWhen {
+            column: "meta.deleted".into(),
+            rule: zirv_flow_core::mapping::DeleteRule::Truthy,
+        });
+        let catalog = HashMap::new();
+        let plain = HashSet::new();
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = Planner {
+            mapping: &mapping,
+            catalog: &catalog,
+            plain: &plain,
+            declared: vec!["email", "name", "meta"],
+            source: "s",
+            stream: "stream_1",
+            observed_at: OffsetDateTime::now_utc(),
+            trace: &trace,
+        };
+        let record = |key: &str, deleted: bool| Record {
+            key: key.into(),
+            data: json!({"email": "a@example.com", "meta": {"deleted": deleted}}),
+            deleted: false,
+        };
+
+        let planned = planner.plan(vec![record("gone", true), record("kept", false)]);
+
+        assert_eq!(
+            planned.deleted,
+            vec![("gone".to_owned(), SYNC_DELETE_BY_SIGNAL)]
+        );
+        assert_eq!(planned.upserts.len(), 1);
+        assert_eq!(planned.upserts[0].record.record_key, "kept");
+        assert!(planned.rejected.is_empty());
+    }
+
+    #[test]
     fn a_nul_in_a_record_is_rejected_with_a_sample_that_holds_none() {
         let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
         let catalog = HashMap::from([(

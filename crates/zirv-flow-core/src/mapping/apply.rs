@@ -1092,4 +1092,29 @@ mod tests {
         assert!(!deleted(&mapping, &["Email"], &["a"]));
         assert!(!deleted(&mapping, &["Email", "gone"], &["a"]));
     }
+
+    #[test]
+    fn a_delete_signal_may_be_a_path_into_a_json_record() {
+        let mapping = Mapping {
+            delete_when: Some(super::super::model::DeleteWhen {
+                column: "meta.deleted".into(),
+                rule: DeleteRule::Truthy,
+            }),
+            ..mapping(vec![email("email")])
+        };
+        let read = |data: Value| {
+            let object = data.as_object().unwrap().clone();
+            let record = JsonRecord::for_mapping(&object, &mapping, ["email", "meta"]);
+            is_deleted(&mapping, &record)
+        };
+
+        assert!(read(
+            json!({"email": "a@example.com", "meta": {"deleted": true}})
+        ));
+        assert!(!read(
+            json!({"email": "a@example.com", "meta": {"deleted": false}})
+        ));
+        assert!(!read(json!({"email": "a@example.com", "meta": {}})));
+        assert!(!read(json!({"email": "a@example.com", "meta": null})));
+    }
 }

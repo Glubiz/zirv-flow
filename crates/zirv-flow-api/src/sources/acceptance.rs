@@ -2299,6 +2299,39 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_delete_signal_may_be_a_path_into_a_declared_field_and_an_undeclared_one_is_refused(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let settings = |column: &str| {
+            let mut mapping = mapping_body();
+            mapping["delete_when"] = json!({"column": column, "rule": "truthy"});
+            json!({"enabled": true, "sync_mode": "full_refresh", "mapping": mapping})
+        };
+
+        let ghost = fx
+            .as_admin("PUT", &tail, Some(settings("ghost.deleted")))
+            .await;
+        let nested = fx
+            .as_admin("PUT", &tail, Some(settings("email.deleted")))
+            .await;
+
+        assert_eq!(ghost.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"ghost.deleted\")"
+        );
+        assert_eq!(nested.status, StatusCode::OK, "{:?}", nested.body);
+        assert_eq!(
+            nested.body["mapping"]["delete_when"],
+            json!({"column": "email.deleted", "rule": "truthy"})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reconciliation_is_started_by_admins_on_an_incremental_stream_and_shows_its_kind(
         pool: PgPool,
     ) {
