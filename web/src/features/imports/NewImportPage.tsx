@@ -2,10 +2,10 @@ import { useState, type ChangeEvent, type DragEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
 import { describeError, uploadFile, type components, type ErrorSummary } from "../../api";
-import { Button, InlineError, PageHeader, Panel, SelectField, TextField } from "../../ui";
+import { Button, InlineError, PageHeader, Panel, SelectField, Stepper, TextField } from "../../ui";
 import { useImportAccess } from "./access";
 import { percent } from "./labels";
-import { Stepper } from "./Stepper";
+import { STEPS } from "./steps";
 
 type Created = components["schemas"]["CsvImportDetailBody"];
 
@@ -89,7 +89,7 @@ function NewImport({ workspaceId }: { workspaceId: string }) {
         title="New import"
         lede="Upload a CSV file of people. The first row names the columns. You choose what each column becomes in the next step; nothing is written until you run the import."
       />
-      <Stepper current="upload" />
+      <Stepper steps={STEPS} current="upload" label="Import steps" />
       <Panel>
         {!ready ? null : !canWrite ? (
           <p className="muted">

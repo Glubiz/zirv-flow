@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
-import { Button, InlineError, PageHeader, Panel, ResourceView, TextField } from "../../ui";
+import { Button, InlineError, PageHeader, Panel, ResourceView, Stepper, TextField } from "../../ui";
 import { useSourceAccess } from "./access";
 import { FieldInputs } from "./FieldInputs";
 import {
@@ -16,7 +16,7 @@ import {
   type Stream,
   type Values,
 } from "./labels";
-import { Stepper, type Step } from "./Stepper";
+import { STEPS, type Step } from "./steps";
 import { StreamsPanel } from "./StreamsPanel";
 
 const MAX_NAME_CHARS = 128;
@@ -128,7 +128,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
         title="New source"
         lede="Choose a type, fill in its settings, and test the connection. Then discover its streams and pick the ones to read. The credential is stored encrypted and is never shown again."
       />
-      <Stepper current={step} />
+      <Stepper steps={STEPS} current={step} label="Source setup steps" />
       <Panel>
         {!ready ? null : !canManage ? (
           <p className="muted">
