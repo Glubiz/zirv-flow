@@ -1,4 +1,5 @@
 import type { components } from "../../api";
+import { formatAgo, formatDuration } from "../../ui";
 
 import { parseQueries, queriesValid } from "./queries";
 
@@ -131,4 +132,29 @@ export function runErrorText(code: string, threshold: number): string {
  */
 export function shapesValid(fields: FieldSpec[], values: Values): boolean {
   return fields.every((field) => field.kind !== "queries" || queriesValid(values[field.key] ?? ""));
+}
+
+export type Freshness = components["schemas"]["FreshnessBody"];
+
+/** The state of a stream or a source in words. Anything the server adds later shows as it is. */
+export function freshnessLabel(state: string): string {
+  const labels: Record<string, string> = { fresh: "Fresh", stale: "Stale", failing: "Failing" };
+  return labels[state] ?? state;
+}
+
+export function freshnessTone(state: string): "neutral" | "attention" | "error" {
+  return state === "failing" ? "error" : state === "stale" ? "attention" : "neutral";
+}
+
+/** When a stream last succeeded: "Never", or the time ago. */
+export function lastSuccessLabel(freshness: Pick<Freshness, "last_success_at"> | null | undefined, now?: number): string {
+  return freshness?.last_success_at ? formatAgo(freshness.last_success_at, now) : "Never";
+}
+
+/** The threshold in force: "None" when the stream never turns stale, else its length, marked when it is the default. */
+export function thresholdLabel(freshness: Pick<Freshness, "threshold_seconds" | "threshold_is_default"> | null | undefined): string {
+  if (!freshness) return "None";
+  if (freshness.threshold_seconds === null || freshness.threshold_seconds === undefined) return "None";
+  const text = formatDuration(freshness.threshold_seconds);
+  return freshness.threshold_is_default ? `${text} (default)` : text;
 }

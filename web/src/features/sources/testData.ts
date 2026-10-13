@@ -1,4 +1,4 @@
-import type { Run, RunDetail, Source, SourceKind, Stream } from "./labels";
+import type { Freshness, Run, RunDetail, Source, SourceKind, Stream } from "./labels";
 
 /** The fake source type as `GET /api/v1/source-kinds` lists it, for the tests of this feature. */
 export const FAKE_KIND: SourceKind = {
@@ -87,6 +87,7 @@ export function aSource(change: Partial<Source> = {}): Source {
     credential_fields_set: ["token"],
     schedule: null,
     enabled: true,
+    freshness: null,
     created_by: null,
     created_at: "2026-10-01T09:00:00Z",
     updated_at: "2026-10-02T09:00:00Z",
@@ -103,6 +104,7 @@ export function aStream(change: Partial<Stream> = {}): Stream {
     cursor_field: "updated_at",
     primary_key: ["id"],
     staleness_threshold_seconds: null,
+    freshness: null,
     mapping: null,
     discovered: {
       fields: [
@@ -157,6 +159,17 @@ export function aRunDetail(change: Partial<RunDetail> = {}): RunDetail {
         sample: { properties: { name: "Ada", email: null }, masked: ["email"] } as never,
       },
     ],
+    ...change,
+  };
+}
+
+export function aFreshness(change: Partial<Freshness> = {}): Freshness {
+  return {
+    state: "fresh",
+    last_success_at: null,
+    high_water_mark: null,
+    threshold_seconds: null,
+    threshold_is_default: false,
     ...change,
   };
 }

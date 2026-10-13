@@ -636,6 +636,21 @@ through the context's token slot (`take_refreshed_token`); `connectors` never wr
 (5.1), so the caller stores it through `encrypted_secrets`, and test connection and discovery drop
 it. Errors carry a variant, a status and an attempt count, never a URL, header or body.
 
+As built (M3, freshness): the state is derived, never stored. `streams` gains `enabled_at`,
+`last_success_at` and `last_run_failed`; the high-water mark is the existing `checkpoint`.
+`core::freshness::freshness` is the pure function (a failed last run is failing; no threshold is
+never stale; else stale once `now - max(last_success_at, enabled_at)` is past the threshold, and
+equal is fresh), and `effective_threshold` gives the explicit value or twice the longest gap
+among the next 8 slots of the source cron. `store::stream_freshness` joins `streams` with
+`sources`, calls them and is the one read both the API and the leader use, so neither depends on
+the other (5.1). `store::record_stream_outcome` is the only writer of the two columns and is the
+shape every source type reports through: a pull run calls it in the transaction that ends the run
+(finish, fail, the reject threshold, the orphan sweep; a cancel records nothing), a webhook
+source calls it with the time of the last record received, and a stream consumer with success or
+failure by its lag bound. Only the pull path exists as of M3. Only enabled streams of enabled
+sources are reported. The high-water mark is shown to workspace admins only, since an incremental
+cursor can be a record value.
+
 ### 7.6 Native contacts and streaming updates
 
 Some companies have no external customer store. For them Zirv Flow is the
@@ -1458,7 +1473,7 @@ and nothing yet shows the cap is not enough. M8 validates the cap under load.
 | Execution | Outside any claim transaction. The handler's writes and the jobs it enqueues commit in its own transaction, which also checks the lease token (see Completion below). Long handlers heartbeat every third of the lease (default 30 s, `worker.lease_seconds`); a heartbeat that finds the lease gone cancels the handler and discards its transaction. |
 | Retries | `run_at = now() + min(base * 2^attempts, cap) * jitter`; after `max_attempts` the job is `dead`, visible and retryable on the Jobs admin page. |
 | Idempotency | Database effects are idempotent by construction (upserts, unique keys, `state_version`). External effects carry stable keys: effectively-once where the destination honours them; where it cannot (SMTP), a crash between provider acceptance and recording can duplicate a send. Documented, not hidden. |
-| Scheduler | Leader enqueues due schedules with unique key `(schedule_id, slot)`, reaps expired leases, pre-creates event partitions and watches the default partition, enforces retention, marks stale sources, triggers scheduled segment refreshes. |
+| Scheduler | Leader enqueues due schedules with unique key `(schedule_id, slot)`, reaps expired leases, pre-creates event partitions and watches the default partition, enforces retention, refreshes the stream freshness gauges every 30 s (stale-source detection: the state is derived on each pass, nothing is marked), triggers scheduled segment refreshes. |
 | Hygiene | Completed jobs are deleted at once (history only for failures/dead); aggressive autovacuum on `jobs`; applied inbox rows deleted; dead-tuple counts exported as metrics. |
 | Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is a per-workspace running cap (OQ-8, below). |
 

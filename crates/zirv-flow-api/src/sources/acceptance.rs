@@ -1323,155 +1323,499 @@ mod tests {
         assert_eq!(after.body["sync_mode"], "incremental");
     }
 
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_kinds_list_the_database_sources_with_their_setting_kinds(pool: PgPool) {
-        let fx = fixture(&pool).await;
+    impl Fixture {
+        async fn stream_freshness(&self, id: &str, who: Auth<'_>) -> Value {
+            let reply = self
+                .send("GET", &format!("/sources/{id}/streams"), None, who)
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            reply.body
+        }
 
-        let kinds = call(
-            &fx.router,
-            "GET",
-            "/api/v1/source-kinds",
-            None,
-            Auth::Key(&fx.read),
-        )
-        .await;
+        /// Pretends the stream was enabled `seconds` ago.
+        async fn enabled_ago(&self, seconds: i64) {
+            sqlx::query(
+                "UPDATE streams SET enabled_at = now() - make_interval(secs => $1) \
+                 WHERE enabled",
+            )
+            .bind(seconds as f64)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
 
-        assert_eq!(kinds.status, StatusCode::OK);
-        for kind in ["postgres", "mysql"] {
-            let entry = kinds
+        async fn source_state(&self, id: &str) -> Value {
+            let one = self.as_admin("GET", &format!("/sources/{id}"), None).await;
+            let listed = self.as_admin("GET", "/sources", None).await;
+            let in_list = listed
                 .body
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|entry| entry["kind"] == kind)
-                .unwrap_or_else(|| panic!("{kind} is listed"));
-            let field = |key: &str| {
-                entry["config_fields"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|field| field["key"] == key)
-                    .unwrap_or_else(|| panic!("{kind} has the setting {key}"))
-            };
-            assert_eq!(field("host")["kind"], "text");
-            assert_eq!(field("host")["required"], true);
-            assert_eq!(field("port")["kind"], "number");
-            assert_eq!(field("ca_certificate")["kind"], "long_text");
-            assert_eq!(field("queries")["kind"], "queries");
-            assert_eq!(field("tls")["kind"], "select");
-            assert_eq!(field("tls")["options"], json!(["verify", "off"]));
-            let credentials: Vec<_> = entry["credential_fields"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|field| (field["key"].clone(), field["secret"].clone()))
-                .collect();
-            assert_eq!(
-                credentials,
-                [
-                    (json!("user"), json!(true)),
-                    (json!("password"), json!(true))
-                ]
-            );
-            assert_eq!(entry["capabilities"]["emits_deletes"], false);
+                .find(|source| source["id"] == id)
+                .unwrap();
+            assert_eq!(one.body["freshness"], in_list["freshness"]);
+            one.body["freshness"].clone()
         }
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_database_source_validates_its_settings_and_round_trips_its_queries(pool: PgPool) {
+    async fn freshness_follows_the_threshold_the_schedule_and_the_last_run(pool: PgPool) {
         let fx = fixture(&pool).await;
-        let create = |config: Value| {
-            fx.as_admin(
-                "POST",
-                "/sources",
-                Some(
-                    json!({"kind": "postgres", "name": "warehouse", "config": config,
-                    "credential": {"user": "reader", "password": "pw"}}),
-                ),
+        let id = fx.mapped_source(2).await;
+        let stream = format!("/sources/{id}/streams/stream_1");
+        let other = fx.create_ok("Idle", "ok", 1).await;
+
+        // Just enabled, with no schedule and no threshold: fresh and never stale.
+        let streams = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        let freshness = &streams[0]["freshness"];
+        assert_eq!(streams[0]["name"], "stream_1");
+        assert_eq!(freshness["state"], "fresh");
+        assert_eq!(freshness["last_success_at"], Value::Null);
+        assert_eq!(freshness["threshold_seconds"], Value::Null);
+        assert_eq!(freshness["threshold_is_default"], false);
+        assert_eq!(streams[1]["freshness"], Value::Null, "stream_2 is disabled");
+        assert_eq!(fx.source_state(&id).await, "fresh");
+        assert_eq!(
+            fx.source_state(&other).await,
+            Value::Null,
+            "no enabled stream"
+        );
+
+        // An explicit threshold passed with no run makes the stream stale, at once.
+        fx.enabled_ago(3600).await;
+        let put = fx
+            .as_admin(
+                "PUT",
+                &stream,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "staleness_threshold_seconds": 60})),
             )
-        };
-        let fields = |reply: &Reply| -> Vec<String> {
-            reply.body["errors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|e| {
-                    format!(
-                        "{}: {}",
-                        e["field"].as_str().unwrap(),
-                        e["reason"].as_str().unwrap()
-                    )
-                })
-                .collect()
-        };
+            .await;
+        assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+        assert_eq!(put.body["staleness_threshold_seconds"], 60);
+        assert_eq!(put.body["freshness"]["state"], "stale");
+        assert_eq!(put.body["freshness"]["threshold_seconds"], 60);
+        assert_eq!(put.body["freshness"]["threshold_is_default"], false);
+        assert_eq!(fx.source_state(&id).await, "stale");
 
-        let bad_host = create(json!({"host": "db/../x", "database": "shop"})).await;
-        let bad_query = create(json!({"host": "db.example.com", "database": "shop",
-            "queries": [{"name": "vip", "sql": "DROP TABLE secrets"}]}))
-        .await;
-        let bad_ca = create(json!({"host": "db.example.com", "database": "shop",
-            "ca_certificate": "not a certificate"}))
-        .await;
+        // Clearing it takes the threshold away again: nothing without a schedule is stale.
+        let cleared = fx
+            .as_admin(
+                "PUT",
+                &stream,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh"})),
+            )
+            .await;
+        assert_eq!(cleared.body["freshness"]["state"], "fresh");
+        assert_eq!(cleared.body["freshness"]["threshold_seconds"], Value::Null);
 
-        assert_eq!(
-            bad_host.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{:?}",
-            bad_host.body
-        );
-        assert_eq!(fields(&bad_host).len(), 1);
-        assert!(
-            fields(&bad_host)[0].starts_with("config.host: "),
-            "{:?}",
-            fields(&bad_host)
-        );
-        assert!(
-            fields(&bad_query)[0].starts_with("config.queries: "),
-            "{:?}",
-            fields(&bad_query)
-        );
-        assert!(!fields(&bad_query)[0].contains("secrets"));
-        assert!(
-            fields(&bad_ca)[0].starts_with("config.ca_certificate: "),
-            "{:?}",
-            fields(&bad_ca)
-        );
-        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM sources")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(stored, 0, "a refused source stores nothing");
-
-        let queries = json!([{"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"}]);
-        let created = create(json!({"host": "db.example.com", "database": "shop",
-            "queries": queries}))
-        .await;
-        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
-        let id = created.body["id"].as_str().unwrap().to_owned();
-        assert_eq!(created.body["config"]["queries"], queries);
-        assert_eq!(
-            created.body["credential_fields_set"],
-            json!(["password", "user"])
-        );
-
-        let more = json!([
-            {"name": "vip", "sql": "SELECT id, email FROM customers WHERE vip"},
-            {"name": "recent", "sql": "SELECT id FROM orders"}
-        ]);
-        let patched = fx
+        // The schedule gives the default: twice the hourly interval.
+        let scheduled = fx
             .as_admin(
                 "PATCH",
                 &format!("/sources/{id}"),
-                Some(
-                    json!({"config": {"host": "db.example.com", "database": "shop",
-                    "queries": more}}),
-                ),
+                Some(json!({"schedule": "0 * * * *"})),
             )
             .await;
-        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
-        let read = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
-        assert_eq!(read.body["config"]["queries"], more);
+        assert_eq!(scheduled.body["freshness"], "fresh");
+        let within = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        assert_eq!(within[0]["freshness"]["threshold_seconds"], 7200);
+        assert_eq!(within[0]["freshness"]["threshold_is_default"], true);
+        assert_eq!(within[0]["freshness"]["state"], "fresh");
+        fx.enabled_ago(3 * 3600).await;
+        let past = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        assert_eq!(past[0]["freshness"]["state"], "stale");
+        assert_eq!(fx.source_state(&id).await, "stale");
+
+        // A failed last run is failing, and the source takes its worst stream.
+        zirv_flow_store::record_stream_outcome(
+            &mut pool.acquire().await.unwrap(),
+            fx.ws,
+            streams[0]["id"].as_str().unwrap().parse().unwrap(),
+            zirv_flow_store::StreamOutcome::Failed,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let failing = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        assert_eq!(failing[0]["freshness"]["state"], "failing");
+        assert_eq!(fx.source_state(&id).await, "failing");
+
+        // A success recovers it and shows when.
+        zirv_flow_store::record_stream_outcome(
+            &mut pool.acquire().await.unwrap(),
+            fx.ws,
+            streams[0]["id"].as_str().unwrap().parse().unwrap(),
+            zirv_flow_store::StreamOutcome::Succeeded,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let recovered = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        assert_eq!(recovered[0]["freshness"]["state"], "fresh");
+        assert!(recovered[0]["freshness"]["last_success_at"].is_string());
+
+        // A disabled source reports nothing.
+        let off = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"enabled": false})),
+            )
+            .await;
+        assert_eq!(off.body["freshness"], Value::Null);
+        let disabled = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+        assert_eq!(disabled[0]["freshness"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_admin_sees_the_high_water_mark(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        sqlx::query("UPDATE streams SET checkpoint = $1 WHERE enabled")
+            .bind(json!({"after": "zz-cursor-marker@example.com"}))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let admin = fx.stream_freshness(&id, Auth::Key(&fx.admin)).await;
+        let member = fx.stream_freshness(&id, Auth::Session(&fx.member)).await;
+        let reader = fx.stream_freshness(&id, Auth::Key(&fx.read)).await;
+
+        assert_eq!(
+            admin[0]["freshness"]["high_water_mark"],
+            json!({"after": "zz-cursor-marker@example.com"})
+        );
+        assert_eq!(member[0]["freshness"]["high_water_mark"], Value::Null);
+        assert_eq!(reader[0]["freshness"]["high_water_mark"], Value::Null);
+        assert!(!member.to_string().contains("zz-cursor-marker"));
+        assert!(!reader.to_string().contains("zz-cursor-marker"));
+        // The freshness shape names no source, host or credential.
+        let keys: std::collections::BTreeSet<_> = member[0]["freshness"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "high_water_mark",
+                "last_success_at",
+                "state",
+                "threshold_is_default",
+                "threshold_seconds"
+            ]
+            .map(String::from)
+            .into()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_admin_edits_the_threshold_and_the_change_is_audited_without_a_value(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        sqlx::query("UPDATE streams SET checkpoint = $1 WHERE enabled")
+            .bind(json!({"after": "zz-cursor-marker@example.com"}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stream = format!("/sources/{id}/streams/stream_1");
+        let settings = |seconds: Value| {
+            json!({"enabled": true, "sync_mode": "full_refresh",
+                "staleness_threshold_seconds": seconds})
+        };
+
+        let member = fx
+            .send(
+                "PUT",
+                &stream,
+                Some(settings(json!(90))),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        let reader = fx
+            .send(
+                "PUT",
+                &stream,
+                Some(settings(json!(90))),
+                Auth::Key(&fx.read),
+            )
+            .await;
+        let set = fx.as_admin("PUT", &stream, Some(settings(json!(90)))).await;
+        let cleared = fx
+            .as_admin("PUT", &stream, Some(settings(Value::Null)))
+            .await;
+        let refused = fx.as_admin("PUT", &stream, Some(settings(json!(0)))).await;
+
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(reader.status, StatusCode::FORBIDDEN);
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+        assert_eq!(set.body["staleness_threshold_seconds"], 90);
+        assert_eq!(cleared.body["staleness_threshold_seconds"], Value::Null);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let entries: Vec<_> = zirv_flow_store::list_audit(&pool, 200)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.action == "stream.configured")
+            .collect();
+        // The mapped_source fixture configured the stream once; then the two successful edits.
+        let thresholds: Vec<_> = entries
+            .iter()
+            .rev()
+            .map(|entry| entry.summary["staleness_threshold_seconds"].clone())
+            .collect();
+        assert_eq!(thresholds, [Value::Null, json!(90), Value::Null]);
+        let summaries: String = entries
+            .iter()
+            .map(|entry| entry.summary.to_string())
+            .collect();
+        assert!(!summaries.contains("zz-cursor-marker"));
+        // The threshold edit did not touch the stream's checkpoint.
+        assert_eq!(
+            fx.stream_freshness(&id, Auth::Key(&fx.admin)).await[0]["freshness"]["high_water_mark"],
+            json!({"after": "zz-cursor-marker@example.com"})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_stores_and_returns_its_delete_signal_reconcile_schedule_and_sweep_limit(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let mut mapping = mapping_body();
+        mapping["delete_when"] = json!({"column": "updated_at", "rule": "present"});
+        let settings = json!({
+            "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+            "reconcile_schedule": "0 3 * * *", "sweep_limit": 0.25, "mapping": mapping
+        });
+
+        let saved = fx.as_admin("PUT", &tail, Some(settings)).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["reconcile_schedule"], "0 3 * * *");
+        assert_eq!(saved.body["sweep_limit"], 0.25);
+        assert_eq!(
+            saved.body["mapping"]["delete_when"],
+            json!({"column": "updated_at", "rule": "present"})
+        );
+        // The cron is mirrored to the row the leader fires, keyed by the stream.
+        let rows: Vec<(String, serde_json::Value, bool)> = sqlx::query_as(
+            "SELECT cron, payload, enabled FROM schedules WHERE stream_id IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "0 3 * * *");
+        assert_eq!(rows[0].1["reconcile"], true);
+        assert!(rows[0].2);
+        // The audit entry says that they were set and holds no column or cron text.
+        let entry = zirv_flow_store::list_audit(&pool, 5)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "stream.configured")
+            .unwrap();
+        assert_eq!(entry.summary["delete_signal_set"], true);
+        assert_eq!(entry.summary["reconcile_schedule_set"], true);
+        assert_eq!(entry.summary["sweep_limit"], 0.25);
+        assert!(!entry.summary.to_string().contains("updated_at"));
+        assert!(!entry.summary.to_string().contains("0 3"));
+
+        // Absent settings clear the cron and reset the limit; the mapping stays.
+        let cleared = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "incremental",
+                    "cursor_field": "updated_at"})),
+            )
+            .await;
+        assert_eq!(cleared.body["reconcile_schedule"], Value::Null);
+        assert_eq!(cleared.body["sweep_limit"], 0.5);
+        assert_eq!(cleared.body["mapping"], saved.body["mapping"]);
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedules WHERE stream_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+        let member = fx
+            .send(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh", "sweep_limit": 1})),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn bad_deletion_settings_are_refused_and_store_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let tail = format!("/sources/{id}/streams/stream_1");
+        let incremental = |extra: Value| {
+            let mut body = json!({"enabled": true, "sync_mode": "incremental",
+                "cursor_field": "updated_at"});
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+
+        let bad_cron = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(incremental(json!({"reconcile_schedule": "nope"}))),
+            )
+            .await;
+        let full = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "reconcile_schedule": "0 3 * * *"})),
+            )
+            .await;
+        let ghost = fx
+            .as_admin(
+                "PUT",
+                &tail,
+                Some(incremental(json!({"mapping": {
+                    "columns": [{"column": "email", "target": {"type": "identifier", "kind": "email"}}],
+                    "delete_when": {"column": "ghost"}}}))),
+            )
+            .await;
+        let mut limits = Vec::new();
+        for limit in [json!(0), json!(-0.5), json!(1.5)] {
+            limits.push(
+                fx.as_admin(
+                    "PUT",
+                    &tail,
+                    Some(incremental(json!({"sweep_limit": limit}))),
+                )
+                .await,
+            );
+        }
+
+        assert_eq!(bad_cron.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            bad_cron.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("reconcile_schedule")
+        );
+        assert_eq!(full.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(full.body["code"], "reconcile_needs_incremental");
+        assert_eq!(ghost.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            ghost.body["detail"],
+            "mapping: unknown_column (column \"ghost\")"
+        );
+        for limit in &limits {
+            assert_eq!(limit.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(limit.body["code"], "invalid_sweep_limit");
+        }
+        // Nothing changed: still the full refresh set up by the fixture, with the defaults.
+        let streams = fx
+            .as_admin("GET", &format!("/sources/{id}/streams"), None)
+            .await;
+        assert_eq!(streams.body[0]["sync_mode"], "full_refresh");
+        assert_eq!(streams.body[0]["sweep_limit"], 0.5);
+        assert_eq!(streams.body[0]["reconcile_schedule"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reconciliation_is_started_by_admins_on_an_incremental_stream_and_shows_its_kind(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let runs = format!("/sources/{id}/runs");
+        let reconcile = json!({"stream": "stream_1", "kind": "reconcile"});
+
+        // stream_1 is a full refresh: nothing to reconcile.
+        let full = fx.as_admin("POST", &runs, Some(reconcile.clone())).await;
+        let no_stream = fx
+            .as_admin("POST", &runs, Some(json!({"kind": "reconcile"})))
+            .await;
+        fx.as_admin(
+            "PUT",
+            &format!("/sources/{id}/streams/stream_1"),
+            Some(json!({"enabled": true, "sync_mode": "incremental",
+                "cursor_field": "updated_at"})),
+        )
+        .await;
+        let member = fx
+            .send(
+                "POST",
+                &runs,
+                Some(reconcile.clone()),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        let started = fx.as_admin("POST", &runs, Some(reconcile.clone())).await;
+        let again = fx.as_admin("POST", &runs, Some(reconcile)).await;
+
+        assert_eq!(full.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(full.body["code"], "reconcile_needs_incremental");
+        assert_eq!(no_stream.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(started.status, StatusCode::ACCEPTED, "{:?}", started.body);
+        assert_eq!(started.body[0]["kind"], "reconcile");
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(again.body["code"], "sync_run_active");
+        let run_id = started.body[0]["id"].as_str().unwrap();
+        let read = fx
+            .send(
+                "GET",
+                &format!("{runs}/{run_id}"),
+                None,
+                Auth::Session(&fx.member),
+            )
+            .await;
+        assert_eq!(read.body["kind"], "reconcile");
+        let listed = fx.send("GET", &runs, None, Auth::Session(&fx.member)).await;
+        assert_eq!(listed.body["runs"][0]["kind"], "reconcile");
+        let entry = zirv_flow_store::list_audit(&pool, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "sync_run.started")
+            .unwrap();
+        assert_eq!(entry.summary["kind"], "reconcile");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_normal_run_reports_the_kind_sync(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+
+        let started = fx
+            .as_admin(
+                "POST",
+                &format!("/sources/{id}/runs"),
+                Some(json!({"stream": "stream_1"})),
+            )
+            .await;
+
+        assert_eq!(started.body[0]["kind"], "sync");
     }
 }

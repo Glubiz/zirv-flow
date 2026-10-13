@@ -1407,10 +1407,12 @@ mod tests {
         .unwrap()
         .unwrap();
         drop(connection);
-        sqlx::query("UPDATE streams SET enabled = false WHERE name = 'stream_3'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE streams SET enabled = false, enabled_at = NULL WHERE name = 'stream_3'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let mut fire = NewJobFor::new(&env);
         let fired = fire.claim(&env).await;
 

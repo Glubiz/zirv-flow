@@ -4,13 +4,17 @@ import {
   configFrom,
   credentialFrom,
   filled,
+  freshnessLabel,
+  freshnessTone,
   initialValues,
   kindName,
+  lastSuccessLabel,
   shapesValid,
   showValue,
+  thresholdLabel,
   withoutSecrets,
 } from "./labels";
-import { FAKE_KIND, POSTGRES_KIND } from "./testData";
+import { aFreshness, FAKE_KIND, POSTGRES_KIND } from "./testData";
 
 const CONFIG = FAKE_KIND.config_fields;
 const CREDENTIAL = FAKE_KIND.credential_fields;
@@ -99,5 +103,36 @@ describe("source forms", () => {
     expect(kindName([FAKE_KIND], "fake")).toBe("Fake source");
     expect(kindName([FAKE_KIND], "other")).toBe("other");
     expect(kindName(null, "fake")).toBe("fake");
+  });
+});
+
+describe("freshness", () => {
+  it("names each state, gives it a tone and leaves an unknown state as it is", () => {
+    expect([freshnessLabel("fresh"), freshnessLabel("stale"), freshnessLabel("failing")]).toEqual([
+      "Fresh",
+      "Stale",
+      "Failing",
+    ]);
+    expect([freshnessTone("fresh"), freshnessTone("stale"), freshnessTone("failing")]).toEqual([
+      "neutral",
+      "attention",
+      "error",
+    ]);
+    expect(freshnessLabel("paused")).toBe("paused");
+  });
+
+  it("says when a stream last succeeded, or that it never has", () => {
+    const now = Date.parse("2026-10-10T12:00:00Z");
+
+    expect(lastSuccessLabel(aFreshness({ last_success_at: "2026-10-10T09:00:00Z" }), now)).toBe("3 hours ago");
+    expect(lastSuccessLabel(aFreshness({ last_success_at: null }), now)).toBe("Never");
+    expect(lastSuccessLabel(null, now)).toBe("Never");
+  });
+
+  it("states the threshold in force and marks the default", () => {
+    expect(thresholdLabel(aFreshness({ threshold_seconds: 7200, threshold_is_default: true }))).toBe("2.0 h (default)");
+    expect(thresholdLabel(aFreshness({ threshold_seconds: 90, threshold_is_default: false }))).toBe("2 min");
+    expect(thresholdLabel(aFreshness({ threshold_seconds: null }))).toBe("None");
+    expect(thresholdLabel(null)).toBe("None");
   });
 });

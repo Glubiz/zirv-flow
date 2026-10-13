@@ -5,6 +5,7 @@ import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSumm
 import { Button, Dialog, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useSourceAccess } from "./access";
 import { EditSourceDialog } from "./EditSourceDialog";
+import { FreshnessBadge } from "./FreshnessBadge";
 import { kindName, plural, showValue, type Stream } from "./labels";
 import { RunsPanel } from "./RunsPanel";
 import { StreamsPanel } from "./StreamsPanel";
@@ -141,6 +142,12 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                     <dt>Status</dt>
                     <dd>
                       <Pill tone={data.enabled ? "neutral" : "attention"}>{data.enabled ? "Enabled" : "Disabled"}</Pill>
+                    </dd>
+                  </div>
+                  <div className="fact">
+                    <dt>Freshness</dt>
+                    <dd>
+                      {data.freshness ? <FreshnessBadge state={data.freshness} /> : "No enabled streams"}
                     </dd>
                   </div>
                   <div className="fact">

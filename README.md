@@ -1422,6 +1422,50 @@ workspace label): `zirv_flow_source_db_batches_total{source_type}` and
 `zirv_flow_source_db_errors_total{source_type,reason}` with `reason` one of `auth`, `unreachable`,
 `egress`, `timeout`, `tls`, `read_only`, `config` or `query`.
 
+### Source freshness
+
+Marketers can see whether the data behind a segment is current. Every enabled stream of an
+enabled source is **fresh**, **stale** or **failing**, and the state is worked out from facts on
+each read, never stored, so a changed threshold or schedule takes effect at once.
+
+- **Failing:** the last run of the stream failed (any error code, including `reject_threshold`
+  and `job_failed`). This holds however recent the last success was. A cancelled run is not a
+  verdict on the data and changes nothing. The next success clears it.
+- **Stale:** the time since the last success is past the stream's threshold. Exactly at the
+  threshold is still fresh.
+- **Fresh:** anything else. A stream that has never run is fresh until the threshold has passed
+  since it was enabled, then stale. Enabling a stream again restarts that grace period, and
+  streams that were already enabled when the feature arrived start theirs at the upgrade.
+
+**The threshold.** A stream's own `staleness_threshold_seconds` wins. Without one it is twice
+the source schedule's interval (an hourly schedule is stale after 2 hours); the interval is the
+longest gap among the next 8 slots, so a weekdays-only schedule allows for the weekend. A stream
+with neither a threshold nor a schedule is **never stale**, though it can still be failing.
+Admins set or clear the threshold with the stream's `PUT .../streams/{name}` or the stream
+dialog; it is audited as `stream.configured` with the number (`staleness_threshold_seconds`).
+
+**Where it shows.** `GET .../sources/{id}/streams` carries `freshness` on each stream: `state`,
+`last_success_at`, `threshold_seconds`, `threshold_is_default` and `high_water_mark`. It is
+`null` for a stream that is not read, or whose source is disabled. `GET .../sources` and `GET
+.../sources/{id}` carry `freshness` as the worst state of the source's enabled streams (`null`
+when there is none). The high-water mark is the stream's checkpoint, which can hold a value
+taken from a record, so only workspace admins get it; everyone else gets `null`. The Sources
+list shows a badge per source, and the streams table and the stream dialog show the badge, the
+time since the last success and the threshold.
+
+**Metrics.** The scheduler leader refreshes these at most every 30 seconds, with ids as the only
+labels: `zirv_flow_stream_freshness_seconds{workspace,stream}` (age of the data),
+`zirv_flow_stream_state{workspace,stream}` (0 fresh, 1 stale, 2 failing) and
+`zirv_flow_streams{workspace,state}` (how many enabled streams are in each state). A stream that
+is disabled or deleted is set to 0, and an instance that stops leading zeroes what it published.
+
+**Other source types.** A pull run reports when it ends. A webhook source (#90) and a stream
+consumer such as Kafka (#91) report through the same call, `record_stream_outcome`: a success at
+a time, or a failure, written to the same columns. Only the pull path exists today.
+
+**Not done:** stale or failing inputs do not pause sends. That is a later decision (OQ-14, M5);
+for now freshness is shown and exported, nothing acts on it.
+
 ## Connector runtime
 
 Every HTTP source makes its calls through the connector runtime in `zirv-flow-connectors`
