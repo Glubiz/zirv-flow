@@ -13,6 +13,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use chrono::{DateTime, TimeDelta, Utc};
+use futures_util::future::BoxFuture;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 use reqwest::{Method, Request};
 use serde_json::Value;
@@ -29,11 +30,11 @@ const EXPIRY_SKEW: Duration = Duration::from_secs(60);
 
 /// Where an API key goes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ApiKeyPlacement {
+pub enum ApiKeyPlacement<'a> {
     /// In the named request header.
-    Header(&'static str),
+    Header(&'a str),
     /// In the named query parameter.
-    Query(&'static str),
+    Query(&'a str),
 }
 
 /// How the client proves itself to an OAuth2 token endpoint.
@@ -50,7 +51,7 @@ pub enum ClientAuth {
 pub enum Auth<'a> {
     None,
     ApiKey {
-        placement: ApiKeyPlacement,
+        placement: ApiKeyPlacement<'a>,
         value: &'a SecretString,
     },
     Basic {
@@ -69,6 +70,20 @@ pub enum Auth<'a> {
         scopes: &'a [String],
         client_auth: ClientAuth,
     },
+    /// The OAuth2 authorization-code grant, refreshed with `refresh_token` (the consent was
+    /// given earlier, see [`exchange_code`]). The runtime refreshes through `token_url` and
+    /// keeps the access token in the context's slot. A refresh response that carries a new
+    /// refresh token replaces the old one (rotation); the caller reads it back with
+    /// [`SourceContext::take_refreshed_token`] unless a [`TokenStore`] persists it. A public
+    /// client has no `client_secret`.
+    OAuth2AuthorizationCode {
+        token_url: Url,
+        client_id: &'a str,
+        client_secret: Option<&'a SecretString>,
+        refresh_token: &'a SecretString,
+        scopes: &'a [String],
+        client_auth: ClientAuth,
+    },
 }
 
 /// Names the style only: a URL, a username or a key would not belong in a log line.
@@ -80,15 +95,39 @@ impl fmt::Debug for Auth<'_> {
             Self::Basic { .. } => "Auth::Basic",
             Self::Bearer { .. } => "Auth::Bearer",
             Self::OAuth2ClientCredentials { .. } => "Auth::OAuth2ClientCredentials",
+            Self::OAuth2AuthorizationCode { .. } => "Auth::OAuth2AuthorizationCode",
         })
     }
 }
 
 impl Auth<'_> {
     pub(crate) fn is_oauth(&self) -> bool {
-        matches!(self, Self::OAuth2ClientCredentials { .. })
+        matches!(
+            self,
+            Self::OAuth2ClientCredentials { .. } | Self::OAuth2AuthorizationCode { .. }
+        )
     }
 }
+
+/// Persists an authorization-code refresh across processes (architecture 7.5). A single-use
+/// rotating refresh token used twice can make a provider revoke the whole token family, so the
+/// runtime hands the refresh to the store, which serializes it (a row lock in `store`) and
+/// decides whether the provider must be called at all. `connectors` never depends on the store:
+/// `api` and `jobs` implement this with a few lines.
+pub trait TokenStore: Send + Sync {
+    /// `held` is the refresh token the context holds. The implementation locks, reloads the
+    /// newest stored tokens and returns them when their refresh token differs from `held`
+    /// (another process refreshed first); otherwise it calls `refresh` with the stored refresh
+    /// token, saves the result and returns it. A failure stores nothing.
+    fn refresh<'a>(
+        &'a self,
+        held: &'a SecretString,
+        refresh: &'a (dyn Fn(SecretString) -> RefreshFuture<'a> + Send + Sync),
+    ) -> RefreshFuture<'a>;
+}
+
+/// What a [`TokenStore`] refresh produces.
+pub type RefreshFuture<'a> = BoxFuture<'a, Result<AccessToken, RuntimeError>>;
 
 /// An OAuth2 access token and when it lapses. The caller stores it between runs (through
 /// `encrypted_secrets`, with [`AccessToken::binding`]) and seeds the next context with it.
@@ -98,6 +137,8 @@ pub struct AccessToken {
     token: Arc<SecretString>,
     expires_at: Option<DateTime<Utc>>,
     binding: Option<String>,
+    /// The refresh token of the authorization-code grant, the newest one the provider issued.
+    refresh_token: Option<Arc<SecretString>>,
 }
 
 impl AccessToken {
@@ -108,7 +149,22 @@ impl AccessToken {
             token: Arc::new(token),
             expires_at,
             binding: None,
+            refresh_token: None,
         }
+    }
+
+    /// The refresh token that goes with this access token (authorization-code grant).
+    pub fn with_refresh_token(mut self, refresh_token: SecretString) -> Self {
+        self.refresh_token = Some(Arc::new(refresh_token));
+        self
+    }
+
+    pub(crate) fn shared_refresh_token(&self) -> Option<Arc<SecretString>> {
+        self.refresh_token.clone()
+    }
+
+    pub fn refresh_token(&self) -> Option<&SecretString> {
+        self.refresh_token.as_deref()
     }
 
     pub fn token(&self) -> &SecretString {
@@ -183,6 +239,25 @@ fn binding_of(token_url: &Url, client_id: &str, scopes: &[String]) -> String {
         .collect()
 }
 
+/// The token endpoint, client id and scopes of an OAuth auth: what a token is bound to.
+fn endpoint_of<'b>(auth: &'b Auth<'_>) -> Option<(&'b Url, &'b str, &'b [String])> {
+    match auth {
+        Auth::OAuth2ClientCredentials {
+            token_url,
+            client_id,
+            scopes,
+            ..
+        }
+        | Auth::OAuth2AuthorizationCode {
+            token_url,
+            client_id,
+            scopes,
+            ..
+        } => Some((token_url, client_id, scopes)),
+        _ => None,
+    }
+}
+
 /// The token for the next request: the cached one while it is usable for this configuration,
 /// else a fresh one. `rejected` is the token the upstream just answered 401 to, which is not
 /// reused. The flag says whether the token is new to this call: fetched, or adopted from another
@@ -196,13 +271,7 @@ pub(crate) async fn ensure_token(
     auth: &Auth<'_>,
     rejected: Option<&AccessToken>,
 ) -> Result<(AccessToken, bool), RuntimeError> {
-    let Auth::OAuth2ClientCredentials {
-        token_url,
-        client_id,
-        scopes,
-        ..
-    } = auth
-    else {
+    let Some((token_url, client_id, scopes)) = endpoint_of(auth) else {
         return Err(RuntimeError::InvalidRequest);
     };
     let binding = binding_of(token_url, client_id, scopes);
@@ -213,12 +282,86 @@ pub(crate) async fn ensure_token(
     if let Some(token) = ctx.reusable_token(&binding, rejected) {
         return Ok((token, true));
     }
-    let token = fetch_token(ctx, auth).await?.with_binding(binding);
-    ctx.store_token(token.clone());
+    let (token, handed_back) = match auth {
+        Auth::OAuth2AuthorizationCode { refresh_token, .. } => {
+            // The newest refresh token wins: a rotated one in the slot, else the credential's.
+            let held = ctx
+                .held_refresh_token(&binding)
+                .unwrap_or_else(|| Arc::new(SecretString::new(refresh_token.expose().to_owned())));
+            // With a store, the store has already persisted it: the caller has nothing to save.
+            (
+                refresh_code_grant(ctx, auth, &held).await?,
+                ctx.token_store().is_none(),
+            )
+        }
+        _ => (fetch_token(ctx, auth).await?, true),
+    };
+    let token = token.with_binding(binding);
+    ctx.store_token(token.clone(), handed_back);
     Ok((token, true))
 }
 
-/// Asks the token endpoint for a token. One attempt: a failure is the caller's to retry.
+/// Refreshes the authorization-code grant, through the context's [`TokenStore`] when it has one
+/// so the refresh is serialized across processes.
+async fn refresh_code_grant(
+    ctx: &SourceContext,
+    auth: &Auth<'_>,
+    held: &Arc<SecretString>,
+) -> Result<AccessToken, RuntimeError> {
+    let Some(store) = ctx.token_store() else {
+        return refresh_request(ctx, auth, held).await;
+    };
+    let refresh = |current: SecretString| -> RefreshFuture<'_> {
+        Box::pin(async move { refresh_request(ctx, auth, &current).await })
+    };
+    store.refresh(held, &refresh).await
+}
+
+/// One refresh-token grant request.
+async fn refresh_request(
+    ctx: &SourceContext,
+    auth: &Auth<'_>,
+    held: &SecretString,
+) -> Result<AccessToken, RuntimeError> {
+    let Auth::OAuth2AuthorizationCode {
+        token_url,
+        client_id,
+        client_secret,
+        scopes,
+        client_auth,
+        ..
+    } = auth
+    else {
+        return Err(RuntimeError::InvalidRequest);
+    };
+    let scope = scopes.join(" ");
+    let mut pairs = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", held.expose()),
+    ];
+    if !scopes.is_empty() {
+        pairs.push(("scope", &scope));
+    }
+    let parsed = post_token(
+        ctx,
+        &TokenRequest {
+            token_url,
+            client_id,
+            client_secret: *client_secret,
+            client_auth: *client_auth,
+            pairs,
+        },
+    )
+    .await?;
+    let token = parse_token(&parsed)?;
+    // A response without a refresh token keeps the old one; one with it rotates it.
+    let rotated =
+        new_refresh_token(&parsed).unwrap_or_else(|| SecretString::new(held.expose().to_owned()));
+    Ok(token.with_refresh_token(rotated))
+}
+
+/// Asks the token endpoint for a client-credentials token. One attempt: a failure is the
+/// caller's to retry.
 async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken, RuntimeError> {
     let Auth::OAuth2ClientCredentials {
         token_url,
@@ -230,27 +373,105 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
     else {
         return Err(RuntimeError::InvalidRequest);
     };
+    let scope = scopes.join(" ");
+    let mut pairs = vec![("grant_type", "client_credentials")];
+    if !scopes.is_empty() {
+        pairs.push(("scope", &scope));
+    }
+    let parsed = post_token(
+        ctx,
+        &TokenRequest {
+            token_url,
+            client_id,
+            client_secret: Some(client_secret),
+            client_auth: *client_auth,
+            pairs,
+        },
+    )
+    .await?;
+    parse_token(&parsed)
+}
+
+/// What the callback of an authorization-code consent hands to [`exchange_code`].
+pub struct CodeExchange<'a> {
+    pub token_url: &'a Url,
+    pub client_id: &'a str,
+    pub client_secret: Option<&'a SecretString>,
+    /// The `code` the provider returned.
+    pub code: &'a str,
+    /// The redirect URI of the authorization request, unchanged.
+    pub redirect_uri: &'a str,
+    /// The PKCE verifier whose challenge the authorization request carried.
+    pub pkce_verifier: &'a str,
+    /// The scopes of the manifest, which the token is bound to.
+    pub scopes: &'a [String],
+    pub client_auth: ClientAuth,
+}
+
+/// Exchanges an authorization code for tokens through the guarded client. The response must
+/// carry both an access and a refresh token: a sync cannot run unattended on an access token.
+/// The returned token is bound to the configuration, ready to be stored.
+pub async fn exchange_code(
+    ctx: &SourceContext,
+    exchange: CodeExchange<'_>,
+) -> Result<AccessToken, RuntimeError> {
+    let parsed = post_token(
+        ctx,
+        &TokenRequest {
+            token_url: exchange.token_url,
+            client_id: exchange.client_id,
+            client_secret: exchange.client_secret,
+            client_auth: exchange.client_auth,
+            pairs: vec![
+                ("grant_type", "authorization_code"),
+                ("code", exchange.code),
+                ("redirect_uri", exchange.redirect_uri),
+                ("code_verifier", exchange.pkce_verifier),
+            ],
+        },
+    )
+    .await?;
+    let token = parse_token(&parsed)?;
+    let refresh = new_refresh_token(&parsed).ok_or(RuntimeError::TokenEndpoint { status: None })?;
+    let binding = binding_of(exchange.token_url, exchange.client_id, exchange.scopes);
+    Ok(token.with_refresh_token(refresh).with_binding(binding))
+}
+
+struct TokenRequest<'a> {
+    token_url: &'a Url,
+    client_id: &'a str,
+    client_secret: Option<&'a SecretString>,
+    client_auth: ClientAuth,
+    pairs: Vec<(&'static str, &'a str)>,
+}
+
+/// Posts a grant to the token endpoint and returns its JSON answer. The caller takes what it
+/// needs and drops the rest: the body never reaches an error.
+async fn post_token(ctx: &SourceContext, token: &TokenRequest<'_>) -> Result<Value, RuntimeError> {
     let body = {
         let mut form = url::form_urlencoded::Serializer::new(String::new());
-        form.append_pair("grant_type", "client_credentials");
-        if !scopes.is_empty() {
-            form.append_pair("scope", &scopes.join(" "));
+        for (name, value) in &token.pairs {
+            form.append_pair(name, value);
         }
-        if *client_auth == ClientAuth::Body {
-            form.append_pair("client_id", client_id);
-            form.append_pair("client_secret", client_secret.expose());
+        if token.client_auth == ClientAuth::Body {
+            form.append_pair("client_id", token.client_id);
+            if let Some(secret) = token.client_secret {
+                form.append_pair("client_secret", secret.expose());
+            }
         }
         Zeroizing::new(form.finish())
     };
-    let mut request = Request::new(Method::POST, token_url.clone());
+    let mut request = Request::new(Method::POST, token.token_url.clone());
     let headers = request.headers_mut();
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/x-www-form-urlencoded"),
     );
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    if *client_auth == ClientAuth::Basic {
-        headers.insert(AUTHORIZATION, basic_value(client_id, client_secret)?);
+    if token.client_auth == ClientAuth::Basic {
+        let empty = SecretString::new(String::new());
+        let secret = token.client_secret.unwrap_or(&empty);
+        headers.insert(AUTHORIZATION, basic_value(token.client_id, secret)?);
     }
     *request.body_mut() = Some(Bytes::copy_from_slice(body.as_bytes()).into());
 
@@ -262,9 +483,10 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
         });
     }
     let body = response.body().await?;
-    // The body is parsed for the token and dropped: it never reaches an error.
-    let parsed: Value =
-        serde_json::from_slice(&body).map_err(|_| RuntimeError::TokenEndpoint { status: None })?;
+    serde_json::from_slice(&body).map_err(|_| RuntimeError::TokenEndpoint { status: None })
+}
+
+fn parse_token(parsed: &Value) -> Result<AccessToken, RuntimeError> {
     let token = parsed
         .get("access_token")
         .and_then(Value::as_str)
@@ -280,6 +502,14 @@ async fn fetch_token(ctx: &SourceContext, auth: &Auth<'_>) -> Result<AccessToken
         SecretString::new(token.to_owned()),
         expires_at,
     ))
+}
+
+fn new_refresh_token(parsed: &Value) -> Option<SecretString> {
+    parsed
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(|token| SecretString::new(token.to_owned()))
 }
 
 /// A token's stated lifetime is capped at a year, so an absurd value cannot overflow the date.
@@ -339,7 +569,7 @@ pub(crate) fn apply(
                 .insert(AUTHORIZATION, basic_value(username, password)?);
         }
         Auth::Bearer { token } => bearer(request, token)?,
-        Auth::OAuth2ClientCredentials { .. } => {
+        Auth::OAuth2ClientCredentials { .. } | Auth::OAuth2AuthorizationCode { .. } => {
             let token = token.ok_or(RuntimeError::InvalidRequest)?;
             bearer(request, token.token())?;
         }
@@ -921,5 +1151,560 @@ mod tests {
         );
         let sent = api.seen()[0].headers.get("authorization").unwrap().clone();
         assert_eq!(sent, "Bearer tok-1");
+    }
+
+    // The authorization-code grant: a provider that rotates the refresh token on every use and
+    // refuses one it has already seen.
+
+    use std::collections::HashMap;
+
+    struct CodeIdp {
+        mock: Mock,
+        refreshes: Arc<AtomicUsize>,
+        /// The form body of each token request.
+        forms: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        authorization: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct CodeIdpMode {
+        rotate: bool,
+        omit_refresh_on_exchange: bool,
+        exchange_status: StatusCode,
+    }
+
+    const PLAIN: CodeIdpMode = CodeIdpMode {
+        rotate: true,
+        omit_refresh_on_exchange: false,
+        exchange_status: StatusCode::OK,
+    };
+
+    /// Issues `acc-<n>` access tokens (the API accepts the latest) and `rt-<n>` refresh tokens.
+    /// Starts out knowing `rt-0`, the one a consent produced.
+    async fn code_idp(valid_access: Arc<Mutex<String>>, mode: CodeIdpMode) -> CodeIdp {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let forms = Arc::new(Mutex::new(Vec::new()));
+        let authorization = Arc::new(Mutex::new(Vec::new()));
+        let valid_refresh = Arc::new(Mutex::new("rt-0".to_owned()));
+        let (counted, logged, auths) = (
+            Arc::clone(&refreshes),
+            Arc::clone(&forms),
+            Arc::clone(&authorization),
+        );
+        let router = Router::new().route(
+            "/token",
+            post(move |headers: HeaderMap, body: String| {
+                let (refreshes, forms, auths) = (
+                    Arc::clone(&counted),
+                    Arc::clone(&logged),
+                    Arc::clone(&auths),
+                );
+                let (valid_access, valid_refresh) =
+                    (Arc::clone(&valid_access), Arc::clone(&valid_refresh));
+                async move {
+                    let form: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    auths.lock().unwrap().push(
+                        headers
+                            .get("authorization")
+                            .map(|value| value.to_str().unwrap().to_owned()),
+                    );
+                    forms.lock().unwrap().push(form.clone());
+                    match form.get("grant_type").map(String::as_str) {
+                        Some("authorization_code") => {
+                            if mode.exchange_status != StatusCode::OK {
+                                return (mode.exchange_status, "provider says: CODEECHO")
+                                    .into_response();
+                            }
+                            let mut answer = serde_json::json!({
+                                "access_token": "acc-0", "expires_in": 3600,
+                            });
+                            if !mode.omit_refresh_on_exchange {
+                                answer["refresh_token"] = "rt-0".into();
+                            }
+                            axum::Json(answer).into_response()
+                        }
+                        Some("refresh_token") => {
+                            let mut current = valid_refresh.lock().unwrap();
+                            if form.get("refresh_token") != Some(&*current) {
+                                // Reuse of a rotated token: the provider revokes the family.
+                                *current = "revoked".to_owned();
+                                return (StatusCode::BAD_REQUEST, "reuse").into_response();
+                            }
+                            let n = refreshes.fetch_add(1, Ordering::SeqCst) + 1;
+                            *valid_access.lock().unwrap() = format!("acc-{n}");
+                            let mut answer = serde_json::json!({
+                                "access_token": format!("acc-{n}"), "expires_in": 3600,
+                            });
+                            if mode.rotate {
+                                *current = format!("rt-{n}");
+                                answer["refresh_token"] = format!("rt-{n}").into();
+                            }
+                            axum::Json(answer).into_response()
+                        }
+                        _ => StatusCode::BAD_REQUEST.into_response(),
+                    }
+                }
+            }),
+        );
+        CodeIdp {
+            mock: serve(router).await,
+            refreshes,
+            forms,
+            authorization,
+        }
+    }
+
+    fn code_auth<'a>(
+        idp: &CodeIdp,
+        refresh_token: &'a SecretString,
+        client_secret: Option<&'a SecretString>,
+        scopes: &'a [String],
+        client_auth: ClientAuth,
+    ) -> Auth<'a> {
+        Auth::OAuth2AuthorizationCode {
+            token_url: idp.mock.url("/token"),
+            client_id: "the-client",
+            client_secret,
+            refresh_token,
+            scopes,
+            client_auth,
+        }
+    }
+
+    fn code_binding(idp: &CodeIdp, scopes: &[String]) -> String {
+        binding_of(&idp.mock.url("/token"), "the-client", scopes)
+    }
+
+    #[tokio::test]
+    async fn the_authorization_code_grant_refreshes_with_the_refresh_token_in_the_form() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let (refresh, secret) = (
+            SecretString::new("rt-0".into()),
+            SecretString::new("client-secret".into()),
+        );
+        let scopes = vec!["read".to_owned()];
+
+        let by_body = code_auth(&idp, &refresh, Some(&secret), &scopes, ClientAuth::Body);
+        call(&context("oauth", "a"), &api, &by_body).await.unwrap();
+
+        let forms = idp.forms.lock().unwrap();
+        let form = &forms[0];
+        assert_eq!(form["grant_type"], "refresh_token");
+        assert_eq!(form["refresh_token"], "rt-0");
+        assert_eq!(form["scope"], "read");
+        assert_eq!(form["client_id"], "the-client");
+        assert_eq!(form["client_secret"], "client-secret");
+        assert!(idp.authorization.lock().unwrap()[0].is_none());
+    }
+
+    #[tokio::test]
+    async fn the_authorization_code_grant_can_prove_the_client_with_basic_auth() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let (refresh, secret) = (
+            SecretString::new("rt-0".into()),
+            SecretString::new("client-secret".into()),
+        );
+
+        let by_basic = code_auth(&idp, &refresh, Some(&secret), &[], ClientAuth::Basic);
+        call(&context("oauth", "b"), &api, &by_basic).await.unwrap();
+
+        let forms = idp.forms.lock().unwrap();
+        assert!(!forms[0].contains_key("client_secret"));
+        assert!(!forms[0].contains_key("client_id"));
+        // base64("the-client:client-secret")
+        assert_eq!(
+            idp.authorization.lock().unwrap()[0].as_deref(),
+            Some("Basic dGhlLWNsaWVudDpjbGllbnQtc2VjcmV0")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_public_client_sends_no_secret() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let refresh = SecretString::new("rt-0".into());
+
+        let auth = code_auth(&idp, &refresh, None, &[], ClientAuth::Body);
+        call(&context("oauth", "p"), &api, &auth).await.unwrap();
+
+        let forms = idp.forms.lock().unwrap();
+        assert_eq!(forms[0]["client_id"], "the-client");
+        assert!(!forms[0].contains_key("client_secret"));
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_replaces_the_old_one_and_is_handed_back() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(Arc::clone(&valid), false).await;
+        let refresh = SecretString::new("rt-0".into());
+        let auth = code_auth(&idp, &refresh, None, &[], ClientAuth::Body);
+        let ctx = context("oauth", "s");
+
+        call(&ctx, &api, &auth).await.unwrap();
+        let stored = ctx.take_refreshed_token().unwrap();
+        assert_eq!(stored.token().expose(), "acc-1");
+        assert_eq!(stored.refresh_token().unwrap().expose(), "rt-1");
+
+        // A later refresh in the same context uses the slot's newest refresh token, not the
+        // credential's rt-0 (which the provider would treat as reuse and revoke the family).
+        ctx.store_token(
+            AccessToken::new(
+                SecretString::new("acc-1".into()),
+                Some(Utc::now() + TimeDelta::seconds(5)),
+            )
+            .with_refresh_token(SecretString::new("rt-1".into()))
+            .with_binding(code_binding(&idp, &[])),
+            false,
+        );
+        call(&ctx, &api, &auth).await.unwrap();
+
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 2);
+        assert_eq!(idp.forms.lock().unwrap()[1]["refresh_token"], "rt-1");
+        assert_eq!(
+            ctx.take_refreshed_token()
+                .unwrap()
+                .refresh_token()
+                .unwrap()
+                .expose(),
+            "rt-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_without_a_new_refresh_token_keeps_the_old_one() {
+        let valid = Arc::default();
+        let mode = CodeIdpMode {
+            rotate: false,
+            ..PLAIN
+        };
+        let idp = code_idp(Arc::clone(&valid), mode).await;
+        let api = api(valid, false).await;
+        let refresh = SecretString::new("rt-0".into());
+        let ctx = context("oauth", "s");
+
+        call(
+            &ctx,
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+
+        let stored = ctx.take_refreshed_token().unwrap();
+        assert_eq!(stored.refresh_token().unwrap().expose(), "rt-0");
+    }
+
+    #[tokio::test]
+    async fn a_seeded_authorization_code_token_is_refused_for_another_configuration() {
+        let valid = Arc::new(Mutex::new("seeded".to_owned()));
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(Arc::clone(&valid), false).await;
+        let refresh = SecretString::new("rt-0".into());
+        let seeded = |binding: String| {
+            AccessToken::new(
+                SecretString::new("seeded".into()),
+                Some(Utc::now() + TimeDelta::seconds(3600)),
+            )
+            .with_refresh_token(SecretString::new("rt-0".into()))
+            .with_binding(binding)
+        };
+
+        // The right binding: used as is.
+        let same = context("oauth", "s").with_access_token(seeded(code_binding(&idp, &[])));
+        call(
+            &same,
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 0);
+
+        // The same token against other scopes: not sent, a refresh happens instead.
+        let scopes = vec!["write".to_owned()];
+        let other = context("oauth", "s").with_access_token(seeded(code_binding(&idp, &[])));
+        call(
+            &other,
+            &api,
+            &code_auth(&idp, &refresh, None, &scopes, ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 1);
+        assert_ne!(api.seen()[1].headers["authorization"], "Bearer seeded");
+    }
+
+    #[tokio::test]
+    async fn a_401_on_an_authorization_code_token_refreshes_once_and_retries_once() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(Arc::clone(&valid), false).await;
+        let refresh = SecretString::new("rt-0".into());
+        // Not expired as far as the clock knows, but the API only accepts the latest token.
+        let revoked = AccessToken::new(
+            SecretString::new("revoked".into()),
+            Some(Utc::now() + TimeDelta::seconds(3600)),
+        )
+        .with_refresh_token(SecretString::new("rt-0".into()))
+        .with_binding(code_binding(&idp, &[]));
+        let ctx = context("oauth", "s").with_access_token(revoked);
+
+        let response = call(
+            &ctx,
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.body(), "data");
+        assert_eq!(
+            idp.refreshes.load(Ordering::SeqCst),
+            1,
+            "exactly one refresh"
+        );
+        assert_eq!(api.hits(), 2, "the revoked token, then the new one");
+        assert_eq!(
+            ctx.take_refreshed_token()
+                .unwrap()
+                .refresh_token()
+                .unwrap()
+                .expose(),
+            "rt-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_401_after_the_refresh_is_unauthorized_without_another_refresh() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, true).await;
+        let refresh = SecretString::new("rt-0".into());
+
+        let error = call(
+            &context("oauth", "s"),
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeError::Unauthorized);
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    fn exchange<'a>(
+        url: &'a Url,
+        secret: Option<&'a SecretString>,
+        client_auth: ClientAuth,
+    ) -> CodeExchange<'a> {
+        CodeExchange {
+            token_url: url,
+            client_id: "the-client",
+            client_secret: secret,
+            code: "the-code",
+            redirect_uri: "https://zirv.example/api/v1/oauth/callback",
+            pkce_verifier: "the-verifier",
+            scopes: &[],
+            client_auth,
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_code_posts_the_code_and_verifier_and_returns_both_tokens_bound() {
+        let idp = code_idp(Arc::default(), PLAIN).await;
+        let url = idp.mock.url("/token");
+        let secret = SecretString::new("client-secret".into());
+
+        let token = exchange_code(
+            &context("oauth", "s"),
+            exchange(&url, Some(&secret), ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(token.token().expose(), "acc-0");
+        assert_eq!(token.refresh_token().unwrap().expose(), "rt-0");
+        assert_eq!(token.binding(), Some(code_binding(&idp, &[]).as_str()));
+        let forms = idp.forms.lock().unwrap();
+        let form = &forms[0];
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "the-code");
+        assert_eq!(form["code_verifier"], "the-verifier");
+        assert_eq!(
+            form["redirect_uri"],
+            "https://zirv.example/api/v1/oauth/callback"
+        );
+        assert_eq!(form["client_secret"], "client-secret");
+        assert!(!format!("{token:?}").contains("acc-0"));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_failure_is_a_status_and_never_echoes_the_body() {
+        let mode = CodeIdpMode {
+            exchange_status: StatusCode::BAD_REQUEST,
+            ..PLAIN
+        };
+        let idp = code_idp(Arc::default(), mode).await;
+        let url = idp.mock.url("/token");
+
+        let error = exchange_code(
+            &context("oauth", "s"),
+            exchange(&url, None, ClientAuth::Body),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeError::TokenEndpoint { status: Some(400) });
+        assert!(!format!("{error} {error:?}").contains("CODEECHO"));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_without_a_refresh_token_is_refused() {
+        let mode = CodeIdpMode {
+            omit_refresh_on_exchange: true,
+            ..PLAIN
+        };
+        let idp = code_idp(Arc::default(), mode).await;
+        let url = idp.mock.url("/token");
+
+        let error = exchange_code(
+            &context("oauth", "s"),
+            exchange(&url, None, ClientAuth::Basic),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeError::TokenEndpoint { status: None });
+    }
+
+    #[tokio::test]
+    async fn exchange_code_goes_through_the_egress_guard() {
+        let policy = Arc::new(zirv_flow_core::egress::EgressPolicy::default());
+        let ctx = SourceContext::new(
+            policy,
+            crate::http::HttpLimits::default(),
+            "oauth",
+            "s",
+            Arc::default(),
+        )
+        .unwrap();
+        let idp = code_idp(Arc::default(), PLAIN).await;
+        let url = idp.mock.url("/token");
+
+        let result = exchange_code(&ctx, exchange(&url, None, ClientAuth::Body)).await;
+
+        assert!(result.is_err());
+        assert_eq!(idp.mock.hits(), 0, "no request reached the loopback server");
+    }
+
+    /// A store that counts and delegates, as the adapters in `api` and `jobs` do.
+    struct CountingStore {
+        calls: AtomicUsize,
+        held_seen: Mutex<Vec<String>>,
+    }
+
+    impl TokenStore for CountingStore {
+        fn refresh<'a>(
+            &'a self,
+            held: &'a SecretString,
+            refresh: &'a (dyn Fn(SecretString) -> RefreshFuture<'a> + Send + Sync),
+        ) -> RefreshFuture<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.held_seen
+                .lock()
+                .unwrap()
+                .push(held.expose().to_owned());
+            // The store reloads and hands the callback the token it holds.
+            Box::pin(async move { refresh(SecretString::new("rt-0".into())).await })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_store_serves_the_refresh_and_nothing_is_handed_back_to_the_caller() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        let refresh = SecretString::new("rt-0".into());
+        let store = Arc::new(CountingStore {
+            calls: AtomicUsize::new(0),
+            held_seen: Mutex::default(),
+        });
+        let ctx = context("oauth", "s").with_token_store(store.clone());
+
+        call(
+            &ctx,
+            &api,
+            &code_auth(&idp, &refresh, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.held_seen.lock().unwrap().as_slice(), ["rt-0"]);
+        assert_eq!(idp.refreshes.load(Ordering::SeqCst), 1);
+        assert!(
+            ctx.take_refreshed_token().is_none(),
+            "the store persisted it; the caller saves nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_the_provider_refuses_surfaces_as_a_status_and_caches_nothing() {
+        let valid = Arc::default();
+        let idp = code_idp(Arc::clone(&valid), PLAIN).await;
+        let api = api(valid, false).await;
+        // The provider does not know this refresh token.
+        let wrong = SecretString::new("rt-wrong".into());
+        let ctx = context("oauth", "s");
+
+        let error = call(
+            &ctx,
+            &api,
+            &code_auth(&idp, &wrong, None, &[], ClientAuth::Body),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeError::TokenEndpoint { status: Some(400) });
+        assert!(ctx.take_refreshed_token().is_none());
+        assert_eq!(api.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_api_key_names_are_chosen_at_run_time() {
+        let upstream = serve(Router::new().route("/r", get(|| async { "ok" }))).await;
+        let key = SecretString::new("the-key".into());
+        let header_name = String::from("x-custom-key");
+        let query_name = String::from("access_token");
+        let ctx = context("styles", "s");
+
+        for placement in [
+            ApiKeyPlacement::Header(&header_name),
+            ApiKeyPlacement::Query(&query_name),
+        ] {
+            ctx.send(
+                &Auth::ApiKey {
+                    placement,
+                    value: &key,
+                },
+                RequestSpec::get(&upstream.base(), upstream.url("/r")),
+            )
+            .await
+            .unwrap();
+        }
+
+        let seen = upstream.seen();
+        assert_eq!(seen[0].headers["x-custom-key"], "the-key");
+        assert_eq!(seen[1].path_and_query, "/r?access_token=the-key");
     }
 }

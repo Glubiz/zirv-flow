@@ -12,7 +12,10 @@ mod send;
 mod testing;
 
 pub(crate) use auth::TokenSlot;
-pub use auth::{AccessToken, ApiKeyPlacement, Auth, ClientAuth};
+pub use auth::{
+    AccessToken, ApiKeyPlacement, Auth, ClientAuth, CodeExchange, RefreshFuture, TokenStore,
+    exchange_code,
+};
 pub use error::RuntimeError;
 pub use paginate::{Page, Pagination, paginate};
 pub use rate_limit::{RateLimit, RateLimits};
