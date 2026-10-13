@@ -14,15 +14,15 @@ use super::context::SourceContext;
 use super::credential::Credential;
 use super::error::SourceError;
 use super::source::Source;
-use super::spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
+use super::spec::{Capabilities, SourceSpec};
 use super::sql::connect::{CONNECT_TIMEOUT, backstop, resolve, within};
-use super::sql::discover::{MAX_TABLES, default_cursor, descriptor, from_clause};
+use super::sql::discover::{from_clause, query_stream, table_streams};
 use super::sql::error::{from_mysql, query};
-use super::sql::keyset::{BATCH_ROWS, KeySpec, Paged, Pager, Row, batches, parse_checkpoint};
-use super::sql::metrics::metered;
-use super::sql::settings::{
-    Flavor, Login, QUERY_PREFIX, Settings, TlsMode, check_config, config_error,
+use super::sql::keyset::{
+    self, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
 };
+use super::sql::metrics::metered;
+use super::sql::settings::{Flavor, Login, Settings, TlsMode, check_config, config_error, fields};
 use super::sql::tls;
 use super::types::{Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor};
 
@@ -38,81 +38,21 @@ impl Source for Mysql {
         label: "MySQL",
         description: "Reads tables and queries of one MySQL database, through a read-only user.",
         config_fields: &[
-            FieldSpec {
-                key: "host",
-                label: "Host",
-                help: "The database server's DNS name or IP address.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: false,
-            },
-            FieldSpec {
-                key: "port",
-                label: "Port",
-                help: "Defaults to 3306.",
-                kind: FieldKind::Number,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "database",
-                label: "Database",
-                help: "The database to connect to; its tables are the streams.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: false,
-            },
-            FieldSpec {
-                key: "tls",
-                label: "TLS",
-                help: "verify (default) checks the server's certificate; off is accepted only \
-                    toward addresses the egress allowlist names.",
-                kind: FieldKind::Select(&["verify", "off"]),
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "ca_certificate",
-                label: "CA certificate",
-                help: "A PEM certificate to trust instead of the built-in public roots.",
-                kind: FieldKind::LongText,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "statement_timeout_seconds",
-                label: "Statement timeout (seconds)",
-                help: "The longest one query may run, 1 to 600. Defaults to 60.",
-                kind: FieldKind::Number,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "queries",
-                label: "Queries",
-                help: "Named SELECT statements, each offered as a stream named query:<name>.",
-                kind: FieldKind::Queries,
-                required: false,
-                secret: false,
-            },
+            fields::HOST,
+            fields::port("Defaults to 3306."),
+            fields::database("The database to connect to; its tables are the streams."),
+            fields::TLS,
+            fields::CA_CERTIFICATE,
+            fields::STATEMENT_TIMEOUT,
+            fields::QUERIES,
         ],
         credential_fields: &[
-            FieldSpec {
-                key: "user",
-                label: "User",
-                help: "A user that can only SELECT what should be read.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: true,
-            },
-            FieldSpec {
-                key: "password",
-                label: "Password",
-                help: "The user's password.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: true,
-            },
+            fields::credential(
+                "user",
+                "User",
+                "A user that can only SELECT what should be read.",
+            ),
+            fields::credential("password", "Password", "The user's password."),
         ],
         rate_limit: None,
         config_check: Some(|config| check_config(config, Flavor::MySql)),
@@ -396,42 +336,17 @@ fn page_sql(
     after: bool,
 ) -> (String, Vec<usize>) {
     let mut bindings = Vec::new();
-    let mut conditions = Vec::new();
-    if cursor {
-        conditions.push(format!("s.{} IS NOT NULL", quote(&keys[0].0)));
-    }
-    if after {
-        let mut operand = |index: usize, operator: &str| {
-            let (name, key_type) = &keys[index];
+    let sql = keyset::page_sql(
+        &select_list(columns),
+        from,
+        keys,
+        cursor,
+        after,
+        quote,
+        |index, column, operator| {
             bindings.push(index);
-            format!("s.{} {operator} {}", quote(name), key_type.placeholder())
-        };
-        let alternatives: Vec<String> = (0..keys.len())
-            .map(|i| {
-                let mut terms: Vec<String> = (0..i).map(|j| operand(j, "=")).collect();
-                terms.push(operand(i, ">"));
-                if terms.len() == 1 {
-                    terms.remove(0)
-                } else {
-                    format!("({})", terms.join(" AND "))
-                }
-            })
-            .collect();
-        conditions.push(format!("({})", alternatives.join(" OR ")));
-    }
-    let filter = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
-    let order = keys
-        .iter()
-        .map(|(name, _)| format!("s.{}", quote(name)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT {} FROM {from} AS s{filter} ORDER BY {order} LIMIT {BATCH_ROWS}",
-        select_list(columns)
+            format!("{column} {operator} {}", keys[index].1.placeholder())
+        },
     );
     (sql, bindings)
 }
@@ -451,18 +366,16 @@ async fn describe(conn: &mut mysql_async::Conn, from: &str) -> Result<Vec<Column
         .await
         .map_err(failed)?;
     tx.commit().await.map_err(failed)?;
-    Ok(statement
-        .columns()
-        .iter()
-        .map(|column| {
-            describe_column(
-                column.name_str().into_owned(),
-                column.column_type(),
-                column.flags(),
-                column.character_set(),
-            )
-        })
-        .collect())
+    Ok(statement.columns().iter().map(column_of).collect())
+}
+
+fn column_of(column: &mysql_async::Column) -> Column {
+    describe_column(
+        column.name_str().into_owned(),
+        column.column_type(),
+        column.flags(),
+        column.character_set(),
+    )
 }
 
 struct MysqlPager {
@@ -547,28 +460,14 @@ async fn open_paged(
     Paged::new(pager, names, &spec, after)
 }
 
-/// The key columns with the type each is paged on. A column the stream lacks or a type that
-/// cannot be paged on is a configuration error naming the setting.
+/// The key columns with the type each is paged on.
 fn key_types(columns: &[Column], spec: &KeySpec) -> Result<Vec<(String, KeyType)>, SourceError> {
-    let mut keys = Vec::new();
-    let mut add = |name: &str, setting: &str| {
-        let column = columns
+    keys_of(spec, |name| {
+        columns
             .iter()
             .find(|column| column.name == name)
-            .ok_or_else(|| config_error(setting, "names a column the stream does not have"))?;
-        let key_type = column
-            .key
-            .ok_or_else(|| config_error(setting, "has a type that cannot be paged on"))?;
-        keys.push((name.to_owned(), key_type));
-        Ok::<_, SourceError>(())
-    };
-    if let Some(cursor) = &spec.cursor {
-        add(cursor, "cursor_field")?;
-    }
-    for name in &spec.primary_key {
-        add(name, "primary_key")?;
-    }
-    Ok(keys)
+            .map(|column| column.key)
+    })
 }
 
 fn field_type(data_type: &str) -> FieldType {
@@ -611,60 +510,39 @@ async fn discover_streams(
         )
         .await
         .map_err(failed)?;
-    let mut streams: Vec<StreamDescriptor> = Vec::new();
-    for (table, column, data_type) in columns {
-        if streams.last().is_none_or(|stream| stream.name != table) {
-            if streams.len() == MAX_TABLES {
-                return Err(config_error(
-                    "database",
-                    "has more than 1000 tables; grant the user fewer",
-                ));
-            }
-            streams.push(descriptor(table));
-        }
-        let stream = streams.last_mut().expect("a stream was just pushed");
-        stream.fields.push(FieldDescriptor {
-            name: column,
-            field_type: field_type(&data_type.to_lowercase()),
-        });
-    }
-    for (table, column) in keys {
-        if let Some(stream) = streams.iter_mut().find(|stream| stream.name == table) {
-            stream.default_primary_key.push(column);
-        }
-    }
-    for stream in &mut streams {
-        stream.default_cursor_field = default_cursor(&stream.fields);
-    }
-    for query_stream in &settings.queries {
-        let name = format!("{QUERY_PREFIX}{}", query_stream.name);
+    let columns = columns
+        .into_iter()
+        .map(|(table, column, data_type)| {
+            let field = FieldDescriptor {
+                name: column,
+                field_type: field_type(&data_type.to_lowercase()),
+            };
+            (table, field)
+        })
+        .collect::<Vec<_>>();
+    let mut streams = table_streams(columns, keys, || {
+        config_error(
+            "database",
+            "has more than 1000 tables; grant the user fewer",
+        )
+    })?;
+    for configured in &settings.queries {
         // Prepared as written, so the columns are the query's own and a second statement is the
         // driver's error.
         let statement = tx
-            .prep(query_stream.sql.as_str())
+            .prep(configured.sql.as_str())
             .await
             .map_err(|error| rejected_query(&error))?;
-        let mut stream = descriptor(name);
-        for column in statement.columns().iter() {
-            let described = describe_column(
-                column.name_str().into_owned(),
-                column.column_type(),
-                column.flags(),
-                column.character_set(),
-            );
-            if stream
-                .fields
-                .iter()
-                .any(|field| field.name == described.name)
-            {
-                return Err(config_error("queries", "returns a column name twice"));
-            }
-            stream.fields.push(FieldDescriptor {
-                name: described.name,
-                field_type: described.field_type,
-            });
-        }
-        streams.push(stream);
+        streams.push(query_stream(
+            &configured.name,
+            statement.columns().iter().map(|column| {
+                let column = column_of(column);
+                FieldDescriptor {
+                    name: column.name,
+                    field_type: column.field_type,
+                }
+            }),
+        )?);
     }
     tx.commit().await.map_err(failed)?;
     Ok(streams)

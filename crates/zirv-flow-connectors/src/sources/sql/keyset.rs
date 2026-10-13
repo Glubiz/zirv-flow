@@ -90,6 +90,67 @@ pub(crate) fn checkpoint_of(key: &[String]) -> Checkpoint {
     Checkpoint(json!({"v": 1, "key": key}))
 }
 
+/// The key columns, cursor first, with the type each is paged on. `type_of` answers for a column
+/// name: `None` when the stream lacks the column, `Some(None)` when its type cannot be paged on.
+/// Either is a configuration error naming the setting.
+pub(crate) fn key_types<K>(
+    spec: &KeySpec,
+    type_of: impl Fn(&str) -> Option<Option<K>>,
+) -> Result<Vec<(String, K)>, SourceError> {
+    let cursor = spec.cursor.iter().map(|name| (name, "cursor_field"));
+    let primary_key = spec.primary_key.iter().map(|name| (name, "primary_key"));
+    cursor
+        .chain(primary_key)
+        .map(|(name, setting)| {
+            let key_type = type_of(name)
+                .ok_or_else(|| config_error(setting, "names a column the stream does not have"))?
+                .ok_or_else(|| config_error(setting, "has a type that cannot be paged on"))?;
+            Ok((name.clone(), key_type))
+        })
+        .collect()
+}
+
+/// The page query over a select list and a `from` clause aliased `s`. `keys` are the key columns
+/// in comparison order (the cursor first, when `cursor` is set) and `quote` quotes an identifier.
+/// With `after`, the key is compared expanded, not as a row constructor: `term(index, column,
+/// operator)` renders one comparison of key `index` (`column` is the qualified, quoted name).
+pub(crate) fn page_sql<K>(
+    select: &str,
+    from: &str,
+    keys: &[(String, K)],
+    cursor: bool,
+    after: bool,
+    quote: fn(&str) -> String,
+    mut term: impl FnMut(usize, &str, &str) -> String,
+) -> String {
+    let column = |index: usize| format!("s.{}", quote(&keys[index].0));
+    let mut conditions = Vec::new();
+    if cursor {
+        conditions.push(format!("{} IS NOT NULL", column(0)));
+    }
+    if after {
+        let alternatives: Vec<String> = (0..keys.len())
+            .map(|i| {
+                let mut terms: Vec<String> = (0..i).map(|j| term(j, &column(j), "=")).collect();
+                terms.push(term(i, &column(i), ">"));
+                if terms.len() == 1 {
+                    terms.remove(0)
+                } else {
+                    format!("({})", terms.join(" AND "))
+                }
+            })
+            .collect();
+        conditions.push(format!("({})", alternatives.join(" OR ")));
+    }
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let order = (0..keys.len()).map(column).collect::<Vec<_>>().join(", ");
+    format!("SELECT {select} FROM {from} AS s{filter} ORDER BY {order} LIMIT {BATCH_ROWS}")
+}
+
 /// The record key: a single primary-key value as is, several as a JSON array text.
 pub(crate) fn record_key(values: &[String]) -> String {
     match values {

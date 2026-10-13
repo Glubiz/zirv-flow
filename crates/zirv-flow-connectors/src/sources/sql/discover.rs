@@ -25,6 +25,55 @@ pub(crate) fn default_cursor(fields: &[FieldDescriptor]) -> Option<String> {
         .map(|field| field.name.clone())
 }
 
+/// The table streams from the catalog: `columns` are `(table, field)` rows ordered by table, and
+/// `keys` the `(table, column)` primary-key rows in key order. `too_many` is the refusal for more
+/// than [`MAX_TABLES`] tables.
+pub(crate) fn table_streams(
+    columns: impl IntoIterator<Item = (String, FieldDescriptor)>,
+    keys: impl IntoIterator<Item = (String, String)>,
+    too_many: impl FnOnce() -> SourceError,
+) -> Result<Vec<StreamDescriptor>, SourceError> {
+    let mut streams: Vec<StreamDescriptor> = Vec::new();
+    for (table, field) in columns {
+        if streams.last().is_none_or(|stream| stream.name != table) {
+            if streams.len() == MAX_TABLES {
+                return Err(too_many());
+            }
+            streams.push(descriptor(table));
+        }
+        streams
+            .last_mut()
+            .expect("a stream was just pushed")
+            .fields
+            .push(field);
+    }
+    for (table, column) in keys {
+        if let Some(stream) = streams.iter_mut().find(|stream| stream.name == table) {
+            stream.default_primary_key.push(column);
+        }
+    }
+    for stream in &mut streams {
+        stream.default_cursor_field = default_cursor(&stream.fields);
+    }
+    Ok(streams)
+}
+
+/// The stream of a configured query, from the columns the server reported. A column name twice
+/// would make a record ambiguous.
+pub(crate) fn query_stream(
+    name: &str,
+    fields: impl IntoIterator<Item = FieldDescriptor>,
+) -> Result<StreamDescriptor, SourceError> {
+    let mut stream = descriptor(format!("{QUERY_PREFIX}{name}"));
+    for field in fields {
+        if stream.fields.iter().any(|other| other.name == field.name) {
+            return Err(config_error("queries", "returns a column name twice"));
+        }
+        stream.fields.push(field);
+    }
+    Ok(stream)
+}
+
 /// What a stream reads from: a configured query (`query:<name>`), parenthesised, or the table
 /// `table` renders to its qualified, quoted name.
 pub(crate) fn from_clause(
@@ -92,6 +141,56 @@ mod tests {
         assert_eq!(
             from_clause(&settings, "query:other", |_| unreachable!()).unwrap_err(),
             config_error("queries", "has no query for this stream")
+        );
+    }
+
+    #[test]
+    fn table_streams_group_columns_by_table_and_take_keys_and_the_default_cursor() {
+        let columns = [
+            ("a", field("id", FieldType::Number)),
+            ("a", field("updated_at", FieldType::Timestamp)),
+            ("b", field("id", FieldType::Number)),
+        ]
+        .map(|(table, field)| (table.to_owned(), field));
+        let keys = [("a", "id"), ("zz", "id"), ("b", "id")]
+            .map(|(table, column)| (table.to_owned(), column.to_owned()));
+
+        let streams = table_streams(columns, keys, || unreachable!()).unwrap();
+
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].fields.len(), 2);
+        assert_eq!(streams[0].default_primary_key, ["id"]);
+        assert_eq!(
+            streams[0].default_cursor_field.as_deref(),
+            Some("updated_at")
+        );
+        assert_eq!(streams[1].default_cursor_field, None);
+    }
+
+    #[test]
+    fn more_than_the_most_tables_is_refused_with_the_callers_error() {
+        let columns = (0..=MAX_TABLES).map(|n| (format!("t{n}"), field("id", FieldType::Number)));
+
+        let error = table_streams(columns, [], || config_error("schema", "too many")).unwrap_err();
+
+        assert_eq!(error, config_error("schema", "too many"));
+    }
+
+    #[test]
+    fn a_query_stream_is_prefixed_and_a_repeated_column_name_is_refused() {
+        let stream = query_stream("vip", [field("id", FieldType::Number)]).unwrap();
+        let twice = query_stream(
+            "vip",
+            [
+                field("id", FieldType::Number),
+                field("id", FieldType::String),
+            ],
+        );
+
+        assert_eq!(stream.name, "query:vip");
+        assert_eq!(
+            twice.unwrap_err(),
+            config_error("queries", "returns a column name twice")
         );
     }
 

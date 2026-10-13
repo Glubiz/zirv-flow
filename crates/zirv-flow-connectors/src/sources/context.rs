@@ -251,22 +251,12 @@ mod tests {
         assert_eq!(context.http().limits(), HttpLimits::default());
     }
 
+    use crate::sources::sql::testing::{context, fixed};
+
     use std::future::Future;
     use std::io;
     use std::pin::Pin;
 
-    struct Fixed(Vec<IpAddr>);
-
-    impl Lookup for Fixed {
-        fn lookup<'a>(
-            &'a self,
-            _host: &'a str,
-        ) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>> {
-            Box::pin(async move { Ok(self.0.clone()) })
-        }
-    }
-
-    /// A lookup that fails the test if it is asked anything.
     struct Never;
 
     impl Lookup for Never {
@@ -278,26 +268,13 @@ mod tests {
         }
     }
 
-    fn context(allow: &[&str], lookup: Arc<dyn Lookup>) -> SourceContext {
-        let entries: Vec<String> = allow.iter().map(|entry| (*entry).to_owned()).collect();
-        SourceContext::new(
-            Arc::new(EgressPolicy::parse(&entries).unwrap()),
-            HttpLimits::default(),
-            "postgres",
-            "source-1",
-            Arc::default(),
-        )
-        .unwrap()
-        .with_lookup(lookup)
-    }
-
-    fn fixed(ips: &[&str]) -> Arc<dyn Lookup> {
-        Arc::new(Fixed(ips.iter().map(|ip| ip.parse().unwrap()).collect()))
-    }
-
     #[tokio::test]
     async fn a_public_answer_is_returned_for_the_driver_to_dial() {
-        let ctx = context(&[], fixed(&["8.8.8.8", "8.8.8.8", "2606:4700::1111"]));
+        let ctx = context(
+            "postgres",
+            &[],
+            fixed(&["8.8.8.8", "8.8.8.8", "2606:4700::1111"]),
+        );
 
         let ips = ctx.resolve_checked("db.test").await.unwrap();
 
@@ -312,8 +289,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_private_answer_is_refused_with_egress_and_a_mixed_one_whole() {
-        let private = context(&[], fixed(&["10.0.0.5"]));
-        let mixed = context(&[], fixed(&["8.8.8.8", "10.0.0.5"]));
+        let private = context("postgres", &[], fixed(&["10.0.0.5"]));
+        let mixed = context("postgres", &[], fixed(&["8.8.8.8", "10.0.0.5"]));
 
         for ctx in [private, mixed] {
             let error = ctx.resolve_checked("db.test").await.unwrap_err();
@@ -329,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_allowlisted_range_is_returned() {
-        let ctx = context(&["10.0.0.0/8"], fixed(&["10.0.0.5"]));
+        let ctx = context("postgres", &["10.0.0.0/8"], fixed(&["10.0.0.5"]));
 
         let ips = ctx.resolve_checked("db.test").await.unwrap();
 
@@ -338,8 +315,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_ip_literal_skips_dns_and_is_still_checked() {
-        let allowed = context(&["127.0.0.1/32"], Arc::new(Never));
-        let denied = context(&[], Arc::new(Never));
+        let allowed = context("postgres", &["127.0.0.1/32"], Arc::new(Never));
+        let denied = context("postgres", &[], Arc::new(Never));
 
         assert_eq!(
             allowed.resolve_checked("127.0.0.1").await.unwrap(),
@@ -353,11 +330,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_answer_is_unreachable_and_more_than_eight_addresses_are_refused() {
-        let empty = context(&[], fixed(&[]));
+        let empty = context("postgres", &[], fixed(&[]));
         let many: Vec<String> = (1..=9).map(|n| format!("8.8.8.{n}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        let nine = context(&[], fixed(&many));
-        let eight = context(&[], fixed(&many[..8]));
+        let nine = context("postgres", &[], fixed(&many));
+        let eight = context("postgres", &[], fixed(&many[..8]));
 
         assert_eq!(
             empty.resolve_checked("db.test").await,
@@ -375,7 +352,7 @@ mod tests {
         let mut ips: Vec<String> = (1..=8).map(|n| format!("8.8.8.{n}")).collect();
         ips.push("10.0.0.5".to_owned());
         let ips: Vec<&str> = ips.iter().map(String::as_str).collect();
-        let ctx = context(&[], fixed(&ips));
+        let ctx = context("postgres", &[], fixed(&ips));
 
         let error = ctx.resolve_checked("db.test").await.unwrap_err();
 
@@ -387,7 +364,7 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
-        let ctx = context(&[], fixed(&["10.0.0.5"]));
+        let ctx = context("postgres", &[], fixed(&["10.0.0.5"]));
 
         assert!(ctx.resolve_checked("db.test").await.is_err());
 

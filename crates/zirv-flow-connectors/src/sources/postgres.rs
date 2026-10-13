@@ -19,13 +19,13 @@ use super::error::SourceError;
 use super::source::Source;
 use super::spec::{Capabilities, FieldKind, FieldSpec, SourceSpec};
 use super::sql::connect::{CONNECT_TIMEOUT, backstop, resolve, within};
-use super::sql::discover::{MAX_TABLES, default_cursor, descriptor, from_clause};
+use super::sql::discover::{from_clause, query_stream, table_streams};
 use super::sql::error::{from_postgres, query};
-use super::sql::keyset::{BATCH_ROWS, KeySpec, Paged, Pager, Row, batches, parse_checkpoint};
-use super::sql::metrics::metered;
-use super::sql::settings::{
-    Flavor, Login, QUERY_PREFIX, Settings, TlsMode, check_config, config_error,
+use super::sql::keyset::{
+    self, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
 };
+use super::sql::metrics::metered;
+use super::sql::settings::{Flavor, Login, Settings, TlsMode, check_config, config_error, fields};
 use super::sql::tls;
 use super::types::{Batch, Checkpoint, FieldDescriptor, FieldType, StreamConfig, StreamDescriptor};
 
@@ -42,30 +42,9 @@ impl Source for Postgres {
         description: "Reads tables and queries of one schema of a PostgreSQL database, \
             through a read-only role.",
         config_fields: &[
-            FieldSpec {
-                key: "host",
-                label: "Host",
-                help: "The database server's DNS name or IP address.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: false,
-            },
-            FieldSpec {
-                key: "port",
-                label: "Port",
-                help: "Defaults to 5432.",
-                kind: FieldKind::Number,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "database",
-                label: "Database",
-                help: "The database to connect to.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: false,
-            },
+            fields::HOST,
+            fields::port("Defaults to 5432."),
+            fields::database("The database to connect to."),
             FieldSpec {
                 key: "schema",
                 label: "Schema",
@@ -74,57 +53,18 @@ impl Source for Postgres {
                 required: false,
                 secret: false,
             },
-            FieldSpec {
-                key: "tls",
-                label: "TLS",
-                help: "verify (default) checks the server's certificate; off is accepted only \
-                    toward addresses the egress allowlist names.",
-                kind: FieldKind::Select(&["verify", "off"]),
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "ca_certificate",
-                label: "CA certificate",
-                help: "A PEM certificate to trust instead of the built-in public roots.",
-                kind: FieldKind::LongText,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "statement_timeout_seconds",
-                label: "Statement timeout (seconds)",
-                help: "The longest one query may run, 1 to 600. Defaults to 60.",
-                kind: FieldKind::Number,
-                required: false,
-                secret: false,
-            },
-            FieldSpec {
-                key: "queries",
-                label: "Queries",
-                help: "Named SELECT statements, each offered as a stream named query:<name>.",
-                kind: FieldKind::Queries,
-                required: false,
-                secret: false,
-            },
+            fields::TLS,
+            fields::CA_CERTIFICATE,
+            fields::STATEMENT_TIMEOUT,
+            fields::QUERIES,
         ],
         credential_fields: &[
-            FieldSpec {
-                key: "user",
-                label: "User",
-                help: "A role that can only SELECT what should be read.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: true,
-            },
-            FieldSpec {
-                key: "password",
-                label: "Password",
-                help: "The role's password.",
-                kind: FieldKind::Text,
-                required: true,
-                secret: true,
-            },
+            fields::credential(
+                "user",
+                "User",
+                "A role that can only SELECT what should be read.",
+            ),
+            fields::credential("password", "Password", "The role's password."),
         ],
         rate_limit: None,
         config_check: Some(|config| check_config(config, Flavor::Postgres)),
@@ -382,8 +322,7 @@ fn select_list(columns: &[Column]) -> String {
 
 /// The page query. `from` is a quoted table or a parenthesised query, `keys` the key columns in
 /// comparison order (the cursor first, when `cursor` is set) with their types, and `after`
-/// whether a checkpoint applies. The key is compared expanded, not as a row constructor, with
-/// the checkpoint bound as text parameters `$1..$n` and cast on the server.
+/// whether a checkpoint applies, bound as text parameters `$1..$n` and cast on the server.
 fn page_sql(
     from: &str,
     columns: &[Column],
@@ -391,50 +330,20 @@ fn page_sql(
     cursor: bool,
     after: bool,
 ) -> String {
-    let mut conditions = Vec::new();
-    if cursor {
-        conditions.push(format!("s.{} IS NOT NULL", quote(&keys[0].0)));
-    }
-    if after {
-        let operand = |index: usize| {
-            let (name, key_type) = &keys[index];
-            (
-                format!("s.{}", quote(name)),
-                format!("${}::text::{}", index + 1, key_type.cast()),
+    keyset::page_sql(
+        &select_list(columns),
+        from,
+        keys,
+        cursor,
+        after,
+        quote,
+        |index, column, operator| {
+            format!(
+                "{column} {operator} ${}::text::{}",
+                index + 1,
+                keys[index].1.cast()
             )
-        };
-        let alternatives: Vec<String> = (0..keys.len())
-            .map(|i| {
-                let mut terms: Vec<String> = (0..i)
-                    .map(|j| {
-                        let (column, parameter) = operand(j);
-                        format!("{column} = {parameter}")
-                    })
-                    .collect();
-                let (column, parameter) = operand(i);
-                terms.push(format!("{column} > {parameter}"));
-                if terms.len() == 1 {
-                    terms.remove(0)
-                } else {
-                    format!("({})", terms.join(" AND "))
-                }
-            })
-            .collect();
-        conditions.push(format!("({})", alternatives.join(" OR ")));
-    }
-    let filter = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
-    let order = keys
-        .iter()
-        .map(|(name, _)| format!("s.{}", quote(name)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {} FROM {from} AS s{filter} ORDER BY {order} LIMIT {BATCH_ROWS}",
-        select_list(columns)
+        },
     )
 }
 
@@ -532,27 +441,14 @@ async fn open_paged(
     Paged::new(pager, names, &spec, after)
 }
 
-/// The key columns with the type each is paged on. A column the stream lacks or a type that
-/// cannot be paged on is a configuration error naming the setting.
+/// The key columns with the type each is paged on.
 fn key_types(columns: &[Column], spec: &KeySpec) -> Result<Vec<(String, KeyType)>, SourceError> {
-    let mut keys = Vec::new();
-    let mut add = |name: &str, setting: &str| {
-        let column = columns
+    keys_of(spec, |name| {
+        columns
             .iter()
             .find(|column| column.name == name)
-            .ok_or_else(|| config_error(setting, "names a column the stream does not have"))?;
-        let key_type = KeyType::of(&column.ty)
-            .ok_or_else(|| config_error(setting, "has a type that cannot be paged on"))?;
-        keys.push((name.to_owned(), key_type));
-        Ok::<_, SourceError>(())
-    };
-    if let Some(cursor) = &spec.cursor {
-        add(cursor, "cursor_field")?;
-    }
-    for name in &spec.primary_key {
-        add(name, "primary_key")?;
-    }
-    Ok(keys)
+            .map(|column| KeyType::of(&column.ty))
+    })
 }
 
 fn field_type(type_name: &str) -> FieldType {
@@ -600,63 +496,47 @@ async fn discover_streams(
         )
         .await
         .map_err(failed)?;
-    let mut streams: Vec<StreamDescriptor> = Vec::new();
-    for row in &columns {
-        let (table, column, type_name): (String, String, String) = (
-            row.try_get(0).map_err(|_| query())?,
-            row.try_get(1).map_err(|_| query())?,
-            row.try_get(2).map_err(|_| query())?,
-        );
-        if streams.last().is_none_or(|stream| stream.name != table) {
-            if streams.len() == MAX_TABLES {
-                return Err(config_error(
-                    "schema",
-                    "has more than 1000 tables; grant the role fewer",
-                ));
-            }
-            streams.push(descriptor(table));
-        }
-        let stream = streams.last_mut().expect("a stream was just pushed");
-        stream.fields.push(FieldDescriptor {
-            name: column,
-            field_type: field_type(&type_name),
-        });
-    }
-    for row in &keys {
-        let (table, column): (String, String) = (
-            row.try_get(0).map_err(|_| query())?,
-            row.try_get(1).map_err(|_| query())?,
-        );
-        if let Some(stream) = streams.iter_mut().find(|stream| stream.name == table) {
-            stream.default_primary_key.push(column);
-        }
-    }
-    for stream in &mut streams {
-        stream.default_cursor_field = default_cursor(&stream.fields);
-    }
-    for query_stream in &settings.queries {
-        let name = format!("{QUERY_PREFIX}{}", query_stream.name);
+    let columns = columns
+        .iter()
+        .map(|row| {
+            let (table, column, type_name): (String, String, String) = (
+                row.try_get(0).map_err(|_| query())?,
+                row.try_get(1).map_err(|_| query())?,
+                row.try_get(2).map_err(|_| query())?,
+            );
+            let field = FieldDescriptor {
+                name: column,
+                field_type: field_type(&type_name),
+            };
+            Ok((table, field))
+        })
+        .collect::<Result<Vec<_>, SourceError>>()?;
+    let keys = keys
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get(0).map_err(|_| query())?,
+                row.try_get(1).map_err(|_| query())?,
+            ))
+        })
+        .collect::<Result<Vec<(String, String)>, SourceError>>()?;
+    let mut streams = table_streams(columns, keys, || {
+        config_error("schema", "has more than 1000 tables; grant the role fewer")
+    })?;
+    for configured in &settings.queries {
         // Prepared as written, so the columns are the query's own and a second statement is the
         // driver's error.
         let statement = tx
-            .prepare(&query_stream.sql)
+            .prepare(&configured.sql)
             .await
             .map_err(|error| rejected_query(&error))?;
-        let mut stream = descriptor(name);
-        for column in statement.columns() {
-            if stream
-                .fields
-                .iter()
-                .any(|field| field.name == column.name())
-            {
-                return Err(config_error("queries", "returns a column name twice"));
-            }
-            stream.fields.push(FieldDescriptor {
+        streams.push(query_stream(
+            &configured.name,
+            statement.columns().iter().map(|column| FieldDescriptor {
                 name: column.name().to_owned(),
                 field_type: field_type(column.type_().name()),
-            });
-        }
-        streams.push(stream);
+            }),
+        )?);
     }
     tx.commit().await.map_err(failed)?;
     Ok(streams)

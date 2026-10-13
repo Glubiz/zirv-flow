@@ -19,6 +19,91 @@ const MAX_STATEMENT_TIMEOUT_SECONDS: u64 = 600;
 /// The prefix of a query stream's name.
 pub(crate) const QUERY_PREFIX: &str = "query:";
 
+/// The form fields both database sources declare identically.
+pub(crate) mod fields {
+    use crate::sources::{FieldKind, FieldSpec};
+
+    const fn optional(
+        key: &'static str,
+        label: &'static str,
+        help: &'static str,
+        kind: FieldKind,
+    ) -> FieldSpec {
+        FieldSpec {
+            key,
+            label,
+            help,
+            kind,
+            required: false,
+            secret: false,
+        }
+    }
+
+    pub(crate) const HOST: FieldSpec = FieldSpec {
+        key: "host",
+        label: "Host",
+        help: "The database server's DNS name or IP address.",
+        kind: FieldKind::Text,
+        required: true,
+        secret: false,
+    };
+    pub(crate) const TLS: FieldSpec = optional(
+        "tls",
+        "TLS",
+        "verify (default) checks the server's certificate; off is accepted only toward \
+         addresses the egress allowlist names.",
+        FieldKind::Select(&["verify", "off"]),
+    );
+    pub(crate) const CA_CERTIFICATE: FieldSpec = optional(
+        "ca_certificate",
+        "CA certificate",
+        "A PEM certificate to trust instead of the built-in public roots.",
+        FieldKind::LongText,
+    );
+    pub(crate) const STATEMENT_TIMEOUT: FieldSpec = optional(
+        "statement_timeout_seconds",
+        "Statement timeout (seconds)",
+        "The longest one query may run, 1 to 600. Defaults to 60.",
+        FieldKind::Number,
+    );
+    pub(crate) const QUERIES: FieldSpec = optional(
+        "queries",
+        "Queries",
+        "Named SELECT statements, each offered as a stream named query:<name>.",
+        FieldKind::Queries,
+    );
+
+    pub(crate) const fn port(help: &'static str) -> FieldSpec {
+        optional("port", "Port", help, FieldKind::Number)
+    }
+
+    pub(crate) const fn credential(
+        key: &'static str,
+        label: &'static str,
+        help: &'static str,
+    ) -> FieldSpec {
+        FieldSpec {
+            key,
+            label,
+            help,
+            kind: FieldKind::Text,
+            required: true,
+            secret: true,
+        }
+    }
+
+    pub(crate) const fn database(help: &'static str) -> FieldSpec {
+        FieldSpec {
+            key: "database",
+            label: "Database",
+            help,
+            kind: FieldKind::Text,
+            required: true,
+            secret: false,
+        }
+    }
+}
+
 /// How the connection is secured.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TlsMode {
