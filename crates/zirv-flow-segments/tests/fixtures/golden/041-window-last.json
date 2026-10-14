@@ -1,0 +1,46 @@
+{
+  "definition": {
+    "all": [
+      {
+        "event": "order",
+        "window": {
+          "last": "P90D"
+        }
+      },
+      {
+        "event": "order",
+        "window": {
+          "last": "PT36H"
+        }
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "timestamp": "2025-03-17T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-14T00:00:00Z"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND e.occurred_at > $3::timestamptz AND e.occurred_at <= $4::timestamptz) AND EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND e.occurred_at > $5::timestamptz AND e.occurred_at <= $4::timestamptz)))",
+  "time_sensitive": true
+}

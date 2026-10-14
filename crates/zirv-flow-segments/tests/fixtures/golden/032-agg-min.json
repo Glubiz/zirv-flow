@@ -1,0 +1,36 @@
+{
+  "definition": {
+    "agg": {
+      "fn": "min",
+      "op": "lt",
+      "prop": "items",
+      "value": 5
+    },
+    "event": "order",
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "items"
+    },
+    {
+      "float": 5.0
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (COALESCE(((SELECT min(CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 THEN ((e.properties -> $3::text))::float8 END END) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) < $4::float8), false))",
+  "time_sensitive": false
+}

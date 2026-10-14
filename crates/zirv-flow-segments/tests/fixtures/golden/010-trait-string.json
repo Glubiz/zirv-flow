@@ -1,0 +1,95 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "eq",
+        "trait": "name",
+        "value": "Ada"
+      },
+      {
+        "op": "neq",
+        "trait": "name",
+        "value": "Bob"
+      },
+      {
+        "op": "in",
+        "trait": "name",
+        "value": [
+          "Ada",
+          "Grace"
+        ]
+      },
+      {
+        "op": "not_in",
+        "trait": "name",
+        "value": [
+          "Bob",
+          "Eve"
+        ]
+      },
+      {
+        "op": "contains",
+        "trait": "name",
+        "value": "da"
+      },
+      {
+        "op": "starts_with",
+        "trait": "name",
+        "value": "Ad"
+      },
+      {
+        "op": "exists",
+        "trait": "name"
+      },
+      {
+        "op": "not_exists",
+        "trait": "name"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "name"
+    ]
+  },
+  "params": [
+    {
+      "text": "name"
+    },
+    {
+      "text": "da"
+    },
+    {
+      "jsonb": {
+        "name": "Ada"
+      }
+    },
+    {
+      "text_array": [
+        "Ada",
+        "Grace"
+      ]
+    },
+    {
+      "text": "Bob"
+    },
+    {
+      "text_array": [
+        "Bob",
+        "Eve"
+      ]
+    },
+    {
+      "text": "Ad"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN strpos((p.traits ->> $2::text), $3::text) > 0 END), false) AND COALESCE((p.traits @> $4::jsonb), false) AND COALESCE(((jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) = ANY($5::text[]) END), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) <> $6::text END), false) AND COALESCE((NOT (jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) <> ALL($7::text[]) END), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN left((p.traits ->> $2::text), char_length($8::text)) = $8::text END), false)))",
+  "time_sensitive": false
+}

@@ -872,6 +872,8 @@ least 50 in 90 days, not VIP, subscribed to the newsletter":
 
 **Semantics.** Every leaf is two-valued: a missing trait, or a missing or null property, makes every operator false except `not_exists`, so `neq` and `not_in` on a missing value are false. `not` is plain boolean negation of its child, so "not (country eq DK)" includes people with no country while "country neq DK" does not. Over zero matching events `count` is 0, and `sum`, `min`, `max`, `avg` and first or last time are missing, so every comparison on them is false. Date values compare at UTC midnight; the workspace time zone is out of scope in v1, a recorded limitation (21.1). The compiled SQL reproduces this with `COALESCE(…, false)`, and the property tests enforce it (ruling 887b9eef).
 
+**Numbers (ruling e6659f67).** Numbers compare as `f64` in the evaluator and as `float8` in SQL, for traits, properties and aggregates alike; integer properties take the same path. A stored number whose magnitude is past `1e300` counts as missing, so a cast never overflows and a `sum` over up to 10^8 values cannot. v1 limits, recorded here: integers above 2^53 lose precision, and equality on an aggregate can depend on summation order.
+
 ### 8.2 Compilation
 
 `parse -> validate -> normalize -> lower`. Validation checks types, operators,

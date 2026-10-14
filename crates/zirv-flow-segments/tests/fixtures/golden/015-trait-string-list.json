@@ -1,0 +1,65 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "contains",
+        "trait": "tags",
+        "value": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "op": "contains_all",
+        "trait": "tags",
+        "value": [
+          "c",
+          "d"
+        ]
+      },
+      {
+        "op": "is_empty",
+        "trait": "tags"
+      },
+      {
+        "op": "exists",
+        "trait": "tags"
+      },
+      {
+        "op": "not_exists",
+        "trait": "tags"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "tags"
+    ]
+  },
+  "params": [
+    {
+      "text": "tags"
+    },
+    {
+      "text_array": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "text_array": [
+        "c",
+        "d"
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'array' THEN (p.traits -> $2::text) ?| $3::text[] END), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'array' THEN (p.traits -> $2::text) ?& $4::text[] END), false) AND COALESCE(((jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'array' THEN jsonb_array_length((p.traits -> $2::text)) = 0 END), false) AND COALESCE((NOT (jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false)))",
+  "time_sensitive": false
+}

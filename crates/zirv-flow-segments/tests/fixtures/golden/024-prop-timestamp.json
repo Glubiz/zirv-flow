@@ -1,0 +1,88 @@
+{
+  "definition": {
+    "event": "order",
+    "v": 1,
+    "where": [
+      {
+        "op": "before",
+        "prop": "shipped_at",
+        "value": "2025-01-01T00:00:00Z"
+      },
+      {
+        "op": "after",
+        "prop": "shipped_at",
+        "value": "2025-01-01T00:00:00Z"
+      },
+      {
+        "op": "between",
+        "prop": "shipped_at",
+        "value": [
+          "2025-01-01T00:00:00Z",
+          "2025-02-01T00:00:00Z"
+        ]
+      },
+      {
+        "op": "within_last",
+        "prop": "shipped_at",
+        "value": "P7D"
+      },
+      {
+        "op": "more_than_ago",
+        "prop": "shipped_at",
+        "value": "PT36H"
+      },
+      {
+        "op": "within_next",
+        "prop": "shipped_at",
+        "value": "P30D"
+      },
+      {
+        "op": "exists",
+        "prop": "shipped_at"
+      },
+      {
+        "op": "not_exists",
+        "prop": "shipped_at"
+      }
+    ]
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "shipped_at"
+    },
+    {
+      "timestamp": "2025-01-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-02-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-14T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-07-15T12:00:00Z"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END > $4::timestamptz), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END < $4::timestamptz), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END <@ tstzrange($4::timestamptz, $5::timestamptz, '[)')), false) AND COALESCE(((jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END <= $6::timestamptz), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END <@ tstzrange($7::timestamptz, $8::timestamptz, '(]')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN ((e.properties ->> $3::text))::timestamptz END <@ tstzrange($8::timestamptz, $9::timestamptz, '[)')), false)))",
+  "time_sensitive": true
+}

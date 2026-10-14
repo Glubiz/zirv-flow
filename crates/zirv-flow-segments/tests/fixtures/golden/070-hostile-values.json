@@ -1,0 +1,57 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "eq",
+        "trait": "name",
+        "value": "x'; DROP TABLE people; --"
+      },
+      {
+        "op": "contains",
+        "trait": "name",
+        "value": "$1 % \\ \" _"
+      },
+      {
+        "op": "in",
+        "trait": "name",
+        "value": [
+          "a'b",
+          "$2"
+        ]
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "name"
+    ]
+  },
+  "params": [
+    {
+      "text": "name"
+    },
+    {
+      "text": "$1 % \\ \" _"
+    },
+    {
+      "jsonb": {
+        "name": "x'; DROP TABLE people; --"
+      }
+    },
+    {
+      "text_array": [
+        "$2",
+        "a'b"
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN strpos((p.traits ->> $2::text), $3::text) > 0 END), false) AND COALESCE((p.traits @> $4::jsonb), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) = ANY($5::text[]) END), false)))",
+  "time_sensitive": false
+}

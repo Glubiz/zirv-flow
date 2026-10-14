@@ -1,0 +1,26 @@
+{
+  "definition": {
+    "not": {
+      "segment": "018f0000-0000-7000-8000-000000000002"
+    },
+    "v": 1
+  },
+  "deps": {
+    "classes": 32,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [
+      "018f0000-0000-7000-8000-000000000002"
+    ],
+    "traits": []
+  },
+  "params": [
+    {
+      "uuid": "018f0000-0000-7000-8000-000000000002"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (NOT (EXISTS (SELECT 1 FROM segment_members sm WHERE sm.workspace_id = p.workspace_id AND sm.person_id = p.id AND sm.segment_id = $2::uuid AND sm.exited_at IS NULL)))",
+  "time_sensitive": false
+}

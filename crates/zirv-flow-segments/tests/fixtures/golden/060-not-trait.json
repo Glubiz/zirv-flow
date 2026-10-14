@@ -1,0 +1,33 @@
+{
+  "definition": {
+    "not": {
+      "op": "eq",
+      "trait": "name",
+      "value": "Ada"
+    },
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "name"
+    ]
+  },
+  "params": [
+    {
+      "text": "name"
+    },
+    {
+      "jsonb": {
+        "name": "Ada"
+      }
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (NOT (COALESCE((p.traits @> $3::jsonb), false)))",
+  "time_sensitive": false
+}

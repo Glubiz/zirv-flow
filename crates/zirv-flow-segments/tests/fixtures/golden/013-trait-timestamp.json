@@ -1,0 +1,84 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "before",
+        "trait": "signed_up",
+        "value": "2025-01-01T00:00:00Z"
+      },
+      {
+        "op": "after",
+        "trait": "signed_up",
+        "value": "2025-01-01T00:00:00Z"
+      },
+      {
+        "op": "between",
+        "trait": "signed_up",
+        "value": [
+          "2025-01-01T00:00:00Z",
+          "2025-02-01T00:00:00Z"
+        ]
+      },
+      {
+        "op": "within_last",
+        "trait": "signed_up",
+        "value": "P7D"
+      },
+      {
+        "op": "more_than_ago",
+        "trait": "signed_up",
+        "value": "PT36H"
+      },
+      {
+        "op": "within_next",
+        "trait": "signed_up",
+        "value": "P30D"
+      },
+      {
+        "op": "exists",
+        "trait": "signed_up"
+      },
+      {
+        "op": "not_exists",
+        "trait": "signed_up"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "signed_up"
+    ]
+  },
+  "params": [
+    {
+      "text": "signed_up"
+    },
+    {
+      "timestamp": "2025-01-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-02-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-14T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-07-15T12:00:00Z"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END > $3::timestamptz), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END < $3::timestamptz), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END <@ tstzrange($3::timestamptz, $4::timestamptz, '[)')), false) AND COALESCE(((jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END <= $5::timestamptz), false) AND COALESCE((NOT (jsonb_typeof((p.traits -> $2::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $2::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END <@ tstzrange($6::timestamptz, $7::timestamptz, '(]')), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN ((p.traits ->> $2::text))::timestamptz END <@ tstzrange($7::timestamptz, $8::timestamptz, '[)')), false)))",
+  "time_sensitive": true
+}

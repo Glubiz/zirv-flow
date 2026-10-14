@@ -1,0 +1,91 @@
+{
+  "definition": {
+    "all": [
+      {
+        "any": [
+          {
+            "op": "eq",
+            "trait": "name",
+            "value": "Ada"
+          },
+          {
+            "op": "gt",
+            "trait": "age",
+            "value": 30
+          }
+        ]
+      },
+      {
+        "not": {
+          "all": [
+            {
+              "op": "eq",
+              "trait": "vip",
+              "value": true
+            },
+            {
+              "list": "018f0000-0000-7000-8000-000000000001"
+            }
+          ]
+        }
+      },
+      {
+        "not": {
+          "not": {
+            "identifier": "phone"
+          }
+        }
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 53,
+    "consent": [],
+    "events": [],
+    "identifiers": [
+      "phone"
+    ],
+    "lists": [
+      "018f0000-0000-7000-8000-000000000001"
+    ],
+    "segments": [],
+    "traits": [
+      "age",
+      "name",
+      "vip"
+    ]
+  },
+  "params": [
+    {
+      "uuid": "018f0000-0000-7000-8000-000000000001"
+    },
+    {
+      "text": "vip"
+    },
+    {
+      "jsonb": {
+        "vip": true
+      }
+    },
+    {
+      "text": "name"
+    },
+    {
+      "jsonb": {
+        "name": "Ada"
+      }
+    },
+    {
+      "text": "age"
+    },
+    {
+      "float": 30.0
+    },
+    {
+      "text": "phone"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (((NOT (EXISTS (SELECT 1 FROM list_members lm WHERE lm.workspace_id = p.workspace_id AND lm.person_id = p.id AND lm.list_id = $2::uuid)) OR NOT (COALESCE((p.traits @> $4::jsonb), false))) AND (COALESCE((p.traits @> $6::jsonb), false) OR COALESCE((CASE WHEN jsonb_typeof((p.traits -> $7::text)) = 'number' THEN CASE WHEN abs(((p.traits -> $7::text))::numeric) <= 1e300 THEN ((p.traits -> $7::text))::float8 END END > $8::float8), false)) AND EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $9::text)))",
+  "time_sensitive": false
+}
