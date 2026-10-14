@@ -387,4 +387,17 @@ mod tests {
         assert!(check(Kind::Object, json!({}), Op::Exists, None));
         assert!(!check(Kind::Object, json!({}), Op::Eq, Some(json!({}))));
     }
+
+    #[test]
+    fn a_sub_microsecond_bound_before_2000_compares_as_the_floored_instant() {
+        let stored = json!("1999-12-31T23:59:59Z");
+        let bound = Some(json!("1999-12-31T23:59:59.0000005Z"));
+        assert!(!check(
+            Kind::Timestamp,
+            stored.clone(),
+            Op::Before,
+            bound.clone()
+        ));
+        assert!(!check(Kind::Timestamp, stored, Op::After, bound));
+    }
 }

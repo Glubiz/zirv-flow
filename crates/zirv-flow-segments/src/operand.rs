@@ -23,13 +23,21 @@ pub(crate) fn strings(value: Option<&Value>) -> Option<Vec<String>> {
         .collect()
 }
 
+/// An RFC 3339 timestamp from the definition, cut to whole microseconds. PostgreSQL holds
+/// microseconds, and the driver rounds a finer bound toward zero from 2000 on, which is up
+/// before it, so the SQL and the evaluator both start from the floored instant.
+pub(crate) fn timestamp(text: &str) -> Option<OffsetDateTime> {
+    let at = parse_timestamp(text)?;
+    at.replace_nanosecond(at.nanosecond() / 1_000 * 1_000).ok()
+}
+
 /// A bound from the definition as an instant; a date is at UTC midnight.
 pub(crate) fn absolute(kind: Kind, value: &Value) -> Option<OffsetDateTime> {
     let text = value.as_str()?;
     if kind == Kind::Date {
         parse_date(text).map(|date| date.midnight().assume_utc())
     } else {
-        parse_timestamp(text)
+        timestamp(text)
     }
 }
 
@@ -68,5 +76,29 @@ mod tests {
         );
         assert_eq!(absolute(Kind::Date, &json!("2025-06-15T00:00:00Z")), None);
         assert_eq!(absolute(Kind::Timestamp, &json!(5)), None);
+    }
+
+    #[test]
+    fn a_bound_is_cut_to_whole_microseconds_before_and_after_2000() {
+        for (text, expected) in [
+            (
+                "1999-12-31T23:59:59.0000005Z",
+                datetime!(1999-12-31 23:59:59 UTC),
+            ),
+            (
+                "2025-06-15T12:00:00.1234567Z",
+                datetime!(2025-06-15 12:00:00.123456 UTC),
+            ),
+            (
+                "1969-12-31T23:59:59.9999999+00:00",
+                datetime!(1969-12-31 23:59:59.999999 UTC),
+            ),
+        ] {
+            assert_eq!(
+                absolute(Kind::Timestamp, &json!(text)),
+                Some(expected),
+                "{text}"
+            );
+        }
     }
 }

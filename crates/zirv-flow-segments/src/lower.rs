@@ -17,10 +17,10 @@ use zirv_flow_core::segment::{
 
 use crate::catalog::Catalog;
 use crate::deps::Deps;
-use crate::operand::{absolute, number_of, numbers, strings};
+use crate::operand::{absolute, number_of, numbers, strings, timestamp};
 use crate::query::Param;
 use crate::storage::{Storage, TraitStorage};
-use crate::time_value::{parse_duration, parse_timestamp};
+use crate::time_value::parse_duration;
 use crate::validate::Kind;
 
 pub(crate) struct Lowered {
@@ -540,8 +540,7 @@ impl Lowerer<'_> {
                 format!("e.occurred_at > {from} AND e.occurred_at <= {now}")
             }
             Window::Between(start, end) => {
-                let (Some(start), Some(end)) = (parse_timestamp(start), parse_timestamp(end))
-                else {
+                let (Some(start), Some(end)) = (timestamp(start), timestamp(end)) else {
                     return self.fail(code::VALUE_TYPE_MISMATCH);
                 };
                 let start = self.instant(start);

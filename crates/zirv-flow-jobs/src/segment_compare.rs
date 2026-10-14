@@ -419,6 +419,8 @@ mod tests {
             json!("2025-06-15t12:00:00z"),
             json!("2025-06-15 12:00:00+02:00"),
             json!("2025-06-15T12:00:00.000Z"),
+            json!("1999-12-31T23:59:59Z"),
+            json!("1969-12-31T23:59:59Z"),
             json!("2025-06-15T12:00:00-15:00"),
             json!("2025-06-15T12:00:00+15:00"),
             json!("2025-06-15T00:00:00+15:59"),
@@ -490,6 +492,18 @@ mod tests {
             );
             definitions
                 .push(json!({"not": {"event": "visit", "window": {"since_trait": trait_key}}}));
+        }
+        // Bounds finer than a microsecond: the driver rounds them toward zero, which is up
+        // before 2000, so the lowering binds the floored instant and the evaluator reads it.
+        for (stored_at, bound) in [
+            ("signed_up", "1999-12-31T23:59:59.0000005Z"),
+            ("signed_up", "1969-12-31T23:59:59.9999995Z"),
+            ("signed_up", "2025-06-15T12:00:00.0000005Z"),
+        ] {
+            for op in ["before", "after"] {
+                definitions.push(json!({"trait": stored_at, "op": op, "value": bound}));
+            }
+            definitions.push(json!({"trait": stored_at, "op": "between", "value": [bound, "2100-01-01T00:00:00Z"]}));
         }
         let mut tx = pool.begin().await.unwrap();
         let ids = seed(&mut tx, ws, &people).await;
