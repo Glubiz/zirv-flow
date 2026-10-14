@@ -543,6 +543,69 @@ mod tests {
         assert!(dangling.is_err());
     }
 
+    async fn version_rows(pool: &PgPool, segment: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM segment_versions WHERE segment_id = $1")
+            .bind(segment)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_version_cannot_be_deleted_on_its_own(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let segment = create(&pool, ws, "A", &[]).await;
+        save(&pool, ws, segment.id, &[]).await.unwrap();
+
+        let delete_first =
+            sqlx::query("DELETE FROM segment_versions WHERE segment_id = $1 AND version = 1")
+                .bind(segment.id)
+                .execute(&pool)
+                .await;
+        let delete_all = sqlx::query("DELETE FROM segment_versions WHERE segment_id = $1")
+            .bind(segment.id)
+            .execute(&pool)
+            .await;
+
+        assert!(delete_first.is_err());
+        assert!(delete_all.is_err());
+        assert_eq!(version_rows(&pool, segment.id).await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn deleting_the_segment_or_the_workspace_removes_the_versions(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let gone = create(&pool, one, "A", &[]).await;
+        save(&pool, one, gone.id, &[]).await.unwrap();
+        let kept = create(&pool, one, "B", &[]).await;
+        let other = create(&pool, two, "C", &[]).await;
+        save(&pool, two, other.id, &[]).await.unwrap();
+
+        sqlx::query("DELETE FROM segments WHERE id = $1")
+            .bind(gone.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(two.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(version_rows(&pool, gone.id).await, 0);
+        assert_eq!(version_rows(&pool, kept.id).await, 1);
+        assert_eq!(version_rows(&pool, other.id).await, 0);
+        let segments: i64 = sqlx::query_scalar("SELECT count(*) FROM segments WHERE id = $1")
+            .bind(other.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(segments, 0);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_self_reference_a_direct_and_a_transitive_cycle_are_refused_with_the_path(
