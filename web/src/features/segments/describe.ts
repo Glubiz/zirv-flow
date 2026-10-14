@@ -1,0 +1,55 @@
+import { OP_LABELS, AGG_LABELS } from "./operators";
+import type { Node } from "./ast";
+
+export interface Names {
+  lists: ReadonlyMap<string, string>;
+  segments: ReadonlyMap<string, string>;
+}
+
+function valueText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (Array.isArray(value)) return (value as unknown[]).map(valueText).join(", ");
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+/** What a condition says, in words, for a reader who did not build it. */
+export function describeNode(node: Node, names: Names): string {
+  if ("all" in node) return "All of these are true";
+  if ("any" in node) return "At least one of these is true";
+  if ("not" in node) return "This is not true";
+  if ("trait" in node) {
+    const value = valueText(node.value);
+    return `${node.trait} ${OP_LABELS[node.op]}${value === "" ? "" : ` ${value}`}`;
+  }
+  if ("event" in node) {
+    const parts = [`Has the event ${node.event}`];
+    const window = node.window;
+    if (window !== undefined) {
+      if ("last" in window) parts.push(`in the last ${window.last}`);
+      else if ("between" in window) parts.push(`between ${window.between.join(" and ")}`);
+      else parts.push(`since the date in ${window.since_trait}`);
+    }
+    const filters = node.where ?? [];
+    if (filters.length > 0) {
+      parts.push(
+        `where ${filters.map((filter) => `${filter.prop} ${OP_LABELS[filter.op]}${valueText(filter.value) === "" ? "" : ` ${valueText(filter.value)}`}`).join(" and ")}`,
+      );
+    }
+    if (node.agg) {
+      const agg = node.agg;
+      parts.push(
+        `and ${AGG_LABELS[agg.fn].toLowerCase()}${agg.prop ? ` ${agg.prop}` : ""} ${OP_LABELS[agg.op]}${valueText(agg.value) === "" ? "" : ` ${valueText(agg.value)}`}`,
+      );
+    }
+    return parts.join(" ");
+  }
+  if ("list" in node) return `Is on the list ${names.lists.get(node.list) ?? "(unknown list)"}`;
+  if ("segment" in node) return `Is in the segment ${names.segments.get(node.segment) ?? "(unknown segment)"}`;
+  if ("consent" in node) {
+    const { channel, topic, status } = node.consent;
+    return `Consent for ${channel}${topic ? `, topic ${topic},` : ""} is ${status.replaceAll("_", " ")}`;
+  }
+  return `Has a ${node.identifier} identifier`;
+}
