@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen"]
 resolver = "3"
 
 [workspace.package]
-version = "0.47.0"
+version = "0.48.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -73,6 +73,7 @@ zirv-flow-connectors = { path = "crates/zirv-flow-connectors" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
+zirv-flow-segments = { path = "crates/zirv-flow-segments" }
 zirv-flow-store = { path = "crates/zirv-flow-store" }
 
 # No `panic = "abort"`: this will be a long-running server, where a panic in

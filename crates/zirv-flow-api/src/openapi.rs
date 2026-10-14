@@ -22,6 +22,7 @@ use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
 use crate::privacy::{self, erasures, exports};
 use crate::problem::{ItemProblem, Problem};
+use crate::segments::SegmentSchemas;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::sources;
@@ -393,7 +394,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         exports::ExportsBody,
         privacy::settings::PrivacySettingsBody,
     )),
-    modifiers(&SecuritySchemes)
+    modifiers(&SecuritySchemes, &SegmentSchemas)
 )]
 struct ApiDoc;
 

@@ -25,6 +25,7 @@ mod people;
 mod privacy;
 mod problem;
 mod request_id;
+mod segments;
 mod session;
 mod setup;
 mod sources;
