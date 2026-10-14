@@ -14,6 +14,7 @@ pub mod generate;
 mod leaf;
 mod lower;
 mod normalize;
+mod operand;
 mod query;
 mod snapshot;
 mod storage;

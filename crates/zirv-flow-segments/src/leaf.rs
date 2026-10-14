@@ -5,8 +5,9 @@
 use serde_json::Value;
 use zirv_flow_core::segment::Op;
 
+use crate::operand::{self, number_of, numbers, strings};
 use crate::stored_time;
-use crate::time_value::{parse_date, parse_duration, parse_timestamp};
+use crate::time_value::parse_duration;
 use crate::validate::Kind;
 
 /// A number past this magnitude is treated as missing (ruling e6659f67).
@@ -165,31 +166,9 @@ fn list(stored: Option<&Value>, op: Op, wanted: Option<&Value>) -> bool {
     }
 }
 
-fn number_of(value: &Value) -> Option<f64> {
-    value.as_f64().filter(|number| number.is_finite())
-}
-
-fn numbers(value: Option<&Value>) -> Option<Vec<f64>> {
-    value?.as_array()?.iter().map(number_of).collect()
-}
-
-fn strings(value: Option<&Value>) -> Option<Vec<String>> {
-    value?
-        .as_array()?
-        .iter()
-        .map(|item| item.as_str().map(str::to_owned))
-        .collect()
-}
-
 /// A bound from the definition as an instant; a date is at UTC midnight.
 pub(crate) fn absolute(kind: Kind, value: &Value) -> Option<i64> {
-    let text = value.as_str()?;
-    let at = if kind == Kind::Date {
-        parse_date(text)?.midnight().assume_utc()
-    } else {
-        parse_timestamp(text)?
-    };
-    Some(stored_time::micros(at))
+    operand::absolute(kind, value).map(stored_time::micros)
 }
 
 /// A window or relative span in microseconds.
