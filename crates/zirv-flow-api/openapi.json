@@ -17997,7 +17997,6 @@
             "type": "string"
           },
           "value": {
-            "type": "object",
             "description": "A number, or a timestamp for `first_time` and `last_time`."
           }
         },
@@ -18071,26 +18070,238 @@
         "additionalProperties": false
       },
       "SegmentDefinition": {
-        "allOf": [
+        "oneOf": [
           {
             "type": "object",
+            "description": "True when every child is true; an empty list is true.",
             "required": [
+              "all",
               "v"
             ],
             "properties": {
+              "all": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SegmentNode"
+                }
+              },
               "v": {
                 "type": "integer",
                 "enum": [
                   1
                 ]
               }
-            }
+            },
+            "additionalProperties": false
           },
           {
-            "$ref": "#/components/schemas/SegmentNode"
+            "type": "object",
+            "description": "True when some child is true; an empty list is false.",
+            "required": [
+              "any",
+              "v"
+            ],
+            "properties": {
+              "any": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SegmentNode"
+                }
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Boolean negation of the child. A leaf's operator is never rewritten under it.",
+            "required": [
+              "not",
+              "v"
+            ],
+            "properties": {
+              "not": {
+                "$ref": "#/components/schemas/SegmentNode"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "A condition on a person's trait. Beside `trait` go `op` and, for most operators, `value`.",
+            "required": [
+              "trait",
+              "op",
+              "v"
+            ],
+            "properties": {
+              "op": {
+                "$ref": "#/components/schemas/SegmentOp"
+              },
+              "trait": {
+                "type": "string"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              },
+              "value": {
+                "description": "The operand; its type follows the trait's type."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one).",
+            "required": [
+              "event",
+              "v"
+            ],
+            "properties": {
+              "agg": {
+                "$ref": "#/components/schemas/SegmentAggregate"
+              },
+              "event": {
+                "type": "string"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              },
+              "where": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SegmentPropertyFilter"
+                }
+              },
+              "window": {
+                "$ref": "#/components/schemas/SegmentWindow"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The person is a member of the list.",
+            "required": [
+              "list",
+              "v"
+            ],
+            "properties": {
+              "list": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The person is in the other segment. Cycles are rejected when the segment is saved.",
+            "required": [
+              "segment",
+              "v"
+            ],
+            "properties": {
+              "segment": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The person's consent status for a channel, or one of its topics.",
+            "required": [
+              "consent",
+              "v"
+            ],
+            "properties": {
+              "consent": {
+                "type": "object",
+                "required": [
+                  "channel",
+                  "status"
+                ],
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "subscribed",
+                      "unsubscribed",
+                      "pending_confirmation",
+                      "unknown"
+                    ]
+                  },
+                  "topic": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+            "required": [
+              "identifier",
+              "v"
+            ],
+            "properties": {
+              "identifier": {
+                "type": "string"
+              },
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "additionalProperties": false
           }
         ],
-        "description": "A segment definition, version 1: a node with `v` added. Unknown keys are refused."
+        "description": "A segment definition, version 1: one node with `v` added beside its key. Unknown keys are refused."
       },
       "SegmentEventNode": {
         "type": "object",
@@ -18269,7 +18480,6 @@
             "type": "string"
           },
           "value": {
-            "type": "object",
             "description": "The operand; its type follows the property's type."
           }
         },
@@ -18304,7 +18514,6 @@
             "type": "string"
           },
           "value": {
-            "type": "object",
             "description": "The operand; its type follows the trait's type."
           }
         },

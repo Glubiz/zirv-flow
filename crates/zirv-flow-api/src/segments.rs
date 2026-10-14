@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use utoipa::openapi::schema::{
-    AdditionalProperties, AllOfBuilder, ArrayBuilder, ObjectBuilder, OneOfBuilder, Type,
+    AdditionalProperties, ArrayBuilder, ObjectBuilder, OneOfBuilder, SchemaType, Type,
 };
 use utoipa::openapi::{Ref, RefOr, Schema};
 use zirv_flow_core::segment::{AggFn, NODE_KEYS, Op, code};
@@ -52,7 +52,9 @@ fn string_enum<'a>(values: impl IntoIterator<Item = &'a str>) -> Schema {
 }
 
 fn any_value(description: &str) -> ObjectBuilder {
-    ObjectBuilder::new().description(Some(description))
+    ObjectBuilder::new()
+        .schema_type(SchemaType::AnyValue)
+        .description(Some(description))
 }
 
 fn array_of(items: RefOr<Schema>) -> ArrayBuilder {
@@ -67,11 +69,9 @@ fn node_object(key: &str, shape: impl Into<RefOr<Schema>>, description: &str) ->
         .additional_properties(closed())
 }
 
-fn node_schemas() -> BTreeMap<String, Schema> {
-    let mut schemas = BTreeMap::new();
-    let mut put = |key: &str, schema: ObjectBuilder| {
-        schemas.insert(node_schema_name(key), Schema::from(schema));
-    };
+fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
+    let mut builders = Vec::new();
+    let mut put = |key: &'static str, schema: ObjectBuilder| builders.push((key, schema));
 
     put(
         "all",
@@ -176,12 +176,15 @@ fn node_schemas() -> BTreeMap<String, Schema> {
              `external:<namespace>`.",
         ),
     );
-    schemas
+    builders
 }
 
 /// Every component schema of the AST, by name.
 pub(crate) fn schemas() -> BTreeMap<String, Schema> {
-    let mut schemas = node_schemas();
+    let mut schemas: BTreeMap<String, Schema> = node_builders()
+        .into_iter()
+        .map(|(key, builder)| (node_schema_name(key), Schema::from(builder)))
+        .collect();
 
     let mut node = OneOfBuilder::new().description(Some(
         "One node of a segment condition tree: an object with exactly one node key.",
@@ -191,25 +194,22 @@ pub(crate) fn schemas() -> BTreeMap<String, Schema> {
     }
     schemas.insert(NODE.to_owned(), node.into());
 
-    schemas.insert(
-        DEFINITION.to_owned(),
-        AllOfBuilder::new()
-            .description(Some(
-                "A segment definition, version 1: a node with `v` added. Unknown keys are refused.",
-            ))
-            .item(
-                ObjectBuilder::new()
-                    .property(
-                        "v",
-                        ObjectBuilder::new()
-                            .schema_type(Type::Integer)
-                            .enum_values(Some([1])),
-                    )
-                    .required("v"),
-            )
-            .item(reference(NODE))
-            .into(),
-    );
+    let mut definition = OneOfBuilder::new().description(Some(
+        "A segment definition, version 1: one node with `v` added beside its key. Unknown keys are refused.",
+    ));
+    for (_, builder) in node_builders() {
+        definition = definition.item(
+            builder
+                .property(
+                    "v",
+                    ObjectBuilder::new()
+                        .schema_type(Type::Integer)
+                        .enum_values(Some([1])),
+                )
+                .required("v"),
+        );
+    }
+    schemas.insert(DEFINITION.to_owned(), definition.into());
     schemas.insert(OP.to_owned(), string_enum(Op::ALL.map(Op::as_str)));
     schemas.insert(
         AGG_FN.to_owned(),
@@ -395,13 +395,43 @@ mod tests {
     }
 
     #[test]
-    fn the_definition_requires_the_version_and_a_node() {
+    fn each_root_variant_is_closed_and_lists_the_version_and_its_node_key() {
         let document = document();
-        let all_of = component(&document, DEFINITION)["allOf"]
+        let variants = component(&document, DEFINITION)["oneOf"]
             .as_array()
             .unwrap();
-        assert_eq!(all_of[0]["required"][0], "v");
-        assert_eq!(all_of[1]["$ref"], "#/components/schemas/SegmentNode");
+        assert_eq!(variants.len(), NODE_KEYS.len());
+        for (variant, key) in variants.iter().zip(NODE_KEYS) {
+            assert_eq!(variant["additionalProperties"], false, "{key}");
+            assert!(variant["properties"].get("v").is_some(), "{key} lacks v");
+            assert!(
+                variant["properties"].get(key).is_some(),
+                "{key} lacks itself"
+            );
+            let required: Vec<&str> = variant["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item.as_str().unwrap())
+                .collect();
+            assert!(required.contains(&"v") && required.contains(&key), "{key}");
+        }
+        let nested = component(&document, &node_schema_name("all"));
+        assert!(nested["properties"].get("v").is_none());
+    }
+
+    #[test]
+    fn operands_carry_no_type() {
+        let document = document();
+        let operands = [
+            &component(&document, &node_schema_name("trait"))["properties"]["value"],
+            &component(&document, PROPERTY_FILTER)["properties"]["value"],
+            &component(&document, AGGREGATE)["properties"]["value"],
+        ];
+        for operand in operands {
+            assert!(operand.get("type").is_none(), "{operand}");
+            assert!(operand.get("description").is_some());
+        }
     }
 
     #[test]
