@@ -3,12 +3,11 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
 use time::OffsetDateTime;
 use zirv_flow_core::segment::{Definition, Node, Window};
 
-use crate::leaf::{absolute, span_of};
-use crate::validate::Kind;
+use crate::leaf::span_of;
+use crate::operand;
 
 const MICROS_TO_NANOS: i128 = 1_000;
 
@@ -57,17 +56,19 @@ fn widest(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Option<Offset
 }
 
 fn lower_bound(window: Option<&Window>, now: OffsetDateTime) -> Option<OffsetDateTime> {
-    let micros = match window? {
-        Window::Last(text) => crate::stored_time::micros(now).checked_sub(span_of(text)?)?,
-        Window::Between(start, _) => absolute(Kind::Timestamp, &Value::String(start.clone()))?,
-        Window::SinceTrait(_) => return None,
-    };
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * MICROS_TO_NANOS).ok()
+    match window? {
+        Window::Last(text) => {
+            let micros = crate::stored_time::micros(now).checked_sub(span_of(text)?)?;
+            OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * MICROS_TO_NANOS).ok()
+        }
+        Window::Between(start, _) => operand::timestamp(start),
+        Window::SinceTrait(_) => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use time::macros::datetime;
 
     use super::*;
