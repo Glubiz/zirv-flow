@@ -139,6 +139,7 @@ fn snapshot_of(person: &ExplainPerson) -> PersonSnapshot {
             })
             .collect(),
         capped_events: person.capped_events.clone(),
+        events_complete_after: person.events_complete_after,
         lists: person.lists.clone(),
         consent: person
             .consent
@@ -346,12 +347,12 @@ pub(crate) async fn explain(
     let now = state.clock.now(&mut tx).await.map_err(read_error)?;
     let segment = find_segment(&mut *tx, workspace.id, segment_id)
         .await
-        .map_err(read_error)?
+        .map_err(|error| read_error(error.into_bounded()))?
         .ok_or_else(ApiError::not_found)?;
     let version = asked.unwrap_or(segment.current_version);
     let saved = find_segment_version(&mut *tx, workspace.id, segment_id, version)
         .await
-        .map_err(read_error)?
+        .map_err(|error| read_error(error.into_bounded()))?
         .ok_or_else(ApiError::not_found)?;
     let catalog = catalog_of(
         zirv_flow_store::segment_catalog(&mut tx, workspace.id)
@@ -451,6 +452,7 @@ mod tests {
                 })
                 .collect(),
             capped_events: BTreeSet::new(),
+            events_complete_after: None,
             lists: BTreeSet::new(),
             consent: vec![ExplainConsent {
                 channel: Channel::Email,
