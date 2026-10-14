@@ -11173,4 +11173,44 @@ email,b@example.com,
         );
         assert_eq!(reply.body["code"], "segment_preview_timeout");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_catalog_read_past_the_time_limit_is_the_preview_timeout_not_a_500(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        // The catalog is the first read of the preview; holding its table stalls it.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE trait_definitions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/preview", segments_uri(&ws)),
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Session(&owner),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "segment_preview_timeout");
+    }
 }
