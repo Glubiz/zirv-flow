@@ -9325,6 +9325,339 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/segments/{id}/history": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Entries into and exits from the segment, newest first, each with its cause and version.",
+        "operationId": "list_segment_history",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Items per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The next_cursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentHistoryBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or cursor is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `segment_preview_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/members": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "A page of the segment's current members by person id, with when they were computed and how\nold the data behind them is. Identifier values are shown to the owner, workspace admins and\n`admin` keys and masked for everyone else.",
+        "operationId": "list_segment_members",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Members per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The next_cursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentMembersBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range, or cursor is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `segment_preview_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/refresh": {
+      "post": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Queues a full refresh of the segment now. The trace's cause is `manual`: the signed-in user,\nor the request for an API key. Audited as `segment.refresh_requested`.",
+        "operationId": "refresh_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The refresh is queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshQueuedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The segment is archived (`code` is `segment_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/segments/{id}/versions": {
       "get": {
         "tags": [
@@ -18137,6 +18470,18 @@
           }
         }
       },
+      "RefreshQueuedBody": {
+        "type": "object",
+        "required": [
+          "queued"
+        ],
+        "properties": {
+          "queued": {
+            "type": "boolean",
+            "description": "True when a refresh was queued; false when a manual refresh was already waiting."
+          }
+        }
+      },
       "RemoveMembersBody": {
         "type": "object",
         "required": [
@@ -18898,6 +19243,7 @@
           "description",
           "current_version",
           "cadence_minutes",
+          "member_count",
           "created_at",
           "updated_at"
         ],
@@ -18928,6 +19274,22 @@
               10080
             ]
           },
+          "computed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the members were last computed; null before the first refresh."
+          },
+          "computed_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version the members were last computed from; null before the first refresh."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -18951,6 +19313,11 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many people are members now."
           },
           "name": {
             "type": "string",
@@ -19275,6 +19642,73 @@
         },
         "additionalProperties": false
       },
+      "SegmentHistoryBody": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentHistoryItemBody"
+            },
+            "description": "Entries and exits, newest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null when there is none."
+          }
+        }
+      },
+      "SegmentHistoryItemBody": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "kind",
+          "at",
+          "cause",
+          "version"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cause": {
+            "type": "string",
+            "description": "`initial`, `definition_change`, `data_change`, `time` or `manual`.",
+            "example": "time"
+          },
+          "display": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayBody"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "`entered` or `exited`.",
+            "example": "entered"
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version that entered the person, or whose refresh closed the row."
+          }
+        }
+      },
       "SegmentIdentifierNode": {
         "type": "object",
         "description": "The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or `external:<namespace>`.",
@@ -19360,6 +19794,70 @@
           }
         },
         "additionalProperties": false
+      },
+      "SegmentMemberBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "entered_at"
+        ],
+        "properties": {
+          "display": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayBody",
+                "description": "The strongest identifier; null for a person with none. The value is masked for callers\nwho may not see personal values."
+              }
+            ]
+          },
+          "entered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The person."
+          }
+        }
+      },
+      "SegmentMembersBody": {
+        "type": "object",
+        "required": [
+          "items",
+          "data_age"
+        ],
+        "properties": {
+          "computed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the members were last computed; null before the first refresh."
+          },
+          "data_age": {
+            "$ref": "#/components/schemas/DataAgeBody",
+            "description": "How current the data behind the members is."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentMemberBody"
+            },
+            "description": "The current members by person id."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null when there is none."
+          }
+        }
       },
       "SegmentNode": {
         "oneOf": [

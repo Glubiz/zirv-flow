@@ -11171,4 +11171,339 @@ email,b@example.com,
         );
         assert_eq!(reply.body["code"], "segment_preview_timeout");
     }
+
+    // ---- Segment membership and refresh (#121) ----
+
+    /// Applies a refresh the way the job does, with a handwritten members query.
+    async fn refresh_members(pool: &PgPool, ws: &str, segment: &str, plan: &str) {
+        let ws: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let segment: uuid::Uuid = segment.parse().unwrap();
+        let members = zirv_flow_store::SqlQuery {
+            sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL \
+                  AND (p.traits ->> 'plan') = $2::text"
+                .into(),
+            params: vec![zirv_flow_store::SqlParam::Text(plan.into())],
+        };
+        let job_trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::schedule(
+            uuid::Uuid::new_v4(),
+        ));
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        zirv_flow_store::apply_refresh(
+            &mut tx,
+            &zirv_flow_store::RefreshApply {
+                workspace: ws,
+                segment,
+                version: 1,
+                members: &members,
+                now: time::OffsetDateTime::now_utc(),
+                cause: zirv_flow_store::MembershipCause::Initial,
+                trace: &job_trace,
+                job: (uuid::Uuid::new_v4(), 1),
+                job_trace: &job_trace,
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn members_and_history_page_by_cursor_mask_by_role_and_carry_computed_at_and_data_age(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let id = make_segment(&router, Auth::Session(&owner), &ws, "Pros", plan_is("pro"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let base = format!("{}/{id}", segments_uri(&ws));
+        let members_uri = format!("{base}/members");
+        let before = call(&router, "GET", &members_uri, None, Auth::Key(&read_key)).await;
+        plan_people(
+            &pool,
+            &ws,
+            &[
+                ("a@example.com", "pro"),
+                ("b@example.com", "pro"),
+                ("c@example.com", "pro"),
+                ("d@example.com", "free"),
+            ],
+        )
+        .await;
+        refresh_members(&pool, &ws, &id, "pro").await;
+        sqlx::query(
+            "UPDATE people SET traits = '{\"plan\":\"free\"}' WHERE id IN \
+             (SELECT person_id FROM identities WHERE value = 'c@example.com')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        refresh_members(&pool, &ws, &id, "pro").await;
+
+        let owner_auth = || Auth::Session(&owner);
+        let first = call(
+            &router,
+            "GET",
+            &format!("{members_uri}?limit=1"),
+            None,
+            owner_auth(),
+        )
+        .await;
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
+        let second = call(
+            &router,
+            "GET",
+            &format!("{members_uri}?limit=1&cursor={cursor}"),
+            None,
+            owner_auth(),
+        )
+        .await;
+        let masked = call(&router, "GET", &members_uri, None, Auth::Session(&member)).await;
+        let by_key = call(&router, "GET", &members_uri, None, Auth::Key(&read_key)).await;
+        let bad_cursor = call(
+            &router,
+            "GET",
+            &format!("{members_uri}?cursor=nope"),
+            None,
+            owner_auth(),
+        )
+        .await;
+        let too_many = call(
+            &router,
+            "GET",
+            &format!("{members_uri}?limit=201"),
+            None,
+            owner_auth(),
+        )
+        .await;
+        let detail = call(&router, "GET", &base, None, owner_auth()).await;
+        let history_uri = format!("{base}/history?limit=2");
+        let history = call(&router, "GET", &history_uri, None, owner_auth()).await;
+        let history_next = call(
+            &router,
+            "GET",
+            &format!(
+                "{history_uri}&cursor={}",
+                history.body["next_cursor"].as_str().unwrap()
+            ),
+            None,
+            owner_auth(),
+        )
+        .await;
+
+        assert_eq!(before.status, StatusCode::OK);
+        assert_eq!(before.body["items"], json!([]));
+        assert!(before.body["computed_at"].is_null());
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(first.body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second.body["items"].as_array().unwrap().len(), 1);
+        assert!(second.body["next_cursor"].is_null());
+        assert_ne!(first.body["items"][0]["id"], second.body["items"][0]["id"]);
+        assert!(
+            first.body["items"][0]["display"]["value"]
+                .as_str()
+                .unwrap()
+                .ends_with("@example.com")
+        );
+        assert_eq!(first.body["items"][0]["display"]["masked"], false);
+        assert_eq!(masked.body["items"].as_array().unwrap().len(), 2);
+        assert!(masked.body["items"][0]["display"]["value"].is_null());
+        assert_eq!(masked.body["items"][0]["display"]["masked"], true);
+        assert!(!first.body["computed_at"].is_null());
+        assert!(first.body["data_age"].is_object());
+        assert_eq!(by_key.status, StatusCode::OK);
+        assert_eq!(bad_cursor.status, StatusCode::BAD_REQUEST);
+        assert_eq!(too_many.status, StatusCode::BAD_REQUEST);
+        assert_eq!(detail.body["member_count"], 2);
+        assert_eq!(detail.body["computed_version"], 1);
+        assert!(!detail.body["computed_at"].is_null());
+        // Three entries and one exit, newest first.
+        assert_eq!(history.body["items"][0]["kind"], "exited");
+        assert_eq!(history.body["items"].as_array().unwrap().len(), 2);
+        assert_eq!(history_next.body["items"].as_array().unwrap().len(), 2);
+        assert!(history_next.body["next_cursor"].is_null());
+        let entered = history.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(history_next.body["items"].as_array().unwrap())
+            .filter(|item| item["kind"] == "entered")
+            .count();
+        assert_eq!(entered, 3);
+        assert_eq!(history.body["items"][0]["cause"], "initial");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_is_202_for_a_writer_queues_a_manual_job_and_is_409_when_archived(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        define_plan(&pool, &ws).await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
+        let id = make_segment(&router, Auth::Session(&owner), &ws, "Pros", plan_is("pro"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let uri = format!("{}/{id}/refresh", segments_uri(&ws));
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let queued = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        let again = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        let by_viewer = call(&router, "POST", &uri, None, Auth::Key(&read_key)).await;
+        let by_key = call(&router, "POST", &uri, None, Auth::Key(&write_key)).await;
+        let foreign = call(
+            &router,
+            "POST",
+            &format!("{}/{id}/refresh", segments_uri(&other)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let jobs: Vec<(Option<String>, Value, String)> = sqlx::query_as(
+            "SELECT unique_key, payload, cause_kind FROM jobs WHERE kind = 'segment.refresh'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let archive = format!("{}/{id}/archive", segments_uri(&ws));
+        call(&router, "POST", &archive, None, Auth::Session(&owner)).await;
+        let archived = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'segment.refresh_requested'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+        assert_eq!(queued.body, json!({"queued": true}));
+        assert_eq!(again.status, StatusCode::ACCEPTED);
+        assert_eq!(again.body, json!({"queued": false}));
+        assert_eq!(by_viewer.status, StatusCode::FORBIDDEN);
+        assert_eq!(by_key.status, StatusCode::ACCEPTED);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].0.as_deref(),
+            Some(format!("segment.refresh:{id}:manual").as_str())
+        );
+        assert_eq!(jobs[0].1["trigger"], "manual");
+        assert_eq!(jobs[0].2, "manual");
+        assert_eq!(archived.status, StatusCode::CONFLICT);
+        assert_eq!(archived.body["code"], "segment_archived");
+        assert_eq!(audited, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_save_queues_a_refresh_and_a_schedule_and_archiving_removes_the_schedule(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let id = make_segment(&router, Auth::Session(&owner), &ws, "Pros", plan_is("pro"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let uri = format!("{}/{id}", segments_uri(&ws));
+
+        let saved = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"definition": plan_is("free"), "cadence_minutes": 5})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT unique_key FROM jobs WHERE kind = 'segment.refresh' ORDER BY unique_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let cron: String =
+            sqlx::query_scalar("SELECT cron FROM schedules WHERE segment_id::text = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        call(
+            &router,
+            "POST",
+            &format!("{uri}/archive"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedules WHERE segment_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(
+            keys,
+            [
+                format!("segment.refresh:{id}:v1"),
+                format!("segment.refresh:{id}:v2")
+            ]
+        );
+        assert!(cron.ends_with("-59/5 * * * *"), "{cron}");
+        assert_eq!(left, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_compiles_at_the_clock_the_state_was_given(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let at = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_clock(zirv_flow_store::Clock::Manual(
+                    zirv_flow_store::ManualClock::new(at),
+                )),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/preview", segments_uri(&ws)),
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["compiled_at"], "2031-05-06T07:08:09Z");
+    }
 }

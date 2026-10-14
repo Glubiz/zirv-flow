@@ -204,6 +204,18 @@ fn routes() -> Router<AppState> {
             get(segments::crud::version),
         )
         .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/members",
+            get(segments::members::members),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/history",
+            get(segments::members::history),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/refresh",
+            post(segments::members::refresh),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}",
             get(people::profile::get),
         )

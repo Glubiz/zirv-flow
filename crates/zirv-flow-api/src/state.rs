@@ -7,7 +7,7 @@ use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
-use zirv_flow_store::{EventRetention, PgPool, SchemaState, StoreError};
+use zirv_flow_store::{Clock, EventRetention, PgPool, SchemaState, StoreError};
 
 use crate::assistant::{AiConfig, runtime::AiRuntime};
 use crate::events::ExplorerLimits;
@@ -47,6 +47,8 @@ pub struct AppState {
     pub(crate) explorer: ExplorerLimits,
     /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
     pub(crate) segment_preview_timeout: Duration,
+    /// The clock segment paths read: the database's, or a test's.
+    pub(crate) clock: Clock,
     /// The shared listener and the viewers of the event debugger.
     pub(crate) debugger: DebuggerHub,
     /// Fires when the server is shutting down, so long-lived streams end and do not hold the
@@ -95,6 +97,7 @@ impl AppState {
             keyring: None,
             explorer: ExplorerLimits::default(),
             segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
+            clock: Clock::default(),
             stop: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
@@ -177,6 +180,12 @@ impl AppState {
     /// How long a segment preview may run; 10 seconds by default.
     pub fn with_segment_preview_timeout(mut self, timeout: Duration) -> Self {
         self.segment_preview_timeout = timeout;
+        self
+    }
+
+    /// Reads segment time from `clock` instead of the database's clock, so a test can move it.
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
         self
     }
 

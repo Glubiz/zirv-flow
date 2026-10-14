@@ -742,7 +742,9 @@ history moves to the survivor.
 
 A segment is a named, versioned definition of a group of people, built from traits, events,
 lists, consent and other segments. The definition format is the AST in the OpenAPI document
-(`SegmentDefinition`). Membership itself is computed later; today you can save and preview.
+(`SegmentDefinition`). You can save and preview, and a `segment.refresh` job computes the
+members: `GET .../segments/{id}/members` and `.../history` read them, and
+`POST .../segments/{id}/refresh` (a member or a `write` key) queues a refresh now (202).
 
 - **Create and version.** `POST /api/v1/workspaces/{ws}/segments` with `{name, description?,
   cadence_minutes?, definition}` creates version 1. `PATCH .../segments/{id}` with a

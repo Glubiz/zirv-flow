@@ -55,6 +55,14 @@ pub(crate) struct SegmentBody {
     /// Minutes between full recomputes.
     #[schema(schema_with = cadence_schema)]
     cadence_minutes: i32,
+    /// The version the members were last computed from; null before the first refresh.
+    computed_version: Option<i32>,
+    /// When the members were last computed; null before the first refresh.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    computed_at: Option<OffsetDateTime>,
+    /// How many people are members now.
+    member_count: i32,
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     archived_at: Option<OffsetDateTime>,
@@ -76,6 +84,9 @@ impl From<&Segment> for SegmentBody {
             description: segment.description.clone(),
             current_version: segment.current_version,
             cadence_minutes: segment.cadence_minutes,
+            computed_version: segment.computed_version,
+            computed_at: segment.computed_at,
+            member_count: segment.member_count,
             archived_at: segment.archived_at,
             created_by: segment.created_by,
             created_at: segment.created_at,
