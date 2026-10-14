@@ -18,6 +18,8 @@ pub const MAX_NODES: usize = 200;
 /// The most issues one pass reports; the rest are dropped.
 pub const MAX_ISSUES: usize = 200;
 
+const WINDOW_KEYS: [&str; 3] = ["last", "between", "since_trait"];
+
 /// Parses a definition, collecting every structural issue.
 pub fn parse(value: &Value) -> Result<Definition, Vec<Issue>> {
     let Some(map) = value.as_object() else {
@@ -96,6 +98,19 @@ impl Parser {
                 self.report(&at, code::MALFORMED);
                 None
             }
+        }
+    }
+
+    /// An absent key is `Some(None)`; a present key that is not a string is `None`.
+    fn optional_string(
+        &mut self,
+        map: &Map<String, Value>,
+        key: &str,
+        pointer: &str,
+    ) -> Option<Option<String>> {
+        match map.get(key) {
+            None => Some(None),
+            Some(value) => self.string(value, &pointer_push(pointer, key)).map(Some),
         }
     }
 
@@ -242,18 +257,10 @@ impl Parser {
         self.unknown_keys(map, pointer, &["channel", "topic", "status"]);
         let channel = self.required_string(map, "channel", pointer);
         let status = self.required_string(map, "status", pointer);
-        let mut topic_ok = true;
-        let topic = match map.get("topic") {
-            None => None,
-            Some(value) => {
-                let topic = self.string(value, &pointer_push(pointer, "topic"));
-                topic_ok = topic.is_some();
-                topic
-            }
-        };
+        let topic = self.optional_string(map, "topic", pointer);
         Some(Node::Consent(ConsentCondition {
             channel: channel?,
-            topic: topic_ok.then_some(topic)?,
+            topic: topic?,
             status: status?,
         }))
     }
@@ -347,20 +354,12 @@ impl Parser {
                 None
             }
         };
-        let mut prop_ok = true;
-        let prop = match map.get("prop") {
-            None => None,
-            Some(value) => {
-                let prop = self.string(value, &pointer_push(pointer, "prop"));
-                prop_ok = prop.is_some();
-                prop
-            }
-        };
+        let prop = self.optional_string(map, "prop", pointer);
         let condition = self.op_value(map, pointer);
         let (op, value) = condition?;
         Some(Aggregate {
             func: func?,
-            prop: prop_ok.then_some(prop)?,
+            prop: prop?,
             op,
             value,
         })
@@ -371,8 +370,8 @@ impl Parser {
             self.report(pointer, code::MALFORMED);
             return None;
         };
-        self.unknown_keys(map, pointer, &["last", "between", "since_trait"]);
-        let present: Vec<&str> = ["last", "between", "since_trait"]
+        self.unknown_keys(map, pointer, &WINDOW_KEYS);
+        let present: Vec<&str> = WINDOW_KEYS
             .into_iter()
             .filter(|key| map.contains_key(*key))
             .collect();

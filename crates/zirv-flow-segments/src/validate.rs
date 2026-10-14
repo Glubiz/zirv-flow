@@ -3,6 +3,7 @@
 
 use std::str::FromStr;
 
+use hashbrown::HashMap;
 use serde_json::Value;
 use zirv_flow_core::consent::{Channel, ConsentStatus};
 use zirv_flow_core::events::PropertyType;
@@ -273,7 +274,7 @@ impl Checker<'_> {
     fn filter(
         &mut self,
         filter: &PropertyFilter,
-        schema: &hashbrown::HashMap<String, PropertyType>,
+        schema: &HashMap<String, PropertyType>,
         pointer: &str,
     ) {
         match schema.get(&filter.prop) {
@@ -291,7 +292,7 @@ impl Checker<'_> {
     fn aggregate(
         &mut self,
         agg: &Aggregate,
-        schema: &hashbrown::HashMap<String, PropertyType>,
+        schema: &HashMap<String, PropertyType>,
         pointer: &str,
     ) {
         let prop_at = pointer_push(pointer, "prop");
@@ -498,7 +499,7 @@ fn is_integral(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hashbrown::{HashMap, HashSet};
+    use hashbrown::HashSet;
     use serde_json::json;
     use uuid::Uuid;
 
