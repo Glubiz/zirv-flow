@@ -78,6 +78,7 @@ pub async fn apply_profile_batch(
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
     let outcomes = apply_profile_records(&mut tx, workspace, records).await?;
+    crate::changes::request_reevaluation(&mut *tx, workspace).await?;
     commit(tx).await?;
     Ok(outcomes)
 }
@@ -148,6 +149,7 @@ pub async fn remove_contribution(
     let removed =
         remove_contribution_in(&mut tx, workspace, source, stream, record_key, trace).await?;
     if removed.is_some() {
+        crate::changes::request_reevaluation(&mut *tx, workspace).await?;
         commit(tx).await?;
     }
     Ok(removed.is_some())

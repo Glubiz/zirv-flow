@@ -711,6 +711,7 @@ pub async fn drain_batch(
     }
     events.finish(&mut tx, workspace).await?;
     delete_rows(&mut tx, workspace, &rows).await?;
+    crate::changes::request_reevaluation(&mut *tx, workspace).await?;
     commit(tx).await?;
     Ok(outcome)
 }
@@ -823,6 +824,7 @@ pub async fn drain_batch_singly(
         }
     }
     delete_rows(&mut tx, workspace, &rows).await?;
+    crate::changes::request_reevaluation(&mut *tx, workspace).await?;
     commit(tx).await?;
     Ok(outcome)
 }

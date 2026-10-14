@@ -14,7 +14,7 @@ use zirv_flow_core::people::IdentifierKind;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
-use crate::changes::mark_people;
+use crate::changes::{mark_people, request_reevaluation};
 use crate::{NewDecision, StoreError, append_decision, append_decisions};
 
 /// The most people one add or remove takes.
@@ -295,6 +295,9 @@ pub async fn add_members(
         trace,
     };
     record_changes(connection, &recorded, &added).await?;
+    if !added.is_empty() {
+        request_reevaluation(connection, workspace).await?;
+    }
     outcome.changed = added.len();
     outcome.unchanged -= added.len();
     Ok(outcome)
@@ -330,6 +333,9 @@ pub async fn remove_members(
         trace,
     };
     record_changes(connection, &recorded, &removed).await?;
+    if !removed.is_empty() {
+        request_reevaluation(connection, workspace).await?;
+    }
     outcome.changed = removed.len();
     outcome.unchanged -= removed.len();
     Ok(outcome)

@@ -404,7 +404,7 @@ The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each
 on conflict, so repeated marks coalesce and keep every class that changed. A mark made after
 `segment.reevaluate` claimed a row re-inserts it (8.4). `segment.*` events never mark a person
 dirty: a membership change reaches dependent segments through topological evaluation, not
-through the dirty set.
+through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency.
 
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
@@ -931,6 +931,7 @@ rolls the claim back. In that one transaction it evaluates every segment whose d
 classes intersect the batch's combined classes, plus their transitive segment dependents, in
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
+**Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty backlog and age. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
 
 ## 9. Flow engine
 

@@ -12,7 +12,7 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::topics::find_topic;
 use crate::StoreError;
-use crate::changes::mark_person;
+use crate::changes::{mark_person, request_reevaluation};
 use crate::decisions::{NewDecision, append_decision};
 use crate::people::current_person;
 
@@ -131,6 +131,7 @@ pub async fn set_consent(
         trace,
     )
     .await?;
+    request_reevaluation(connection, workspace).await?;
     Ok(ConsentOutcome::Changed {
         person_id: person,
         change_id,

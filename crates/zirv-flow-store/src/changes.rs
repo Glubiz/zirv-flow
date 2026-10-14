@@ -11,12 +11,8 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::{NewJob, StoreError, enqueue};
-
 /// The kind of the job that re-evaluates the segments for a workspace's dirty people.
 pub const REEVALUATE_JOB_KIND: &str = "segment.reevaluate";
-
-/// The class of the advisory lock that keeps writers from queueing on the job's unique key.
-const ENQUEUE_LOCK_CLASS: &str = "segments.reevaluate.enqueue";
 
 /// One claimed mark.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,9 +26,10 @@ pub struct DirtyPerson {
     pub late_from: Option<OffsetDateTime>,
 }
 
-/// Marks `people` changed in `classes`, in the caller's transaction, and asks for a
-/// re-evaluation. Marks coalesce per person: the classes are OR-ed, the latest trace and cause
-/// win, `late_from` takes the earliest value and `changed_at` keeps the first mark's time.
+/// Marks `people` changed in `classes`, in the caller's transaction. Marks coalesce per person:
+/// the classes are OR-ed, the latest trace and cause win, `late_from` takes the earliest value
+/// and `changed_at` keeps the first mark's time. It only upserts; the transaction's owner calls
+/// [`enqueue_reevaluate`] once before it commits.
 pub(crate) async fn mark_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -69,7 +66,6 @@ pub(crate) async fn mark_people(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    request_reevaluate(connection, workspace, trace).await?;
     Ok(())
 }
 
@@ -85,8 +81,13 @@ pub(crate) async fn mark_person(
     mark_people(connection, workspace, &[person], classes, trace, late_from).await
 }
 
-/// Enqueues the workspace's `segment.reevaluate`. A no-op while one is ready or running (its
+/// Enqueues the workspace's `segment.reevaluate`, once per transaction that marked anyone. A
+/// no-op while one is ready or running (its
 /// unique key).
+///
+/// This only buys latency. Correctness never depends on it: a mark that no request follows (a
+/// path that missed the call, a request that rolled back, a mark made after the job's last
+/// claim) is found by the leader's safety net, which enqueues for any mark older than 2 s.
 pub async fn enqueue_reevaluate<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -103,28 +104,19 @@ fn unique_key(workspace: WorkspaceId) -> String {
     format!("{REEVALUATE_JOB_KIND}:{}", workspace.as_uuid())
 }
 
-/// [`enqueue_reevaluate`] for a writer, in its transaction. Also a no-op while another transaction's request for it is
-/// uncommitted: that one wakes the job, and the leader's safety net covers a mark that lands
-/// after the job's last claim, or whose other request rolled back. It never waits, so a busy
-/// ingest never queues up on the key.
-async fn request_reevaluate(
+/// [`enqueue_reevaluate`] for a transaction that marked people, on a trace of its own: the
+/// job's trace only names the decisions the job records itself. Call it once, before the
+/// transaction commits.
+pub(crate) async fn request_reevaluation(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    trace: &TraceContext,
-) -> Result<bool, StoreError> {
-    let key = unique_key(workspace);
-    let free: bool = sqlx::query_scalar(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))",
-    )
-    .bind(ENQUEUE_LOCK_CLASS)
-    .bind(&key)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    if !free {
-        return Ok(false);
-    }
-    enqueue_reevaluate(&mut *connection, workspace, trace).await
+) -> Result<(), StoreError> {
+    let trace = TraceContext::root(Cause::from_stored(
+        CauseKind::Api,
+        "segment.reevaluate".to_owned(),
+    ));
+    enqueue_reevaluate(connection, workspace, &trace).await?;
+    Ok(())
 }
 
 type ClaimedRow = (
@@ -372,70 +364,6 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_mark_asks_for_one_job_per_workspace(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
-
-        mark(
-            &pool,
-            ws,
-            &[one],
-            ChangeClasses::TRAITS,
-            &trace(Cause::api("a")),
-            None,
-        )
-        .await;
-        mark(
-            &pool,
-            ws,
-            &[two],
-            ChangeClasses::TRAITS,
-            &trace(Cause::api("b")),
-            None,
-        )
-        .await;
-
-        let keys: Vec<Option<String>> =
-            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'segment.reevaluate'")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(keys, [Some(format!("segment.reevaluate:{}", ws.as_uuid()))]);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_second_open_transaction_does_not_wait_for_the_first_ones_request(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
-        let mut first = begin(&pool).await.unwrap();
-        let mut second = begin(&pool).await.unwrap();
-
-        let a = trace(Cause::api("a"));
-        mark_person(&mut first, ws, one, ChangeClasses::TRAITS, &a, None)
-            .await
-            .unwrap();
-        // The first transaction is still open and holds the request; this returns at once.
-        mark_person(&mut second, ws, two, ChangeClasses::TRAITS, &a, None)
-            .await
-            .unwrap();
-        commit(second).await.unwrap();
-        commit(first).await.unwrap();
-
-        let jobs: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!((jobs, marks), (1, 2));
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_mark_made_after_a_claim_survives_it_and_a_rolled_back_claim_restores_its_batch(
         pool: PgPool,
     ) {
@@ -520,5 +448,28 @@ mod tests {
         assert!((29.0..120.0).contains(&heads[0].age_seconds));
         assert_eq!(dirty_backlog(&pool).await.unwrap(), 2);
         assert!(heads.iter().all(|head| head.workspace_id != idle));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_mark_enqueues_nothing_and_a_request_is_one_job_per_workspace(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
+        let a = trace(Cause::api("a"));
+        mark(&pool, ws, &[one, two], ChangeClasses::TRAITS, &a, None).await;
+        let jobs = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(jobs(pool.clone()).await, 0);
+
+        assert!(enqueue_reevaluate(&pool, ws, &a).await.unwrap());
+        assert!(!enqueue_reevaluate(&pool, ws, &a).await.unwrap());
+
+        assert_eq!(jobs(pool.clone()).await, 1);
     }
 }

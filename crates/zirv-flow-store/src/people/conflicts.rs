@@ -13,7 +13,7 @@ use super::apply::record_decision;
 use super::merge::current_person;
 use super::profiles::{IdentityConflict, conflict_columns};
 use crate::StoreError;
-use crate::changes::mark_people;
+use crate::changes::{mark_people, request_reevaluation};
 
 /// How a conflict is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +125,7 @@ pub async fn resolve_conflict(
         ConflictResolution::KeepSeparate => "kept_separate",
         ConflictResolution::MoveIdentifier { to_person_id } => {
             move_identifier(connection, workspace, &conflict, to_person_id, trace).await?;
+            request_reevaluation(connection, workspace).await?;
             "identifier_moved"
         }
     };

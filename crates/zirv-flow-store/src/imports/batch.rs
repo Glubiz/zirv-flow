@@ -202,6 +202,7 @@ pub async fn commit_import_batch(
         .await
         .map_err(StoreError::query)?;
     }
+    crate::changes::request_reevaluation(&mut *tx, batch.workspace).await?;
     commit(tx).await?;
     Ok(BatchOutcome::Committed(BatchProgress {
         rows_done,
