@@ -8,7 +8,9 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::schedule::{cadence_cron, next_after};
 
-use super::refresh::{REFRESH_JOB_KIND, RefreshTrigger};
+use zirv_flow_core::{Cause, TraceContext};
+
+use super::refresh::{REFRESH_JOB_KIND, RefreshRequest, RefreshTrigger, enqueue_refresh};
 use crate::StoreError;
 
 /// The zone a segment cron is read in.
@@ -80,6 +82,59 @@ pub(crate) async fn remove_segment_schedule(
         .await
         .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// Brings segments saved before schedules and membership existed in line, in one transaction:
+/// every live segment without a `schedules` row gets one, and every live segment never computed
+/// gets a `save` refresh under its version's key, so one already queued is not doubled. The cron
+/// phase is computed in Rust, so this runs from the leader's upkeep and not from a migration.
+/// Returns the schedules created and the refreshes enqueued; a second call finds nothing to do.
+pub async fn reconcile_segment_schedules(
+    connection: &mut PgConnection,
+) -> Result<(u64, u64), StoreError> {
+    let unscheduled: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT s.workspace_id, s.id, s.cadence_minutes FROM segments s \
+         WHERE s.archived_at IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM schedules c WHERE c.segment_id = s.id) \
+         ORDER BY s.id",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut scheduled = 0;
+    for (workspace, segment, cadence) in unscheduled {
+        sync_segment_schedule(
+            connection,
+            WorkspaceId::from_uuid(workspace),
+            segment,
+            cadence,
+        )
+        .await?;
+        scheduled += 1;
+    }
+    let uncomputed: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT workspace_id, id, current_version FROM segments \
+         WHERE archived_at IS NULL AND computed_version IS NULL ORDER BY id",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut queued = 0;
+    for (workspace, segment, version) in uncomputed {
+        let trace = TraceContext::root(Cause::definition_change(segment));
+        if enqueue_refresh(
+            connection,
+            WorkspaceId::from_uuid(workspace),
+            segment,
+            RefreshRequest::Save { version },
+            &trace,
+        )
+        .await?
+        {
+            queued += 1;
+        }
+    }
+    Ok((scheduled, queued))
 }
 
 #[cfg(test)]
@@ -187,5 +242,55 @@ mod tests {
         let all = rows(&pool).await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1, segment_cron(mine.id, 60).unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reconciling_schedules_and_queues_a_segment_left_by_version_0_50_0_once(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = Uuid::now_v7();
+        // As migration 0030 left it: live, no schedule, never computed.
+        let mut tx = begin(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO segments (id, workspace_id, name, current_version, cadence_minutes) \
+             VALUES ($1, $2, 'Old', 1, 30)",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO segment_versions (workspace_id, segment_id, version, definition, \
+                normalized, deps, time_sensitive, trace_id) \
+             VALUES ($1, $2, 1, '{}', '{}', '{}', false, gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        let mut tx = begin(&pool).await.unwrap();
+        let first = reconcile_segment_schedules(&mut tx).await.unwrap();
+        commit(tx).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        let second = reconcile_segment_schedules(&mut tx).await.unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!((first, second), ((1, 1), (0, 0)));
+        let cron: String = sqlx::query_scalar("SELECT cron FROM schedules WHERE segment_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cron, segment_cron(id, 30).unwrap());
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'segment.refresh'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [format!("segment.refresh:{id}:v1")]);
     }
 }

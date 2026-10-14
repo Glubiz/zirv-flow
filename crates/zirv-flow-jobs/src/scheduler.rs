@@ -14,7 +14,7 @@ use zirv_flow_store::{
     database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
     enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
     expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
-    reap_expired, stream_freshness, try_lead,
+    reap_expired, reconcile_segment_schedules, stream_freshness, try_lead,
 };
 
 use crate::metrics::{FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_inbox_age};
@@ -188,6 +188,11 @@ impl Scheduler {
         }
         if let Err(error) = ensure_event_partitions(&self.pool, now.date()).await {
             warn!("could not create the event partitions: {error}");
+        }
+        // Segments saved before schedules existed get their schedule and a first refresh.
+        match reconcile_segments(&self.pool).await {
+            Ok(_) => {}
+            Err(error) => warn!("could not reconcile the segment schedules: {error}"),
         }
         // Contact idempotency keys are remembered for 24 hours.
         if let Err(error) = expire_contact_idempotency(&self.pool).await {
@@ -431,6 +436,14 @@ impl Scheduler {
         zirv_flow_store::commit(tx).await?;
         Ok(true)
     }
+}
+
+/// Reconciles the segments saved before schedules existed, in one transaction.
+async fn reconcile_segments(pool: &PgPool) -> Result<(u64, u64), StoreError> {
+    let mut tx = begin(pool).await?;
+    let done = reconcile_segment_schedules(&mut tx).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(done)
 }
 
 /// The unique key of one slot of one schedule.
