@@ -121,6 +121,16 @@ pub(crate) fn set_inbox_age(seconds: f64) {
     metrics::gauge!("zirv_flow_ingest_inbox_age_seconds").set(seconds);
 }
 
+/// The `zirv_flow_segment_dirty_age_seconds` gauge: the oldest dirty mark.
+pub(crate) fn set_dirty_age(seconds: f64) {
+    metrics::gauge!("zirv_flow_segment_dirty_age_seconds").set(seconds);
+}
+
+/// The `zirv_flow_segment_dirty_backlog` gauge: the people marked dirty, over all workspaces.
+pub(crate) fn set_dirty_backlog(people: i64) {
+    metrics::gauge!("zirv_flow_segment_dirty_backlog").set(people as f64);
+}
+
 /// The queue-depth gauge `zirv_flow_jobs{kind,state}`. It remembers which pairs it has set,
 /// so a pair that drops out of the counts is set to 0 rather than left at its last value.
 #[derive(Default)]
@@ -147,6 +157,8 @@ impl QueueGauges {
     pub(crate) fn zero_all(&mut self) {
         self.update(&[]);
         set_inbox_age(0.0);
+        set_dirty_age(0.0);
+        set_dirty_backlog(0);
     }
 }
 
@@ -435,6 +447,28 @@ mod tests {
             handle
                 .render()
                 .contains("zirv_flow_ingest_inbox_age_seconds 0"),
+        );
+    }
+
+    #[test]
+    fn stepping_down_zeroes_the_dirty_gauges() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            set_dirty_age(9.0);
+            set_dirty_backlog(4);
+            QueueGauges::default().zero_all();
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_segment_dirty_age_seconds 0"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_segment_dirty_backlog 0"),
+            "{output}"
         );
     }
 

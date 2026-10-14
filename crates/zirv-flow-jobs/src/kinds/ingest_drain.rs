@@ -379,7 +379,7 @@ mod tests {
 
         run_job(&pool, key(), 1).await.unwrap();
 
-        let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'")
             .fetch_one(&pool)
             .await
             .unwrap();

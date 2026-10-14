@@ -116,7 +116,7 @@ impl JobKind for SegmentRefresh {
 }
 
 /// The compiler's catalog from the store's snapshot.
-fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
+pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
     Catalog {
         traits: snapshot.traits,
         events: snapshot.events,
@@ -141,7 +141,7 @@ fn param(param: Param) -> SqlParam {
     }
 }
 
-fn sql_query(query: zirv_flow_segments::Query) -> SqlQuery {
+pub(super) fn sql_query(query: zirv_flow_segments::Query) -> SqlQuery {
     SqlQuery {
         sql: query.sql,
         params: query.params.into_iter().map(param).collect(),
