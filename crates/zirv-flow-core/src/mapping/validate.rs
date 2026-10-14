@@ -600,6 +600,7 @@ mod tests {
         assert_eq!(error.column(), None);
         assert_eq!(event_check(&with_event(event("segments", vec![]))), Ok(()));
     }
+
     #[test]
     fn an_event_name_must_follow_the_event_name_rule() {
         for name in ["", ".", "..", "has\ncontrol", &"n".repeat(129)] {

@@ -229,6 +229,28 @@ fn refresh_statement(members: &SqlQuery) -> String {
     let cause_id = format!("${}::text", base + 7);
     let job = format!("${}::uuid", base + 8);
     let attempt = format!("${}::int4", base + 9);
+    // The event and the decision of each change; `kind` is `entered` or `exited` and `from` the
+    // CTE that lists the people.
+    let recorded = |kind: &str, from: &str| {
+        format!(
+            "{kind}_events AS ( \
+                 INSERT INTO events (id, workspace_id, person_id, name, occurred_at, \
+                     received_at, properties, source, trace_id, validation_state) \
+                 SELECT gen_random_uuid(), $1, person_id, 'segment.{kind}', {now}, {now}, \
+                     jsonb_build_object('segment_id', {segment}::text, 'version', {version}, \
+                                        'cause', {cause}), \
+                     'segments', {trace}, 'valid' FROM {from} RETURNING 1), \
+             {kind}_decisions AS ( \
+                 INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
+                     reason, cause_kind, cause_id, subject_ids, job_id, attempt) \
+                 SELECT gen_random_uuid(), $1, {trace}, 'segment.{kind}', '{kind}', {cause}, \
+                     {cause_kind}, {cause_id}, \
+                     jsonb_build_object('segment', {segment}::text, 'person', person_id::text), \
+                     {job}, {attempt} FROM {from} RETURNING 1)"
+        )
+    };
+    let entered = recorded("entered", "inserted");
+    let exited = recorded("exited", "closed");
     format!(
         "WITH target AS ({members_sql}), \
          entering AS ( \
@@ -250,34 +272,7 @@ fn refresh_statement(members: &SqlQuery) -> String {
                  exited_trace_id = {trace}, exited_cause = {cause} \
              FROM leaving l WHERE m.id = l.row_id AND m.exited_at IS NULL \
              RETURNING m.person_id), \
-         entered_events AS ( \
-             INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
-                 properties, source, trace_id, validation_state) \
-             SELECT gen_random_uuid(), $1, person_id, 'segment.entered', {now}, {now}, \
-                 jsonb_build_object('segment_id', {segment}::text, 'version', {version}, \
-                                    'cause', {cause}), \
-                 'segments', {trace}, 'valid' FROM inserted RETURNING 1), \
-         exited_events AS ( \
-             INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
-                 properties, source, trace_id, validation_state) \
-             SELECT gen_random_uuid(), $1, person_id, 'segment.exited', {now}, {now}, \
-                 jsonb_build_object('segment_id', {segment}::text, 'version', {version}, \
-                                    'cause', {cause}), \
-                 'segments', {trace}, 'valid' FROM closed RETURNING 1), \
-         entered_decisions AS ( \
-             INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, \
-                 cause_kind, cause_id, subject_ids, job_id, attempt) \
-             SELECT gen_random_uuid(), $1, {trace}, 'segment.entered', 'entered', {cause}, \
-                 {cause_kind}, {cause_id}, \
-                 jsonb_build_object('segment', {segment}::text, 'person', person_id::text), \
-                 {job}, {attempt} FROM inserted RETURNING 1), \
-         exited_decisions AS ( \
-             INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, \
-                 cause_kind, cause_id, subject_ids, job_id, attempt) \
-             SELECT gen_random_uuid(), $1, {trace}, 'segment.exited', 'exited', {cause}, \
-                 {cause_kind}, {cause_id}, \
-                 jsonb_build_object('segment', {segment}::text, 'person', person_id::text), \
-                 {job}, {attempt} FROM closed RETURNING 1) \
+         {entered}, {exited} \
          SELECT ARRAY[ \
              (SELECT count(*) FROM inserted), (SELECT count(*) FROM closed), \
              (SELECT count(*) FROM entered_events) + (SELECT count(*) FROM exited_events), \

@@ -848,6 +848,7 @@ mod tests {
         );
         assert!(checked_input(&event("segments", json!({}))).is_ok());
     }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_block_mode_wrong_type_is_rejected_with_a_masked_sample_and_no_event(pool: PgPool) {

@@ -17,10 +17,7 @@ const SCHEDULE_TIMEZONE: &str = "UTC";
 /// The phase of a segment: the last 8 bytes of its id as a number. A version 7 id keeps its
 /// random bits there, where the first bytes are a timestamp that ids created together share.
 pub(crate) fn phase_of(segment: Uuid) -> u64 {
-    let bytes = segment.as_bytes();
-    u64::from_be_bytes([
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    ])
+    segment.as_u64_pair().1
 }
 
 /// The UTC cron of a segment's refresh; none for a cadence outside the ruled set.
