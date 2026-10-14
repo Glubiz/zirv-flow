@@ -141,7 +141,7 @@ fn param(param: Param) -> SqlParam {
     }
 }
 
-fn sql_query(query: zirv_flow_segments::Query) -> SqlQuery {
+pub(crate) fn sql_query(query: zirv_flow_segments::Query) -> SqlQuery {
     SqlQuery {
         sql: query.sql,
         params: query.params.into_iter().map(param).collect(),

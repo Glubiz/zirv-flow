@@ -18,7 +18,7 @@ mod noop;
 mod person_merge_rewrite;
 mod privacy_erase;
 mod privacy_export;
-mod segment_refresh;
+pub(crate) mod segment_refresh;
 mod sync_run;
 mod sync_tokens;
 mod traits_recompute;

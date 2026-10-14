@@ -12,3 +12,12 @@ serde_json.workspace = true
 time.workspace = true
 uuid.workspace = true
 zirv-flow-core.workspace = true
+proptest = { workspace = true, optional = true }
+
+[features]
+# TEST ONLY: the proptest generators in `generate` (architecture section 18). Enabled by
+# dev-dependencies; never in a normal build.
+test-support = ["dep:proptest"]
+
+[dev-dependencies]
+proptest.workspace = true
