@@ -395,6 +395,17 @@ impl ApiError {
         }
     }
 
+    /// An explain that ran past its time limit and was cancelled.
+    pub(crate) fn explain_timeout() -> Self {
+        Self {
+            code: Some("explain_timeout"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the explanation took too long; try again",
+            )
+        }
+    }
+
     /// A preview that ran past its time limit and was cancelled.
     pub(crate) fn segment_preview_timeout() -> Self {
         Self {

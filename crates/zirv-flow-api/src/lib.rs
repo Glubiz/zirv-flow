@@ -220,6 +220,10 @@ fn routes() -> Router<AppState> {
             get(people::profile::get),
         )
         .route(
+            "/api/v1/workspaces/{ws}/people/{id}/explain",
+            get(segments::explain::explain),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}/timeline",
             get(people::timeline::get),
         )
