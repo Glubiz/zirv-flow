@@ -423,4 +423,64 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
     }
+
+    /// The SQL of the compiler's `051-segment` golden fixture.
+    const SEGMENT_NODE_SQL: &str = "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND \
+        p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM segment_members sm WHERE \
+        sm.workspace_id = p.workspace_id AND sm.person_id = p.id AND sm.segment_id = $2::uuid \
+        AND sm.exited_at IS NULL))";
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_compiled_segment_node_probes_a_batch_through_the_open_member_index(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        let other = segment(&pool, ws, "Other", 60).await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 3000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
+                entered_at, entered_trace_id, entered_cause) \
+             SELECT $1, s, p.id, 1, now(), gen_random_uuid(), 'initial' \
+             FROM people p, unnest(ARRAY[$2::uuid, $3::uuid]) s WHERE p.workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .bind(seg.id)
+        .bind(other.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE people, segment_members")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let batch: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 LIMIT 10")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        // The incremental path asks about a batch of people (`batch_sql`): one probe each.
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {SEGMENT_NODE_SQL} AND p.id = ANY($3::uuid[])"
+        )))
+        .bind(ws.as_uuid())
+        .bind(seg.id)
+        .bind(&batch)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let plan = plan.join("\n");
+        eprintln!("{plan}");
+        assert!(plan.contains("segment_members_open_idx"), "{plan}");
+    }
 }
