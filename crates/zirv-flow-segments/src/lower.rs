@@ -498,13 +498,18 @@ impl Lowerer<'_> {
                 let Some(prop) = &agg.prop else {
                     return self.fail(code::AGGREGATE_NOT_ALLOWED);
                 };
-                let function = agg.func.as_str();
                 let field = self.field(Table::Event, prop);
                 let integral = schema.get(prop) == Some(&PropertyType::Integer);
-                let expr = format!(
-                    "(SELECT {function}({}) {from})",
-                    number_expr(&field.json(), integral)
-                );
+                let argument = number_expr(&field.json(), integral);
+                // PostgreSQL's `avg(float8)` also accumulates the sum of squares, which
+                // overflows for values past about 1e154 and fails the whole query, though the bound allows
+                // 1e300. The mean is the sum over the count, which is what `avg` returns without that.
+                let aggregate = if agg.func == AggFn::Avg {
+                    format!("sum({argument}) / NULLIF(count({argument}), 0)")
+                } else {
+                    format!("{}({argument})", agg.func.as_str())
+                };
+                let expr = format!("(SELECT {aggregate} {from})");
                 self.number(&expr, agg.op, agg.value.as_ref())
             }
             AggFn::FirstTime | AggFn::LastTime => {
@@ -698,5 +703,34 @@ mod tests {
             expr.starts_with("CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'number' THEN CASE")
         );
         assert!(expr.contains("<= 1e300"));
+    }
+
+    #[test]
+    fn the_mean_is_the_sum_over_the_count_because_avg_squares_its_inputs() {
+        let mut catalog = Catalog::default();
+        let mut order = hashbrown::HashMap::new();
+        order.insert("total".to_owned(), PropertyType::Number);
+        catalog.events.insert("order".to_owned(), order);
+        let node = Node::Event(EventCondition {
+            name: "order".into(),
+            filters: Vec::new(),
+            agg: Some(zirv_flow_core::segment::Aggregate {
+                func: AggFn::Avg,
+                prop: Some("total".into()),
+                op: Op::Gt,
+                value: Some(serde_json::json!(1)),
+            }),
+            window: None,
+        });
+        let lowered = lower(
+            &node,
+            &catalog,
+            &TraitStorage::default(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        assert!(!lowered.predicate.contains("avg("));
+        assert!(lowered.predicate.contains("sum(CASE"));
+        assert!(lowered.predicate.contains("/ NULLIF(count(CASE"));
     }
 }
