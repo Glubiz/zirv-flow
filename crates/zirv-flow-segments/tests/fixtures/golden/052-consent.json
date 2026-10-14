@@ -1,0 +1,80 @@
+{
+  "definition": {
+    "all": [
+      {
+        "consent": {
+          "channel": "email",
+          "status": "subscribed",
+          "topic": "news"
+        }
+      },
+      {
+        "consent": {
+          "channel": "email",
+          "status": "unsubscribed"
+        }
+      },
+      {
+        "consent": {
+          "channel": "email",
+          "status": "pending_confirmation",
+          "topic": "news"
+        }
+      },
+      {
+        "consent": {
+          "channel": "email",
+          "status": "unknown"
+        }
+      },
+      {
+        "consent": {
+          "channel": "email",
+          "status": "unknown",
+          "topic": "news"
+        }
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 40,
+    "consent": [
+      [
+        "email",
+        null
+      ],
+      [
+        "email",
+        "news"
+      ]
+    ],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "uuid": "018f0000-0000-7000-8000-000000000004"
+    },
+    {
+      "text": "email"
+    },
+    {
+      "text": "pending_confirmation"
+    },
+    {
+      "text": "subscribed"
+    },
+    {
+      "text": "unknown"
+    },
+    {
+      "text": "unsubscribed"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id = $2::uuid AND c.status = $4::text) AND EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id = $2::uuid AND c.status = $5::text) AND NOT EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id = $2::uuid AND c.status <> $6::text) AND NOT EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id IS NULL AND c.status <> $6::text) AND EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id IS NULL AND c.status = $7::text)))",
+  "time_sensitive": false
+}

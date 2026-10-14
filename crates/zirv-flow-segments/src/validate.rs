@@ -45,8 +45,8 @@ pub fn validate(definition: &Definition, catalog: &Catalog) -> Result<(), Vec<Is
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Kind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Kind {
     String,
     Number,
     Integer,
@@ -128,7 +128,7 @@ const LIST_OPS: &[Op] = &[
 ];
 const OBJECT_OPS: &[Op] = &[Op::Exists, Op::NotExists];
 
-const fn ops_for(kind: Kind) -> &'static [Op] {
+pub(crate) const fn ops_for(kind: Kind) -> &'static [Op] {
     match kind {
         Kind::String => STRING_OPS,
         Kind::Number | Kind::Integer => NUMBER_OPS,
@@ -191,6 +191,9 @@ impl Checker<'_> {
                 }
                 Node::Consent(condition) => self.consent(condition, &pointer),
                 Node::Identifier(kind) => {
+                    if self.has_nul(kind, &pointer_push(&pointer, "identifier")) {
+                        continue;
+                    }
                     if IdentifierKind::parse(kind).is_err() {
                         self.report(
                             &pointer_push(&pointer, "identifier"),
@@ -200,6 +203,15 @@ impl Checker<'_> {
                 }
             }
         }
+    }
+
+    /// Postgres cannot store NUL in text or jsonb, so a definition string holding one is refused.
+    fn has_nul(&mut self, text: &str, pointer: &str) -> bool {
+        let found = text.contains('\0');
+        if found {
+            self.report(pointer, code::VALUE_NOT_ALLOWED);
+        }
+        found
     }
 
     /// Counts one node; past the limit it reports once and tells the caller to stop.
@@ -213,6 +225,9 @@ impl Checker<'_> {
     }
 
     fn trait_condition(&mut self, condition: &TraitCondition, pointer: &str) {
+        if self.has_nul(&condition.key, &pointer_push(pointer, "trait")) {
+            return;
+        }
         match self.catalog.traits.get(&condition.key) {
             Some(kind) => self.condition(
                 Kind::from(*kind),
@@ -239,7 +254,7 @@ impl Checker<'_> {
                 .catalog
                 .topics
                 .get(&channel)
-                .is_some_and(|topics| topics.contains(topic));
+                .is_some_and(|topics| topics.contains_key(topic));
             if !known {
                 self.report(&pointer_push(&base, "topic"), code::UNKNOWN_TOPIC);
             }
@@ -248,8 +263,13 @@ impl Checker<'_> {
 
     /// Returns false when the node budget ran out and the walk must stop.
     fn event(&mut self, condition: &EventCondition, pointer: &str) -> bool {
-        let schema = self.catalog.events.get(&condition.name);
-        if schema.is_none() {
+        let named = !self.has_nul(&condition.name, &pointer_push(pointer, "event"));
+        let schema = if named {
+            self.catalog.events.get(&condition.name)
+        } else {
+            None
+        };
+        if named && schema.is_none() {
             self.report(&pointer_push(pointer, "event"), code::UNKNOWN_EVENT);
         }
         let filters = pointer_push(pointer, "where");
@@ -277,6 +297,9 @@ impl Checker<'_> {
         schema: &HashMap<String, PropertyType>,
         pointer: &str,
     ) {
+        if self.has_nul(&filter.prop, &pointer_push(pointer, "prop")) {
+            return;
+        }
         match schema.get(&filter.prop) {
             Some(kind) => self.condition(
                 Kind::from(*kind),
@@ -296,6 +319,13 @@ impl Checker<'_> {
         pointer: &str,
     ) {
         let prop_at = pointer_push(pointer, "prop");
+        if agg
+            .prop
+            .as_deref()
+            .is_some_and(|prop| self.has_nul(prop, &prop_at))
+        {
+            return;
+        }
         let kind = match agg.func {
             AggFn::Count | AggFn::FirstTime | AggFn::LastTime => {
                 if agg.prop.is_some() {
@@ -348,6 +378,9 @@ impl Checker<'_> {
             }
             Window::SinceTrait(key) => {
                 let at = pointer_push(pointer, "since_trait");
+                if self.has_nul(key, &at) {
+                    return;
+                }
                 match self.catalog.traits.get(key) {
                     None => self.report(&at, code::UNKNOWN_TRAIT),
                     Some(TraitType::Timestamp | TraitType::Date) => {}
@@ -411,6 +444,10 @@ impl Checker<'_> {
     fn scalar(&mut self, kind: Kind, value: &Value, pointer: &str) -> bool {
         let ok = match kind {
             Kind::String => match value.as_str() {
+                Some(text) if text.contains('\0') => {
+                    self.report(pointer, code::VALUE_NOT_ALLOWED);
+                    return false;
+                }
                 Some(text) if text.chars().count() > MAX_STRING_CHARS => {
                     self.report(pointer, code::VALUE_TOO_LONG);
                     return false;
@@ -504,7 +541,6 @@ fn is_integral(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hashbrown::HashSet;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -513,6 +549,7 @@ mod tests {
     const LIST: &str = "018f0000-0000-7000-8000-000000000001";
     const SEGMENT: &str = "018f0000-0000-7000-8000-000000000002";
     const OTHER: &str = "018f0000-0000-7000-8000-000000000003";
+    const NEWS: &str = "018f0000-0000-7000-8000-000000000004";
 
     fn catalog() -> Catalog {
         let mut catalog = Catalog::default();
@@ -542,8 +579,8 @@ mod tests {
         catalog.events.insert("order".to_owned(), order);
         catalog.lists.insert(Uuid::parse_str(LIST).unwrap());
         catalog.segments.insert(Uuid::parse_str(SEGMENT).unwrap());
-        let mut topics = HashSet::new();
-        topics.insert("news".to_owned());
+        let mut topics = HashMap::new();
+        topics.insert("news".to_owned(), Uuid::parse_str(NEWS).unwrap());
         catalog.topics.insert(Channel::Email, topics);
         catalog
     }
@@ -1268,5 +1305,61 @@ mod tests {
         let issues = validate(&definition, &catalog()).unwrap_err();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, code::TOO_MANY_NODES);
+    }
+
+    #[test]
+    fn a_nul_in_any_definition_string_is_refused() {
+        let nul = "a\u{0}b";
+        refused(
+            leaf("name", "eq", json!(nul)),
+            "/value",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            leaf("name", "in", json!(["ok", nul])),
+            "/value/1",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            leaf("name", "contains", json!(nul)),
+            "/value",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            leaf("tags", "contains", json!([nul])),
+            "/value/0",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            json!({"trait": nul, "op": "exists"}),
+            "/trait",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(json!({"event": nul}), "/event", code::VALUE_NOT_ALLOWED);
+        refused(
+            json!({"event": "order", "where": [{"prop": nul, "op": "exists"}]}),
+            "/where/0/prop",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            event_where("coupon", "eq", json!(nul)),
+            "/where/0/value",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            event_agg("sum", Some(nul), "gt", json!(1)),
+            "/agg/prop",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            json!({"event": "order", "window": {"since_trait": nul}}),
+            "/window/since_trait",
+            code::VALUE_NOT_ALLOWED,
+        );
+        refused(
+            json!({"identifier": format!("external:{nul}")}),
+            "/identifier",
+            code::VALUE_NOT_ALLOWED,
+        );
     }
 }

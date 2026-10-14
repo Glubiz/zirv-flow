@@ -1,0 +1,53 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "eq",
+        "trait": "vip",
+        "value": true
+      },
+      {
+        "op": "eq",
+        "trait": "vip",
+        "value": false
+      },
+      {
+        "op": "exists",
+        "trait": "vip"
+      },
+      {
+        "op": "not_exists",
+        "trait": "vip"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "vip"
+    ]
+  },
+  "params": [
+    {
+      "jsonb": {
+        "vip": false
+      }
+    },
+    {
+      "jsonb": {
+        "vip": true
+      }
+    },
+    {
+      "text": "vip"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((p.traits @> $2::jsonb AND p.traits @> $3::jsonb AND COALESCE(((jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false) AND COALESCE((NOT (jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false)))",
+  "time_sensitive": false
+}

@@ -1,0 +1,97 @@
+{
+  "definition": {
+    "event": "order",
+    "v": 1,
+    "where": [
+      {
+        "op": "eq",
+        "prop": "coupon",
+        "value": "X"
+      },
+      {
+        "op": "neq",
+        "prop": "coupon",
+        "value": "Y"
+      },
+      {
+        "op": "in",
+        "prop": "coupon",
+        "value": [
+          "A",
+          "B"
+        ]
+      },
+      {
+        "op": "not_in",
+        "prop": "coupon",
+        "value": [
+          "C"
+        ]
+      },
+      {
+        "op": "contains",
+        "prop": "coupon",
+        "value": "UM"
+      },
+      {
+        "op": "starts_with",
+        "prop": "coupon",
+        "value": "SU"
+      },
+      {
+        "op": "exists",
+        "prop": "coupon"
+      },
+      {
+        "op": "not_exists",
+        "prop": "coupon"
+      }
+    ]
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "coupon"
+    },
+    {
+      "text": "UM"
+    },
+    {
+      "jsonb": {
+        "coupon": "X"
+      }
+    },
+    {
+      "text_array": [
+        "A",
+        "B"
+      ]
+    },
+    {
+      "text": "Y"
+    },
+    {
+      "text_array": [
+        "C"
+      ]
+    },
+    {
+      "text": "SU"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN strpos((e.properties ->> $3::text), $4::text) > 0 END), false) AND e.properties @> $5::jsonb AND COALESCE(((jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN (e.properties ->> $3::text) = ANY($6::text[]) END), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN (e.properties ->> $3::text) <> $7::text END), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN (e.properties ->> $3::text) <> ALL($8::text[]) END), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'string' THEN left((e.properties ->> $3::text), char_length($9::text)) = $9::text END), false)))",
+  "time_sensitive": false
+}

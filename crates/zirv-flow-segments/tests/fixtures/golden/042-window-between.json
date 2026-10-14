@@ -1,0 +1,36 @@
+{
+  "definition": {
+    "event": "order",
+    "v": 1,
+    "window": {
+      "between": [
+        "2025-01-01T00:00:00Z",
+        "2025-02-01T00:00:00Z"
+      ]
+    }
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "timestamp": "2025-01-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-02-01T00:00:00Z"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND e.occurred_at >= $3::timestamptz AND e.occurred_at < $4::timestamptz))",
+  "time_sensitive": false
+}

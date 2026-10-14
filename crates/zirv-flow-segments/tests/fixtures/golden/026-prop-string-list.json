@@ -1,0 +1,69 @@
+{
+  "definition": {
+    "event": "order",
+    "v": 1,
+    "where": [
+      {
+        "op": "contains",
+        "prop": "labels",
+        "value": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "op": "contains_all",
+        "prop": "labels",
+        "value": [
+          "c",
+          "d"
+        ]
+      },
+      {
+        "op": "is_empty",
+        "prop": "labels"
+      },
+      {
+        "op": "exists",
+        "prop": "labels"
+      },
+      {
+        "op": "not_exists",
+        "prop": "labels"
+      }
+    ]
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "labels"
+    },
+    {
+      "text_array": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "text_array": [
+        "c",
+        "d"
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'array' THEN (e.properties -> $3::text) ?| $4::text[] END), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'array' THEN (e.properties -> $3::text) ?& $5::text[] END), false) AND COALESCE(((jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'array' THEN jsonb_array_length((e.properties -> $3::text)) = 0 END), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false)))",
+  "time_sensitive": false
+}

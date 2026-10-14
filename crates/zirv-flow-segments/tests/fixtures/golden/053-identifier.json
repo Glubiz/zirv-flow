@@ -1,0 +1,49 @@
+{
+  "definition": {
+    "all": [
+      {
+        "identifier": "email"
+      },
+      {
+        "identifier": "phone"
+      },
+      {
+        "identifier": "anonymous_id"
+      },
+      {
+        "identifier": "external:crm.v2"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 48,
+    "consent": [],
+    "events": [],
+    "identifiers": [
+      "anonymous_id",
+      "email",
+      "external:crm.v2",
+      "phone"
+    ],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "anonymous_id"
+    },
+    {
+      "text": "email"
+    },
+    {
+      "text": "external:crm.v2"
+    },
+    {
+      "text": "phone"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $2::text) AND EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $3::text) AND EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $4::text) AND EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $5::text)))",
+  "time_sensitive": false
+}

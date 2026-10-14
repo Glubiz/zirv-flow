@@ -1,0 +1,127 @@
+{
+  "definition": {
+    "event": "order",
+    "v": 1,
+    "where": [
+      {
+        "op": "eq",
+        "prop": "items",
+        "value": 5
+      },
+      {
+        "op": "neq",
+        "prop": "items",
+        "value": 6
+      },
+      {
+        "op": "gt",
+        "prop": "items",
+        "value": 1
+      },
+      {
+        "op": "gte",
+        "prop": "items",
+        "value": 2
+      },
+      {
+        "op": "lt",
+        "prop": "items",
+        "value": 90
+      },
+      {
+        "op": "lte",
+        "prop": "items",
+        "value": 89
+      },
+      {
+        "op": "between",
+        "prop": "items",
+        "value": [
+          10,
+          20
+        ]
+      },
+      {
+        "op": "in",
+        "prop": "items",
+        "value": [
+          1,
+          2
+        ]
+      },
+      {
+        "op": "not_in",
+        "prop": "items",
+        "value": [
+          3,
+          4
+        ]
+      },
+      {
+        "op": "exists",
+        "prop": "items"
+      },
+      {
+        "op": "not_exists",
+        "prop": "items"
+      }
+    ]
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "items"
+    },
+    {
+      "float": 10.0
+    },
+    {
+      "float": 20.0
+    },
+    {
+      "float": 5.0
+    },
+    {
+      "float": 1.0
+    },
+    {
+      "float": 2.0
+    },
+    {
+      "float_array": [
+        1.0,
+        2.0
+      ]
+    },
+    {
+      "float": 90.0
+    },
+    {
+      "float": 89.0
+    },
+    {
+      "float": 6.0
+    },
+    {
+      "float_array": [
+        3.0,
+        4.0
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END BETWEEN $4::float8 AND $5::float8), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END = $6::float8), false) AND COALESCE(((jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END > $7::float8), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END >= $8::float8), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END = ANY($9::float8[])), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END < $10::float8), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END <= $11::float8), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END <> $12::float8), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 AND ((e.properties -> $3::text))::numeric = trunc(((e.properties -> $3::text))::numeric) THEN ((e.properties -> $3::text))::float8 END END <> ALL($13::float8[])), false)))",
+  "time_sensitive": false
+}

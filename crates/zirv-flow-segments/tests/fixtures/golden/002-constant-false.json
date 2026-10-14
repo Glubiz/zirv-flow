@@ -1,0 +1,18 @@
+{
+  "definition": {
+    "any": [],
+    "v": 1
+  },
+  "deps": {
+    "classes": 32,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (false)",
+  "time_sensitive": false
+}

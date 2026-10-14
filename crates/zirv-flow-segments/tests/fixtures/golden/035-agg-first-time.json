@@ -1,0 +1,94 @@
+{
+  "definition": {
+    "all": [
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "before",
+          "value": "2025-01-01T00:00:00Z"
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "after",
+          "value": "2025-01-01T00:00:00Z"
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "between",
+          "value": [
+            "2025-01-01T00:00:00Z",
+            "2025-02-01T00:00:00Z"
+          ]
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "within_last",
+          "value": "P7D"
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "more_than_ago",
+          "value": "P1D"
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "first_time",
+          "op": "within_next",
+          "value": "P2D"
+        },
+        "event": "order"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "timestamp": "2025-01-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-02-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-14T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-17T12:00:00Z"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) > $3::timestamptz), false) AND COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) < $3::timestamptz), false) AND COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <@ tstzrange($3::timestamptz, $4::timestamptz, '[)')), false) AND COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <= $5::timestamptz), false) AND COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <@ tstzrange($6::timestamptz, $7::timestamptz, '(]')), false) AND COALESCE(((SELECT min(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <@ tstzrange($7::timestamptz, $8::timestamptz, '[)')), false)))",
+  "time_sensitive": true
+}

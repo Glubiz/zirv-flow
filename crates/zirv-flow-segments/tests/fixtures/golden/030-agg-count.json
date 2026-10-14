@@ -1,0 +1,134 @@
+{
+  "definition": {
+    "all": [
+      {
+        "agg": {
+          "fn": "count",
+          "op": "eq",
+          "value": 2
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "neq",
+          "value": 3
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "gt",
+          "value": 1
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "gte",
+          "value": 2
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "lt",
+          "value": 9
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "lte",
+          "value": 8
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "between",
+          "value": [
+            2,
+            5
+          ]
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "in",
+          "value": [
+            1,
+            2
+          ]
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "not_in",
+          "value": [
+            0
+          ]
+        },
+        "event": "order"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "float": 2.0
+    },
+    {
+      "float": 5.0
+    },
+    {
+      "float": 1.0
+    },
+    {
+      "float_array": [
+        1.0,
+        2.0
+      ]
+    },
+    {
+      "float": 9.0
+    },
+    {
+      "float": 8.0
+    },
+    {
+      "float": 3.0
+    },
+    {
+      "float_array": [
+        0.0
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) BETWEEN $3::float8 AND $4::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) = $3::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) > $5::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) >= $3::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) = ANY($6::float8[])), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) < $7::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <= $8::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <> $9::float8), false) AND COALESCE(((SELECT count(*)::float8 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <> ALL($10::float8[])), false)))",
+  "time_sensitive": false
+}

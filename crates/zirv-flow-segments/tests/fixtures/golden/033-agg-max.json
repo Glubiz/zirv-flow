@@ -1,0 +1,42 @@
+{
+  "definition": {
+    "agg": {
+      "fn": "max",
+      "op": "between",
+      "prop": "total",
+      "value": [
+        10,
+        500
+      ]
+    },
+    "event": "order",
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "text": "total"
+    },
+    {
+      "float": 10.0
+    },
+    {
+      "float": 500.0
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (COALESCE(((SELECT max(CASE WHEN jsonb_typeof((e.properties -> $3::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $3::text))::numeric) <= 1e300 THEN ((e.properties -> $3::text))::float8 END END) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) BETWEEN $4::float8 AND $5::float8), false))",
+  "time_sensitive": false
+}

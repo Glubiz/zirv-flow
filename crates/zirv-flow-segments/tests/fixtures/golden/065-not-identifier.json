@@ -1,0 +1,26 @@
+{
+  "definition": {
+    "not": {
+      "identifier": "email"
+    },
+    "v": 1
+  },
+  "deps": {
+    "classes": 48,
+    "consent": [],
+    "events": [],
+    "identifiers": [
+      "email"
+    ],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "email"
+    }
+  ],
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (NOT (EXISTS (SELECT 1 FROM identities i WHERE i.workspace_id = p.workspace_id AND i.person_id = p.id AND i.kind = $2::text)))",
+  "time_sensitive": false
+}
