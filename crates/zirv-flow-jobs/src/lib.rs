@@ -7,6 +7,8 @@ mod kinds;
 mod metrics;
 mod registry;
 mod scheduler;
+#[cfg(test)]
+mod segment_compare;
 mod worker;
 
 pub use context::JobContext;
