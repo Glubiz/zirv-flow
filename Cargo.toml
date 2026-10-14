@@ -34,6 +34,7 @@ opentelemetry = { version = "0.33.1", default-features = false, features = ["tra
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 rand = "0.8.5"
 # Only here to choose the TLS stack for the OTLP exporter's HTTP client: rustls on the ring provider
 # the tree already uses, never aws-lc or OpenSSL.
