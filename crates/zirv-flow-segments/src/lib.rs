@@ -9,7 +9,7 @@ mod catalog;
 mod compile;
 mod deps;
 mod evaluate;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod generate;
 mod leaf;
 mod lower;
