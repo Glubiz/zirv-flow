@@ -32,3 +32,41 @@ pub(crate) fn absolute(kind: Kind, value: &Value) -> Option<OffsetDateTime> {
         parse_timestamp(text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[test]
+    fn a_number_must_be_a_finite_number() {
+        assert_eq!(number_of(&json!(2.5)), Some(2.5));
+        assert_eq!(number_of(&json!("2")), None);
+        assert_eq!(number_of(&json!(null)), None);
+        assert_eq!(numbers(Some(&json!([1, "2"]))), None);
+        assert_eq!(numbers(Some(&json!([1, 2.5]))), Some(vec![1.0, 2.5]));
+        assert_eq!(numbers(None), None);
+    }
+
+    #[test]
+    fn strings_refuse_a_mixed_array() {
+        assert_eq!(strings(Some(&json!(["a", 1]))), None);
+        assert_eq!(strings(Some(&json!("a"))), None);
+        assert_eq!(
+            strings(Some(&json!(["a", "b"]))),
+            Some(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn a_date_is_read_at_utc_midnight() {
+        assert_eq!(
+            absolute(Kind::Date, &json!("2025-06-15")),
+            Some(datetime!(2025-06-15 0:00 UTC))
+        );
+        assert_eq!(absolute(Kind::Date, &json!("2025-06-15T00:00:00Z")), None);
+        assert_eq!(absolute(Kind::Timestamp, &json!(5)), None);
+    }
+}
