@@ -13,7 +13,8 @@ use super::issue::{Issue, code, pointer_push};
 
 /// The deepest nesting of nodes; the root is depth 1.
 pub const MAX_DEPTH: usize = 10;
-/// The most nodes in one definition. An event's `where` filters count as nodes.
+/// The most nodes in one definition. An event's `where` filters count as nodes; `not` counts
+/// toward the depth only, because normalizing can multiply the `not`s but never the other nodes.
 pub const MAX_NODES: usize = 200;
 /// The most issues one pass reports; the rest are dropped.
 pub const MAX_ISSUES: usize = 200;
@@ -149,13 +150,13 @@ impl Parser {
             }
             return None;
         }
-        if !self.count_node(pointer) {
-            return None;
-        }
         let present: Vec<&str> = NODE_KEYS
             .into_iter()
             .filter(|key| map.contains_key(*key))
             .collect();
+        if present[..] != ["not"] && !self.count_node(pointer) {
+            return None;
+        }
         let [key] = present[..] else {
             self.report(pointer, code::MALFORMED);
             for name in map.keys() {
@@ -596,6 +597,21 @@ mod tests {
         let children: Vec<Value> = (0..MAX_NODES).map(|_| json!({"all": []})).collect();
         let found = issues(json!({"v": 1, "all": children}));
         assert_eq!(found, [pair("/all/199", code::TOO_MANY_NODES)]);
+    }
+
+    #[test]
+    fn a_not_counts_toward_the_depth_but_not_the_node_limit() {
+        let leaves: Vec<Value> = (0..MAX_NODES - 2)
+            .map(|_| json!({"not": {"list": "018f0000-0000-7000-8000-000000000001"}}))
+            .collect();
+        assert!(parse(&json!({"v": 1, "all": leaves})).is_ok());
+        let too_many: Vec<Value> = (0..MAX_NODES)
+            .map(|_| json!({"not": {"all": []}}))
+            .collect();
+        assert_eq!(
+            issues(json!({"v": 1, "all": too_many})),
+            [pair("/all/199/not", code::TOO_MANY_NODES)]
+        );
     }
 
     #[test]

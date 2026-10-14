@@ -160,7 +160,7 @@ impl Checker<'_> {
                 self.report(&pointer, code::TOO_DEEP);
                 continue;
             }
-            if !self.count_node(&pointer) {
+            if !matches!(node, Node::Not(_)) && !self.count_node(&pointer) {
                 return;
             }
             match node {
@@ -262,7 +262,7 @@ impl Checker<'_> {
                 self.filter(filter, schema, &at);
             }
         }
-        if let (Some(agg), Some(schema)) = (&condition.agg, schema) {
+        if let Some(agg) = &condition.agg {
             self.aggregate(agg, schema, &pointer_push(pointer, "agg"));
         }
         if let Some(window) = &condition.window {
@@ -292,7 +292,7 @@ impl Checker<'_> {
     fn aggregate(
         &mut self,
         agg: &Aggregate,
-        schema: &HashMap<String, PropertyType>,
+        schema: Option<&HashMap<String, PropertyType>>,
         pointer: &str,
     ) {
         let prop_at = pointer_push(pointer, "prop");
@@ -308,11 +308,16 @@ impl Checker<'_> {
                 }
             }
             AggFn::Sum | AggFn::Min | AggFn::Max | AggFn::Avg => {
-                match agg.prop.as_ref().map(|prop| schema.get(prop)) {
+                match agg
+                    .prop
+                    .as_ref()
+                    .map(|prop| schema.map(|schema| schema.get(prop)))
+                {
                     None => self.report(&prop_at, code::AGGREGATE_NOT_ALLOWED),
-                    Some(None) => self.report(&prop_at, code::UNKNOWN_PROPERTY),
-                    Some(Some(PropertyType::Number | PropertyType::Integer)) => {}
-                    Some(Some(_)) => self.report(&prop_at, code::AGGREGATE_NOT_ALLOWED),
+                    Some(None) | Some(Some(Some(PropertyType::Number | PropertyType::Integer))) => {
+                    }
+                    Some(Some(None)) => self.report(&prop_at, code::UNKNOWN_PROPERTY),
+                    Some(Some(Some(_))) => self.report(&prop_at, code::AGGREGATE_NOT_ALLOWED),
                 }
                 Kind::Number
             }
@@ -1084,6 +1089,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_event_still_checks_the_aggregate_parts_that_need_no_schema() {
+        let issues =
+            check(json!({"event": "missing", "agg": {"fn": "count", "op": "exists"}})).unwrap_err();
+        assert_eq!(
+            issues,
+            [
+                ("/event".to_owned(), code::UNKNOWN_EVENT),
+                ("/agg/op".to_owned(), code::OPERATOR_NOT_ALLOWED)
+            ]
+        );
+        refused(
+            json!({"event": "missing", "agg": {"fn": "sum", "op": "gt", "value": 1}}),
+            "/agg/prop",
+            code::AGGREGATE_NOT_ALLOWED,
+        );
+        refused(
+            json!({"event": "missing", "agg": {"fn": "count", "op": "gt"}}),
+            "/agg/value",
+            code::VALUE_MISSING,
+        );
+        assert_eq!(
+            check(json!({"event": "missing", "agg": {"fn": "sum", "prop": "x", "op": "gt", "value": 1}}))
+                .unwrap_err(),
+            [("/event".to_owned(), code::UNKNOWN_EVENT)]
+        );
+    }
+
+    #[test]
     fn an_unknown_event_still_checks_its_window() {
         let issues = check(json!({"event": "nope", "window": {"last": "P1096D"}})).unwrap_err();
         assert_eq!(
@@ -1139,6 +1172,64 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, code::TOO_DEEP);
         assert_eq!(issues[0].pointer.matches("/not").count(), MAX_DEPTH);
+    }
+
+    fn counted(node: &Node) -> usize {
+        match node {
+            Node::All(children) | Node::Any(children) => {
+                1 + children.iter().map(counted).sum::<usize>()
+            }
+            Node::Not(child) => counted(child),
+            Node::Event(condition) => 1 + condition.filters.len(),
+            _ => 1,
+        }
+    }
+
+    fn leaves(count: usize) -> Vec<Node> {
+        (0..count)
+            .map(|index| {
+                Node::Trait(TraitCondition {
+                    key: "age".into(),
+                    op: Op::Eq,
+                    value: Some(json!(index)),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_not_over_a_near_limit_group_still_validates_after_normalizing() {
+        let definition = Definition {
+            v: 1,
+            root: Node::Not(Box::new(Node::All(leaves(MAX_NODES - 2)))),
+        };
+        assert_eq!(counted(&definition.root), MAX_NODES - 1);
+        assert_eq!(validate(&definition, &catalog()), Ok(()));
+        let normalized = crate::normalize(definition);
+        assert_eq!(validate(&normalized, &catalog()), Ok(()));
+    }
+
+    #[test]
+    fn normalizing_never_increases_the_counted_nodes() {
+        let leaf = || leaves(1).remove(0);
+        let shapes = [
+            Node::Not(Box::new(Node::All(leaves(30)))),
+            Node::Not(Box::new(Node::Any(vec![
+                Node::All(leaves(5)),
+                Node::Not(Box::new(Node::Any(leaves(7)))),
+            ]))),
+            Node::All(vec![
+                Node::Not(Box::new(Node::All(vec![leaf(), Node::Any(leaves(4))]))),
+                Node::Any(vec![Node::Any(leaves(3)), Node::All(vec![leaf()])]),
+            ]),
+            Node::Not(Box::new(Node::Not(Box::new(Node::Not(Box::new(leaf())))))),
+            Node::Not(Box::new(Node::All(vec![Node::Any(vec![])]))),
+        ];
+        for root in shapes {
+            let before = counted(&root);
+            let after = counted(&crate::normalize(Definition { v: 1, root }).root);
+            assert!(after <= before, "{after} > {before}");
+        }
     }
 
     #[test]
