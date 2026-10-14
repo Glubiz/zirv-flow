@@ -4287,6 +4287,141 @@ export interface components {
             limit?: number | null;
             trait?: null | components["schemas"]["TraitQuery"];
         };
+        /** @enum {string} */
+        SegmentAggFn: "count" | "sum" | "min" | "max" | "avg" | "first_time" | "last_time";
+        SegmentAggregate: {
+            fn: components["schemas"]["SegmentAggFn"];
+            op: components["schemas"]["SegmentOp"];
+            prop?: string;
+            /** @description A number, or a timestamp for `first_time` and `last_time`. */
+            value: unknown;
+        };
+        /** @description True when every child is true; an empty list is true. */
+        SegmentAllNode: {
+            all: components["schemas"]["SegmentNode"][];
+        };
+        /** @description True when some child is true; an empty list is false. */
+        SegmentAnyNode: {
+            any: components["schemas"]["SegmentNode"][];
+        };
+        /** @description The person's consent status for a channel, or one of its topics. */
+        SegmentConsentNode: {
+            consent: {
+                channel: string;
+                /** @enum {string} */
+                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown";
+                topic?: string;
+            };
+        };
+        /** @description A segment definition, version 1: one node with `v` added beside its key. Unknown keys are refused. */
+        SegmentDefinition: {
+            all: components["schemas"]["SegmentNode"][];
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            any: components["schemas"]["SegmentNode"][];
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            not: components["schemas"]["SegmentNode"];
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            op: components["schemas"]["SegmentOp"];
+            trait: string;
+            /** @enum {integer} */
+            v: 1;
+            /** @description The operand; its type follows the trait's type. */
+            value?: unknown;
+        } | {
+            agg?: components["schemas"]["SegmentAggregate"];
+            event: string;
+            /** @enum {integer} */
+            v: 1;
+            where?: components["schemas"]["SegmentPropertyFilter"][];
+            window?: components["schemas"]["SegmentWindow"];
+        } | {
+            /** Format: uuid */
+            list: string;
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            /** Format: uuid */
+            segment: string;
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            consent: {
+                channel: string;
+                /** @enum {string} */
+                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown";
+                topic?: string;
+            };
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            identifier: string;
+            /** @enum {integer} */
+            v: 1;
+        };
+        /** @description The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one). */
+        SegmentEventNode: {
+            agg?: components["schemas"]["SegmentAggregate"];
+            event: string;
+            where?: components["schemas"]["SegmentPropertyFilter"][];
+            window?: components["schemas"]["SegmentWindow"];
+        };
+        /** @description The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or `external:<namespace>`. */
+        SegmentIdentifierNode: {
+            identifier: string;
+        };
+        /** @description One problem with a definition. It carries a position and a fixed code, never a value from the definition. */
+        SegmentIssue: {
+            /** @enum {string} */
+            code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long";
+            /** @description A JSON pointer into the definition. */
+            pointer: string;
+        };
+        /** @description The person is a member of the list. */
+        SegmentListNode: {
+            /** Format: uuid */
+            list: string;
+        };
+        /** @description One node of a segment condition tree: an object with exactly one node key. */
+        SegmentNode: components["schemas"]["SegmentAllNode"] | components["schemas"]["SegmentAnyNode"] | components["schemas"]["SegmentNotNode"] | components["schemas"]["SegmentTraitNode"] | components["schemas"]["SegmentEventNode"] | components["schemas"]["SegmentListNode"] | components["schemas"]["SegmentSegmentNode"] | components["schemas"]["SegmentConsentNode"] | components["schemas"]["SegmentIdentifierNode"];
+        /** @description Boolean negation of the child. A leaf's operator is never rewritten under it. */
+        SegmentNotNode: {
+            not: components["schemas"]["SegmentNode"];
+        };
+        /** @enum {string} */
+        SegmentOp: "eq" | "neq" | "in" | "not_in" | "contains" | "starts_with" | "exists" | "not_exists" | "gt" | "gte" | "lt" | "lte" | "between" | "before" | "after" | "within_last" | "more_than_ago" | "within_next" | "contains_all" | "is_empty";
+        SegmentPropertyFilter: {
+            op: components["schemas"]["SegmentOp"];
+            prop: string;
+            /** @description The operand; its type follows the property's type. */
+            value?: unknown;
+        };
+        /** @description The person is in the other segment. Cycles are rejected when the segment is saved. */
+        SegmentSegmentNode: {
+            /** Format: uuid */
+            segment: string;
+        };
+        /** @description A condition on a person's trait. Beside `trait` go `op` and, for most operators, `value`. */
+        SegmentTraitNode: {
+            op: components["schemas"]["SegmentOp"];
+            trait: string;
+            /** @description The operand; its type follows the trait's type. */
+            value?: unknown;
+        };
+        /** @description Which events count; with no window, all retained events. */
+        SegmentWindow: {
+            /** @description ISO 8601 duration in days or hours, such as P90D. */
+            last: string;
+        } | {
+            between: string[];
+        } | {
+            since_trait: string;
+        };
         SessionBody: {
             /** @description Send this as `x-csrf-token` on every POST, PUT, PATCH and DELETE made with the cookie. */
             csrf_token: string;
