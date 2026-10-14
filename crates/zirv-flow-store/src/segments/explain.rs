@@ -211,6 +211,15 @@ const SCOPED_EVENTS: &str = "FROM events e \
        ON s.name = e.name AND (s.since IS NULL OR e.occurred_at >= s.since) \
      WHERE e.workspace_id = $1 AND e.person_id = $2";
 
+/// One loaded event row, with the id the cap boundary is cut on.
+#[derive(sqlx::FromRow)]
+struct EventRow {
+    id: Uuid,
+    name: String,
+    occurred_at: OffsetDateTime,
+    properties: Json<Map<String, Value>>,
+}
+
 async fn load_events(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -227,21 +236,25 @@ async fn load_events(
         "SELECT e.id, e.name, e.occurred_at, e.properties {SCOPED_EVENTS} \
          ORDER BY e.occurred_at DESC, e.id DESC LIMIT $5"
     );
-    let mut rows: Vec<(Uuid, String, OffsetDateTime, Json<Map<String, Value>>)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .bind(workspace.as_uuid())
-            .bind(person)
-            .bind(&names)
-            .bind(&since)
-            .bind(limit)
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(StoreError::bounded)?;
+    let mut rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(workspace.as_uuid())
+        .bind(person)
+        .bind(&names)
+        .bind(&since)
+        .bind(limit)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::bounded)?;
 
     let mut capped = BTreeSet::new();
     if rows.len() > EXPLAIN_EVENT_CAP {
         rows.truncate(EXPLAIN_EVENT_CAP);
-        if let Some((last_id, _, last_at, _)) = rows.last() {
+        if let Some(EventRow {
+            id: last_id,
+            occurred_at: last_at,
+            ..
+        }) = rows.last()
+        {
             // The names that still have an event older than the oldest one kept.
             let sql = format!(
                 "SELECT DISTINCT e.name {SCOPED_EVENTS} AND (e.occurred_at, e.id) < ($5, $6)"
@@ -261,11 +274,18 @@ async fn load_events(
     }
     let events = rows
         .into_iter()
-        .map(|(_, name, occurred_at, Json(properties))| ExplainEvent {
-            name,
-            occurred_at,
-            properties,
-        })
+        .map(
+            |EventRow {
+                 name,
+                 occurred_at,
+                 properties,
+                 ..
+             }| ExplainEvent {
+                name,
+                occurred_at,
+                properties: properties.0,
+            },
+        )
         .collect();
     Ok((events, capped))
 }
