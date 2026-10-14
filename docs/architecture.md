@@ -1829,6 +1829,8 @@ As built (M3): `core::secrets` seals a secret with a random 32-byte data key and
 | Editor | Workspace | Draft segments, flows, templates, snippets, lists; assistant drafts when enabled; previews, test mode and test sends |
 | Viewer | Workspace | Read only; personal data masked unless granted `view_pii` |
 
+Editors create segments and save current segment versions (ruling e4aa60bb).
+
 M1 ships owner, admin and member; the full matrix lands in M8. The **audit
 log** is append-only (actor, action, object, time, request id, change summary
 without personal data values) and covers sign-ins, membership and key changes,

@@ -27,6 +27,30 @@ pub struct Problem {
     /// `search_timeout`; absent for the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
+    /// definition and a fixed code for each issue, never a value from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issues: Option<Vec<SegmentIssueProblem>>,
+    /// The segments of a reference cycle (`segment_cycle`) in path order, the first one
+    /// repeated at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<Vec<SegmentRefProblem>>,
+}
+
+/// One issue of a segment definition.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct SegmentIssueProblem {
+    /// A JSON pointer into the definition.
+    pub pointer: String,
+    /// A fixed issue code such as `unknown_trait`.
+    pub code: String,
+}
+
+/// A segment named in a problem.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct SegmentRefProblem {
+    pub id: uuid::Uuid,
+    pub name: String,
 }
 
 /// One invalid field of one item of an ingestion request.
@@ -40,6 +64,14 @@ pub struct ItemProblem {
     pub reason: String,
 }
 
+/// The fields only a segment problem carries.#[derive(Debug)]struct SegmentExtra {    issues: Option<Vec<SegmentIssueProblem>>,    cycle: Option<Vec<SegmentRefProblem>>,}
+/// The fields only a segment problem carries.
+#[derive(Debug)]
+struct SegmentExtra {
+    issues: Option<Vec<SegmentIssueProblem>>,
+    cycle: Option<Vec<SegmentRefProblem>>,
+}
+
 /// An error that renders as `application/problem+json`.
 #[derive(Debug)]
 pub(crate) struct ApiError {
@@ -48,6 +80,8 @@ pub(crate) struct ApiError {
     errors: Option<Vec<ItemProblem>>,
     retry_after: Option<u64>,
     code: Option<&'static str>,
+    /// The extra fields of a segment problem, boxed to keep the error small.
+    segment: Option<Box<SegmentExtra>>,
 }
 
 impl ApiError {
@@ -58,6 +92,7 @@ impl ApiError {
             errors: None,
             retry_after: None,
             code: None,
+            segment: None,
         }
     }
 
@@ -306,6 +341,73 @@ impl ApiError {
 }
 
 impl ApiError {
+    /// A segment definition that does not validate: every issue with its pointer and code.
+    pub(crate) fn segment_invalid(issues: Vec<SegmentIssueProblem>) -> Self {
+        Self {
+            code: Some("segment_invalid"),
+            segment: Some(Box::new(SegmentExtra {
+                issues: Some(issues),
+                cycle: None,
+            })),
+            ..Self::unprocessable("the segment definition is not valid")
+        }
+    }
+
+    /// A save that would make segments reference each other. The detail names the cycle as
+    /// "A → B → A".
+    pub(crate) fn segment_cycle(cycle: Vec<SegmentRefProblem>) -> Self {
+        let path: Vec<&str> = cycle.iter().map(|segment| segment.name.as_str()).collect();
+        Self {
+            code: Some("segment_cycle"),
+            ..Self::unprocessable(format!(
+                "segments cannot reference each other: {}",
+                path.join(" \u{2192} ")
+            ))
+            .with_cycle(cycle)
+        }
+    }
+
+    fn with_cycle(mut self, cycle: Vec<SegmentRefProblem>) -> Self {
+        self.segment = Some(Box::new(SegmentExtra {
+            issues: None,
+            cycle: Some(cycle),
+        }));
+        self
+    }
+
+    /// An archive of a segment that another live segment's current version still references.
+    pub(crate) fn segment_referenced(by: &[SegmentRefProblem]) -> Self {
+        let names: Vec<&str> = by.iter().map(|segment| segment.name.as_str()).collect();
+        Self {
+            code: Some("segment_referenced"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                format!("referenced by {}", names.join(", ")),
+            )
+        }
+    }
+
+    /// A write to an archived segment.
+    pub(crate) fn segment_archived() -> Self {
+        Self {
+            code: Some("segment_archived"),
+            ..Self::new(StatusCode::CONFLICT, "the segment is archived")
+        }
+    }
+
+    /// A preview that ran past its time limit and was cancelled.
+    pub(crate) fn segment_preview_timeout() -> Self {
+        Self {
+            code: Some("segment_preview_timeout"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the preview took too long; narrow the definition and try again",
+            )
+        }
+    }
+}
+
+impl ApiError {
     /// The assistant is off for the workspace, or its model is no longer offered.
     pub(crate) fn ai_disabled() -> Self {
         Self {
@@ -456,7 +558,7 @@ impl From<crate::admin::AdminError> for ApiError {
 }
 
 impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
+    fn into_response(mut self) -> Response {
         let problem = Problem {
             kind: "about:blank".into(),
             title: self.status.canonical_reason().unwrap_or("Error").into(),
@@ -466,6 +568,8 @@ impl IntoResponse for ApiError {
             trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
             errors: self.errors,
             code: self.code.map(str::to_owned),
+            issues: self.segment.as_mut().and_then(|extra| extra.issues.take()),
+            cycle: self.segment.as_mut().and_then(|extra| extra.cycle.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (

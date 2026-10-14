@@ -5259,6 +5259,7 @@ dependencies = [
  "zirv-flow-connectors",
  "zirv-flow-core",
  "zirv-flow-identity",
+ "zirv-flow-segments",
  "zirv-flow-store",
 ]
 

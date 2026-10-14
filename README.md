@@ -738,6 +738,38 @@ keys see its kind and a `masked` flag instead.
 keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
 history moves to the survivor.
 
+## Segments
+
+A segment is a named, versioned definition of a group of people, built from traits, events,
+lists, consent and other segments. The definition format is the AST in the OpenAPI document
+(`SegmentDefinition`). Membership itself is computed later; today you can save and preview.
+
+- **Create and version.** `POST /api/v1/workspaces/{ws}/segments` with `{name, description?,
+  cadence_minutes?, definition}` creates version 1. `PATCH .../segments/{id}` with a
+  `definition` saves the next version and makes it current; there is no separate publish, so
+  any member (or a `write` key) saves. Versions are immutable: `GET .../segments/{id}/versions`
+  and `.../versions/{n}`. `cadence_minutes` is one of 5, 10, 15, 30, 60, 120, 180, 240, 360,
+  480, 720, 1440 or 10080 (default 60).
+- **Checked at save.** A definition is checked against the workspace's traits, event schemas,
+  lists, live segments and consent topics. A failure is 422 `segment_invalid` with
+  `issues: [{pointer, code}]`, never a value. A segment that refers to another that refers back
+  is 422 `segment_cycle`, with `cycle: [{id, name}]` in path order and a detail such as
+  "A → B → A". A reference to a missing or archived segment is `unknown_segment`.
+- **Archive.** `POST .../segments/{id}/archive` is refused with 409 `segment_referenced` while a
+  current version of another live segment references it. The list hides archived segments
+  unless `?archived=true`.
+- **Preview.** `POST .../segments/preview` with `{definition, sample_size?}` (20 by default,
+  100 at most) runs an unsaved definition on the primary and returns `{count, sample,
+  data_age, compiled_at}`. It reads in one read-only snapshot and stops at 10 seconds with 503
+  `segment_preview_timeout`. Sample identifiers are masked like the people search. `data_age`
+  is the oldest `last_success_at` of the enabled streams whose saved mapping writes a trait,
+  event or list the definition reads (including through segments it references), with each
+  feeding source; with no feeding stream `as_of` is null and the data is live.
+- **Access and audit.** `read` looks and previews; creating, saving and archiving need a
+  workspace member or a `write` key. Writes are audited as `segment.created`,
+  `segment.updated` (with the version) and `segment.archived`; the audit never holds a
+  definition's values.
+
 ## Contacts
 
 For a company with no customer system of its own, zirv flow can hold the contacts itself. A

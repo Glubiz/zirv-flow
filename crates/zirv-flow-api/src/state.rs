@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
@@ -44,6 +45,8 @@ pub struct AppState {
     keyring: Option<Arc<Keyring>>,
     /// The explorer's time and row limits.
     pub(crate) explorer: ExplorerLimits,
+    /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
+    pub(crate) segment_preview_timeout: Duration,
     /// The shared listener and the viewers of the event debugger.
     pub(crate) debugger: DebuggerHub,
     /// Fires when the server is shutting down, so long-lived streams end and do not hold the
@@ -91,6 +94,7 @@ impl AppState {
             identifier_key: None,
             keyring: None,
             explorer: ExplorerLimits::default(),
+            segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
             stop: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
@@ -167,6 +171,12 @@ impl AppState {
     /// The explorer's query timeouts and row limits.
     pub fn with_explorer_limits(mut self, limits: ExplorerLimits) -> Self {
         self.explorer = limits;
+        self
+    }
+
+    /// How long a segment preview may run; 10 seconds by default.
+    pub fn with_segment_preview_timeout(mut self, timeout: Duration) -> Self {
+        self.segment_preview_timeout = timeout;
         self
     }
 
