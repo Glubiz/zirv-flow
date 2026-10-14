@@ -221,7 +221,7 @@ per-person explanations and visible data age; membership changes become events.
 - **Assistant.** Natural language drafts segment ASTs and explains saved segments through typed read-and-draft tools; compiler errors receive bounded repair, and review shows the AST diff, preview count and sample before acceptance.
 - **Versions and freshness.** Segment versions, `computed_at`, input freshness. Erasure and deletion reach memberships.
 - **UI.** Builder over registry and event catalog, live count with data age, sample people, explain on the profile, membership history, refresh now.
-- **Decisions.** OQ-2 (event rollups), OQ-6 (definition-edit triggers).
+- **Decisions.** OQ-2 (event rollups), by benchmark (#127). OQ-6 (definition-edit triggers) is decided in architecture section 21.1.
 
 **Out of scope.** Segments over custom objects, raw SQL segments, predictive
 segments, federated sources.
