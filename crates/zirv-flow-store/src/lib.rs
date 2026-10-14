@@ -135,6 +135,8 @@ pub use privacy::{
     expire_exports, find_erasure_request, find_privacy_export, list_erasure_requests,
     list_privacy_exports, replay_erasures, request_erasure, request_export,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use segments::run_segment_ids;
 pub use segments::{
     CADENCE_MINUTES, CatalogSnapshot, DEFAULT_CADENCE_MINUTES, DataAge, FeedingSource,
     HistoryCursor, HistoryRow, MemberRow, MembershipCause, NewSegment, NewSegmentVersion,
