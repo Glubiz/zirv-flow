@@ -391,6 +391,15 @@ async fn person_document(
              ORDER BY lower(l.name), l.id",
         )
         .await?;
+    let segments = section
+        .rows(
+            "SELECT s.id AS segment_id, s.name, m.version, m.entered_at, m.entered_cause, \
+                    m.exited_version, m.exited_at, m.exited_cause \
+             FROM segment_members m JOIN segments s ON s.id = m.segment_id \
+             WHERE m.workspace_id = $1 AND m.person_id = ANY($2) \
+             ORDER BY lower(s.name), s.id, m.entered_at, m.id",
+        )
+        .await?;
     let list_history = section
         .rows(
             "SELECT c.id, c.list_id, l.name AS list_name, c.action, c.source, c.occurred_at, \
@@ -435,6 +444,7 @@ async fn person_document(
             "consent": consent,
             "consent_history": consent_history,
             "lists": lists,
+            "segments": segments,
             "list_history": list_history,
             "merges": merges,
             "identity_conflicts": identity_conflicts,
@@ -585,6 +595,11 @@ mod tests {
         assert_eq!(count("consent_history"), 2);
         assert_eq!(count("lists"), 2);
         assert_eq!(count("list_history"), 2);
+        assert_eq!(
+            count("segments"),
+            2,
+            "the open row and the merged person's closed one"
+        );
         assert_eq!(count("merges"), 1);
         assert_eq!(count("identity_conflicts"), 1);
         // The profile carries the traits, and events come oldest first.

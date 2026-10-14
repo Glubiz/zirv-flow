@@ -73,7 +73,7 @@ pub async fn snapshot_now(connection: &mut PgConnection) -> Result<OffsetDateTim
         .map_err(StoreError::bounded)
 }
 
-fn bind_all<'q, O>(
+pub(super) fn bind_all<'q, O>(
     mut query: QueryScalar<'q, sqlx::Postgres, O, PgArguments>,
     workspace: WorkspaceId,
     params: &'q [SqlParam],

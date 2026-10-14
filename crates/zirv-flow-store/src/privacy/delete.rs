@@ -61,6 +61,7 @@ pub async fn delete_person(
     }
 
     remove_from_lists(connection, workspace, &people).await?;
+    crate::segments::forget_people(connection, workspace, &people).await?;
     for statement in DELETIONS {
         sqlx::query(*statement)
             .bind(workspace.as_uuid())
@@ -106,6 +107,7 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
+    "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -226,6 +228,23 @@ mod tests {
         .await
         .unwrap();
         assert!(drifted.is_empty(), "member counts drifted: {drifted:?}");
+        let segment_drift: Vec<i32> = sqlx::query_scalar(
+            "SELECT member_count FROM segments s WHERE member_count <> \
+                (SELECT count(*) FROM segment_members m \
+                 WHERE m.segment_id = s.id AND m.exited_at IS NULL)",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            segment_drift.is_empty(),
+            "segment counts drifted: {segment_drift:?}"
+        );
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM segment_members")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "only the bystander's membership is left");
     }
 
     #[sqlx::test]

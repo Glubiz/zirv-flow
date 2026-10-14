@@ -138,6 +138,34 @@ fn parse_timezone(timezone: &str) -> Result<Tz, ScheduleError> {
     Tz::from_str(timezone).map_err(|_| ScheduleError::InvalidTimezone)
 }
 
+/// The UTC cron of a segment refresh every `cadence_minutes`, shifted by a stable phase taken
+/// from `phase` (the segment's id), so a workspace's segments do not all refresh on the same
+/// minute (ruling 303ac6ac). The interval stays exact: slots are `cadence_minutes` apart across
+/// hour, day and week boundaries. `None` for a cadence outside the ruled set of 5, 10, 15, 30,
+/// 60, 120, 180, 240, 360, 480, 720, 1440 and 10080 minutes.
+///
+/// The phase spreads the minute within the interval up to an hour, then the hour within the
+/// interval up to a day, and the weekday for a week.
+pub fn cadence_cron(cadence_minutes: i32, phase: u64) -> Option<String> {
+    let minute = phase % 60;
+    let hour = (phase / 60) % 24;
+    let weekday = (phase / 1440) % 7;
+    Some(match cadence_minutes {
+        5 | 10 | 15 | 30 => {
+            let every = u64::try_from(cadence_minutes).ok()?;
+            format!("{}-59/{every} * * * *", phase % every)
+        }
+        60 => format!("{minute} * * * *"),
+        120 | 180 | 240 | 360 | 480 | 720 => {
+            let every = u64::try_from(cadence_minutes / 60).ok()?;
+            format!("{minute} {}-23/{every} * * *", hour % every)
+        }
+        1440 => format!("{minute} {hour} * * *"),
+        10080 => format!("{minute} {hour} * * {weekday}"),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
@@ -146,6 +174,82 @@ mod tests {
 
     const BASE: Duration = Duration::from_secs(2);
     const CAP: Duration = Duration::from_secs(600);
+
+    const CADENCES: [i32; 13] = [5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440, 10080];
+
+    /// Phases that put the offset in every position of every field.
+    fn phases() -> Vec<u64> {
+        let mut phases: Vec<u64> = (0..100).map(|n| n * 1013 + 3).collect();
+        phases.extend([0, 1, 59, 60, 1439, 10079, u64::MAX, 0x018f_0000_0000_7000]);
+        phases
+    }
+
+    #[test]
+    fn a_cadence_slot_comes_exactly_one_interval_after_the_last_across_hours_days_and_weeks() {
+        let start = datetime!(2030-02-27 21:41:13 UTC);
+        for cadence in CADENCES {
+            for phase in phases() {
+                let cron = cadence_cron(cadence, phase).unwrap();
+                let mut slot = next_after(&cron, "UTC", start).unwrap();
+                // The first slot is within one interval of the start.
+                assert!(
+                    slot - start <= time::Duration::minutes(i64::from(cadence)),
+                    "{cron}"
+                );
+                let span = if cadence >= 1440 { 4 } else { 30 };
+                for _ in 0..span {
+                    let next = next_after(&cron, "UTC", slot).unwrap();
+                    assert_eq!(
+                        next - slot,
+                        time::Duration::minutes(i64::from(cadence)),
+                        "{cron} after {slot}"
+                    );
+                    slot = next;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_phase_spreads_segments_over_the_interval_and_is_stable() {
+        let distinct = |cadence: i32| {
+            let mut crons: Vec<String> = (0..10_080)
+                .map(|phase| cadence_cron(cadence, phase).unwrap())
+                .collect();
+            crons.sort();
+            crons.dedup();
+            crons.len()
+        };
+        assert_eq!(distinct(5), 5);
+        assert_eq!(distinct(30), 30);
+        assert_eq!(distinct(60), 60);
+        assert_eq!(distinct(120), 60 * 2);
+        assert_eq!(distinct(720), 60 * 12);
+        assert_eq!(distinct(1440), 60 * 24);
+        assert_eq!(distinct(10080), 60 * 24 * 7);
+        assert_eq!(cadence_cron(60, 4242), cadence_cron(60, 4242));
+    }
+
+    #[test]
+    fn one_example_cron_per_cadence_class() {
+        // phase 4242 = 70 h 42 min: minute 42, hour 22, weekday 2.
+        assert_eq!(cadence_cron(15, 4242).as_deref(), Some("12-59/15 * * * *"));
+        assert_eq!(cadence_cron(60, 4242).as_deref(), Some("42 * * * *"));
+        assert_eq!(cadence_cron(360, 4242).as_deref(), Some("42 4-23/6 * * *"));
+        assert_eq!(cadence_cron(1440, 4242).as_deref(), Some("42 22 * * *"));
+        assert_eq!(cadence_cron(10080, 4242).as_deref(), Some("42 22 * * 2"));
+    }
+
+    #[test]
+    fn a_cadence_outside_the_ruled_set_has_no_cron() {
+        for cadence in [-5, 0, 1, 7, 45, 90, 1441, 10081] {
+            assert_eq!(cadence_cron(cadence, 1), None, "{cadence}");
+        }
+        for cadence in CADENCES {
+            let cron = cadence_cron(cadence, 99).unwrap();
+            assert!(validate(&cron, "UTC").is_ok(), "{cron}");
+        }
+    }
 
     #[test]
     fn the_backoff_doubles_until_the_cap() {
