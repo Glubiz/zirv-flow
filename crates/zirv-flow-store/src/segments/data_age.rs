@@ -72,8 +72,10 @@ pub struct FeedingSource {
 /// How current a definition's data is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataAge {
-    /// The oldest `last_success_at` of the feeding sources that have one; `None` when nothing
-    /// feeds the definition (it reads only live data), or no feeding source has succeeded yet.
+    /// True exactly when no stream feeds the definition: it reads only live data.
+    pub live: bool,
+    /// The oldest `last_success_at` across the feeding sources. `None` when `live`, and also
+    /// when any feeding source has never succeeded (`sources` shows which one).
     pub as_of: Option<OffsetDateTime>,
     pub sources: Vec<FeedingSource>,
 }
@@ -151,11 +153,24 @@ pub async fn segment_data_age(
             }),
         }
     }
-    let as_of = sources
+    let live = sources.is_empty();
+    // One source that never succeeded makes the age unknown, not the age of the others.
+    let as_of = if sources
         .iter()
-        .filter_map(|source| source.last_success_at)
-        .min();
-    Ok(DataAge { as_of, sources })
+        .any(|source| source.last_success_at.is_none())
+    {
+        None
+    } else {
+        sources
+            .iter()
+            .filter_map(|source| source.last_success_at)
+            .min()
+    };
+    Ok(DataAge {
+        live,
+        as_of,
+        sources,
+    })
 }
 
 #[cfg(test)]
@@ -328,6 +343,7 @@ mod tests {
         assert_eq!(
             live,
             DataAge {
+                live: true,
                 as_of: None,
                 sources: Vec::new()
             }
@@ -346,8 +362,52 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(!age.live);
         assert_eq!(age.as_of, None);
         assert_eq!(age.sources.len(), 1);
         assert_eq!(age.sources[0].last_success_at, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_never_synced_feeder_keeps_the_age_unknown_beside_a_synced_one(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let synced = source(&pool, ws, "Synced", true).await;
+        let fresh = source(&pool, ws, "Fresh", true).await;
+        let at = datetime!(2026-02-01 00:00 UTC);
+        stream(
+            &pool,
+            ws,
+            synced,
+            "contacts",
+            Some(plan_mapping()),
+            true,
+            Some(at),
+        )
+        .await;
+        stream(
+            &pool,
+            ws,
+            fresh,
+            "contacts",
+            Some(plan_mapping()),
+            true,
+            None,
+        )
+        .await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let age = segment_data_age(&mut connection, ws, &json!({"traits": ["plan"]}))
+            .await
+            .unwrap();
+
+        assert!(!age.live);
+        assert_eq!(age.as_of, None);
+        let found: Vec<(&str, Option<OffsetDateTime>)> = age
+            .sources
+            .iter()
+            .map(|source| (source.name.as_str(), source.last_success_at))
+            .collect();
+        assert_eq!(found, [("Fresh", None), ("Synced", Some(at))]);
     }
 }

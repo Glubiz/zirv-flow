@@ -59,3 +59,19 @@ $$;
 CREATE TRIGGER segment_versions_immutable
     BEFORE UPDATE ON segment_versions
     FOR EACH ROW EXECUTE FUNCTION segment_versions_immutable();
+
+-- A version is not deleted on its own. Deleting its segment (or the workspace) still removes it:
+-- the cascade deletes the parent row first, so this trigger no longer finds it.
+CREATE FUNCTION segment_versions_no_delete() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM segments WHERE id = OLD.segment_id) THEN
+        RAISE EXCEPTION 'segment versions cannot be deleted while their segment exists';
+    END IF;
+    RETURN OLD;
+END
+$$;
+
+CREATE TRIGGER segment_versions_no_delete
+    BEFORE DELETE ON segment_versions
+    FOR EACH ROW EXECUTE FUNCTION segment_versions_no_delete();

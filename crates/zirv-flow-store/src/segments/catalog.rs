@@ -32,6 +32,16 @@ pub async fn segment_catalog(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<CatalogSnapshot, StoreError> {
+    // A statement cancelled at the preview's timeout is a timeout, not a failed query.
+    read_catalog(connection, workspace)
+        .await
+        .map_err(StoreError::into_bounded)
+}
+
+async fn read_catalog(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<CatalogSnapshot, StoreError> {
     let mut snapshot = CatalogSnapshot::default();
     for definition in list_trait_definitions(&mut *connection, workspace).await? {
         if !definition.archived {
