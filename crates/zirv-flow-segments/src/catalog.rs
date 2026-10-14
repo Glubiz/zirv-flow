@@ -15,8 +15,8 @@ pub struct Catalog {
     pub events: HashMap<String, HashMap<String, PropertyType>>,
     pub lists: HashSet<Uuid>,
     pub segments: HashSet<Uuid>,
-    /// The consent topic keys of each channel.
-    pub topics: HashMap<Channel, HashSet<String>>,
+    /// The consent topics of each channel: each key with its id.
+    pub topics: HashMap<Channel, HashMap<String, Uuid>>,
 }
 
 #[cfg(test)]

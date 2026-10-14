@@ -45,8 +45,8 @@ pub fn validate(definition: &Definition, catalog: &Catalog) -> Result<(), Vec<Is
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Kind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Kind {
     String,
     Number,
     Integer,
@@ -128,7 +128,7 @@ const LIST_OPS: &[Op] = &[
 ];
 const OBJECT_OPS: &[Op] = &[Op::Exists, Op::NotExists];
 
-const fn ops_for(kind: Kind) -> &'static [Op] {
+pub(crate) const fn ops_for(kind: Kind) -> &'static [Op] {
     match kind {
         Kind::String => STRING_OPS,
         Kind::Number | Kind::Integer => NUMBER_OPS,
@@ -239,7 +239,7 @@ impl Checker<'_> {
                 .catalog
                 .topics
                 .get(&channel)
-                .is_some_and(|topics| topics.contains(topic));
+                .is_some_and(|topics| topics.contains_key(topic));
             if !known {
                 self.report(&pointer_push(&base, "topic"), code::UNKNOWN_TOPIC);
             }
@@ -504,7 +504,6 @@ fn is_integral(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hashbrown::HashSet;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -513,6 +512,7 @@ mod tests {
     const LIST: &str = "018f0000-0000-7000-8000-000000000001";
     const SEGMENT: &str = "018f0000-0000-7000-8000-000000000002";
     const OTHER: &str = "018f0000-0000-7000-8000-000000000003";
+    const NEWS: &str = "018f0000-0000-7000-8000-000000000004";
 
     fn catalog() -> Catalog {
         let mut catalog = Catalog::default();
@@ -542,8 +542,8 @@ mod tests {
         catalog.events.insert("order".to_owned(), order);
         catalog.lists.insert(Uuid::parse_str(LIST).unwrap());
         catalog.segments.insert(Uuid::parse_str(SEGMENT).unwrap());
-        let mut topics = HashSet::new();
-        topics.insert("news".to_owned());
+        let mut topics = HashMap::new();
+        topics.insert("news".to_owned(), Uuid::parse_str(NEWS).unwrap());
         catalog.topics.insert(Channel::Email, topics);
         catalog
     }
