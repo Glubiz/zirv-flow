@@ -95,6 +95,20 @@ pub struct ClearFields {
 }
 
 impl ClearFields {
+    /// The fields declared not personal: trait keys, and event name with property name.
+    pub fn new<'a>(
+        traits: impl IntoIterator<Item = &'a str>,
+        event_properties: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        Self {
+            traits: traits.into_iter().map(str::to_owned).collect(),
+            event_properties: event_properties
+                .into_iter()
+                .map(|(event, property)| (event.to_owned(), property.to_owned()))
+                .collect(),
+        }
+    }
+
     pub fn is_trait_pii(&self, key: &str) -> bool {
         !self.traits.contains(key)
     }
@@ -415,6 +429,26 @@ mod tests {
 
         assert!(load(&pool, ours, stranger, &[]).await.is_none());
         assert!(load(&pool, ours, Uuid::now_v7(), &[]).await.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merged_person_is_read_as_the_survivor_with_the_asked_id_named(pool: PgPool) {
+        let ws = workspace(&pool, "explain-merged").await;
+        let survivor = person(&pool, ws, "ada@example.com", "pro").await;
+        let loser = person(&pool, ws, "ada.old@example.com", "free").await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let loaded = load(&pool, ws, loser, &[]).await.unwrap();
+
+        assert_eq!(loaded.id, survivor);
+        assert_eq!(loaded.merged_from, Some(loser));
+        assert_eq!(loaded.traits["plan"], "pro");
     }
 
     #[sqlx::test]
