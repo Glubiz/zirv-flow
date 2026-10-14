@@ -19,6 +19,7 @@ mod people;
 mod pool;
 mod privacy;
 pub mod secrets;
+mod segments;
 mod sessions;
 mod sources;
 mod stream_freshness;
@@ -131,6 +132,13 @@ pub use privacy::{
     PrivacyExport, ReplayReport, build_export, delete_person, download_export, erase_person,
     expire_exports, find_erasure_request, find_privacy_export, list_erasure_requests,
     list_privacy_exports, replay_erasures, request_erasure, request_export,
+};
+pub use segments::{
+    CADENCE_MINUTES, CatalogSnapshot, DEFAULT_CADENCE_MINUTES, DataAge, FeedingSource, NewSegment,
+    NewSegmentVersion, SampleRow, Segment, SegmentError, SegmentPatch, SegmentRef, SegmentVersion,
+    SqlParam, SqlQuery, archive_segment, begin_segment_snapshot, create_segment, find_segment,
+    find_segment_version, list_segment_versions, list_segments, lock_segments, run_segment_preview,
+    segment_catalog, segment_data_age, snapshot_now, update_segment,
 };
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,

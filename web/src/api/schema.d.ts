@@ -1481,6 +1481,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live segments by name; archived ones with `archived=true`. */
+        get: operations["list_segments"];
+        put?: never;
+        /**
+         * Creates a segment with its first version. The definition is checked against the workspace's
+         *     traits, events, lists, segments and consent topics. Audited as `segment.created`.
+         */
+        post: operations["create_segment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Previews a definition without saving it: how many people match, a sample of them and the age
+         *     of the data. A definition that does not validate is 422 `segment_invalid` with its issues. A
+         *     preview that runs past its time limit is 503 with the code `segment_preview_timeout`.
+         *     Identifier values in the sample are shown to the owner, workspace admins and `admin` keys and
+         *     masked for everyone else.
+         */
+        post: operations["preview_segment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One segment with its current version, its dependencies and whether it is time-sensitive. */
+        get: operations["get_segment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Changes a segment. A definition is saved as the next version and becomes the current one,
+         *     after the references are checked for a cycle. Audited as `segment.updated`.
+         */
+        patch: operations["update_segment"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archives a segment; refused while a current version of another live segment references it.
+         *     Versions stay readable. Audited as `segment.archived`.
+         */
+        post: operations["archive_segment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The versions of a segment, newest first. */
+        get: operations["list_segment_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of a segment. */
+        get: operations["get_segment_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
         parameters: {
             query?: never;
@@ -2521,6 +2640,22 @@ export interface components {
              */
             name: string;
         };
+        CreateSegmentRequest: {
+            /**
+             * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
+             * @enum {integer}
+             */
+            cadence_minutes?: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
+            definition: components["schemas"]["SegmentDefinition"];
+            /** @description At most 500 characters. */
+            description?: string;
+            /**
+             * @description 1 to 100 characters after trimming; unique among the workspace's live segments, ignoring
+             *     case.
+             * @example Pro customers
+             */
+            name: string;
+        };
         CreateSourceRequest: {
             /** @description The plain settings, checked against the type's field specs. */
             config: {
@@ -2737,6 +2872,30 @@ export interface components {
             imports: components["schemas"]["CsvImportBody"][];
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
+        };
+        /** @description How current the data behind a preview is. */
+        DataAgeBody: {
+            /**
+             * Format: date-time
+             * @description The oldest `last_success_at` across the sources whose enabled streams have a mapping that
+             *     writes a trait, event or list the definition reads, including through segments it
+             *     references. Null when `live`, and null when any feeding source has never succeeded: the
+             *     age is then unknown, and `sources` shows which source has no success.
+             */
+            as_of?: string | null;
+            /** @description True exactly when no stream feeds the definition: it reads only live data. */
+            live: boolean;
+            sources: components["schemas"]["DataSourceBody"][];
+        };
+        DataSourceBody: {
+            /**
+             * Format: date-time
+             * @description When the source's oldest feeding stream last succeeded; null when one never has.
+             */
+            last_success_at?: string | null;
+            name: string;
+            /** Format: uuid */
+            source_id: string;
         };
         DeadJobsBody: {
             /** @description Newest first. */
@@ -3848,9 +4007,19 @@ export interface components {
              *     `search_timeout`; absent for the rest.
              */
             code?: string | null;
+            /**
+             * @description The segments of a reference cycle (`segment_cycle`) in path order, the first one
+             *     repeated at the end.
+             */
+            cycle?: components["schemas"]["SegmentRefProblem"][] | null;
             detail: string;
             /** @description The invalid fields of an ingestion request: field names and reason codes, never values. */
             errors?: components["schemas"]["ItemProblem"][] | null;
+            /**
+             * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
+             *     definition and a fixed code for each issue, never a value from it.
+             */
+            issues?: components["schemas"]["SegmentIssueProblem"][] | null;
             /** @description The `x-request-id` of the failed request. */
             request_id?: string | null;
             /** Format: int32 */
@@ -4304,6 +4473,34 @@ export interface components {
         SegmentAnyNode: {
             any: components["schemas"]["SegmentNode"][];
         };
+        SegmentBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /**
+             * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
+             * @enum {integer}
+             */
+            cadence_minutes: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The version that is current: the newest one saved.
+             */
+            current_version: number;
+            description: string;
+            /** Format: uuid */
+            id: string;
+            /** @example Pro customers */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description The person's consent status for a channel, or one of its topics. */
         SegmentConsentNode: {
             consent: {
@@ -4364,6 +4561,10 @@ export interface components {
             /** @enum {integer} */
             v: 1;
         };
+        /** @description A segment with its current version. */
+        SegmentDetailBody: components["schemas"]["SegmentBody"] & {
+            current: components["schemas"]["SegmentVersionBody"];
+        };
         /** @description The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one). */
         SegmentEventNode: {
             agg?: components["schemas"]["SegmentAggregate"];
@@ -4379,6 +4580,13 @@ export interface components {
         SegmentIssue: {
             /** @enum {string} */
             code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long";
+            /** @description A JSON pointer into the definition. */
+            pointer: string;
+        };
+        /** @description One issue of a segment definition. */
+        SegmentIssueProblem: {
+            /** @description A fixed issue code such as `unknown_trait`. */
+            code: string;
             /** @description A JSON pointer into the definition. */
             pointer: string;
         };
@@ -4401,6 +4609,12 @@ export interface components {
             /** @description The operand; its type follows the property's type. */
             value?: unknown;
         };
+        /** @description A segment named in a problem. */
+        SegmentRefProblem: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
         /** @description The person is in the other segment. Cycles are rejected when the segment is saved. */
         SegmentSegmentNode: {
             /** Format: uuid */
@@ -4412,6 +4626,22 @@ export interface components {
             trait: string;
             /** @description The operand; its type follows the trait's type. */
             value?: unknown;
+        };
+        SegmentVersionBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            definition: components["schemas"]["SegmentDefinition"];
+            /**
+             * @description What the definition reads: traits, events, lists, segments, consent, identifiers and the
+             *     change classes.
+             */
+            deps: Record<string, never>;
+            /** @description Whether membership can change as time passes with no new data. */
+            time_sensitive: boolean;
+            /** Format: int32 */
+            version: number;
         };
         /** @description Which events count; with no window, all retained events. */
         SegmentWindow: {
@@ -4859,6 +5089,16 @@ export interface components {
             retention_days?: number | null;
         };
         UpdateListRequest: {
+            description?: string | null;
+            name?: string | null;
+        };
+        UpdateSegmentRequest: {
+            /**
+             * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
+             * @enum {integer}
+             */
+            cadence_minutes?: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
+            definition?: components["schemas"]["SegmentDefinition"];
             description?: string | null;
             name?: string | null;
         };
@@ -10957,6 +11197,505 @@ export interface operations {
             };
             /** @description The policy is not keep or delete */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_segments: {
+        parameters: {
+            query?: {
+                /** @description Include archived segments; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The segments */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSegmentRequest"];
+            };
+        };
+        responses: {
+            /** @description The new segment with its first version */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live segment has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, description or cadence, or a definition that does not validate (`code` is `segment_invalid`, with `issues`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    preview_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The count, a sample and the data age */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A definition that does not validate (`code` is `segment_invalid`, with `issues`), or a sample size out of range */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The preview ran past its time limit (`code` is `segment_preview_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The segment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSegmentRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated segment with its current version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live segment has that name, or the segment is archived (`code` is `segment_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, no field at all, a definition that does not validate (`segment_invalid`, with `issues`), or a definition that closes a reference cycle (`segment_cycle`, with `cycle`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived segment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_segment_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentVersionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_segment_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, segment or version, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

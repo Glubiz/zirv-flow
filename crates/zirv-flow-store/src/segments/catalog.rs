@@ -1,0 +1,212 @@
+//! The workspace facts a segment definition is checked against: the input save and preview
+//! share, so they cannot disagree about what exists.
+
+use hashbrown::{HashMap, HashSet};
+use sqlx::PgConnection;
+use sqlx::types::Json;
+use uuid::Uuid;
+use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::consent::Channel;
+use zirv_flow_core::events::{PropertyType, SchemaProperty};
+use zirv_flow_core::people::TraitType;
+
+use crate::{StoreError, list_topics, list_trait_definitions};
+
+/// What a workspace defines now: traits that are not archived, the properties of each event
+/// schema's current version, list ids, the ids of segments that are not archived and the
+/// consent topics of each channel. The API turns it into the compiler's catalog.
+#[derive(Clone, Debug, Default)]
+pub struct CatalogSnapshot {
+    pub traits: HashMap<String, TraitType>,
+    pub events: HashMap<String, HashMap<String, PropertyType>>,
+    pub lists: HashSet<Uuid>,
+    pub segments: HashSet<Uuid>,
+    /// Each channel's topics: a key with its id.
+    pub topics: HashMap<Channel, HashMap<String, Uuid>>,
+}
+
+/// Reads the snapshot on `connection`. Run it inside the transaction that uses the result:
+/// preview reads it in its repeatable-read transaction, save in the transaction that holds the
+/// segments lock.
+pub async fn segment_catalog(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<CatalogSnapshot, StoreError> {
+    // A statement cancelled at the preview's timeout is a timeout, not a failed query.
+    read_catalog(connection, workspace)
+        .await
+        .map_err(StoreError::into_bounded)
+}
+
+async fn read_catalog(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<CatalogSnapshot, StoreError> {
+    let mut snapshot = CatalogSnapshot::default();
+    for definition in list_trait_definitions(&mut *connection, workspace).await? {
+        if !definition.archived {
+            snapshot
+                .traits
+                .insert(definition.key, definition.trait_type);
+        }
+    }
+
+    let schemas: Vec<(String, Json<Vec<SchemaProperty>>)> = sqlx::query_as(
+        "SELECT s.name, v.properties FROM event_schemas s \
+         JOIN event_schema_versions v ON v.workspace_id = s.workspace_id \
+                                     AND v.name = s.name AND v.version = s.current_version \
+         WHERE s.workspace_id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    for (name, Json(properties)) in schemas {
+        snapshot.events.insert(
+            name,
+            properties
+                .into_iter()
+                .map(|property| (property.name, property.property_type))
+                .collect(),
+        );
+    }
+
+    let lists: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM lists WHERE workspace_id = $1")
+        .bind(workspace.as_uuid())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    snapshot.lists.extend(lists);
+
+    let segments: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM segments WHERE workspace_id = $1 AND archived_at IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    snapshot.segments.extend(segments);
+
+    for topic in list_topics(&mut *connection, workspace, false).await? {
+        snapshot
+            .topics
+            .entry(topic.channel)
+            .or_default()
+            .insert(topic.key, topic.id);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use zirv_flow_core::consent::TopicPolicy;
+    use zirv_flow_core::events::EventMode;
+    use zirv_flow_core::people::Precedence;
+    use zirv_flow_core::{Slug, WorkspaceName};
+
+    use super::*;
+    use crate::{
+        NewEventSchema, NewTopic, NewTraitDefinition, TraitDefinitionUpdate, create_event_schema,
+        create_list, create_topic, create_trait_definition, create_workspace, publish_schema_draft,
+        update_trait_definition,
+    };
+
+    async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let name = WorkspaceName::parse(slug).unwrap();
+        let slug = Slug::parse(slug).unwrap();
+        create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    fn new_trait(key: &str) -> NewTraitDefinition {
+        NewTraitDefinition {
+            key: key.into(),
+            trait_type: TraitType::Number,
+            precedence: Precedence::Latest,
+            source_order: Vec::new(),
+            pii: false,
+            channel_address: false,
+            inferred: false,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_default_snapshot_is_empty() {
+        let snapshot = CatalogSnapshot::default();
+        assert!(snapshot.traits.is_empty() && snapshot.events.is_empty());
+        assert!(snapshot.lists.is_empty() && snapshot.segments.is_empty());
+        assert!(snapshot.topics.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_snapshot_holds_the_workspace_and_nothing_of_another(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        for key in ["age", "gone"] {
+            create_trait_definition(&pool, one, &new_trait(key))
+                .await
+                .unwrap();
+        }
+        create_trait_definition(&pool, two, &new_trait("other"))
+            .await
+            .unwrap();
+        update_trait_definition(
+            &pool,
+            one,
+            "gone",
+            &TraitDefinitionUpdate {
+                archived: Some(true),
+                ..TraitDefinitionUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+        let list = create_list(&pool, one, "VIPs", "", None).await.unwrap();
+        create_list(&pool, two, "Theirs", "", None).await.unwrap();
+        let schema = |properties: &str| NewEventSchema {
+            name: "order".into(),
+            mode: EventMode::Warn,
+            description: String::new(),
+            properties: serde_json::from_str(properties).unwrap(),
+        };
+        create_event_schema(
+            &pool,
+            one,
+            &schema(r#"[{"name": "total", "type": "number"}]"#),
+        )
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        publish_schema_draft(&mut connection, one, "order", None)
+            .await
+            .unwrap();
+        let topic = create_topic(
+            &pool,
+            one,
+            &NewTopic {
+                key: "news".into(),
+                name: "News".into(),
+                description: String::new(),
+                channel: Channel::Email,
+                policy: TopicPolicy::OptIn,
+            },
+        )
+        .await
+        .unwrap();
+
+        let snapshot = segment_catalog(&mut connection, one).await.unwrap();
+
+        assert_eq!(snapshot.traits.len(), 1);
+        assert_eq!(snapshot.traits.get("age"), Some(&TraitType::Number));
+        assert_eq!(snapshot.lists.len(), 1);
+        assert!(snapshot.lists.contains(&list.id));
+        assert_eq!(
+            snapshot.events["order"].get("total"),
+            Some(&PropertyType::Number)
+        );
+        assert_eq!(snapshot.topics[&Channel::Email]["news"], topic.id);
+        assert!(snapshot.segments.is_empty());
+    }
+}

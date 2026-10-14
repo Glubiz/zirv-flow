@@ -41,6 +41,7 @@ pub use registry::{
     update_trait_definition,
 };
 pub(crate) use resolve::{find_known_person, resolve_person};
+pub(crate) use search::strongest_identifiers;
 pub use search::{PersonSearch, SearchError, SearchHit, SearchPage, TraitOp, search_people};
 pub(crate) use timeline::person_group;
 pub use timeline::{

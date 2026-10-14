@@ -8751,6 +8751,755 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/segments": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "The workspace's live segments by name; archived ones with `archived=true`.",
+        "operationId": "list_segments",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived segments; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The segments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SegmentBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Creates a segment with its first version. The definition is checked against the workspace's\ntraits, events, lists, segments and consent topics. Audited as `segment.created`.",
+        "operationId": "create_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSegmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new segment with its first version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live segment has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, description or cadence, or a definition that does not validate (`code` is `segment_invalid`, with `issues`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/preview": {
+      "post": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Previews a definition without saving it: how many people match, a sample of them and the age\nof the data. A definition that does not validate is 422 `segment_invalid` with its issues. A\npreview that runs past its time limit is 503 with the code `segment_preview_timeout`.\nIdentifier values in the sample are shown to the owner, workspace admins and `admin` keys and\nmasked for everyone else.",
+        "operationId": "preview_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The count, a sample and the data age",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A definition that does not validate (`code` is `segment_invalid`, with `issues`), or a sample size out of range",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The preview ran past its time limit (`code` is `segment_preview_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "One segment with its current version, its dependencies and whether it is time-sensitive.",
+        "operationId": "get_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Changes a segment. A definition is saved as the next version and becomes the current one,\nafter the references are checked for a cycle. Audited as `segment.updated`.",
+        "operationId": "update_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSegmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated segment with its current version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live segment has that name, or the segment is archived (`code` is `segment_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, no field at all, a definition that does not validate (`segment_invalid`, with `issues`), or a definition that closes a reference cycle (`segment_cycle`, with `cycle`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/archive": {
+      "post": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Archives a segment; refused while a current version of another live segment references it.\nVersions stay readable. Audited as `segment.archived`.",
+        "operationId": "archive_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/versions": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "The versions of a segment, newest first.",
+        "operationId": "list_segment_versions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SegmentVersionBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "One version of a segment.",
+        "operationId": "get_segment_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, segment or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
       "post": {
         "tags": [
@@ -13640,6 +14389,46 @@
           }
         }
       },
+      "CreateSegmentRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "definition"
+        ],
+        "properties": {
+          "cadence_minutes": {
+            "type": "integer",
+            "description": "How often a time-sensitive segment is recomputed in full, in minutes; default 60.",
+            "enum": [
+              5,
+              10,
+              15,
+              30,
+              60,
+              120,
+              180,
+              240,
+              360,
+              480,
+              720,
+              1440,
+              10080
+            ]
+          },
+          "definition": {
+            "$ref": "#/components/schemas/SegmentDefinition"
+          },
+          "description": {
+            "type": "string",
+            "description": "At most 500 characters."
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters after trimming; unique among the workspace's live segments, ignoring\ncase.",
+            "example": "Pro customers"
+          }
+        }
+      },
       "CreateSourceRequest": {
         "type": "object",
         "required": [
@@ -14099,6 +14888,58 @@
               "null"
             ],
             "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "DataAgeBody": {
+        "type": "object",
+        "description": "How current the data behind a preview is.",
+        "required": [
+          "live",
+          "sources"
+        ],
+        "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The oldest `last_success_at` across the sources whose enabled streams have a mapping that\nwrites a trait, event or list the definition reads, including through segments it\nreferences. Null when `live`, and null when any feeding source has never succeeded: the\nage is then unknown, and `sources` shows which source has no success."
+          },
+          "live": {
+            "type": "boolean",
+            "description": "True exactly when no stream feeds the definition: it reads only live data."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DataSourceBody"
+            }
+          }
+        }
+      },
+      "DataSourceBody": {
+        "type": "object",
+        "required": [
+          "source_id",
+          "name"
+        ],
+        "properties": {
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the source's oldest feeding stream last succeeded; null when one never has."
+          },
+          "name": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -16862,6 +17703,16 @@
             ],
             "description": "A stable machine-readable code for a failure a client acts on, such as\n`search_timeout`; absent for the rest."
           },
+          "cycle": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SegmentRefProblem"
+            },
+            "description": "The segments of a reference cycle (`segment_cycle`) in path order, the first one\nrepeated at the end."
+          },
           "detail": {
             "type": "string"
           },
@@ -16874,6 +17725,16 @@
               "$ref": "#/components/schemas/ItemProblem"
             },
             "description": "The invalid fields of an ingestion request: field names and reason codes, never values."
+          },
+          "issues": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SegmentIssueProblem"
+            },
+            "description": "What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the\ndefinition and a fixed code for each issue, never a value from it."
           },
           "request_id": {
             "type": [
@@ -18034,6 +18895,78 @@
         },
         "additionalProperties": false
       },
+      "SegmentBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "current_version",
+          "cadence_minutes",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "cadence_minutes": {
+            "type": "integer",
+            "description": "How often a time-sensitive segment is recomputed in full, in minutes; default 60.",
+            "enum": [
+              5,
+              10,
+              15,
+              30,
+              60,
+              120,
+              180,
+              240,
+              360,
+              480,
+              720,
+              1440,
+              10080
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version that is current: the newest one saved."
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Pro customers"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "SegmentConsentNode": {
         "type": "object",
         "description": "The person's consent status for a channel, or one of its topics.",
@@ -18303,6 +19236,25 @@
         ],
         "description": "A segment definition, version 1: one node with `v` added beside its key. Unknown keys are refused."
       },
+      "SegmentDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SegmentBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "current"
+            ],
+            "properties": {
+              "current": {
+                "$ref": "#/components/schemas/SegmentVersionBody"
+              }
+            }
+          }
+        ],
+        "description": "A segment with its current version."
+      },
       "SegmentEventNode": {
         "type": "object",
         "description": "The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one).",
@@ -18375,6 +19327,24 @@
               "too_many_values",
               "value_too_long"
             ]
+          },
+          "pointer": {
+            "type": "string",
+            "description": "A JSON pointer into the definition."
+          }
+        }
+      },
+      "SegmentIssueProblem": {
+        "type": "object",
+        "description": "One issue of a segment definition.",
+        "required": [
+          "pointer",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A fixed issue code such as `unknown_trait`."
           },
           "pointer": {
             "type": "string",
@@ -18485,6 +19455,23 @@
         },
         "additionalProperties": false
       },
+      "SegmentRefProblem": {
+        "type": "object",
+        "description": "A segment named in a problem.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "SegmentSegmentNode": {
         "type": "object",
         "description": "The person is in the other segment. Cycles are rejected when the segment is saved.",
@@ -18518,6 +19505,44 @@
           }
         },
         "additionalProperties": false
+      },
+      "SegmentVersionBody": {
+        "type": "object",
+        "required": [
+          "version",
+          "definition",
+          "deps",
+          "time_sensitive",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "definition": {
+            "$ref": "#/components/schemas/SegmentDefinition"
+          },
+          "deps": {
+            "type": "object",
+            "description": "What the definition reads: traits, events, lists, segments, consent, identifiers and the\nchange classes."
+          },
+          "time_sensitive": {
+            "type": "boolean",
+            "description": "Whether membership can change as time passes with no new data."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
       },
       "SegmentWindow": {
         "oneOf": [
@@ -19771,6 +20796,45 @@
       "UpdateListRequest": {
         "type": "object",
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateSegmentRequest": {
+        "type": "object",
+        "properties": {
+          "cadence_minutes": {
+            "type": "integer",
+            "description": "How often a time-sensitive segment is recomputed in full, in minutes; default 60.",
+            "enum": [
+              5,
+              10,
+              15,
+              30,
+              60,
+              120,
+              180,
+              240,
+              360,
+              480,
+              720,
+              1440,
+              10080
+            ]
+          },
+          "definition": {
+            "$ref": "#/components/schemas/SegmentDefinition"
+          },
           "description": {
             "type": [
               "string",

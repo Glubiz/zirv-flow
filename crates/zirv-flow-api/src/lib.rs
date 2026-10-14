@@ -180,6 +180,30 @@ fn routes() -> Router<AppState> {
             post(people::search::search),
         )
         .route(
+            "/api/v1/workspaces/{ws}/segments",
+            get(segments::crud::list).post(segments::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/preview",
+            post(segments::preview::preview),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}",
+            get(segments::crud::get).patch(segments::crud::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/archive",
+            post(segments::crud::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/versions",
+            get(segments::crud::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}",
+            get(segments::crud::version),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}",
             get(people::profile::get),
         )

@@ -21,8 +21,8 @@ use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
 use crate::privacy::{self, erasures, exports};
-use crate::problem::{ItemProblem, Problem};
-use crate::segments::SegmentSchemas;
+use crate::problem::{ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem};
+use crate::segments::{self, SegmentSchemas};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::sources;
@@ -114,6 +114,14 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::import::import,
         lists::person::lists,
         lists::person::history,
+        segments::crud::list,
+        segments::crud::create,
+        segments::crud::get,
+        segments::crud::update,
+        segments::crud::archive,
+        segments::crud::versions,
+        segments::crud::version,
+        segments::preview::preview,
         sources::kinds::list,
         sources::crud::list,
         sources::crud::create,
@@ -292,6 +300,18 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::crud::ListBody,
         lists::crud::CreateListRequest,
         lists::crud::UpdateListRequest,
+        segments::crud::SegmentBody,
+        segments::crud::SegmentVersionBody,
+        segments::crud::SegmentDetailBody,
+        segments::crud::CreateSegmentRequest,
+        segments::crud::UpdateSegmentRequest,
+        segments::preview::PreviewRequest,
+        segments::preview::PreviewBody,
+        segments::preview::SampleBody,
+        segments::preview::DataAgeBody,
+        segments::preview::DataSourceBody,
+        SegmentIssueProblem,
+        SegmentRefProblem,
         lists::members::ListMembersBody,
         lists::members::ListMemberBody,
         lists::members::MemberIdentifierBody,

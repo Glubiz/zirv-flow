@@ -10580,4 +10580,637 @@ email,b@example.com,
         assert_eq!(refused.body["detail"], "mapping: event_not_supported");
         assert_eq!(plain.status, StatusCode::OK, "{:?}", plain.body);
     }
+
+    // ---- Segments with versions, cycle rejection and preview (#120) ----
+
+    fn segments_uri(ws: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/segments")
+    }
+
+    fn plan_is(plan: &str) -> Value {
+        json!({"v": 1, "trait": "plan", "op": "eq", "value": plan})
+    }
+
+    fn refers_to(id: &str) -> Value {
+        json!({"v": 1, "segment": id})
+    }
+
+    async fn define_plan(pool: &PgPool, ws: &str) {
+        zirv_flow_store::create_trait_definition(
+            pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewTraitDefinition {
+                key: "plan".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn make_segment(
+        router: &Router,
+        who: Auth<'_>,
+        ws: &str,
+        name: &str,
+        definition: Value,
+    ) -> Reply {
+        call(
+            router,
+            "POST",
+            &segments_uri(ws),
+            Some(json!({"name": name, "definition": definition})),
+            who,
+        )
+        .await
+    }
+
+    async fn plan_people(pool: &PgPool, ws: &str, people: &[(&str, &str)]) {
+        let records: Vec<_> = people
+            .iter()
+            .map(|(email, plan)| {
+                let mut record = profile(email, &[("email", email)]);
+                record.traits = json!({"plan": plan}).as_object().cloned().unwrap();
+                record
+            })
+            .collect();
+        zirv_flow_store::apply_profile_batch(pool, ws.parse().unwrap(), &records)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_saves_versions_and_a_bad_definition_is_a_422_with_pointers_and_each_write_is_audited(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+
+        let created =
+            make_segment(&router, Auth::Session(&member), &ws, "Pro", plan_is("pro")).await;
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let uri = format!("{}/{id}", segments_uri(&ws));
+        let renamed = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"name": "Pro plan", "cadence_minutes": 30})),
+            Auth::Session(&member),
+        )
+        .await;
+        let second = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"definition": plan_is("free")})),
+            Auth::Session(&member),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"definition": {"v": 1, "trait": "nope", "op": "eq", "value": "x"}})),
+            Auth::Session(&member),
+        )
+        .await;
+        let bad_cadence = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({"cadence_minutes": 7})),
+            Auth::Session(&member),
+        )
+        .await;
+        let empty = call(
+            &router,
+            "PATCH",
+            &uri,
+            Some(json!({})),
+            Auth::Session(&member),
+        )
+        .await;
+        let duplicate = make_segment(
+            &router,
+            Auth::Session(&member),
+            &ws,
+            "pro PLAN",
+            plan_is("x"),
+        )
+        .await;
+        let versions = call(
+            &router,
+            "GET",
+            &format!("{uri}/versions"),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let first_version = call(
+            &router,
+            "GET",
+            &format!("{uri}/versions/1"),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let missing_version = call(
+            &router,
+            "GET",
+            &format!("{uri}/versions/9"),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let one = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(created.body["current_version"], 1);
+        assert_eq!(created.body["cadence_minutes"], 60);
+        assert_eq!(created.body["created_by"], member_id.to_string().as_str());
+        assert!(created.body["current"].get("trace_id").is_none());
+        assert_eq!(renamed.body["name"], "Pro plan");
+        assert_eq!(renamed.body["current_version"], 1);
+        assert_eq!(second.body["current_version"], 2);
+        assert_eq!(second.body["current"]["definition"], plan_is("free"));
+        assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unknown.body["code"], "segment_invalid");
+        assert_eq!(unknown.body["issues"][0]["code"], "unknown_trait");
+        assert!(
+            unknown.body["issues"][0]["pointer"]
+                .as_str()
+                .unwrap()
+                .starts_with('/')
+        );
+        assert_eq!(bad_cadence.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        let numbers: Vec<i64> = versions
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|version| version["version"].as_i64().unwrap())
+            .collect();
+        assert_eq!(numbers, [2, 1]);
+        assert_eq!(first_version.body["definition"], plan_is("pro"));
+        assert_eq!(missing_version.status, StatusCode::NOT_FOUND);
+        assert_eq!(one.body["current_version"], 2);
+        assert_eq!(one.body["current"]["deps"]["traits"][0], "plan");
+        assert_eq!(one.body["current"]["time_sensitive"], false);
+
+        let audited: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT action, summary FROM audit_log WHERE action LIKE 'segment.%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let actions: Vec<&str> = audited.iter().map(|(action, _)| action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["segment.created", "segment.updated", "segment.updated"]
+        );
+        assert_eq!(audited[2].1["version"], 2);
+        assert!(
+            !audited
+                .iter()
+                .any(|(_, summary)| summary.to_string().contains("free"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cycle_is_a_422_that_names_it_and_an_archive_is_refused_while_referenced(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let who = || Auth::Session(&owner);
+        let a = make_segment(&router, who(), &ws, "A", plan_is("a"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let b = make_segment(&router, who(), &ws, "B", refers_to(&a))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let a_uri = format!("{}/{a}", segments_uri(&ws));
+
+        let cycle = call(
+            &router,
+            "PATCH",
+            &a_uri,
+            Some(json!({"definition": refers_to(&b)})),
+            who(),
+        )
+        .await;
+        let own = call(
+            &router,
+            "PATCH",
+            &a_uri,
+            Some(json!({"definition": refers_to(&a)})),
+            who(),
+        )
+        .await;
+        let referenced = call(&router, "POST", &format!("{a_uri}/archive"), None, who()).await;
+        let b_uri = format!("{}/{b}", segments_uri(&ws));
+        call(
+            &router,
+            "PATCH",
+            &b_uri,
+            Some(json!({"definition": plan_is("b")})),
+            who(),
+        )
+        .await;
+        let archived = call(&router, "POST", &format!("{a_uri}/archive"), None, who()).await;
+        let to_archived = make_segment(&router, who(), &ws, "C", refers_to(&a)).await;
+        let edit_archived = call(&router, "PATCH", &a_uri, Some(json!({"name": "Z"})), who()).await;
+        let live = call(&router, "GET", &segments_uri(&ws), None, who()).await;
+        let all = call(
+            &router,
+            "GET",
+            &format!("{}?archived=true", segments_uri(&ws)),
+            None,
+            who(),
+        )
+        .await;
+
+        assert_eq!(
+            cycle.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            cycle.body
+        );
+        assert_eq!(cycle.body["code"], "segment_cycle");
+        assert_eq!(
+            cycle.body["detail"],
+            "segments cannot reference each other: A \u{2192} B \u{2192} A"
+        );
+        let path: Vec<&str> = cycle.body["cycle"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|segment| segment["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(path, ["A", "B", "A"]);
+        assert_eq!(cycle.body["cycle"][0]["id"], a.as_str());
+        assert_eq!(own.body["code"], "segment_cycle");
+        assert_eq!(own.body["cycle"].as_array().unwrap().len(), 2);
+        assert_eq!(referenced.status, StatusCode::CONFLICT);
+        assert_eq!(referenced.body["code"], "segment_referenced");
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert!(archived.body["archived_at"].is_string());
+        assert_eq!(to_archived.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(to_archived.body["issues"][0]["code"], "unknown_segment");
+        assert_eq!(edit_archived.status, StatusCode::CONFLICT);
+        assert_eq!(edit_archived.body["code"], "segment_archived");
+        assert_eq!(live.body.as_array().unwrap().len(), 1);
+        assert_eq!(all.body.as_array().unwrap().len(), 2);
+        let archives: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'segment.archived'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archives, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn segments_are_isolated_per_workspace_and_key_scopes_decide_who_saves(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let one = workspace(&router, &owner, "One").await;
+        let two = workspace(&router, &owner, "Two").await;
+        define_plan(&pool, &one).await;
+        define_plan(&pool, &two).await;
+        let (_, read_key) = make_key(&router, &owner, &one, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &one, &["write"]).await;
+        let mine = make_segment(&router, Auth::Session(&owner), &one, "Mine", plan_is("x"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let by_read_key =
+            make_segment(&router, Auth::Key(&read_key), &one, "Nope", plan_is("x")).await;
+        let by_write_key =
+            make_segment(&router, Auth::Key(&write_key), &one, "Keyed", plan_is("x")).await;
+        let write_key_reads = call(
+            &router,
+            "GET",
+            &segments_uri(&one),
+            None,
+            Auth::Key(&write_key),
+        )
+        .await;
+        let read_key_reads = call(
+            &router,
+            "GET",
+            &format!("{}/{mine}", segments_uri(&one)),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let read_key_archives = call(
+            &router,
+            "POST",
+            &format!("{}/{mine}/archive", segments_uri(&one)),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let foreign_get = call(
+            &router,
+            "GET",
+            &format!("{}/{mine}", segments_uri(&two)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_patch = call(
+            &router,
+            "PATCH",
+            &format!("{}/{mine}", segments_uri(&two)),
+            Some(json!({"name": "Taken"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_versions = call(
+            &router,
+            "GET",
+            &format!("{}/{mine}/versions", segments_uri(&two)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let foreign_reference = make_segment(
+            &router,
+            Auth::Session(&owner),
+            &two,
+            "Ref",
+            refers_to(&mine),
+        )
+        .await;
+        let key_other_workspace = call(
+            &router,
+            "GET",
+            &segments_uri(&two),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+
+        assert_eq!(by_read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            by_write_key.status,
+            StatusCode::CREATED,
+            "{:?}",
+            by_write_key.body
+        );
+        assert!(by_write_key.body["created_by"].is_null());
+        assert_eq!(write_key_reads.status, StatusCode::FORBIDDEN);
+        assert_eq!(read_key_reads.status, StatusCode::OK);
+        assert_eq!(read_key_archives.status, StatusCode::FORBIDDEN);
+        assert_eq!(foreign_get.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_patch.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_versions.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_reference.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            foreign_reference.body["issues"][0]["code"],
+            "unknown_segment"
+        );
+        assert_eq!(key_other_workspace.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_counts_samples_masks_by_role_and_reports_the_data_age(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        plan_people(
+            &pool,
+            &ws,
+            &[
+                ("a@example.com", "pro"),
+                ("b@example.com", "pro"),
+                ("c@example.com", "free"),
+            ],
+        )
+        .await;
+        let last_success = time::macros::datetime!(2026-03-01 12:00 UTC);
+        let source = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO sources (id, workspace_id, kind, name, config) VALUES ($1, $2, 'csv', 'CRM', '{}')")
+            .bind(source)
+            .bind(ws.parse::<uuid::Uuid>().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO streams (id, workspace_id, source_id, name, enabled, sync_mode, mapping, \
+                discovered, enabled_at, last_success_at) \
+             VALUES ($1, $2, $3, 'contacts', true, 'full_refresh', $4, '{}', now(), $5)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .bind(source)
+        .bind(json!({"columns": [{"column": "p", "target": {"type": "trait", "key": "plan"}}]}))
+        .bind(last_success)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let uri = format!("{}/preview", segments_uri(&ws));
+        let body = json!({"definition": plan_is("pro"), "sample_size": 1});
+
+        let as_owner = call(
+            &router,
+            "POST",
+            &uri,
+            Some(body.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        let as_member = call(
+            &router,
+            "POST",
+            &uri,
+            Some(body.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let as_read_key = call(&router, "POST", &uri, Some(body), Auth::Key(&read_key)).await;
+        let default_size = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let too_big = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro"), "sample_size": 101})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let invalid = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": {"v": 1, "trait": "nope", "op": "eq", "value": "x"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let live = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": {"v": 1, "identifier": "email"}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM segments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(as_owner.status, StatusCode::OK, "{:?}", as_owner.body);
+        assert_eq!(as_owner.body["count"], 2);
+        assert_eq!(as_owner.body["sample"].as_array().unwrap().len(), 1);
+        assert_eq!(as_owner.body["sample"][0]["display"]["masked"], false);
+        assert!(
+            as_owner.body["sample"][0]["display"]["value"]
+                .as_str()
+                .unwrap()
+                .ends_with("@example.com")
+        );
+        assert!(as_owner.body["compiled_at"].is_string());
+        assert_eq!(as_owner.body["data_age"]["as_of"], "2026-03-01T12:00:00Z");
+        assert_eq!(as_owner.body["data_age"]["sources"][0]["name"], "CRM");
+        assert_eq!(
+            as_owner.body["data_age"]["sources"][0]["source_id"],
+            source.to_string().as_str()
+        );
+        for masked in [&as_member, &as_read_key] {
+            assert_eq!(masked.status, StatusCode::OK, "{:?}", masked.body);
+            assert_eq!(masked.body["count"], 2);
+            assert_eq!(masked.body["sample"][0]["display"]["masked"], true);
+            assert!(masked.body["sample"][0]["display"]["value"].is_null());
+        }
+        assert_eq!(default_size.body["sample"].as_array().unwrap().len(), 2);
+        assert_eq!(too_big.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.body["code"], "segment_invalid");
+        assert_eq!(live.body["count"], 3);
+        assert!(live.body["data_age"]["as_of"].is_null());
+        assert_eq!(live.body["data_age"]["live"], true);
+        assert_eq!(as_owner.body["data_age"]["live"], false);
+        assert_eq!(live.body["data_age"]["sources"], json!([]));
+        assert_eq!(saved, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_past_its_time_limit_is_a_503_with_its_own_code(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        plan_people(&pool, &ws, &[("a@example.com", "pro")]).await;
+        // A lock on the people table holds the count query until the statement timeout cancels it.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE people IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/preview", segments_uri(&ws)),
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Session(&owner),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "segment_preview_timeout");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_catalog_read_past_the_time_limit_is_the_preview_timeout_not_a_500(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        // The catalog is the first read of the preview; holding its table stalls it.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE trait_definitions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let reply = call(
+            &router,
+            "POST",
+            &format!("{}/preview", segments_uri(&ws)),
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Session(&owner),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "segment_preview_timeout");
+    }
 }
