@@ -6,7 +6,8 @@
 //! are two-valued, `not` is plain negation, a zero-event aggregate other than `count` is false,
 //! and a stored value the SQL cannot read is missing. The only third value is unknown, and only
 //! a cap makes it (ruling 0c6404db): a condition that reads an event name in
-//! [`PersonSnapshot::capped_events`] cannot be decided from the events held. With no caps the
+//! [`PersonSnapshot::capped_events`] cannot be decided from the events held, unless its window
+//! lies strictly after [`PersonSnapshot::events_complete_after`]. With no caps the
 //! outcome is always pass or fail.
 //!
 //! `evaluate` takes a validated definition and does not normalize it, so the tree it returns
@@ -232,9 +233,6 @@ impl Evaluator<'_> {
     }
 
     fn event(&self, condition: &EventCondition, pointer: String) -> EvalNode {
-        if self.person.capped_events.contains(&condition.name) {
-            return self.leaf(pointer, Outcome::Unknown, Observed::Missing);
-        }
         let Some(schema) = self.catalog.events.get(&condition.name) else {
             return self.leaf(pointer, Outcome::Fail, Observed::Missing);
         };
@@ -255,6 +253,11 @@ impl Evaluator<'_> {
             }
             _ => None,
         };
+        if self.person.capped_events.contains(&condition.name)
+            && !self.window_is_loaded(condition.window.as_ref(), since)
+        {
+            return self.leaf(pointer, Outcome::Unknown, Observed::Missing);
+        }
         let matching: Vec<&SnapshotEvent> = self
             .person
             .events
@@ -330,6 +333,33 @@ impl Evaluator<'_> {
             Outcome::of(passed),
             Observed::Aggregate { value, events },
         )
+    }
+
+    /// Whether every event the window can include is among the events held, for a name whose
+    /// rows were cut off: they are when the window lies strictly after
+    /// [`PersonSnapshot::events_complete_after`]. A window that matches nothing is decided too.
+    /// Without a window, or without a boundary, the held events cannot decide.
+    fn window_is_loaded(&self, window: Option<&Window>, since: Option<i64>) -> bool {
+        let Some(boundary) = self.person.events_complete_after else {
+            return false;
+        };
+        let boundary = stored_time::micros(boundary);
+        match window {
+            None => false,
+            // The window is (now - span, now]; an unreadable span matches nothing.
+            Some(Window::Last(text)) => {
+                span_of(text).is_none_or(|span| self.now - span >= boundary)
+            }
+            // The window is [start, end); unreadable bounds match nothing.
+            Some(Window::Between(start, end)) => {
+                let bound = |text: &String| absolute(Kind::Timestamp, &Value::String(text.clone()));
+                match (bound(start), bound(end)) {
+                    (Some(start), Some(_)) => start > boundary,
+                    _ => true,
+                }
+            }
+            Some(Window::SinceTrait(_)) => since.is_some_and(|since| since > boundary),
+        }
     }
 
     fn in_window(
@@ -722,5 +752,90 @@ mod tests {
         person.capped_events.insert("other".to_owned());
         person.events.push(order(NOW, Map::new().into()));
         assert_eq!(outcome(json!({"event": "order"}), &person), Outcome::Pass);
+    }
+
+    /// A person whose `order` rows were cut off, with every order after `boundary` held.
+    fn cut_at(boundary: OffsetDateTime) -> PersonSnapshot {
+        PersonSnapshot {
+            capped_events: BTreeSet::from(["order".to_owned()]),
+            events_complete_after: Some(boundary),
+            ..PersonSnapshot::default()
+        }
+    }
+
+    fn count_at_least_one(window: Value) -> Value {
+        json!({"event": "order", "window": window,
+            "agg": {"fn": "count", "op": "gte", "value": 1}})
+    }
+
+    #[test]
+    fn a_window_inside_the_loaded_span_decides_while_a_wider_one_is_unknown() {
+        // Only orders from two days ago were held, and the cut was at their oldest.
+        let person = cut_at(datetime!(2025-06-13 12:00:00 UTC));
+        let day = count_at_least_one(json!({"last": "P1D"}));
+        let year = count_at_least_one(json!({"last": "P365D"}));
+
+        let result = run(json!({"all": [day, year]}), &person);
+
+        assert_eq!(result.outcome, Outcome::Fail);
+        assert_eq!(result.tree.children[0].outcome, Outcome::Fail);
+        assert_eq!(result.tree.children[1].outcome, Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_last_window_is_decided_from_its_own_start_and_unknown_before_the_boundary() {
+        // `P1D` runs from 2025-06-14 12:00.
+        let day = count_at_least_one(json!({"last": "P1D"}));
+        let at_start = cut_at(datetime!(2025-06-14 12:00:00 UTC));
+        let before = cut_at(datetime!(2025-06-14 12:00:01 UTC));
+
+        assert_eq!(outcome(day.clone(), &at_start), Outcome::Fail);
+        assert_eq!(outcome(day, &before), Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_between_window_is_decided_only_strictly_after_the_boundary() {
+        let window = json!({"between": ["2025-06-10T00:00:00Z", "2025-06-11T00:00:00Z"]});
+        let condition = count_at_least_one(window);
+
+        let after = cut_at(datetime!(2025-06-09 23:59:59 UTC));
+        let exactly = cut_at(datetime!(2025-06-10 00:00:00 UTC));
+
+        assert_eq!(outcome(condition.clone(), &after), Outcome::Fail);
+        assert_eq!(outcome(condition, &exactly), Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_since_trait_window_is_decided_only_strictly_after_the_boundary() {
+        let condition = count_at_least_one(json!({"since_trait": "signed_up"}));
+        let mut after = cut_at(datetime!(2025-06-09 23:59:59 UTC));
+        let mut exactly = cut_at(datetime!(2025-06-10 00:00:00 UTC));
+        for person in [&mut after, &mut exactly] {
+            person
+                .traits
+                .insert("signed_up".to_owned(), json!("2025-06-10T00:00:00Z"));
+        }
+
+        assert_eq!(outcome(condition.clone(), &after), Outcome::Fail);
+        assert_eq!(outcome(condition.clone(), &exactly), Outcome::Unknown);
+        // A trait that cannot be read matches nothing, cap or not.
+        assert_eq!(
+            outcome(condition, &cut_at(datetime!(2030-01-01 00:00:00 UTC))),
+            Outcome::Fail
+        );
+    }
+
+    #[test]
+    fn no_window_and_no_boundary_stay_unknown_and_an_unreadable_window_is_decided() {
+        let boundary = datetime!(2025-06-13 12:00:00 UTC);
+        let without_window = json!({"event": "order"});
+        let unreadable = count_at_least_one(json!({"between": ["nope", "2025-06-11T00:00:00Z"]}));
+        let mut no_boundary = cut_at(boundary);
+        no_boundary.events_complete_after = None;
+        let day = count_at_least_one(json!({"last": "P1D"}));
+
+        assert_eq!(outcome(without_window, &cut_at(boundary)), Outcome::Unknown);
+        assert_eq!(outcome(day, &no_boundary), Outcome::Unknown);
+        assert_eq!(outcome(unreadable, &cut_at(boundary)), Outcome::Fail);
     }
 }

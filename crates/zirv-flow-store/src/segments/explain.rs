@@ -58,6 +58,9 @@ pub struct ExplainPerson {
     pub events: Vec<ExplainEvent>,
     /// The scoped names that have events past [`EXPLAIN_EVENT_CAP`].
     pub capped_events: BTreeSet<String>,
+    /// Set when the cap cut rows: the `occurred_at` of the oldest row kept. Every event of every
+    /// scoped name strictly after it is loaded; at exactly that instant rows may be missing.
+    pub events_complete_after: Option<OffsetDateTime>,
     pub lists: BTreeSet<Uuid>,
     pub consent: Vec<ExplainConsent>,
     /// The kinds only, never the values.
@@ -139,7 +142,8 @@ pub async fn load_explain_person(
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    let (events, capped_events) = load_events(connection, workspace, found.id, scope).await?;
+    let (events, capped_events, events_complete_after) =
+        load_events(connection, workspace, found.id, scope).await?;
 
     let lists: Vec<Uuid> = sqlx::query_scalar(
         "SELECT list_id FROM list_members WHERE workspace_id = $1 AND person_id = $2",
@@ -195,6 +199,7 @@ pub async fn load_explain_person(
         traits,
         events,
         capped_events,
+        events_complete_after,
         lists: lists.into_iter().collect(),
         consent,
         identifier_kinds: kinds.into_iter().collect(),
@@ -225,9 +230,9 @@ async fn load_events(
     workspace: WorkspaceId,
     person: Uuid,
     scope: &[ExplainEventScope],
-) -> Result<(Vec<ExplainEvent>, BTreeSet<String>), StoreError> {
+) -> Result<(Vec<ExplainEvent>, BTreeSet<String>, Option<OffsetDateTime>), StoreError> {
     if scope.is_empty() {
-        return Ok((Vec::new(), BTreeSet::new()));
+        return Ok((Vec::new(), BTreeSet::new(), None));
     }
     let names: Vec<&str> = scope.iter().map(|entry| entry.name.as_str()).collect();
     let since: Vec<Option<OffsetDateTime>> = scope.iter().map(|entry| entry.since).collect();
@@ -247,6 +252,7 @@ async fn load_events(
         .map_err(StoreError::bounded)?;
 
     let mut capped = BTreeSet::new();
+    let mut complete_after = None;
     if rows.len() > EXPLAIN_EVENT_CAP {
         rows.truncate(EXPLAIN_EVENT_CAP);
         if let Some(EventRow {
@@ -270,6 +276,7 @@ async fn load_events(
                 .await
                 .map_err(StoreError::bounded)?;
             capped.extend(cut);
+            complete_after = Some(*last_at);
         }
     }
     let events = rows
@@ -287,7 +294,7 @@ async fn load_events(
             },
         )
         .collect();
-    Ok((events, capped))
+    Ok((events, capped, complete_after))
 }
 
 /// Which trait keys and event properties of the workspace are declared not personal: traits that
@@ -385,6 +392,7 @@ mod tests {
                 properties: json!({"card": "4111"}).as_object().cloned().unwrap(),
             }],
             capped_events: BTreeSet::new(),
+            events_complete_after: None,
             lists: BTreeSet::new(),
             consent: Vec::new(),
             identifier_kinds: BTreeSet::new(),
@@ -494,7 +502,7 @@ mod tests {
         assert_eq!(count("order"), 4);
         assert_eq!(count("visit"), 4);
         assert_eq!(count("other"), 0);
-        assert!(loaded.capped_events.is_empty());
+        assert!(loaded.capped_events.is_empty() && loaded.events_complete_after.is_none());
     }
 
     #[sqlx::test]
@@ -523,6 +531,9 @@ mod tests {
 
         assert_eq!(loaded.events.len(), EXPLAIN_EVENT_CAP);
         assert_eq!(loaded.capped_events, BTreeSet::from(["view".to_owned()]));
+        let oldest_kept = loaded.events.iter().map(|event| event.occurred_at).min();
+        assert_eq!(loaded.events_complete_after, oldest_kept);
+        assert!(oldest_kept.is_some());
     }
 
     #[sqlx::test]
