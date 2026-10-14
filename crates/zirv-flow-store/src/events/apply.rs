@@ -82,7 +82,7 @@ pub async fn apply_event_batch(
 ) -> Result<Vec<EventOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
     let outcomes = apply_event_records(&mut tx, workspace, key, records).await?;
-    crate::changes::request_reevaluation(&mut *tx, workspace).await?;
+    crate::changes::request_reevaluation(&mut tx, workspace).await?;
     commit(tx).await?;
     Ok(outcomes)
 }
