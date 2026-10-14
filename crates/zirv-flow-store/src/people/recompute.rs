@@ -3,6 +3,7 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute};
@@ -39,7 +40,7 @@ pub async fn recompute_trait_batch(
     let keys = [key.to_owned()];
     for &person in &people {
         if recompute(connection, workspace, person, &keys).await? {
-            mark_dirty(connection, workspace, person).await?;
+            mark_dirty(connection, workspace, person, ChangeClasses::TRAITS, trace).await?;
             append_decision(
                 &mut *connection,
                 &NewDecision {

@@ -11,8 +11,10 @@ use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::people::IdentifierKind;
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
+use crate::changes::mark_people;
 use crate::{NewDecision, StoreError, append_decision, append_decisions};
 
 /// The most people one add or remove takes.
@@ -248,6 +250,15 @@ async fn record_changes(
             job: None,
         })
         .collect();
+    mark_people(
+        connection,
+        recorded.workspace,
+        people,
+        ChangeClasses::LISTS,
+        recorded.trace,
+        None,
+    )
+    .await?;
     append_decisions(connection, &decisions).await
 }
 
@@ -1174,5 +1185,40 @@ mod tests {
             vals: None,
         });
         assert!(none.identifier.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_real_change_marks_the_person_in_the_lists_class_and_a_no_op_marks_nobody(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let list = create_list(&pool, ws, "VIPs", "", None).await.unwrap().id;
+        let ada = person(&pool, ws, "1", &[("email", "ada@example.com")]).await;
+        let bob = person(&pool, ws, "2", &[("email", "bob@example.com")]).await;
+        add(&pool, ws, list, &[bob]).await.unwrap();
+        let clear = || sqlx::query("DELETE FROM person_changes").execute(&pool);
+        clear().await.unwrap();
+
+        add(&pool, ws, list, &[ada, bob]).await.unwrap();
+
+        let marks: Vec<(Uuid, i16, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT person_id, classes, cause_kind, cause_id FROM person_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        // Bob was a member already, so only Ada changed.
+        assert_eq!(marks, [(ada, 4, Some("api".into()), Some("test".into()))]);
+        clear().await.unwrap();
+
+        remove(&pool, ws, list, &[ada]).await.unwrap();
+        remove(&pool, ws, list, &[ada]).await.unwrap();
+
+        let marks: Vec<(Uuid, i16)> =
+            sqlx::query_as("SELECT person_id, classes FROM person_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(marks, [(ada, 4)]);
     }
 }

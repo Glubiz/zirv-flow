@@ -10,6 +10,7 @@ mod cycle;
 mod data_age;
 mod members;
 mod preview;
+mod reevaluate;
 mod refresh;
 mod schedule;
 
@@ -28,6 +29,7 @@ pub(crate) use members::{close_on_merge, forget_people};
 pub use preview::{
     SampleRow, SqlParam, SqlQuery, begin_segment_snapshot, run_segment_preview, snapshot_now,
 };
+pub use reevaluate::{DirtyBatch, ReevaluateApply, apply_reevaluation, reevaluation_order};
 pub use refresh::{
     MembershipCause, REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome,
     RefreshRequest, RefreshTrigger, apply_refresh, decision_cause_kind, enqueue_refresh,

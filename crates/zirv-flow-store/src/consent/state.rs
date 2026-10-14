@@ -7,10 +7,12 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, State};
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::topics::find_topic;
 use crate::StoreError;
+use crate::changes::mark_person;
 use crate::decisions::{NewDecision, append_decision};
 use crate::people::current_person;
 
@@ -227,6 +229,15 @@ pub(super) async fn write_state(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    mark_person(
+        connection,
+        workspace,
+        person,
+        ChangeClasses::CONSENT,
+        trace,
+        None,
+    )
+    .await?;
     append_decision(
         &mut *connection,
         &NewDecision {
@@ -718,5 +729,45 @@ mod tests {
         let not_object = set_consent(&mut tx, ws, &array, &trace).await;
 
         assert!(not_object.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_consent_change_marks_the_person_in_the_consent_class_and_a_repeat_marks_nobody(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let trace = TraceContext::root(Cause::api("consent"));
+        let change = change(ada, None, ConsentStatus::Subscribed, T1);
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        set(&pool, ws, &change, &trace).await;
+
+        let marks: Vec<(Uuid, i16, Option<Uuid>, Option<String>)> =
+            sqlx::query_as("SELECT person_id, classes, trace_id, cause_id FROM person_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            marks,
+            [(
+                ada,
+                8,
+                Some(trace.trace_id.as_uuid()),
+                Some("consent".into())
+            )]
+        );
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        set(&pool, ws, &change, &trace).await;
+
+        assert_eq!(count(&pool, "person_changes").await, 0);
     }
 }
