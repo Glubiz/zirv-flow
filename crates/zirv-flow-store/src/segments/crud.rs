@@ -30,6 +30,12 @@ pub struct Segment {
     pub description: String,
     pub current_version: i32,
     pub cadence_minutes: i32,
+    /// The version the members were last computed from; none before the first refresh.
+    pub computed_version: Option<i32>,
+    /// The clock time of the last refresh; none before the first.
+    pub computed_at: Option<OffsetDateTime>,
+    /// How many people are members now.
+    pub member_count: i32,
     pub archived_at: Option<OffsetDateTime>,
     pub created_by: Option<Uuid>,
     pub created_at: OffsetDateTime,
@@ -56,8 +62,8 @@ pub struct SegmentVersion {
 
 macro_rules! segment_columns {
     () => {
-        "id, name, description, current_version, cadence_minutes, archived_at, created_by, \
-         created_at, updated_at"
+        "id, name, description, current_version, cadence_minutes, computed_version, \
+         computed_at, member_count, archived_at, created_by, created_at, updated_at"
     };
 }
 
@@ -201,6 +207,16 @@ pub async fn create_segment(
     .map_err(StoreError::query)?;
     let version =
         insert_version(connection, workspace, new.id, 1, content, created_by, trace).await?;
+    super::refresh::enqueue_refresh(
+        connection,
+        workspace,
+        new.id,
+        super::refresh::RefreshRequest::Save { version: 1 },
+        trace,
+    )
+    .await?;
+    super::schedule::sync_segment_schedule(connection, workspace, new.id, segment.cadence_minutes)
+        .await?;
     Ok((segment, version))
 }
 
@@ -249,6 +265,20 @@ pub async fn update_segment(
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    if saved.is_some() {
+        super::refresh::enqueue_refresh(
+            connection,
+            workspace,
+            id,
+            super::refresh::RefreshRequest::Save { version: current },
+            trace,
+        )
+        .await?;
+    }
+    if patch.cadence_minutes.is_some() {
+        super::schedule::sync_segment_schedule(connection, workspace, id, segment.cadence_minutes)
+            .await?;
+    }
     Ok((segment, saved))
 }
 
@@ -301,6 +331,7 @@ pub async fn archive_segment(
                 .collect(),
         ));
     }
+    super::schedule::remove_segment_schedule(connection, workspace, id).await?;
     sqlx::query_as(concat!(
         "UPDATE segments SET archived_at = now(), updated_at = now() \
          WHERE workspace_id = $1 AND id = $2 RETURNING ",

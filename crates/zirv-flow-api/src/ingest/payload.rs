@@ -7,7 +7,7 @@
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use zirv_flow_core::events::validate_event_name;
+use zirv_flow_core::events::{RESERVED_EVENT_CODE, is_reserved_event_name, validate_event_name};
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::{IngestItem, IngestPayload};
 
@@ -166,7 +166,15 @@ fn parse_item(
                     errors.push(error(index, "event", "required"));
                     String::new()
                 }
-                Some(Value::String(name)) if validate_event_name(name).is_ok() => name.clone(),
+                Some(Value::String(name))
+                    if validate_event_name(name).is_ok() && !is_reserved_event_name(name) =>
+                {
+                    name.clone()
+                }
+                Some(Value::String(name)) if validate_event_name(name).is_ok() => {
+                    errors.push(error(index, "event", RESERVED_EVENT_CODE));
+                    String::new()
+                }
                 Some(Value::String(_)) => {
                     errors.push(error(index, "event", "invalid_event_name"));
                     String::new()

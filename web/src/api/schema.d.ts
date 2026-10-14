@@ -1566,6 +1566,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/segments/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Entries into and exits from the segment, newest first, each with its cause and version. */
+        get: operations["list_segment_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A page of the segment's current members by person id, with when they were computed and how
+         *     old the data behind them is. Identifier values are shown to the owner, workspace admins and
+         *     `admin` keys and masked for everyone else.
+         */
+        get: operations["list_segment_members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/segments/{id}/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queues a full refresh of the segment now. The trace's cause is `manual`: the signed-in user,
+         *     or the request for an API key. Audited as `segment.refresh_requested`.
+         */
+        post: operations["refresh_segment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/segments/{id}/versions": {
         parameters: {
             query?: never;
@@ -4184,6 +4242,10 @@ export interface components {
              */
             truncate_ip?: string[];
         };
+        RefreshQueuedBody: {
+            /** @description True when a refresh was queued; false when a manual refresh was already waiting. */
+            queued: boolean;
+        };
         RemoveMembersBody: {
             /** @description The first 1000 inputs that named no person. */
             not_found: components["schemas"]["NotFoundBody"][];
@@ -4481,6 +4543,16 @@ export interface components {
              * @enum {integer}
              */
             cadence_minutes: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
+            /**
+             * Format: date-time
+             * @description When the members were last computed; null before the first refresh.
+             */
+            computed_at?: string | null;
+            /**
+             * Format: int32
+             * @description The version the members were last computed from; null before the first refresh.
+             */
+            computed_version?: number | null;
             /** Format: date-time */
             created_at: string;
             /**
@@ -4496,6 +4568,11 @@ export interface components {
             description: string;
             /** Format: uuid */
             id: string;
+            /**
+             * Format: int32
+             * @description How many people are members now.
+             */
+            member_count: number;
             /** @example Pro customers */
             name: string;
             /** Format: date-time */
@@ -4572,6 +4649,34 @@ export interface components {
             where?: components["schemas"]["SegmentPropertyFilter"][];
             window?: components["schemas"]["SegmentWindow"];
         };
+        SegmentHistoryBody: {
+            /** @description Entries and exits, newest first. */
+            items: components["schemas"]["SegmentHistoryItemBody"][];
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
+        };
+        SegmentHistoryItemBody: {
+            /** Format: date-time */
+            at: string;
+            /**
+             * @description `initial`, `definition_change`, `data_change`, `time` or `manual`.
+             * @example time
+             */
+            cause: string;
+            display?: null | components["schemas"]["DisplayBody"];
+            /**
+             * @description `entered` or `exited`.
+             * @example entered
+             */
+            kind: string;
+            /** Format: uuid */
+            person_id: string;
+            /**
+             * Format: int32
+             * @description The version that entered the person, or whose refresh closed the row.
+             */
+            version: number;
+        };
         /** @description The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or `external:<namespace>`. */
         SegmentIdentifierNode: {
             identifier: string;
@@ -4594,6 +4699,29 @@ export interface components {
         SegmentListNode: {
             /** Format: uuid */
             list: string;
+        };
+        SegmentMemberBody: {
+            display?: null | components["schemas"]["DisplayBody"];
+            /** Format: date-time */
+            entered_at: string;
+            /**
+             * Format: uuid
+             * @description The person.
+             */
+            id: string;
+        };
+        SegmentMembersBody: {
+            /**
+             * Format: date-time
+             * @description When the members were last computed; null before the first refresh.
+             */
+            computed_at?: string | null;
+            /** @description How current the data behind the members is. */
+            data_age: components["schemas"]["DataAgeBody"];
+            /** @description The current members by person id. */
+            items: components["schemas"]["SegmentMemberBody"][];
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         /** @description One node of a segment condition tree: an object with exactly one node key. */
         SegmentNode: components["schemas"]["SegmentAllNode"] | components["schemas"]["SegmentAnyNode"] | components["schemas"]["SegmentNotNode"] | components["schemas"]["SegmentTraitNode"] | components["schemas"]["SegmentEventNode"] | components["schemas"]["SegmentListNode"] | components["schemas"]["SegmentSegmentNode"] | components["schemas"]["SegmentConsentNode"] | components["schemas"]["SegmentIdentifierNode"];
@@ -11589,6 +11717,217 @@ export interface operations {
                 };
             };
             /** @description Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_segment_history: {
+        parameters: {
+            query?: {
+                /** @description Items per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of the history */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentHistoryBody"];
+                };
+            };
+            /** @description limit is out of range, or cursor is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `segment_preview_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_segment_members: {
+        parameters: {
+            query?: {
+                /** @description Members per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of members */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentMembersBody"];
+                };
+            };
+            /** @description limit is out of range, or cursor is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `segment_preview_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    refresh_segment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The refresh is queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefreshQueuedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The segment is archived (`code` is `segment_archived`) */
             409: {
                 headers: {
                     [name: string]: unknown;

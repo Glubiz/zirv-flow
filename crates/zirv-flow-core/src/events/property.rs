@@ -27,6 +27,32 @@ pub fn validate_event_name(name: &str) -> Result<(), ValidationError> {
     }
 }
 
+/// The prefix of the names only the system writes: `segment.entered` and `segment.exited`
+/// (architecture 8.3). A client, a sync or an import never sends one.
+pub const RESERVED_EVENT_PREFIX: &str = "segment.";
+
+/// Whether `name` is reserved for the system, ignoring case so a variant cannot slip past.
+pub fn is_reserved_event_name(name: &str) -> bool {
+    name.get(..RESERVED_EVENT_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_EVENT_PREFIX))
+}
+
+/// The error code of a client event under a reserved name.
+pub const RESERVED_EVENT_CODE: &str = "reserved_event_name";
+
+/// An event name a client may send: [`validate_event_name`], and not a reserved one.
+pub fn validate_client_event_name(name: &str) -> Result<(), ValidationError> {
+    validate_event_name(name)?;
+    if is_reserved_event_name(name) {
+        Err(ValidationError::new(
+            "name",
+            "must not start with segment., which is reserved for the system",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// An event property name: 1 to 128 characters without control characters.
 pub fn validate_property_name(name: &str) -> Result<(), ValidationError> {
     if is_name(name) {
@@ -232,6 +258,33 @@ impl FromStr for UnplannedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_segment_prefix_is_reserved_in_any_case_and_only_as_a_prefix() {
+        for name in [
+            "segment.entered",
+            "segment.exited",
+            "segment.x",
+            "Segment.Entered",
+            "SEGMENT.",
+        ] {
+            assert!(is_reserved_event_name(name), "{name}");
+            assert!(validate_client_event_name(name).is_err(), "{name}");
+            assert!(validate_event_name(name).is_ok(), "{name}");
+        }
+        for name in [
+            "segment",
+            "segments.entered",
+            "my.segment.entered",
+            "order",
+            "seg",
+            "é",
+        ] {
+            assert!(!is_reserved_event_name(name), "{name}");
+            assert!(validate_client_event_name(name).is_ok(), "{name}");
+        }
+        assert!(validate_client_event_name("").is_err());
+    }
 
     fn property(name: &str, property_type: PropertyType) -> SchemaProperty {
         SchemaProperty {

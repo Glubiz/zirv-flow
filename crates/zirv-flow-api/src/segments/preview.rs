@@ -132,7 +132,7 @@ fn sql_query(query: Query) -> SqlQuery {
 }
 
 /// A read past its time limit is `segment_preview_timeout`, never a 500.
-fn read_error(error: StoreError) -> ApiError {
+pub(super) fn read_error(error: StoreError) -> ApiError {
     if error.is_timeout() {
         ApiError::segment_preview_timeout()
     } else {
@@ -176,9 +176,7 @@ pub(crate) async fn preview(
         zirv_flow_store::begin_segment_snapshot(&state.pool, state.segment_preview_timeout)
             .await
             .map_err(read_error)?;
-    let compiled_at = zirv_flow_store::snapshot_now(&mut tx)
-        .await
-        .map_err(read_error)?;
+    let compiled_at = state.clock.now(&mut tx).await.map_err(read_error)?;
     let catalog = catalog_of(
         zirv_flow_store::segment_catalog(&mut tx, workspace.id)
             .await

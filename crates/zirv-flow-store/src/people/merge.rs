@@ -83,6 +83,7 @@ pub(super) async fn merge_people(
         identity_ids.sort();
         record_ids.sort();
         move_on_merge(connection, workspace, loser, survivor, trace).await?;
+        crate::segments::close_on_merge(connection, workspace, loser, trace).await?;
         sqlx::query("DELETE FROM person_changes WHERE workspace_id = $1 AND person_id = $2")
             .bind(workspace.as_uuid())
             .bind(loser)

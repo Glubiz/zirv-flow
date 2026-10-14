@@ -15,8 +15,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::events::{
-    EventFlag, Reason, UnplannedPolicy, ValidationState, apply_time_rules, check_properties,
-    evaluate, infer_properties, mask_sample, redact, validate_event_name,
+    EventFlag, RESERVED_EVENT_CODE, Reason, UnplannedPolicy, ValidationState, apply_time_rules,
+    check_properties, evaluate, infer_properties, is_reserved_event_name, mask_sample, redact,
+    validate_event_name,
 };
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
@@ -509,6 +510,9 @@ fn checked_input(
     if validate_event_name(&record.name).is_err() {
         return Err("invalid_event_name");
     }
+    if is_reserved_event_name(&record.name) {
+        return Err(RESERVED_EVENT_CODE);
+    }
     if let Some(message_id) = &record.message_id {
         let length = message_id.chars().count();
         if !(1..=MAX_MESSAGE_ID_CHARS).contains(&length) || message_id.chars().any(char::is_control)
@@ -830,6 +834,19 @@ mod tests {
             .await
             .unwrap()
             .remove(0)
+    }
+
+    #[test]
+    fn a_client_event_under_the_reserved_segment_prefix_is_refused_before_the_database() {
+        assert_eq!(
+            checked_input(&event("segment.entered", json!({}))).unwrap_err(),
+            "reserved_event_name"
+        );
+        assert_eq!(
+            checked_input(&event("Segment.exited", json!({}))).unwrap_err(),
+            "reserved_event_name"
+        );
+        assert!(checked_input(&event("segments", json!({}))).is_ok());
     }
 
     #[sqlx::test]

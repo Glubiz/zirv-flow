@@ -5,7 +5,7 @@ use hashbrown::{HashMap, HashSet};
 use super::apply::{Header, MAX_EVENT_PROPERTIES};
 use super::model::{EventRule, Mapping, Target, Transform};
 use super::transform::valid_format;
-use crate::events::{validate_event_name, validate_property_name};
+use crate::events::{is_reserved_event_name, validate_event_name, validate_property_name};
 use crate::people::{IdentifierKind, TraitType, validate_key};
 
 /// The most column rules a mapping holds.
@@ -57,6 +57,8 @@ pub enum MappingError {
     InvalidTransform(String),
     /// The event's name breaks the event-name rule.
     InvalidEventName,
+    /// The event name starts with `segment.`, which only the system writes.
+    ReservedEventName,
     /// A property of the event has a name that is not a valid property name.
     InvalidEventProperty(String),
     /// Two properties of the event share a name.
@@ -78,6 +80,7 @@ impl MappingError {
             Self::DuplicateTrait(_) => "duplicate_trait",
             Self::InvalidTransform(_) => "invalid_transform",
             Self::InvalidEventName => "invalid_event_name",
+            Self::ReservedEventName => "reserved_event_name",
             Self::InvalidEventProperty(_) => "invalid_event_property",
             Self::DuplicateEventProperty(_) => "duplicate_event_property",
             Self::TooManyEventProperties => "too_many_event_properties",
@@ -90,6 +93,7 @@ impl MappingError {
             Self::NoIdentifier
             | Self::TooManyRules
             | Self::InvalidEventName
+            | Self::ReservedEventName
             | Self::TooManyEventProperties => None,
             Self::UnknownColumn(column)
             | Self::InvalidIdentifierKind(column)
@@ -200,6 +204,9 @@ fn validate_with(
 
 fn check_event(event: &EventRule, known: &dyn Fn(&str) -> bool) -> Result<(), MappingError> {
     validate_event_name(&event.name).map_err(|_| MappingError::InvalidEventName)?;
+    if is_reserved_event_name(&event.name) {
+        return Err(MappingError::ReservedEventName);
+    }
     if event.properties.len() > MAX_EVENT_PROPERTIES {
         return Err(MappingError::TooManyEventProperties);
     }
@@ -582,6 +589,16 @@ mod tests {
         });
 
         assert_eq!(event_check(&with_event(rule)), Ok(()));
+    }
+
+    #[test]
+    fn an_event_name_under_the_segment_prefix_is_reserved() {
+        let error = event_check(&with_event(event("segment.entered", vec![]))).unwrap_err();
+
+        assert_eq!(error, MappingError::ReservedEventName);
+        assert_eq!(error.code(), "reserved_event_name");
+        assert_eq!(error.column(), None);
+        assert_eq!(event_check(&with_event(event("segments", vec![]))), Ok(()));
     }
 
     #[test]

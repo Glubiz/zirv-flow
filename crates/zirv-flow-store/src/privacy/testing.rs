@@ -267,6 +267,49 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .await
     .unwrap();
 
+    // A segment holding the person and the bystander, and the merged person's closed row.
+    let segment = Uuid::now_v7();
+    let mut tx = begin(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO segments (id, workspace_id, name, current_version, member_count) \
+         VALUES ($1, $2, 'Everyone', 1, 2)",
+    )
+    .bind(segment)
+    .bind(ws.as_uuid())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO segment_versions (workspace_id, segment_id, version, definition, normalized, \
+            deps, time_sensitive, trace_id) \
+         VALUES ($1, $2, 1, '{}', '{}', '{}', false, $3)",
+    )
+    .bind(ws.as_uuid())
+    .bind(segment)
+    .bind(Uuid::now_v7())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    for (member, closed) in [(person, false), (bystander, false), (merged, true)] {
+        sqlx::query(
+            "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
+                entered_at, entered_trace_id, entered_cause, exited_version, exited_at, \
+                exited_trace_id, exited_cause) \
+             VALUES ($1, $2, $3, 1, now(), $4, 'initial', \
+                     CASE WHEN $5 THEN 1 END, CASE WHEN $5 THEN now() END, \
+                     CASE WHEN $5 THEN $4 END, CASE WHEN $5 THEN 'data_change' END)",
+        )
+        .bind(ws.as_uuid())
+        .bind(segment)
+        .bind(member)
+        .bind(Uuid::now_v7())
+        .bind(closed)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    commit(tx).await.unwrap();
+
     // A pending export.
     sqlx::query(
         "INSERT INTO privacy_exports (id, workspace_id, person_id, trace_id) \

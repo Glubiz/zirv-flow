@@ -9,7 +9,7 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use zirv_flow_store::{
-    ClaimedJob, EventRetention, HmacKey, Keyring, NewDecision, NewJob, PgConnection, PgPool,
+    ClaimedJob, Clock, EventRetention, HmacKey, Keyring, NewDecision, NewJob, PgConnection, PgPool,
 };
 
 use crate::JobError;
@@ -39,6 +39,7 @@ pub struct JobContext<'a> {
     keyring: Option<Arc<Keyring>>,
     egress: Arc<EgressPolicy>,
     rate_limits: Arc<RateLimits>,
+    clock: Clock,
 }
 
 impl<'a> JobContext<'a> {
@@ -52,7 +53,19 @@ impl<'a> JobContext<'a> {
             keyring: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            clock: Clock::default(),
         }
+    }
+
+    /// Gives the handler the clock segment paths read.
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The clock the segment paths read: the database's, or a test's.
+    pub fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     /// Gives the handler the operator's event retention settings.
