@@ -19,6 +19,7 @@ tracing.workspace = true
 uuid.workspace = true
 zirv-flow-connectors.workspace = true
 zirv-flow-core.workspace = true
+zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]

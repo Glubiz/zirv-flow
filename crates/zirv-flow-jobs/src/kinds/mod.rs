@@ -18,6 +18,7 @@ mod noop;
 mod person_merge_rewrite;
 mod privacy_erase;
 mod privacy_export;
+mod segment_refresh;
 mod sync_run;
 mod sync_tokens;
 mod traits_recompute;
@@ -36,6 +37,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &import_run::ImportRun,
     &sync_run::SyncRunKind,
     &kafka_consume::KafkaConsume,
+    &segment_refresh::SegmentRefresh,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

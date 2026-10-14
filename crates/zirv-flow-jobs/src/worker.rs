@@ -11,7 +11,7 @@ use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
-    ClaimedJob, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
+    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
     complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
@@ -56,6 +56,8 @@ pub struct WorkerConfig {
     pub egress: Arc<EgressPolicy>,
     /// The rate-limit buckets of outbound source calls, shared by every run in this process.
     pub rate_limits: Arc<RateLimits>,
+    /// The clock segment refreshes read: the database's in production, a manual one in tests.
+    pub clock: Clock,
 }
 
 impl WorkerConfig {
@@ -75,6 +77,7 @@ impl WorkerConfig {
             ingest_drain_shards: 8,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            clock: Clock::default(),
         }
     }
 }
@@ -358,6 +361,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
+            .with_clock(shared.config.clock.clone())
             .with_outbound(
                 shared.config.keyring.clone(),
                 Arc::clone(&shared.config.egress),
@@ -588,6 +592,7 @@ mod tests {
             ingest_drain_shards: 4,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            clock: Clock::default(),
         }
     }
 
