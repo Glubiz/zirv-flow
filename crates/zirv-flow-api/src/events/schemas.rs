@@ -8,7 +8,9 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::events::{EventMode, SchemaProperty, validate_event_name, validate_properties};
+use zirv_flow_core::events::{
+    EventMode, SchemaProperty, validate_client_event_name, validate_properties,
+};
 use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{
     EventRetention, EventSchema, EventSchemaUpdate, NewEventSchema, PgPool, PublishOutcome,
@@ -215,7 +217,7 @@ pub(crate) async fn create_schema(
     workspace: WorkspaceId,
     request: CreateEventSchemaRequest,
 ) -> Result<EventSchema, AdminError> {
-    validate_event_name(&request.name)?;
+    validate_client_event_name(&request.name)?;
     let mode = request
         .mode
         .as_deref()
