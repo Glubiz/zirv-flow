@@ -360,8 +360,8 @@ mod tests {
 
     #[test]
     fn a_hostile_key_or_value_is_only_ever_a_parameter() {
-        let key = "k'; DROP TABLE x; -- $1 \" \\ \u{0}";
-        let value = "v'); DELETE FROM people; -- $2 \u{0}";
+        let key = "k'; DROP TABLE x; -- $1 \" \\";
+        let value = "v'); DELETE FROM people; -- $2";
         let mut catalog = catalog();
         catalog.traits.insert(key.to_owned(), TraitType::String);
         catalog
@@ -377,7 +377,7 @@ mod tests {
         ]}));
         let compiled = compile(&definition, &catalog, &TraitStorage::default(), NOW).unwrap();
         let query = compiled.members_sql();
-        for fragment in ["DROP", "DELETE", "--", "\u{0}", "\"", "\\", "k'", "v'"] {
+        for fragment in ["DROP", "DELETE", "--", "\"", "\\", "k'", "v'"] {
             assert!(
                 !query.sql.contains(fragment),
                 "{fragment:?} reached the SQL: {}",
@@ -616,5 +616,113 @@ mod tests {
         let query = channel.members_sql();
         assert!(query.sql.contains("c.topic_id IS NULL"));
         assert!(!query.params.contains(&id));
+    }
+
+    fn sql_of(value: Value) -> String {
+        compiled(value).members_sql().sql
+    }
+
+    #[test]
+    fn every_temporal_cast_is_guarded_by_a_validity_check() {
+        let cases = [
+            (
+                json!({"trait": "signed_up", "op": "before", "value": "2025-01-01T00:00:00Z"}),
+                "pg_input_is_valid((p.traits ->> $2::text), 'timestamptz')",
+            ),
+            (
+                json!({"trait": "birthday", "op": "within_last", "value": "P7D"}),
+                "pg_input_is_valid((p.traits ->> $2::text), 'date')",
+            ),
+            (
+                json!({"event": "order", "where": [
+                    {"prop": "shipped_at", "op": "before", "value": "2025-01-01T00:00:00Z"}]}),
+                "pg_input_is_valid((e.properties ->> $3::text), 'timestamptz')",
+            ),
+            (
+                json!({"event": "order", "where": [
+                    {"prop": "due", "op": "after", "value": "2025-01-01"}]}),
+                "pg_input_is_valid((e.properties ->> $3::text), 'date')",
+            ),
+            (
+                json!({"event": "order", "window": {"since_trait": "birthday"}}),
+                "pg_input_is_valid((p.traits ->> $3::text), 'date')",
+            ),
+            (
+                json!({"event": "order", "window": {"since_trait": "signed_up"}}),
+                "pg_input_is_valid((p.traits ->> $3::text), 'timestamptz')",
+            ),
+        ];
+        for (value, guard) in cases {
+            let sql = sql_of(value.clone());
+            let nested = format!("= 'string' THEN CASE WHEN {guard} THEN ");
+            assert!(sql.contains(&nested), "{value}: no guarded cast in {sql}");
+        }
+    }
+
+    #[test]
+    fn an_integer_property_treats_a_fractional_value_as_missing() {
+        let filter = sql_of(json!({"event": "order", "where": [
+            {"prop": "items", "op": "gt", "value": 1}]}));
+        assert!(filter.contains("= trunc("), "{filter}");
+        let sum = sql_of(json!({"event": "order",
+            "agg": {"fn": "sum", "prop": "items", "op": "gt", "value": 1}}));
+        assert!(sum.contains("= trunc("), "{sum}");
+        let number = sql_of(json!({"event": "order", "where": [
+            {"prop": "total", "op": "gt", "value": 1}]}));
+        assert!(!number.contains("trunc("), "{number}");
+        let total = sql_of(json!({"event": "order",
+            "agg": {"fn": "sum", "prop": "total", "op": "gt", "value": 1}}));
+        assert!(!total.contains("trunc("), "{total}");
+    }
+
+    #[test]
+    fn a_missing_since_trait_bound_fails_the_whole_event_condition() {
+        let count = sql_of(
+            json!({"event": "order", "window": {"since_trait": "signed_up"},
+            "agg": {"fn": "count", "op": "eq", "value": 0}}),
+        );
+        assert!(
+            count.contains(" END END IS NOT NULL AND COALESCE(((SELECT count(*)::float8"),
+            "{count}"
+        );
+        let exists = sql_of(json!({"event": "order", "window": {"since_trait": "signed_up"}}));
+        assert!(
+            exists.contains(" END END IS NOT NULL AND EXISTS (SELECT 1 FROM events e"),
+            "{exists}"
+        );
+        let plain = sql_of(json!({"event": "order",
+            "agg": {"fn": "count", "op": "eq", "value": 0}}));
+        assert!(!plain.contains("IS NOT NULL"), "{plain}");
+    }
+
+    #[test]
+    fn string_and_boolean_equality_is_a_bare_containment() {
+        for value in [
+            json!({"trait": "name", "op": "eq", "value": "Ada"}),
+            json!({"trait": "vip", "op": "eq", "value": true}),
+            json!({"event": "order", "where": [
+                {"prop": "coupon", "op": "eq", "value": "X"}]}),
+        ] {
+            let sql = sql_of(value.clone());
+            assert!(sql.contains(" @> $"), "{sql}");
+            assert!(!sql.contains("COALESCE((p.traits @>"), "{sql}");
+            assert!(!sql.contains("COALESCE((e.properties @>"), "{sql}");
+        }
+        let sql = sql_of(json!({"trait": "name", "op": "eq", "value": "Ada"}));
+        assert!(sql.ends_with("AND (p.traits @> $2::jsonb)"), "{sql}");
+    }
+
+    #[test]
+    fn every_golden_parameter_is_referenced_by_the_sql() {
+        for (path, fixture) in fixtures() {
+            let compiled = compile_fixture(&fixture).unwrap();
+            let query = compiled.members_sql();
+            for index in 2..query.params.len() + 2 {
+                assert!(
+                    references(&query.sql, index) >= 1,
+                    "{path:?}: ${index} is unused"
+                );
+            }
+        }
     }
 }

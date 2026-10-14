@@ -52,6 +52,6 @@
       ]
     }
   ],
-  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN strpos((p.traits ->> $2::text), $3::text) > 0 END), false) AND COALESCE((p.traits @> $4::jsonb), false) AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) = ANY($5::text[]) END), false)))",
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN strpos((p.traits ->> $2::text), $3::text) > 0 END), false) AND p.traits @> $4::jsonb AND COALESCE((CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'string' THEN (p.traits ->> $2::text) = ANY($5::text[]) END), false)))",
   "time_sensitive": false
 }

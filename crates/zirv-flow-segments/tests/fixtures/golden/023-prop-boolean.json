@@ -39,9 +39,6 @@
       "text": "order"
     },
     {
-      "text": "gift"
-    },
-    {
       "jsonb": {
         "gift": false
       }
@@ -50,8 +47,11 @@
       "jsonb": {
         "gift": true
       }
+    },
+    {
+      "text": "gift"
     }
   ],
-  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND COALESCE((e.properties @> $4::jsonb), false) AND COALESCE((e.properties @> $5::jsonb), false) AND COALESCE(((jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $3::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $3::text)) <> 'null')), false)))",
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND e.properties @> $3::jsonb AND e.properties @> $4::jsonb AND COALESCE(((jsonb_typeof((e.properties -> $5::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $5::text)) <> 'null')), false) AND COALESCE((NOT (jsonb_typeof((e.properties -> $5::text)) IS NOT NULL AND jsonb_typeof((e.properties -> $5::text)) <> 'null')), false)))",
   "time_sensitive": false
 }

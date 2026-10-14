@@ -8,6 +8,7 @@ use std::str::FromStr;
 use serde_json::{Map, Value};
 use time::{Duration, OffsetDateTime};
 use zirv_flow_core::consent::{Channel, ConsentStatus};
+use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 use zirv_flow_core::segment::{
     AggFn, ChangeClasses, ConsentCondition, EventCondition, Issue, Node, Op, TraitCondition,
@@ -226,13 +227,20 @@ impl Lowerer<'_> {
     }
 
     fn field(&mut self, table: Table, key: &str) -> Field {
+        let mut field = Self::unbound_field(table, key);
+        field.key_sql = self.text(key);
+        field
+    }
+
+    /// A field whose key is not bound, for a containment that carries the key in its own value.
+    fn unbound_field(table: Table, key: &str) -> Field {
         Field {
             column: match table {
                 Table::Person => "p.traits",
                 Table::Event => "e.properties",
             },
             key: key.to_owned(),
-            key_sql: self.text(key),
+            key_sql: String::new(),
         }
     }
 
@@ -248,19 +256,30 @@ impl Lowerer<'_> {
         if op.is_relative() {
             self.time_sensitive = true;
         }
-        let field = self.field(table, key);
+        let bare = op == Op::Eq && matches!(kind, Kind::String | Kind::Boolean);
+        let field = if bare {
+            Self::unbound_field(table, key)
+        } else {
+            self.field(table, key)
+        };
         let inner = match op {
             Op::Exists => presence(&field),
             Op::NotExists => format!("NOT {}", presence(&field)),
             _ => self.typed(&field, kind, op, value),
         };
+        if bare {
+            return inner;
+        }
         format!("COALESCE(({inner}), false)")
     }
 
     fn typed(&mut self, field: &Field, kind: Kind, op: Op, value: Option<&Value>) -> String {
         match kind {
             Kind::String => self.string(field, op, value),
-            Kind::Number | Kind::Integer => self.number(&number_expr(&field.json()), op, value),
+            Kind::Number | Kind::Integer => {
+                let expr = number_expr(&field.json(), kind == Kind::Integer);
+                self.number(&expr, op, value)
+            }
             Kind::Boolean => match (op, value) {
                 (Op::Eq, Some(Value::Bool(_))) => self.contains(field, value),
                 _ => self.fail(code::VALUE_TYPE_MISMATCH),
@@ -419,7 +438,22 @@ impl Lowerer<'_> {
         format!("CASE WHEN jsonb_typeof({json}) = 'array' THEN {comparison} END")
     }
 
+    /// An event condition. With a `since_trait` window, a person whose trait is missing or
+    /// invalid fails the whole condition, aggregate included.
     fn event(&mut self, condition: &EventCondition) -> String {
+        let body = self.event_rows(condition);
+        let Some(Window::SinceTrait(key)) = &condition.window else {
+            return body;
+        };
+        let kind = match self.catalog.traits.get(key) {
+            Some(TraitType::Date) => Kind::Date,
+            _ => Kind::Timestamp,
+        };
+        let field = self.field(Table::Person, key);
+        format!("({} IS NOT NULL AND {body})", time_expr(&field, kind))
+    }
+
+    fn event_rows(&mut self, condition: &EventCondition) -> String {
         let catalog = self.catalog;
         let Some(schema) = catalog.events.get(&condition.name) else {
             return self.fail(code::UNKNOWN_EVENT);
@@ -466,7 +500,11 @@ impl Lowerer<'_> {
                 };
                 let function = agg.func.as_str();
                 let field = self.field(Table::Event, prop);
-                let expr = format!("(SELECT {function}({}) {from})", number_expr(&field.json()));
+                let integral = schema.get(prop) == Some(&PropertyType::Integer);
+                let expr = format!(
+                    "(SELECT {function}({}) {from})",
+                    number_expr(&field.json(), integral)
+                );
                 self.number(&expr, agg.op, agg.value.as_ref())
             }
             AggFn::FirstTime | AggFn::LastTime => {
@@ -525,24 +563,35 @@ fn presence(field: &Field) -> String {
     format!("(jsonb_typeof({json}) IS NOT NULL AND jsonb_typeof({json}) <> 'null')")
 }
 
-/// The value as `float8`, or NULL when it is not a number or its magnitude is past `1e300`. The
-/// nesting keeps the cast from running on a wrong type.
-fn number_expr(json: &str) -> String {
+/// The value as `float8`, or NULL when it is not a number, its magnitude is past `1e300`, or
+/// `integral` is set and it has a fractional part. The nesting keeps the cast from running on a
+/// wrong type.
+fn number_expr(json: &str, integral: bool) -> String {
+    let whole = if integral {
+        format!(" AND ({json})::numeric = trunc(({json})::numeric)")
+    } else {
+        String::new()
+    };
     format!(
         "CASE WHEN jsonb_typeof({json}) = 'number' THEN \
-         CASE WHEN abs(({json})::numeric) <= 1e300 THEN ({json})::float8 END END"
+         CASE WHEN abs(({json})::numeric) <= 1e300{whole} THEN ({json})::float8 END END"
     )
 }
 
 /// The value as `timestamptz`, or NULL when it is not a string. A date is taken at UTC midnight.
 fn time_expr(field: &Field, kind: Kind) -> String {
-    let cast = if kind == Kind::Date {
-        format!("(({})::date::timestamp AT TIME ZONE 'UTC')", field.text())
+    let text = field.text();
+    let (cast, sql_type) = if kind == Kind::Date {
+        (
+            format!("(({text})::date::timestamp AT TIME ZONE 'UTC')"),
+            "date",
+        )
     } else {
-        format!("({})::timestamptz", field.text())
+        (format!("({text})::timestamptz"), "timestamptz")
     };
     format!(
-        "CASE WHEN jsonb_typeof({}) = 'string' THEN {cast} END",
+        "CASE WHEN jsonb_typeof({}) = 'string' THEN \
+         CASE WHEN pg_input_is_valid({text}, '{sql_type}') THEN {cast} END END",
         field.json()
     )
 }
@@ -633,7 +682,7 @@ mod tests {
 
     #[test]
     fn the_number_guard_nests_the_cast_inside_the_type_check() {
-        let expr = number_expr("(p.traits -> $2::text)");
+        let expr = number_expr("(p.traits -> $2::text)", false);
         assert!(
             expr.starts_with("CASE WHEN jsonb_typeof((p.traits -> $2::text)) = 'number' THEN CASE")
         );
