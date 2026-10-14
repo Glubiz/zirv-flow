@@ -11127,6 +11127,8 @@ email,b@example.com,
         assert_eq!(invalid.body["code"], "segment_invalid");
         assert_eq!(live.body["count"], 3);
         assert!(live.body["data_age"]["as_of"].is_null());
+        assert_eq!(live.body["data_age"]["live"], true);
+        assert_eq!(as_owner.body["data_age"]["live"], false);
         assert_eq!(live.body["data_age"]["sources"], json!([]));
         assert_eq!(saved, 0);
     }

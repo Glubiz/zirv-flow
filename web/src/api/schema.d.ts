@@ -2877,11 +2877,14 @@ export interface components {
         DataAgeBody: {
             /**
              * Format: date-time
-             * @description The oldest freshness among the source streams whose mapping writes a trait, event or list
-             *     the definition reads, including through segments it references. Null when no stream feeds
-             *     it: the data is live.
+             * @description The oldest `last_success_at` across the sources whose enabled streams have a mapping that
+             *     writes a trait, event or list the definition reads, including through segments it
+             *     references. Null when `live`, and null when any feeding source has never succeeded: the
+             *     age is then unknown, and `sources` shows which source has no success.
              */
             as_of?: string | null;
+            /** @description True exactly when no stream feeds the definition: it reads only live data. */
+            live: boolean;
             sources: components["schemas"]["DataSourceBody"][];
         };
         DataSourceBody: {

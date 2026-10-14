@@ -57,9 +57,12 @@ pub(crate) struct DataSourceBody {
 /// How current the data behind a preview is.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct DataAgeBody {
-    /// The oldest freshness among the source streams whose mapping writes a trait, event or list
-    /// the definition reads, including through segments it references. Null when no stream feeds
-    /// it: the data is live.
+    /// True exactly when no stream feeds the definition: it reads only live data.
+    live: bool,
+    /// The oldest `last_success_at` across the sources whose enabled streams have a mapping that
+    /// writes a trait, event or list the definition reads, including through segments it
+    /// references. Null when `live`, and null when any feeding source has never succeeded: the
+    /// age is then unknown, and `sources` shows which source has no success.
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     as_of: Option<OffsetDateTime>,
@@ -69,6 +72,7 @@ pub(crate) struct DataAgeBody {
 impl From<DataAge> for DataAgeBody {
     fn from(age: DataAge) -> Self {
         Self {
+            live: age.live,
             as_of: age.as_of,
             sources: age
                 .sources
@@ -272,6 +276,7 @@ mod tests {
     fn the_data_age_body_carries_the_oldest_time_and_each_source() {
         let source = Uuid::now_v7();
         let body = DataAgeBody::from(DataAge {
+            live: false,
             as_of: Some(OffsetDateTime::UNIX_EPOCH),
             sources: vec![FeedingSource {
                 source_id: source,
@@ -286,11 +291,14 @@ mod tests {
         assert_eq!(json["sources"][0]["name"], "CRM");
         assert!(json["sources"][0]["last_success_at"].is_null());
         let live = serde_json::to_value(DataAgeBody::from(DataAge {
+            live: true,
             as_of: None,
             sources: Vec::new(),
         }))
         .unwrap();
         assert!(live["as_of"].is_null());
+        assert_eq!(live["live"], true);
+        assert_eq!(json["live"], false);
     }
 
     #[test]
