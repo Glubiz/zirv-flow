@@ -50,11 +50,8 @@ impl CompiledSegment {
 
     /// The first `limit` member ids in id order.
     pub fn sample_sql(&self, limit: u32) -> Query {
-        let mut query = self.query("p.id", "");
-        let at = query.params.len() + 2;
-        query
-            .sql
-            .push_str(&format!(" ORDER BY p.id LIMIT ${at}::bigint"));
+        let at = self.params.len() + 2;
+        let mut query = self.query("p.id", &format!(" ORDER BY p.id LIMIT ${at}::bigint"));
         query.params.push(Param::Int(i64::from(limit)));
         query
     }
