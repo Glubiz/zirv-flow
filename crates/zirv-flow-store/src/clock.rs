@@ -11,7 +11,6 @@ use sqlx::PgConnection;
 use time::{Duration, OffsetDateTime};
 
 use crate::StoreError;
-use crate::segments::snapshot_now;
 
 /// An instant held in memory that a test sets and advances. Clones share the instant.
 #[derive(Clone, Debug)]
@@ -45,7 +44,7 @@ impl ManualClock {
 /// Where "now" comes from.
 #[derive(Clone, Debug, Default)]
 pub enum Clock {
-    /// The database's `now()`.
+    /// The database's `clock_timestamp()`.
     #[default]
     Database,
     /// A test's instant.
@@ -53,11 +52,17 @@ pub enum Clock {
 }
 
 impl Clock {
-    /// The current instant. The database variant reads `connection`; the manual one ignores it.
+    /// The current instant. The database variant reads `clock_timestamp()`, the wall time at the
+    /// call and not the transaction's start, so a refresh that takes it after waiting for the
+    /// segment lock gets a time no earlier than the refresh it waited for committed. The manual
+    /// variant ignores `connection`.
     /// A read cancelled at the connection's statement timeout is [`StoreError::is_timeout`].
     pub async fn now(&self, connection: &mut PgConnection) -> Result<OffsetDateTime, StoreError> {
         match self {
-            Self::Database => snapshot_now(connection).await,
+            Self::Database => sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(connection)
+                .await
+                .map_err(StoreError::bounded),
             Self::Manual(clock) => Ok(clock.now()),
         }
     }
@@ -80,6 +85,29 @@ mod tests {
         clock.set(datetime!(2029-12-31 00:00 UTC));
         assert_eq!(copy.now(), datetime!(2029-12-31 00:00 UTC));
         assert!(matches!(Clock::default(), Clock::Database));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_database_clock_is_the_wall_time_not_the_transaction_start(pool: PgPool) {
+        let mut tx = pool.begin().await.unwrap();
+        let started: OffsetDateTime = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let read = Clock::Database.now(&mut tx).await.unwrap();
+        let still: OffsetDateTime = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        assert_eq!(still, started);
+        assert!(
+            read - started >= Duration::milliseconds(100),
+            "{read} {started}"
+        );
     }
 
     #[sqlx::test]

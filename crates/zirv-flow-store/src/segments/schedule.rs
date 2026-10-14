@@ -8,7 +8,9 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::schedule::{cadence_cron, next_after};
 
-use super::refresh::{REFRESH_JOB_KIND, RefreshTrigger};
+use zirv_flow_core::{Cause, TraceContext};
+
+use super::refresh::{REFRESH_JOB_KIND, RefreshRequest, RefreshTrigger, enqueue_refresh};
 use crate::StoreError;
 
 /// The zone a segment cron is read in.
@@ -17,10 +19,7 @@ const SCHEDULE_TIMEZONE: &str = "UTC";
 /// The phase of a segment: the last 8 bytes of its id as a number. A version 7 id keeps its
 /// random bits there, where the first bytes are a timestamp that ids created together share.
 pub(crate) fn phase_of(segment: Uuid) -> u64 {
-    let bytes = segment.as_bytes();
-    u64::from_be_bytes([
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    ])
+    segment.as_u64_pair().1
 }
 
 /// The UTC cron of a segment's refresh; none for a cadence outside the ruled set.
@@ -83,6 +82,49 @@ pub(crate) async fn remove_segment_schedule(
         .await
         .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// Brings segments saved before schedules and membership existed in line, in one transaction:
+/// every live segment without a `schedules` row gets one and, if never computed, a `save` refresh
+/// under its version's key. Only unscheduled segments are touched, so a scheduled segment whose
+/// refresh keeps failing is retried by its schedule, not again here every hour. The cron phase is
+/// computed in Rust, so this runs from the leader's upkeep and not from a migration. Returns the
+/// schedules created and the refreshes enqueued; a second call finds nothing to do.
+pub async fn reconcile_segment_schedules(
+    connection: &mut PgConnection,
+) -> Result<(u64, u64), StoreError> {
+    let unscheduled: Vec<(Uuid, Uuid, i32, i32, Option<i32>)> = sqlx::query_as(
+        "SELECT s.workspace_id, s.id, s.cadence_minutes, s.current_version, s.computed_version \
+         FROM segments s \
+         WHERE s.archived_at IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM schedules c WHERE c.segment_id = s.id) \
+         ORDER BY s.id",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let (mut scheduled, mut queued) = (0, 0);
+    for (workspace, segment, cadence, version, computed) in unscheduled {
+        let workspace = WorkspaceId::from_uuid(workspace);
+        sync_segment_schedule(connection, workspace, segment, cadence).await?;
+        scheduled += 1;
+        if computed.is_some() {
+            continue;
+        }
+        let trace = TraceContext::root(Cause::definition_change(segment));
+        if enqueue_refresh(
+            connection,
+            workspace,
+            segment,
+            RefreshRequest::Save { version },
+            &trace,
+        )
+        .await?
+        {
+            queued += 1;
+        }
+    }
+    Ok((scheduled, queued))
 }
 
 #[cfg(test)]
@@ -190,5 +232,86 @@ mod tests {
         let all = rows(&pool).await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1, segment_cron(mine.id, 60).unwrap());
+    }
+
+    /// A segment as migration 0030 left it: live, no schedule, never computed.
+    async fn unscheduled_segment(pool: &PgPool, ws: WorkspaceId) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut tx = begin(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO segments (id, workspace_id, name, current_version, cadence_minutes) \
+             VALUES ($1, $2, 'Old', 1, 30)",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO segment_versions (workspace_id, segment_id, version, definition, \
+                normalized, deps, time_sensitive, trace_id) \
+             VALUES ($1, $2, 1, '{}', '{}', '{}', false, gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        id
+    }
+
+    async fn reconcile(pool: &PgPool) -> (u64, u64) {
+        let mut tx = begin(pool).await.unwrap();
+        let counts = reconcile_segment_schedules(&mut tx).await.unwrap();
+        commit(tx).await.unwrap();
+        counts
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reconciling_schedules_and_queues_a_segment_left_by_version_0_50_0_once(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = unscheduled_segment(&pool, ws).await;
+
+        let first = reconcile(&pool).await;
+        let second = reconcile(&pool).await;
+
+        assert_eq!((first, second), ((1, 1), (0, 0)));
+        let cron: String = sqlx::query_scalar("SELECT cron FROM schedules WHERE segment_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cron, segment_cron(id, 30).unwrap());
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'segment.refresh'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [format!("segment.refresh:{id}:v1")]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_scheduled_segment_whose_refresh_never_computes_is_left_to_its_schedule(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        unscheduled_segment(&pool, ws).await;
+        reconcile(&pool).await;
+        // The refresh ran and completed without computing (say, `definition_invalid`).
+        sqlx::query("DELETE FROM jobs WHERE kind = 'segment.refresh'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(reconcile(&pool).await, (0, 0));
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.refresh'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0);
     }
 }

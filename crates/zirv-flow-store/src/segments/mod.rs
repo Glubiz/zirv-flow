@@ -35,7 +35,7 @@ pub use refresh::{
     RefreshRequest, RefreshTrigger, apply_refresh, decision_cause_kind, enqueue_refresh,
     lock_segment_refresh, membership_cause, membership_trace,
 };
-pub use schedule::segment_cron;
+pub use schedule::{reconcile_segment_schedules, segment_cron};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

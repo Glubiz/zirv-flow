@@ -794,6 +794,7 @@ mod tests {
         assert!(batch.body.to_string().contains("reserved_event_name"));
         assert!(fx.inbox().await.is_empty());
     }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_missing_or_wrong_key_is_a_401(pool: PgPool) {

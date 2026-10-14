@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
-use zirv_flow_store::{HistoryCursor, HistoryRow, MemberRow, RefreshRequest, SegmentError, Tx};
+use zirv_flow_store::{HistoryCursor, RefreshRequest, SegmentError, Tx};
 
 use super::preview::{DataAgeBody, read_error};
 use crate::AppState;
@@ -208,17 +208,11 @@ pub(crate) async fn members(
     Ok(Json(SegmentMembersBody {
         items: rows
             .into_iter()
-            .map(
-                |MemberRow {
-                     person_id,
-                     entered_at,
-                     display: shown,
-                 }| SegmentMemberBody {
-                    id: person_id,
-                    display: display(shown, reveal),
-                    entered_at,
-                },
-            )
+            .map(|row| SegmentMemberBody {
+                id: row.person_id,
+                display: display(row.display, reveal),
+                entered_at: row.entered_at,
+            })
             .collect(),
         next_cursor,
         computed_at: found.computed_at,
@@ -276,7 +270,7 @@ pub(crate) async fn history(
     Ok(Json(SegmentHistoryBody {
         items: rows
             .into_iter()
-            .map(|row: HistoryRow| SegmentHistoryItemBody {
+            .map(|row| SegmentHistoryItemBody {
                 person_id: row.person_id,
                 display: display(row.display, reveal),
                 kind: row.kind,
