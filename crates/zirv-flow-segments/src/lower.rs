@@ -578,20 +578,31 @@ fn number_expr(json: &str, integral: bool) -> String {
     )
 }
 
-/// The value as `timestamptz`, or NULL when it is not a string. A date is taken at UTC midnight.
+/// The RFC 3339 shape the write path accepts. PostgreSQL alone also takes `infinity`, `now` and
+/// other spellings the write path refuses.
+const TIMESTAMP_SHAPE: &str = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$";
+const DATE_SHAPE: &str = "^[0-9]{4}-[0-9]{2}-[0-9]{2}$";
+
+/// The value as `timestamptz`, or NULL when it is not a string in the write path's shape that
+/// PostgreSQL also accepts. A date is taken at UTC midnight.
 fn time_expr(field: &Field, kind: Kind) -> String {
     let text = field.text();
-    let (cast, sql_type) = if kind == Kind::Date {
+    let (cast, sql_type, shape) = if kind == Kind::Date {
         (
             format!("(({text})::date::timestamp AT TIME ZONE 'UTC')"),
             "date",
+            DATE_SHAPE,
         )
     } else {
-        (format!("({text})::timestamptz"), "timestamptz")
+        (
+            format!("({text})::timestamptz"),
+            "timestamptz",
+            TIMESTAMP_SHAPE,
+        )
     };
     format!(
         "CASE WHEN jsonb_typeof({}) = 'string' THEN \
-         CASE WHEN pg_input_is_valid({text}, '{sql_type}') THEN {cast} END END",
+         CASE WHEN {text} ~ '{shape}' AND pg_input_is_valid({text}, '{sql_type}') THEN {cast} END END",
         field.json()
     )
 }

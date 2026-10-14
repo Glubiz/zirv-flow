@@ -623,39 +623,53 @@ mod tests {
     }
 
     #[test]
-    fn every_temporal_cast_is_guarded_by_a_validity_check() {
+    fn every_temporal_cast_is_guarded_by_a_shape_and_validity_check() {
+        let timestamp = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$";
+        let date = "^[0-9]{4}-[0-9]{2}-[0-9]{2}$";
         let cases = [
             (
                 json!({"trait": "signed_up", "op": "before", "value": "2025-01-01T00:00:00Z"}),
-                "pg_input_is_valid((p.traits ->> $2::text), 'timestamptz')",
+                "(p.traits ->> $2::text)",
+                "timestamptz",
             ),
             (
                 json!({"trait": "birthday", "op": "within_last", "value": "P7D"}),
-                "pg_input_is_valid((p.traits ->> $2::text), 'date')",
+                "(p.traits ->> $2::text)",
+                "date",
             ),
             (
                 json!({"event": "order", "where": [
                     {"prop": "shipped_at", "op": "before", "value": "2025-01-01T00:00:00Z"}]}),
-                "pg_input_is_valid((e.properties ->> $3::text), 'timestamptz')",
+                "(e.properties ->> $3::text)",
+                "timestamptz",
             ),
             (
                 json!({"event": "order", "where": [
                     {"prop": "due", "op": "after", "value": "2025-01-01"}]}),
-                "pg_input_is_valid((e.properties ->> $3::text), 'date')",
+                "(e.properties ->> $3::text)",
+                "date",
             ),
             (
                 json!({"event": "order", "window": {"since_trait": "birthday"}}),
-                "pg_input_is_valid((p.traits ->> $3::text), 'date')",
+                "(p.traits ->> $3::text)",
+                "date",
             ),
             (
                 json!({"event": "order", "window": {"since_trait": "signed_up"}}),
-                "pg_input_is_valid((p.traits ->> $3::text), 'timestamptz')",
+                "(p.traits ->> $3::text)",
+                "timestamptz",
             ),
         ];
-        for (value, guard) in cases {
-            let sql = sql_of(value.clone());
-            let nested = format!("= 'string' THEN CASE WHEN {guard} THEN ");
-            assert!(sql.contains(&nested), "{value}: no guarded cast in {sql}");
+        for (value, text, sql_type) in cases {
+            let shape = if sql_type == "date" { date } else { timestamp };
+            let guard = format!(
+                "= 'string' THEN CASE WHEN {text} ~ '{shape}' \
+                 AND pg_input_is_valid({text}, '{sql_type}') THEN "
+            );
+            assert!(
+                sql_of(value.clone()).contains(&guard),
+                "{value}: no guarded cast"
+            );
         }
     }
 
