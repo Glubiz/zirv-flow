@@ -11,6 +11,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::{NewJob, StoreError, enqueue};
+
 /// The kind of the job that re-evaluates the segments for a workspace's dirty people.
 pub const REEVALUATE_JOB_KIND: &str = "segment.reevaluate";
 
@@ -82,8 +83,7 @@ pub(crate) async fn mark_person(
 }
 
 /// Enqueues the workspace's `segment.reevaluate`, once per transaction that marked anyone. A
-/// no-op while one is ready or running (its
-/// unique key).
+/// no-op while one is ready or running (its unique key).
 ///
 /// This only buys latency. Correctness never depends on it: a mark that no request follows (a
 /// path that missed the call, a request that rolled back, a mark made after the job's last
@@ -164,16 +164,7 @@ pub async fn claim_dirty(
 }
 
 fn trace_of(trace: Option<Uuid>, kind: Option<String>, id: Option<String>) -> Option<TraceContext> {
-    let kind = match kind?.as_str() {
-        "event" => CauseKind::Event,
-        "trait_change" => CauseKind::TraitChange,
-        "schedule" => CauseKind::Schedule,
-        "manual" => CauseKind::Manual,
-        "api" => CauseKind::Api,
-        "definition_change" => CauseKind::DefinitionChange,
-        "sync_run" => CauseKind::SyncRun,
-        _ => return None,
-    };
+    let kind = kind?.parse().ok()?;
     Some(TraceContext {
         trace_id: TraceId::from_uuid(trace?),
         cause: Cause::from_stored(kind, id?),
