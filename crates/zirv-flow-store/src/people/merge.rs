@@ -76,6 +76,9 @@ pub(super) async fn merge_people(
         None,
     )
     .await?;
+    // The segments the losers are open members of are locked in the pass's order before any of
+    // their rows is written, so this merge and a pass can never wait on each other.
+    crate::segments::lock_segments_of_people(connection, workspace, losers).await?;
     for &loser in losers {
         let mut identity_ids: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE identities SET person_id = $3 \

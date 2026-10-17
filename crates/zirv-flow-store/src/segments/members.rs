@@ -193,11 +193,13 @@ pub(crate) async fn close_on_merge(
 
 /// Takes the people's open rows out of the segments' counts. Deleting the rows themselves is the
 /// `DELETIONS` list's job; run this first.
+/// The segments are locked first, in the order of a pass.
 pub(crate) async fn forget_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
 ) -> Result<(), StoreError> {
+    super::lock_segments_of_people(connection, workspace, people).await?;
     sqlx::query(
         "WITH counts AS ( \
              SELECT segment_id, count(*) AS n FROM segment_members \

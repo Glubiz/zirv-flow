@@ -13,7 +13,9 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::preview::{SqlQuery, bind_all};
-use super::refresh::{MembershipCause, RefreshOutcome, Scope, refresh_statement};
+use super::refresh::{
+    MembershipCause, RefreshOutcome, Scope, lock_segment_refresh, refresh_statement,
+};
 use crate::{DirtyPerson, StoreError};
 
 /// A claimed batch as the parallel arrays the diff statement unnests: each person with the
@@ -58,6 +60,41 @@ impl DirtyBatch {
     }
 }
 
+/// The one total order every writer that touches several segments' rows locks them in: a
+/// segment comes after every segment it references, ties go by id, and archived segments are
+/// ordered with the rest. The passes, merges and erasures all lock through it, so no two of
+/// them can wait on each other.
+async fn lock_order(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<(Uuid, Deps)>, StoreError> {
+    let rows: Vec<(Uuid, Value, bool)> = sqlx::query_as(
+        "SELECT s.id, v.deps, s.archived_at IS NOT NULL FROM segments s \
+         JOIN segment_versions v ON v.segment_id = s.id AND v.version = s.current_version \
+         WHERE s.workspace_id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, deps, archived)| {
+            let mut deps = Deps::parse(&deps);
+            deps.archived = archived;
+            (id, deps)
+        })
+        .collect())
+}
+
+/// Takes the refresh lock of each segment in `segments`, which are already in lock order.
+async fn acquire(connection: &mut PgConnection, segments: &[Uuid]) -> Result<(), StoreError> {
+    for &segment in segments {
+        lock_segment_refresh(connection, segment).await?;
+    }
+    Ok(())
+}
+
 /// The live segments one batch reaches, in the order to evaluate them: every segment whose
 /// current version's dependency classes intersect `classes`, then the segments that reference
 /// those, and so on. A segment comes after every segment it references; ties go by id, so
@@ -68,27 +105,58 @@ pub async fn reevaluation_order(
     workspace: WorkspaceId,
     classes: ChangeClasses,
 ) -> Result<Vec<Uuid>, StoreError> {
-    let rows: Vec<(Uuid, Value)> = sqlx::query_as(
-        "SELECT s.id, v.deps FROM segments s \
-         JOIN segment_versions v ON v.segment_id = s.id AND v.version = s.current_version \
-         WHERE s.workspace_id = $1 AND s.archived_at IS NULL",
-    )
-    .bind(workspace.as_uuid())
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::query)?;
-    let parsed = rows
-        .into_iter()
-        .map(|(id, deps)| (id, Deps::parse(&deps)))
-        .collect();
-    Ok(order_segments(parsed, classes))
+    let all = lock_order(connection, workspace).await?;
+    Ok(order_segments(all, classes))
 }
 
-/// The two parts of a version's `deps` the pass reads.
+/// [`reevaluation_order`], with each of its segments' refresh locks taken, in that order, for
+/// the rest of the transaction. Read nothing about the segments before this returns.
+pub async fn lock_reevaluation(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    classes: ChangeClasses,
+) -> Result<Vec<Uuid>, StoreError> {
+    let order = reevaluation_order(connection, workspace, classes).await?;
+    acquire(connection, &order).await?;
+    Ok(order)
+}
+
+/// Takes, in the same order as a pass, the refresh lock of every segment in which one of
+/// `people` has an open row, for the rest of the transaction. A merge or an erasure calls this
+/// before it writes any segment row, so none of them waits on a pass that waits on it.
+pub(crate) async fn lock_segments_of_people(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    let touched: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT segment_id FROM segment_members \
+         WHERE workspace_id = $1 AND person_id = ANY($2) AND exited_at IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .bind(people)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if touched.is_empty() {
+        return Ok(());
+    }
+    let position: HashMap<Uuid, usize> = global_order(lock_order(connection, workspace).await?)
+        .into_iter()
+        .enumerate()
+        .map(|(at, id)| (id, at))
+        .collect();
+    let mut ordered = touched;
+    ordered.sort_unstable_by_key(|id| (position.get(id).copied().unwrap_or(usize::MAX), *id));
+    acquire(connection, &ordered).await
+}
+
+/// The parts of a version's `deps` the pass reads.
 #[derive(Clone, Debug, Default)]
 struct Deps {
     classes: ChangeClasses,
     segments: BTreeSet<Uuid>,
+    archived: bool,
 }
 
 impl Deps {
@@ -105,38 +173,32 @@ impl Deps {
             .flatten()
             .filter_map(|id| id.as_str().and_then(|id| Uuid::parse_str(id).ok()))
             .collect();
-        Self { classes, segments }
+        Self {
+            classes,
+            segments,
+            archived: false,
+        }
     }
 }
 
-fn order_segments(segments: Vec<(Uuid, Deps)>, classes: ChangeClasses) -> Vec<Uuid> {
+/// Every segment, each after the segments it references, the smallest id first among those
+/// that are ready (Kahn's algorithm). Segments on a reference cycle, which cannot be saved,
+/// come last by id.
+fn global_order(segments: Vec<(Uuid, Deps)>) -> Vec<Uuid> {
     let deps: HashMap<Uuid, Deps> = segments.into_iter().collect();
     let mut referenced_by: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     for (id, own) in &deps {
-        for referenced in &own.segments {
+        for referenced in own.segments.iter().filter(|r| deps.contains_key(*r)) {
             referenced_by.entry(*referenced).or_default().push(*id);
         }
     }
-    // The segments the classes reach, and everything that references them.
-    let mut chosen: HashSet<Uuid> = HashSet::new();
-    let mut pending: Vec<Uuid> = deps
+    let mut waiting: HashMap<Uuid, usize> = deps
         .iter()
-        .filter(|(_, own)| own.classes.intersects(classes))
-        .map(|(id, _)| *id)
-        .collect();
-    while let Some(id) = pending.pop() {
-        if chosen.insert(id) {
-            pending.extend(referenced_by.get(&id).into_iter().flatten().copied());
-        }
-    }
-    // Kahn's algorithm over the chosen segments, the smallest id first.
-    let mut waiting: HashMap<Uuid, usize> = chosen
-        .iter()
-        .map(|id| {
-            let needs = deps[id]
+        .map(|(id, own)| {
+            let needs = own
                 .segments
                 .iter()
-                .filter(|d| chosen.contains(*d))
+                .filter(|r| deps.contains_key(*r))
                 .count();
             (*id, needs)
         })
@@ -146,7 +208,7 @@ fn order_segments(segments: Vec<(Uuid, Deps)>, classes: ChangeClasses) -> Vec<Uu
         .filter(|(_, needs)| **needs == 0)
         .map(|(id, _)| *id)
         .collect();
-    let mut order = Vec::with_capacity(chosen.len());
+    let mut order = Vec::with_capacity(deps.len());
     while let Some(id) = ready.pop_first() {
         waiting.remove(&id);
         order.push(id);
@@ -159,11 +221,50 @@ fn order_segments(segments: Vec<(Uuid, Deps)>, classes: ChangeClasses) -> Vec<Uu
             }
         }
     }
-    // A reference cycle cannot be saved; were one stored, its members still get evaluated.
     let mut left: Vec<Uuid> = waiting.into_keys().collect();
     left.sort_unstable();
     order.extend(left);
     order
+}
+
+/// The live segments `classes` reach and everything that references them, in [`global_order`].
+fn order_segments(segments: Vec<(Uuid, Deps)>, classes: ChangeClasses) -> Vec<Uuid> {
+    let mut referenced_by: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (id, own) in &segments {
+        for referenced in &own.segments {
+            referenced_by.entry(*referenced).or_default().push(*id);
+        }
+    }
+    let live: HashSet<Uuid> = segments
+        .iter()
+        .filter(|(_, own)| !own.archived)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut chosen: HashSet<Uuid> = HashSet::new();
+    let mut pending: Vec<Uuid> = segments
+        .iter()
+        .filter(|(id, own)| live.contains(id) && own.classes.intersects(classes))
+        .map(|(id, _)| *id)
+        .collect();
+    while let Some(id) = pending.pop() {
+        if chosen.insert(id) {
+            pending.extend(
+                referenced_by
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|dependent| live.contains(dependent)),
+            );
+        }
+    }
+    if chosen.is_empty() {
+        return Vec::new();
+    }
+    global_order(segments)
+        .into_iter()
+        .filter(|id| chosen.contains(id))
+        .collect()
 }
 
 /// One batch-restricted diff to apply.
@@ -342,6 +443,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_lock_order_is_one_total_order_that_a_subset_follows_and_an_archived_segment_joins() {
+        // The chosen segments come out in the order the whole set has, so a merge that locks
+        // some of them and a pass that locks others agree on who goes first.
+        let mut archived = deps(ChangeClasses::TRAITS, &[id(9)]);
+        archived.archived = true;
+        let rows = vec![
+            (id(9), deps(ChangeClasses::NONE, &[])),
+            (id(1), deps(ChangeClasses::NONE, &[id(9)])),
+            (id(5), deps(ChangeClasses::TRAITS, &[])),
+            (id(3), archived),
+        ];
+
+        assert_eq!(global_order(rows.clone()), [id(5), id(9), id(1), id(3)]);
+        // An archived segment is never chosen, and does not carry its reach to others.
+        assert_eq!(order_segments(rows, ChangeClasses::TRAITS), [id(5)]);
+    }
     #[test]
     fn a_batch_carries_the_union_of_classes_and_each_persons_own_trace() {
         let fallback = TraceContext::root(Cause::schedule(id(100)));

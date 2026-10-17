@@ -151,10 +151,10 @@ pub use segments::{
     SegmentRef, SegmentVersion, SqlParam, SqlQuery, apply_reevaluation, apply_refresh,
     archive_segment, begin_segment_snapshot, create_segment, decision_cause_kind, enqueue_refresh,
     explain_clear_fields, find_segment, find_segment_version, list_segment_versions, list_segments,
-    load_explain_person, lock_segment_refresh, lock_segments, membership_cause, membership_trace,
-    reconcile_segment_schedules, reevaluation_order, run_segment_preview, segment_catalog,
-    segment_cron, segment_data_age, segment_history_page, segment_members_page, snapshot_now,
-    update_segment,
+    load_explain_person, lock_reevaluation, lock_segment_refresh, lock_segments, membership_cause,
+    membership_trace, reconcile_segment_schedules, reevaluation_order, run_segment_preview,
+    segment_catalog, segment_cron, segment_data_age, segment_history_page, segment_members_page,
+    snapshot_now, update_segment,
 };
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,

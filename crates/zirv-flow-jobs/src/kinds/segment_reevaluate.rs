@@ -21,7 +21,7 @@ use zirv_flow_segments::{TraitStorage, compile, parse_and_validate};
 use zirv_flow_store::{
     Clock, DirtyBatch, NewDecision, PgPool, REEVALUATE_JOB_KIND, ReevaluateApply, append_decision,
     apply_reevaluation, begin, claim_dirty, commit, find_segment, find_segment_version,
-    lock_segment_refresh, reevaluation_order, segment_catalog,
+    lock_reevaluation, segment_catalog,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -98,10 +98,7 @@ impl Run {
 
         // Lock every segment the batch reaches before reading anything about it, in an order
         // that is the same for every pass, so two passes and a full refresh cannot deadlock.
-        let order = reevaluation_order(&mut tx, self.workspace, batch.classes()).await?;
-        for &segment in &order {
-            lock_segment_refresh(&mut tx, segment).await?;
-        }
+        let order = lock_reevaluation(&mut tx, self.workspace, batch.classes()).await?;
         if !order.is_empty() {
             // Read once the locks are held, so the time is no earlier than the refresh that
             // held them committed.
@@ -180,11 +177,13 @@ mod tests {
     use time::OffsetDateTime;
     use zirv_flow_core::events::EventMode;
     use zirv_flow_core::people::{Precedence, TraitType};
-    use zirv_flow_core::{Cause, Slug, WorkspaceName};
+    use zirv_flow_core::segment::ChangeClasses;
+    use zirv_flow_core::{Cause, HmacPurpose, HmacRoot, MasterKey, Slug, WorkspaceName};
     use zirv_flow_segments::normalize;
     use zirv_flow_store::{
-        ManualClock, NewEventSchema, NewJob, NewSegment, NewSegmentVersion, NewTraitDefinition,
-        ProfileOutcome, ProfileRecord, Segment, SegmentPatch, TraitDefinitionUpdate,
+        EventRecord, ManualClock, NewEventSchema, NewJob, NewSegment, NewSegmentVersion,
+        NewTraitDefinition, ProfileOutcome, ProfileRecord, Segment, SegmentPatch,
+        TraitDefinitionUpdate,
     };
 
     use super::*;
@@ -276,6 +275,16 @@ mod tests {
     }
 
     async fn create(pool: &PgPool, ws: WorkspaceId, name: &str, definition: Value) -> Segment {
+        create_with_id(pool, ws, Uuid::now_v7(), name, definition).await
+    }
+
+    async fn create_with_id(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        id: Uuid,
+        name: &str,
+        definition: Value,
+    ) -> Segment {
         let content = content(pool, ws, definition).await;
         let mut tx = zirv_flow_store::begin(pool).await.unwrap();
         zirv_flow_store::lock_segments(&mut tx, ws).await.unwrap();
@@ -283,7 +292,7 @@ mod tests {
             &mut tx,
             ws,
             &NewSegment {
-                id: Uuid::now_v7(),
+                id,
                 name: name.into(),
                 description: String::new(),
                 cadence_minutes: 60,
@@ -1006,5 +1015,244 @@ mod tests {
 
         assert_eq!(open(&pool, seg.id).await.len(), 1);
         assert_eq!(dirty(&pool).await, 0);
+    }
+
+    /// A segment and the segment of its members, the referenced one with the larger id, so the
+    /// order a pass locks in (the referenced first) is the opposite of id order.
+    async fn nested_segments(pool: &PgPool, ws: WorkspaceId, clock: &Clock) -> (Segment, Segment) {
+        // The outer row is written first, so a statement that updates both reaches it first,
+        // against the order a pass locks in (the referenced segment first).
+        let outer = create_with_id(pool, ws, Uuid::from_u128(1), "In Pro", plan_is("free")).await;
+        let inner = create_with_id(
+            pool,
+            ws,
+            Uuid::from_u128(u128::MAX - 1),
+            "Pro",
+            plan_is("pro"),
+        )
+        .await;
+        resave(pool, ws, outer.id, json!({"segment": inner.id, "v": 1})).await;
+        full_refresh(pool, ws, inner.id, clock).await;
+        full_refresh(pool, ws, outer.id, clock).await;
+        reevaluate(pool, ws, clock).await;
+        (inner, outer)
+    }
+
+    /// How often a writer racing a pass failed, over `ROUNDS` rounds. Each round gives a pass
+    /// a crowd to enter into both segments while `writer` changes two people who are open
+    /// members of both.
+    const ROUNDS: usize = 30;
+    /// The leading rounds that stage the interleaving instead of leaving it to chance.
+    const STAGED_ROUNDS: usize = 5;
+
+    async fn race_a_pass_against<W, F>(pool: PgPool, writer: W) -> usize
+    where
+        W: Fn(PgPool, WorkspaceId, Uuid, Uuid, usize) -> F,
+        F: Send + 'static,
+        F: std::future::Future<Output = bool>,
+    {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let clock = clock();
+        let (inner, outer) = nested_segments(&pool, ws, &clock).await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let run = Run {
+            workspace: ws,
+            clock: clock.clone(),
+            job: (Uuid::new_v4(), 1),
+            trace: trace.clone(),
+        };
+        let mut failures = 0;
+        for round in 0..ROUNDS {
+            let one = identify(&pool, ws, &format!("a{round}@example.com"), "pro", &trace).await;
+            let two = identify(&pool, ws, &format!("b{round}@example.com"), "pro", &trace).await;
+            reevaluate(&pool, ws, &clock).await;
+            for crowd in 0..40 {
+                let email = format!("c{round}-{crowd}@example.com");
+                identify(&pool, ws, &email, "pro", &trace).await;
+            }
+            if round < STAGED_ROUNDS {
+                // A pass that has written the inner segment and not yet the outer one, with
+                // the writer let loose in between: the interleaving a deadlock needs.
+                let mut pass = zirv_flow_store::begin(&pool).await.unwrap();
+                let mut failed = false;
+                let order =
+                    zirv_flow_store::lock_reevaluation(&mut pass, ws, ChangeClasses::TRAITS)
+                        .await
+                        .unwrap();
+                assert_eq!(order, [inner.id, outer.id]);
+                let held =
+                    sqlx::query("UPDATE segments SET member_count = member_count WHERE id = $1")
+                        .bind(inner.id)
+                        .execute(&mut *pass)
+                        .await;
+                failed |= held.is_err();
+                let racer = tokio::spawn(writer(pool.clone(), ws, one, two, round));
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let next =
+                    sqlx::query("UPDATE segments SET member_count = member_count WHERE id = $1")
+                        .bind(outer.id)
+                        .execute(&mut *pass)
+                        .await;
+                failed |= next.is_err();
+                if failed {
+                    drop(pass);
+                } else {
+                    zirv_flow_store::commit(pass).await.unwrap();
+                }
+                failures += usize::from(failed) + usize::from(!racer.await.unwrap());
+            } else {
+                let (pass, wrote) =
+                    tokio::join!(run.pass(&pool), writer(pool.clone(), ws, one, two, round));
+                failures += usize::from(pass.is_err()) + usize::from(!wrote);
+            }
+            // Whatever failed, a quiet pass settles the rest.
+            run.pass(&pool).await.unwrap();
+            while run.pass(&pool).await.unwrap() > 0 {}
+        }
+        println!("failed rounds: {failures} of {ROUNDS}");
+        for segment in [inner.id, outer.id] {
+            let rows = open(&pool, segment).await;
+            assert_eq!(
+                i64::from(count_of(&pool, segment).await),
+                i64::try_from(rows.len()).unwrap()
+            );
+            let gone: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM segment_members m JOIN people p ON p.id = m.person_id \
+                 WHERE m.segment_id = $1 AND m.exited_at IS NULL AND p.merged_into IS NOT NULL",
+            )
+            .bind(segment)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(gone, 0, "a merged person stays an open member");
+        }
+        let (inner_rows, outer_rows) = (open(&pool, inner.id).await, open(&pool, outer.id).await);
+        assert_eq!(
+            inner_rows, outer_rows,
+            "the outer segment follows the inner"
+        );
+        failures
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_racing_a_pass_over_nested_segments_never_deadlocks(pool: PgPool) {
+        let failures = race_a_pass_against(pool, |pool, ws, one, two, round| async move {
+            let joined = ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: format!("joined-{round}"),
+                identifiers: vec![
+                    ("email".into(), format!("a{round}@example.com")),
+                    ("email".into(), format!("b{round}@example.com")),
+                ],
+                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                observed_at: OffsetDateTime::now_utc(),
+                trace: TraceContext::root(Cause::api("join")),
+            };
+            let _ = (one, two);
+            zirv_flow_store::apply_profile_batch(&pool, ws, &[joined])
+                .await
+                .is_ok()
+        })
+        .await;
+        assert_eq!(failures, 0, "a transaction failed, a deadlock (40P01)");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_racing_a_pass_over_nested_segments_never_deadlocks(pool: PgPool) {
+        let failures = race_a_pass_against(pool, |pool, ws, one, _two, _round| async move {
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let deleted = zirv_flow_store::delete_person(
+                &mut tx,
+                ws,
+                one,
+                zirv_flow_store::DeleteReason::Requested,
+                &TraceContext::root(Cause::api("erase")),
+            )
+            .await;
+            match deleted {
+                Ok(_) => zirv_flow_store::commit(tx).await.is_ok(),
+                Err(_) => false,
+            }
+        })
+        .await;
+        assert_eq!(failures, 0, "a transaction failed, a deadlock (40P01)");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_that_writes_segment_events_does_not_mark_anyone_again(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let clock = clock();
+        let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+        full_refresh(&pool, ws, seg.id, &clock).await;
+        let ada = identify(
+            &pool,
+            ws,
+            "ada@example.com",
+            "pro",
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await;
+
+        reevaluate(&pool, ws, &clock).await;
+
+        let entered: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE name = 'segment.entered'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(entered, 1);
+        assert_eq!(open(&pool, seg.id).await, [ada]);
+        let marks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM person_changes WHERE person_id = $1")
+                .bind(ada)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(marks, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_client_event_with_a_reserved_segment_name_is_refused_and_marks_no_one(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let record = EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), "ada@example.com".into())],
+            name: "segment.entered".into(),
+            properties: serde_json::Map::new(),
+            timestamp: None,
+            received_at: OffsetDateTime::now_utc(),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("forged")),
+        };
+
+        let outcomes = zirv_flow_store::apply_event_batch(&pool, ws, &key, &[record])
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            zirv_flow_store::EventOutcome::Rejected {
+                reason: "reserved_event_name",
+                ..
+            }
+        ));
+        assert_eq!(dirty(&pool).await, 0);
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 0);
     }
 }
