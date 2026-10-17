@@ -22,11 +22,14 @@ pub(crate) mod segment_refresh;
 mod sync_run;
 mod sync_tokens;
 mod traits_recompute;
+mod traits_slot;
 
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
     &person_merge_rewrite::PersonMergeRewrite,
     &traits_recompute::TraitsRecompute,
+    &traits_slot::TraitsSlotBackfill,
+    &traits_slot::TraitsSlotClear,
     &events_retention::EventsRetention,
     &ai_transcripts::AiTranscripts,
     &ingest_drain::IngestDrain,

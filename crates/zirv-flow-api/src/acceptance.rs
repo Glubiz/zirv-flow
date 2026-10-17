@@ -11657,7 +11657,7 @@ email,b@example.com,
     async fn refresh_compiled(pool: &PgPool, ws: &str, segment: &str, definition: &Value) {
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        let catalog = crate::segments::catalog_of(
+        let (catalog, storage) = crate::segments::catalog_of(
             zirv_flow_store::segment_catalog(&mut connection, workspace)
                 .await
                 .unwrap(),
@@ -11665,13 +11665,7 @@ email,b@example.com,
         drop(connection);
         let parsed = zirv_flow_segments::parse_and_validate(definition, &catalog).unwrap();
         let now = time::OffsetDateTime::now_utc();
-        let compiled = zirv_flow_segments::compile(
-            &parsed,
-            &catalog,
-            &zirv_flow_segments::TraitStorage::default(),
-            now,
-        )
-        .unwrap();
+        let compiled = zirv_flow_segments::compile(&parsed, &catalog, &storage, now).unwrap();
         let members = crate::segments::preview::sql_query(compiled.members_sql());
         let job_trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::schedule(
             uuid::Uuid::new_v4(),

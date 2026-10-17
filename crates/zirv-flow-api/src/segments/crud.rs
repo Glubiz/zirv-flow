@@ -12,7 +12,7 @@ use utoipa::openapi::schema::{ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
-use zirv_flow_segments::{TraitStorage, compile, normalize, parse_and_validate};
+use zirv_flow_segments::{compile, normalize, parse_and_validate};
 use zirv_flow_store::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, PgPool, Segment,
     SegmentPatch, SegmentVersion,
@@ -213,11 +213,11 @@ async fn prepare(
     workspace: WorkspaceId,
     definition: Value,
 ) -> Result<NewSegmentVersion, ApiError> {
-    let catalog = catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
+    let (catalog, storage) =
+        catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let parsed = parse_and_validate(&definition, &catalog).map_err(issues_error)?;
-    let compiled =
-        compile(&parsed, &catalog, &TraitStorage::default(), now).map_err(issues_error)?;
+    let compiled = compile(&parsed, &catalog, &storage, now).map_err(issues_error)?;
     Ok(NewSegmentVersion {
         definition,
         normalized: normalize(parsed).to_value(),

@@ -66,9 +66,10 @@ impl JobKind for SegmentRefresh {
 
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        let catalog = catalog_of(segment_catalog(ctx.conn(), workspace).await?);
+        zirv_flow_store::hold_trait_slots(ctx.conn(), workspace).await?;
+        let (catalog, storage) = catalog_of(segment_catalog(ctx.conn(), workspace).await?);
         let compiled = parse_and_validate(&version.definition, &catalog)
-            .and_then(|parsed| compile(&parsed, &catalog, &TraitStorage::default(), now));
+            .and_then(|parsed| compile(&parsed, &catalog, &storage, now));
         let compiled = match compiled {
             Ok(compiled) => compiled,
             // Something the definition reads was archived since the save: the members stay as
@@ -116,14 +117,16 @@ impl JobKind for SegmentRefresh {
 }
 
 /// The compiler's catalog from the store's snapshot.
-fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
-    Catalog {
+fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
+    let storage = TraitStorage::with_slots(snapshot.slots);
+    let catalog = Catalog {
         traits: snapshot.traits,
         events: snapshot.events,
         lists: snapshot.lists,
         segments: snapshot.segments,
         topics: snapshot.topics,
-    }
+    };
+    (catalog, storage)
 }
 
 fn param(param: Param) -> SqlParam {
@@ -272,15 +275,9 @@ mod tests {
     /// What the API does when it saves a definition.
     async fn checked(pool: &PgPool, ws: WorkspaceId, definition: Value) -> NewSegmentVersion {
         let mut connection = pool.acquire().await.unwrap();
-        let catalog = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
+        let (catalog, storage) = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
         let parsed = parse_and_validate(&definition, &catalog).unwrap();
-        let compiled = compile(
-            &parsed,
-            &catalog,
-            &TraitStorage::default(),
-            OffsetDateTime::now_utc(),
-        )
-        .unwrap();
+        let compiled = compile(&parsed, &catalog, &storage, OffsetDateTime::now_utc()).unwrap();
         NewSegmentVersion {
             definition,
             normalized: normalize(parsed).to_value(),

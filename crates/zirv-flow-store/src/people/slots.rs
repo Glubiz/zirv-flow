@@ -54,6 +54,8 @@ pub enum SlotError {
     },
     /// The slot is being retired; it can be assigned again once it is free.
     Retiring,
+    /// The trait holds a slot, so its type is locked.
+    TypeLocked,
     /// The trait holds no slot.
     NotIndexed,
     Store(StoreError),
@@ -90,6 +92,16 @@ pub(crate) async fn lock_slots_shared(
         .await
         .map_err(lock_error)?;
     Ok(())
+}
+
+/// Holds the writer lock of the workspace until the transaction ends, so a slot the caller read as
+/// `ready` cannot be retired, or one it read as `backfilling` made ready, before it commits. A
+/// segment refresh calls it before it reads the catalog and runs the compiled query.
+pub async fn hold_trait_slots(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<(), StoreError> {
+    lock_slots_shared(connection, workspace).await
 }
 
 /// Takes the assignment lock of the workspace until the transaction ends. It waits for every
