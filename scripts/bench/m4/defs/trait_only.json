@@ -1,0 +1,5 @@
+{"v":1,"all":[
+  {"trait":"plan","op":"eq","value":"pro"},
+  {"trait":"age","op":"between","value":[25,45]},
+  {"trait":"marketing_opt_in","op":"eq","value":true}
+]}
