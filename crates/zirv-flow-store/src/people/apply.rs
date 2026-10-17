@@ -375,6 +375,8 @@ pub(crate) async fn apply_profile_record(
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
+    // First, before any row lock: see the lock order in `slots`.
+    lock_slots_shared(connection, workspace).await?;
     let identifiers = match normalize_identifiers(&record.identifiers) {
         Ok(identifiers) => identifiers,
         Err(reason) => return Ok(ProfileOutcome::Rejected { reason }),

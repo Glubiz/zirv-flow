@@ -90,6 +90,8 @@ impl Run {
     /// One pass; returns how many people it claimed.
     async fn pass(&self, pool: &PgPool) -> Result<usize, JobError> {
         let mut tx = begin(pool).await?;
+        // The slot lock comes before every other lock of the pass: see the store's `slots`.
+        zirv_flow_store::hold_trait_slots(&mut tx, self.workspace).await?;
         let claimed = claim_dirty(&mut tx, self.workspace, BATCH).await?;
         if claimed.is_empty() {
             return Ok(0);
@@ -103,7 +105,6 @@ impl Run {
             // Read once the locks are held, so the time is no earlier than the refresh that
             // held them committed.
             let now = self.clock.now(&mut tx).await?;
-            zirv_flow_store::hold_trait_slots(&mut tx, self.workspace).await?;
             let (catalog, storage) = catalog_of(segment_catalog(&mut tx, self.workspace).await?);
             for segment_id in order {
                 // A segment is judged by what it is now that its lock is held.

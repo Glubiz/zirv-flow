@@ -24,6 +24,7 @@ struct Work {
     workspace: WorkspaceId,
     key: String,
     slot: SlotColumn,
+    generation: i64,
     after: Option<Uuid>,
     finish: bool,
 }
@@ -34,12 +35,25 @@ impl JobKind for TraitsSlotBackfill {
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let work = parse(ctx, &payload)?;
         if work.finish {
-            finish_backfill(ctx.conn(), work.workspace, &work.key, work.slot).await?;
+            finish_backfill(
+                ctx.conn(),
+                work.workspace,
+                &work.key,
+                work.slot,
+                work.generation,
+            )
+            .await?;
             return Ok(());
         }
-        let step =
-            backfill_slot_batch(ctx.conn(), work.workspace, &work.key, work.slot, work.after)
-                .await?;
+        let step = backfill_slot_batch(
+            ctx.conn(),
+            work.workspace,
+            &work.key,
+            work.slot,
+            work.generation,
+            work.after,
+        )
+        .await?;
         follow_up(ctx, Self::KIND, &work, step).await
     }
 }
@@ -50,10 +64,24 @@ impl JobKind for TraitsSlotClear {
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let work = parse(ctx, &payload)?;
         if work.finish {
-            free_trait_slot(ctx.conn(), work.workspace, &work.key, work.slot).await?;
+            free_trait_slot(
+                ctx.conn(),
+                work.workspace,
+                &work.key,
+                work.slot,
+                work.generation,
+            )
+            .await?;
             return Ok(());
         }
-        let step = clear_slot_batch(ctx.conn(), work.workspace, &work.key, work.slot).await?;
+        let step = clear_slot_batch(
+            ctx.conn(),
+            work.workspace,
+            &work.key,
+            work.slot,
+            work.generation,
+        )
+        .await?;
         follow_up(ctx, Self::KIND, &work, step).await
     }
 }
@@ -68,6 +96,7 @@ async fn follow_up(
         "workspace_id": work.workspace,
         "key": work.key,
         "slot": work.slot.as_str(),
+        "generation": work.generation,
     });
     match step {
         SlotStep::Stale => return Ok(()),
@@ -112,6 +141,10 @@ fn parse_payload(payload: &Value) -> Result<Work, JobError> {
         .and_then(Value::as_str)
         .and_then(|text| text.parse::<SlotColumn>().ok())
         .ok_or_else(bad)?;
+    let generation = payload
+        .get("generation")
+        .and_then(Value::as_i64)
+        .ok_or_else(bad)?;
     let after = match payload.get("after") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -126,6 +159,7 @@ fn parse_payload(payload: &Value) -> Result<Work, JobError> {
         workspace,
         key,
         slot,
+        generation,
         after,
         finish,
     })
@@ -146,14 +180,16 @@ mod tests {
         let ws = WorkspaceId::new();
         let person = Uuid::now_v7();
 
-        let first =
-            parse_payload(&json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1"})).unwrap();
+        let first = parse_payload(
+            &json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1", "generation": 1}),
+        )
+        .unwrap();
         let next = parse_payload(
-            &json!({"workspace_id": ws, "key": "plan", "slot": "trait_n2", "after": person}),
+            &json!({"workspace_id": ws, "key": "plan", "slot": "trait_n2", "generation": 2, "after": person}),
         )
         .unwrap();
         let last = parse_payload(
-            &json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1", "finish": true}),
+            &json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1", "generation": 1, "finish": true}),
         )
         .unwrap();
 
@@ -165,10 +201,12 @@ mod tests {
         assert!(
             parse_payload(&json!({"workspace_id": ws, "key": "plan", "slot": "traits"})).is_err()
         );
-        assert!(parse_payload(&json!({"key": "plan", "slot": "trait_s1"})).is_err());
+        assert!(
+            parse_payload(&json!({"key": "plan", "slot": "trait_s1", "generation": 1})).is_err()
+        );
         assert!(
             parse_payload(
-                &json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1", "after": 5})
+                &json!({"workspace_id": ws, "key": "plan", "slot": "trait_s1", "generation": 1, "after": 5})
             )
             .is_err()
         );

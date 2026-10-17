@@ -820,7 +820,7 @@ mod tests {
         };
         let mut connection = pool.acquire().await.unwrap();
 
-        let Ok(zirv_flow_store::Assigned::New(slot)) =
+        let Ok(zirv_flow_store::Assigned::New(slot, generation)) =
             zirv_flow_store::assign_trait_slot(&mut connection, ws, "plan").await
         else {
             panic!("not assigned");
@@ -832,7 +832,7 @@ mod tests {
         );
 
         assert!(
-            zirv_flow_store::finish_backfill(&mut connection, ws, "plan", slot)
+            zirv_flow_store::finish_backfill(&mut connection, ws, "plan", slot, generation)
                 .await
                 .unwrap()
         );

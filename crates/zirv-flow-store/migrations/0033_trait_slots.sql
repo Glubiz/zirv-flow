@@ -1,3 +1,8 @@
+-- KNOWN LIMITATION (supervisor ruling ed1f365c): this migration builds 30 partial indexes on `people`
+-- in one transaction, which blocks writes to `people` for the duration of the build on a
+-- populated install. Index creation must be revisited (for example CREATE INDEX CONCURRENTLY
+-- outside the migration transaction) before upgrades of populated installations are supported.
+--
 -- Typed slot columns for hot traits (architecture sections 6 and 21.1, ruling a4e2afc1). `people`
 -- gains 30 nullable columns: 8 string, 8 number, 6 timestamp, 4 date and 4 boolean slots. A trait
 -- definition holds at most one slot of its type. A slot is only ever a copy of the value in
@@ -77,6 +82,9 @@ ALTER TABLE trait_definitions
     -- (neither read nor written, until the column is cleared and the slot freed).
     ADD COLUMN slot       text,
     ADD COLUMN slot_state text,
+    -- Counts the assignments the trait has had; every slot job carries the one it was enqueued
+    -- for, so a delayed job cannot complete a newer assignment of the same slot.
+    ADD COLUMN slot_generation bigint NOT NULL DEFAULT 0,
     ADD CONSTRAINT trait_definitions_slot_matches_type CHECK (
         slot IS NULL
         OR (type = 'string'    AND slot ~ '^trait_s[1-8]$')

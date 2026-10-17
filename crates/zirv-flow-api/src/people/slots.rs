@@ -85,10 +85,16 @@ pub(crate) fn slot_problem(error: &SlotError) -> ApiError {
     }
 }
 
-fn enqueue_job(kind: &'static str, workspace: WorkspaceId, key: &str, slot: SlotColumn) -> NewJob {
+fn enqueue_job(
+    kind: &'static str,
+    workspace: WorkspaceId,
+    key: &str,
+    slot: SlotColumn,
+    generation: i64,
+) -> NewJob {
     let mut job = NewJob::new(kind, crate::trace::request_trace());
     job.workspace_id = Some(workspace);
-    job.payload = json!({ "workspace_id": workspace, "key": key, "slot": slot.as_str() });
+    job.payload = json!({ "workspace_id": workspace, "key": key, "slot": slot.as_str(), "generation": generation });
     job
 }
 
@@ -105,7 +111,7 @@ pub(crate) async fn index_trait(
         .await
         .map_err(refused)?;
     let change = match assigned {
-        Assigned::New(slot) => {
+        Assigned::New(slot, generation) => {
             admin::audit(
                 &mut tx,
                 context,
@@ -115,7 +121,7 @@ pub(crate) async fn index_trait(
                 json!({ "key": key, "slot": slot.as_str() }),
             )
             .await?;
-            let job = enqueue_job("traits.slot_backfill", workspace, key, slot);
+            let job = enqueue_job("traits.slot_backfill", workspace, key, slot, generation);
             zirv_flow_store::enqueue(&mut *tx, &job).await?;
             Change::Started("backfilling")
         }
@@ -137,7 +143,7 @@ pub(crate) async fn unindex_trait(
         .await
         .map_err(refused)?;
     let change = match retired {
-        Retired::Now(slot) => {
+        Retired::Now(slot, generation) => {
             admin::audit(
                 &mut tx,
                 context,
@@ -147,7 +153,7 @@ pub(crate) async fn unindex_trait(
                 json!({ "key": key, "slot": slot.as_str() }),
             )
             .await?;
-            let job = enqueue_job("traits.slot_clear", workspace, key, slot);
+            let job = enqueue_job("traits.slot_clear", workspace, key, slot, generation);
             zirv_flow_store::enqueue(&mut *tx, &job).await?;
             Change::Started("retiring")
         }

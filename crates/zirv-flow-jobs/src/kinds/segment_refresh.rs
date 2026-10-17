@@ -43,6 +43,8 @@ impl JobKind for SegmentRefresh {
                 JobError::new("the trigger is not save, schedule, manual or dependent")
             })?;
 
+        // The slot lock comes before the segment locks: see the lock order in the store's `slots`.
+        zirv_flow_store::hold_trait_slots(ctx.conn(), workspace).await?;
         lock_segment_refresh(ctx.conn(), segment_id).await?;
         let segment = find_segment(&mut *ctx.conn(), workspace, segment_id).await?;
         let Some(segment) = segment.filter(|segment| segment.archived_at.is_none()) else {
@@ -66,7 +68,6 @@ impl JobKind for SegmentRefresh {
 
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        zirv_flow_store::hold_trait_slots(ctx.conn(), workspace).await?;
         let (catalog, storage) = catalog_of(segment_catalog(ctx.conn(), workspace).await?);
         let compiled = parse_and_validate(&version.definition, &catalog)
             .and_then(|parsed| compile(&parsed, &catalog, &storage, now));

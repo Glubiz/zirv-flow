@@ -36,6 +36,9 @@ pub const SLOT_BATCH: i64 = 500;
 pub struct SlotAssignment {
     pub slot: SlotColumn,
     pub state: SlotState,
+    /// Counts the assignments the trait has had. A job carries the one it was enqueued for, so a
+    /// delayed job cannot complete a newer assignment of the same slot.
+    pub generation: i64,
 }
 
 /// A refused assignment change.
@@ -71,7 +74,7 @@ impl From<StoreError> for SlotError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Assigned {
     /// A free slot was taken and its backfill must be enqueued.
-    New(SlotColumn),
+    New(SlotColumn, i64),
     /// The trait already holds this slot, `backfilling` or `ready`.
     Existing(SlotAssignment),
 }
@@ -119,8 +122,9 @@ fn corrupt() -> StoreError {
     StoreError::query(sqlx::Error::Decode("unknown trait slot".into()))
 }
 
-fn decode(slot: &str, state: &str) -> Result<SlotAssignment, StoreError> {
+fn decode(slot: &str, state: &str, generation: i64) -> Result<SlotAssignment, StoreError> {
     Ok(SlotAssignment {
+        generation,
         slot: slot.parse().map_err(|_| corrupt())?,
         state: state.parse().map_err(|_| corrupt())?,
     })
@@ -131,8 +135,8 @@ pub async fn trait_slot_assignments(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<Vec<(String, SlotAssignment)>, StoreError> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT key, slot, slot_state FROM trait_definitions \
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT key, slot, slot_state, slot_generation FROM trait_definitions \
          WHERE workspace_id = $1 AND slot IS NOT NULL ORDER BY key",
     )
     .bind(workspace.as_uuid())
@@ -140,7 +144,7 @@ pub async fn trait_slot_assignments(
     .await
     .map_err(StoreError::query)?;
     rows.into_iter()
-        .map(|(key, slot, state)| Ok((key, decode(&slot, &state)?)))
+        .map(|(key, slot, state, generation)| Ok((key, decode(&slot, &state, generation)?)))
         .collect()
 }
 
@@ -243,17 +247,18 @@ pub async fn assign_trait_slot(
             capacity: kind.capacity(),
         });
     };
-    sqlx::query(
-        "UPDATE trait_definitions SET slot = $3, slot_state = 'backfilling', updated_at = now() \
-         WHERE workspace_id = $1 AND key = $2",
+    let generation: i64 = sqlx::query_scalar(
+        "UPDATE trait_definitions SET slot = $3, slot_state = 'backfilling', \
+             slot_generation = slot_generation + 1, updated_at = now() \
+         WHERE workspace_id = $1 AND key = $2 RETURNING slot_generation",
     )
     .bind(workspace.as_uuid())
     .bind(key)
     .bind(slot.as_str())
-    .execute(connection)
+    .fetch_one(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(Assigned::New(slot))
+    Ok(Assigned::New(slot, generation))
 }
 
 /// The assignment of one trait, if it has one.
@@ -262,8 +267,9 @@ pub async fn trait_slot_of(
     workspace: WorkspaceId,
     key: &str,
 ) -> Result<Option<SlotAssignment>, StoreError> {
-    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT slot, slot_state FROM trait_definitions WHERE workspace_id = $1 AND key = $2",
+    let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT slot, slot_state, slot_generation FROM trait_definitions \
+         WHERE workspace_id = $1 AND key = $2",
     )
     .bind(workspace.as_uuid())
     .bind(key)
@@ -271,7 +277,7 @@ pub async fn trait_slot_of(
     .await
     .map_err(StoreError::query)?;
     match row {
-        Some((Some(slot), Some(state))) => decode(&slot, &state).map(Some),
+        Some((Some(slot), Some(state), generation)) => decode(&slot, &state, generation).map(Some),
         _ => Ok(None),
     }
 }
@@ -279,8 +285,9 @@ pub async fn trait_slot_of(
 /// What retiring did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Retired {
-    /// The slot went from `backfilling` or `ready` to `retiring`; its clear must be enqueued.
-    Now(SlotColumn),
+    /// The slot went from `backfilling` or `ready` to `retiring`; its clear must be enqueued for
+    /// this generation.
+    Now(SlotColumn, i64),
     /// The slot was already retiring.
     Already(SlotColumn),
 }
@@ -311,27 +318,45 @@ pub async fn retire_trait_slot(
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(Retired::Now(assignment.slot))
+    Ok(Retired::Now(assignment.slot, assignment.generation))
 }
 
 /// The progress of one backfill or clear batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlotStep {
-    /// More people may remain: run another batch after this cursor.
+    /// More people remain: run another batch after this cursor.
     More(Option<Uuid>),
-    /// Every person is done: run the finishing step.
+    /// No person is left: run the finishing step.
     Finish,
-    /// The assignment is no longer in the state this job works on; nothing to do.
+    /// The assignment is no longer the one this job works on; nothing to do.
     Stale,
 }
 
-/// A full batch means more people may remain; a short one is the last.
-fn batch_step(done: usize, cursor: Option<Uuid>) -> SlotStep {
-    if i64::try_from(done).is_ok_and(|n| n == SLOT_BATCH) {
+/// Whether a batch was the last. A short batch does not say so: `FOR UPDATE` under READ COMMITTED
+/// skips a row that was deleted while the batch waited for its lock, and PostgreSQL does not fetch
+/// a replacement. So the job finishes only when the probe finds no person left to do.
+async fn batch_step(
+    connection: &mut PgConnection,
+    probe: &str,
+    workspace: WorkspaceId,
+    done: usize,
+    cursor: Option<Uuid>,
+) -> Result<SlotStep, StoreError> {
+    let more: bool = if i64::try_from(done).is_ok_and(|n| n == SLOT_BATCH) {
+        true
+    } else {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(probe.to_owned()))
+            .bind(workspace.as_uuid())
+            .bind(cursor)
+            .fetch_one(connection)
+            .await
+            .map_err(StoreError::query)?
+    };
+    Ok(if more {
         SlotStep::More(cursor)
     } else {
         SlotStep::Finish
-    }
+    })
 }
 
 /// Backfills up to [`SLOT_BATCH`] people after `after`, in id order, with `conv(traits -> key)`.
@@ -345,18 +370,16 @@ pub async fn backfill_slot_batch(
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
+    generation: i64,
     after: Option<Uuid>,
 ) -> Result<SlotStep, StoreError> {
     lock_slots_shared(connection, workspace).await?;
-    if !holds(connection, workspace, key, slot, SlotState::Backfilling).await? {
+    let state = SlotState::Backfilling;
+    if !holds(connection, workspace, key, slot, generation, state).await? {
         return Ok(SlotStep::Stale);
     }
     let sql = format!(
-        "UPDATE people SET {column} = {value} \
-         WHERE workspace_id = $1 AND id IN ( \
-             SELECT id FROM people WHERE workspace_id = $1 AND ($2::uuid IS NULL OR id > $2) \
-             ORDER BY id LIMIT $3 FOR UPDATE) \
-         RETURNING id",
+        "WITH batch AS MATERIALIZED ( \n             SELECT id FROM people WHERE workspace_id = $1 AND ($2::uuid IS NULL OR id > $2) \n             ORDER BY id LIMIT $3 FOR UPDATE) \n         UPDATE people p SET {column} = {value} FROM batch \n         WHERE p.workspace_id = $1 AND p.id = batch.id RETURNING p.id",
         column = slot.as_str(),
         value = slot.value_sql("traits", "$4::text"),
     );
@@ -365,28 +388,36 @@ pub async fn backfill_slot_batch(
         .bind(after)
         .bind(SLOT_BATCH)
         .bind(key)
-        .fetch_all(connection)
+        .fetch_all(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    Ok(batch_step(ids.len(), ids.into_iter().max()))
+    // The cursor moves past every row the batch returned; a row deleted meanwhile is gone.
+    let cursor = ids.iter().max().copied().or(after);
+    let probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
+                 AND ($2::uuid IS NULL OR id > $2))";
+    batch_step(connection, probe, workspace, ids.len(), cursor).await
 }
 
 /// Sets the slot `ready` under the exclusive lock, after the last batch. Writers already write
-/// it, so the compiler can read it as soon as this commits.
+/// it, so the compiler can read it as soon as this commits. A finish for another generation of
+/// the assignment does nothing.
 pub async fn finish_backfill(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
+    generation: i64,
 ) -> Result<bool, StoreError> {
     lock_slots_exclusive(connection, workspace).await?;
     let done = sqlx::query(
         "UPDATE trait_definitions SET slot_state = 'ready', updated_at = now() \
-         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_state = 'backfilling'",
+         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_generation = $4 \
+           AND slot_state = 'backfilling'",
     )
     .bind(workspace.as_uuid())
     .bind(key)
     .bind(slot.as_str())
+    .bind(generation)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -400,43 +431,51 @@ pub async fn clear_slot_batch(
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
+    generation: i64,
 ) -> Result<SlotStep, StoreError> {
     lock_slots_shared(connection, workspace).await?;
-    if !holds(connection, workspace, key, slot, SlotState::Retiring).await? {
+    let state = SlotState::Retiring;
+    if !holds(connection, workspace, key, slot, generation, state).await? {
         return Ok(SlotStep::Stale);
     }
     let sql = format!(
-        "UPDATE people SET {column} = NULL \
-         WHERE workspace_id = $1 AND id IN ( \
-             SELECT id FROM people WHERE workspace_id = $1 AND {column} IS NOT NULL \
-             ORDER BY id LIMIT $2 FOR UPDATE) \
-         RETURNING id",
+        "WITH batch AS MATERIALIZED ( \n             SELECT id FROM people WHERE workspace_id = $1 AND {column} IS NOT NULL \n             ORDER BY id LIMIT $2 FOR UPDATE) \n         UPDATE people p SET {column} = NULL FROM batch \n         WHERE p.workspace_id = $1 AND p.id = batch.id RETURNING p.id",
         column = slot.as_str(),
     );
     let ids: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(workspace.as_uuid())
         .bind(SLOT_BATCH)
-        .fetch_all(connection)
+        .fetch_all(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    Ok(batch_step(ids.len(), None))
+    // The cursor is always null here; the probe only needs the parameter to exist.
+    let probe = format!(
+        "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND {} IS NOT NULL \
+         AND $2::uuid IS NULL)",
+        slot.as_str()
+    );
+    batch_step(connection, &probe, workspace, ids.len(), None).await
 }
 
-/// Frees a cleared slot under the exclusive lock, so another trait of the type can take it.
+/// Frees a cleared slot under the exclusive lock, so another trait of the type can take it. A
+/// free for another generation of the assignment does nothing.
 pub async fn free_trait_slot(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
+    generation: i64,
 ) -> Result<bool, StoreError> {
     lock_slots_exclusive(connection, workspace).await?;
     let done = sqlx::query(
         "UPDATE trait_definitions SET slot = NULL, slot_state = NULL, updated_at = now() \
-         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_state = 'retiring'",
+         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_generation = $4 \
+           AND slot_state = 'retiring'",
     )
     .bind(workspace.as_uuid())
     .bind(key)
     .bind(slot.as_str())
+    .bind(generation)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -448,15 +487,18 @@ async fn holds(
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
+    generation: i64,
     state: SlotState,
 ) -> Result<bool, StoreError> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM trait_definitions \
-         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_state = $4)",
+         WHERE workspace_id = $1 AND key = $2 AND slot = $3 AND slot_generation = $4 \
+           AND slot_state = $5)",
     )
     .bind(workspace.as_uuid())
     .bind(key)
     .bind(slot.as_str())
+    .bind(generation)
     .bind(state.as_str())
     .fetch_one(connection)
     .await
@@ -574,11 +616,17 @@ mod db_tests {
     }
 
     /// Backfills to the end and makes the slot ready, a batch per transaction like the job.
-    async fn backfill(pool: &PgPool, ws: WorkspaceId, key: &str, slot: SlotColumn) {
+    async fn backfill(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &str,
+        slot: SlotColumn,
+        generation: i64,
+    ) {
         let mut after = None;
         loop {
             let mut tx = begin(pool).await.unwrap();
-            let step = match backfill_slot_batch(&mut tx, ws, key, slot, after).await {
+            let step = match backfill_slot_batch(&mut tx, ws, key, slot, generation, after).await {
                 Ok(step) => step,
                 Err(error) if error.is_retryable() => continue,
                 Err(error) => panic!("backfill failed: {error}"),
@@ -591,7 +639,11 @@ mod db_tests {
             }
         }
         let mut tx = begin(pool).await.unwrap();
-        assert!(finish_backfill(&mut tx, ws, key, slot).await.unwrap());
+        assert!(
+            finish_backfill(&mut tx, ws, key, slot, generation)
+                .await
+                .unwrap()
+        );
         commit(tx).await.unwrap();
     }
 
@@ -634,7 +686,7 @@ mod db_tests {
                 .collect();
             apply(&pool, ws, &records).await;
         }
-        let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
             panic!("not assigned");
         };
 
@@ -658,7 +710,7 @@ mod db_tests {
         }
         let filler = {
             let pool = pool.clone();
-            tokio::spawn(async move { backfill(&pool, ws, "plan", slot).await })
+            tokio::spawn(async move { backfill(&pool, ws, "plan", slot, generation).await })
         };
         for task in tasks {
             task.await.unwrap();
@@ -683,7 +735,7 @@ mod db_tests {
         let ws = workspace(&pool).await;
         define(&pool, ws, "plan", TraitType::String).await;
         apply(&pool, ws, &[record(1, json!({"plan": "a"}), START)]).await;
-        let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
             panic!("not assigned");
         };
         let at = |n| START + Duration::minutes(n);
@@ -691,11 +743,14 @@ mod db_tests {
         apply(&pool, ws, &[record(1, json!({"plan": "b"}), at(1))]).await;
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0, "backfilling");
 
-        backfill(&pool, ws, "plan", slot).await;
+        backfill(&pool, ws, "plan", slot, generation).await;
         apply(&pool, ws, &[record(1, json!({"plan": "c"}), at(2))]).await;
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0, "ready");
 
-        assert_eq!(retire(&pool, ws, "plan").await, Retired::Now(slot));
+        assert_eq!(
+            retire(&pool, ws, "plan").await,
+            Retired::Now(slot, generation)
+        );
         apply(&pool, ws, &[record(1, json!({"plan": "d"}), at(3))]).await;
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 1, "not written");
         assert!(ready(&pool, ws).await.is_empty(), "not read");
@@ -715,10 +770,10 @@ mod db_tests {
             &[record(1, json!({"plan": "gold", "tier": "t1"}), START)],
         )
         .await;
-        let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
             panic!("not assigned");
         };
-        backfill(&pool, ws, "plan", slot).await;
+        backfill(&pool, ws, "plan", slot, generation).await;
 
         // Marking again while indexed changes nothing.
         let again = assign(&pool, ws, "plan").await;
@@ -734,23 +789,29 @@ mod db_tests {
 
         loop {
             let mut tx = begin(&pool).await.unwrap();
-            let step = clear_slot_batch(&mut tx, ws, "plan", slot).await.unwrap();
+            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+                .await
+                .unwrap();
             commit(tx).await.unwrap();
             if step == SlotStep::Finish {
                 break;
             }
         }
         let mut tx = begin(&pool).await.unwrap();
-        assert!(free_trait_slot(&mut tx, ws, "plan", slot).await.unwrap());
+        assert!(
+            free_trait_slot(&mut tx, ws, "plan", slot, generation)
+                .await
+                .unwrap()
+        );
         commit(tx).await.unwrap();
 
         // A leftover in a free slot must not survive the next backfill.
         set_all_slots(&pool, slot, "stale").await;
-        let Assigned::New(reused) = assign(&pool, ws, "tier").await else {
+        let Assigned::New(reused, reused_generation) = assign(&pool, ws, "tier").await else {
             panic!("not assigned");
         };
         assert_eq!(reused, slot, "the lowest free slot is reused");
-        backfill(&pool, ws, "tier", reused).await;
+        backfill(&pool, ws, "tier", reused, reused_generation).await;
         assert_eq!(mismatches(&pool, ws, "tier", reused).await, 0);
     }
 
@@ -801,10 +862,10 @@ mod db_tests {
             ],
         )
         .await;
-        let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
             panic!("not assigned");
         };
-        backfill(&pool, ws, "plan", slot).await;
+        backfill(&pool, ws, "plan", slot, generation).await;
         // A record carrying both identifiers merges the two people.
         let mut both = record(4, json!({"plan": "m"}), START + Duration::minutes(1));
         both.identifiers = vec![
@@ -841,10 +902,10 @@ mod db_tests {
         let assigner = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+                let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
                     panic!("not assigned");
                 };
-                backfill(&pool, ws, "plan", slot).await;
+                backfill(&pool, ws, "plan", slot, generation).await;
                 slot
             })
         };
@@ -866,5 +927,257 @@ mod db_tests {
 
         let slot = assigner.await.unwrap();
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0);
+    }
+
+    async fn person_of_record(pool: &PgPool, ws: WorkspaceId, person: usize) -> Uuid {
+        sqlx::query_scalar(
+            "SELECT person_id FROM source_records WHERE workspace_id = $1 AND record_key = $2",
+        )
+        .bind(ws.as_uuid())
+        .bind(format!("r{person}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_that_loses_a_locked_row_to_a_delete_does_not_end_the_backfill(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        let people = i64::try_from(SLOT_BATCH).unwrap() + 100;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, traits) \
+             SELECT gen_random_uuid(), $1, jsonb_build_object('plan', 'p' || g) \
+             FROM generate_series(1, $2) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(people)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+
+        // A delete holds rows inside the first batch's range while the batch starts, then
+        // commits: the batch locks 500 candidates and loses the deleted ones.
+        let mut delete = begin(&pool).await.unwrap();
+        sqlx::query("DELETE FROM people WHERE id = ANY($1)")
+            .bind(&ids[10..15])
+            .execute(&mut *delete)
+            .await
+            .unwrap();
+        let batch = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let step = backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None)
+                    .await
+                    .unwrap();
+                commit(tx).await.unwrap();
+                step
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        commit(delete).await.unwrap();
+        let step = batch.await.unwrap();
+
+        let SlotStep::More(cursor) = step else {
+            panic!("a short batch ended the backfill: {step:?}");
+        };
+        let mut after = cursor;
+        loop {
+            let mut tx = begin(&pool).await.unwrap();
+            let step = backfill_slot_batch(&mut tx, ws, "plan", slot, generation, after)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            match step {
+                SlotStep::More(cursor) => after = cursor,
+                _ => break,
+            }
+        }
+        assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0);
+        let unfilled: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM people WHERE workspace_id = $1 AND {} IS NULL",
+            slot.as_str()
+        )))
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unfilled, 0, "every remaining row is filled");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_job_of_an_earlier_assignment_changes_nothing(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        apply(&pool, ws, &[record(1, json!({"plan": "a"}), START)]).await;
+        let Assigned::New(slot, first) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+        backfill(&pool, ws, "plan", slot, first).await;
+        retire(&pool, ws, "plan").await;
+        let mut tx = begin(&pool).await.unwrap();
+        assert!(
+            free_trait_slot(&mut tx, ws, "plan", slot, first)
+                .await
+                .unwrap()
+        );
+        commit(tx).await.unwrap();
+
+        // The same trait is indexed again into the same slot.
+        let Assigned::New(again, second) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+        assert_eq!((again, second > first), (slot, true));
+
+        // A delayed job of the first assignment: finish, batch and free all do nothing.
+        let mut tx = begin(&pool).await.unwrap();
+        assert!(
+            !finish_backfill(&mut tx, ws, "plan", slot, first)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            backfill_slot_batch(&mut tx, ws, "plan", slot, first, None)
+                .await
+                .unwrap(),
+            SlotStep::Stale
+        );
+        assert!(
+            !free_trait_slot(&mut tx, ws, "plan", slot, first)
+                .await
+                .unwrap()
+        );
+        commit(tx).await.unwrap();
+        let state = trait_slot_assignments_of(&pool, ws).await;
+        assert_eq!(
+            state,
+            SlotState::Backfilling,
+            "the new assignment is untouched"
+        );
+
+        // The same holds for a clear of the first generation against a newer retirement.
+        retire(&pool, ws, "plan").await;
+        let mut tx = begin(&pool).await.unwrap();
+        assert_eq!(
+            clear_slot_batch(&mut tx, ws, "plan", slot, first)
+                .await
+                .unwrap(),
+            SlotStep::Stale
+        );
+        assert!(
+            !free_trait_slot(&mut tx, ws, "plan", slot, first)
+                .await
+                .unwrap()
+        );
+        commit(tx).await.unwrap();
+        assert_eq!(
+            trait_slot_assignments_of(&pool, ws).await,
+            SlotState::Retiring
+        );
+    }
+
+    async fn trait_slot_assignments_of(pool: &PgPool, ws: WorkspaceId) -> SlotState {
+        let mut connection = pool.acquire().await.unwrap();
+        trait_slot_assignments(&mut connection, ws)
+            .await
+            .unwrap()
+            .remove(0)
+            .1
+            .state
+    }
+
+    /// The cycle the lock order prevents: a backfill batch holds the shared lock and waits on a
+    /// person row, a retire queues for the exclusive lock behind it, and a writer for another
+    /// person starts. Writers take the shared lock before any row, so the writer queues holding
+    /// nothing and all three finish.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_queued_exclusive_request_does_not_deadlock_a_batch_and_a_writer(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        apply(
+            &pool,
+            ws,
+            &[
+                record(1, json!({"plan": "a"}), START),
+                record(2, json!({"plan": "a"}), START),
+            ],
+        )
+        .await;
+        let (one, two) = (
+            person_of_record(&pool, ws, 1).await,
+            person_of_record(&pool, ws, 2).await,
+        );
+        // The batch locks rows in id order: it waits on `low`, and the writer wants `high`.
+        let (high_record, low_person) = if one < two { (2, one) } else { (1, two) };
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+
+        let mut holder = begin(&pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM people WHERE id = $1 FOR UPDATE")
+            .bind(low_person)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let wait = || tokio::time::sleep(std::time::Duration::from_millis(800));
+
+        let batch = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let step = backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None).await;
+                commit(tx).await.unwrap();
+                step
+            })
+        };
+        wait().await;
+        let retire_task = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let retired = retire_trait_slot(&mut tx, ws, "plan").await;
+                commit(tx).await.unwrap();
+                retired
+            })
+        };
+        wait().await;
+        let writer = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let later = record(
+                    high_record,
+                    json!({"plan": "b"}),
+                    START + Duration::hours(1),
+                );
+                let mut tx = begin(&pool).await.unwrap();
+                let outcome = crate::people::apply_profile_record(&mut tx, ws, &later).await;
+                commit(tx).await.unwrap();
+                outcome
+            })
+        };
+        wait().await;
+        commit(holder).await.unwrap();
+
+        let all = async { (batch.await, retire_task.await, writer.await) };
+        let (batch, retired, writer) =
+            tokio::time::timeout(std::time::Duration::from_secs(20), all)
+                .await
+                .expect("the three requests finish");
+        assert!(batch.unwrap().is_ok(), "the batch finished");
+        assert!(retired.unwrap().is_ok(), "the retire finished");
+        assert!(writer.unwrap().is_ok(), "the writer finished");
     }
 }

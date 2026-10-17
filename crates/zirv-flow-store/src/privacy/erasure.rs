@@ -907,12 +907,12 @@ mod tests {
         let mut tx = crate::begin(&pool).await.unwrap();
         let assigned = crate::assign_trait_slot(&mut tx, ws, "plan").await.unwrap();
         crate::commit(tx).await.unwrap();
-        let crate::Assigned::New(slot) = assigned else {
+        let crate::Assigned::New(slot, generation) = assigned else {
             panic!("not assigned");
         };
         loop {
             let mut tx = crate::begin(&pool).await.unwrap();
-            let step = crate::backfill_slot_batch(&mut tx, ws, "plan", slot, None)
+            let step = crate::backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None)
                 .await
                 .unwrap();
             crate::commit(tx).await.unwrap();
