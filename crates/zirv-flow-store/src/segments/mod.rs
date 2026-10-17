@@ -8,6 +8,7 @@ mod catalog;
 mod crud;
 mod cycle;
 mod data_age;
+mod explain;
 mod members;
 mod preview;
 mod reevaluate;
@@ -22,10 +23,16 @@ pub use crud::{
 };
 pub use cycle::SegmentRef;
 pub use data_age::{DataAge, FeedingSource, segment_data_age};
+pub use explain::{
+    ClearFields, EXPLAIN_EVENT_CAP, ExplainConsent, ExplainEvent, ExplainEventScope, ExplainPerson,
+    explain_clear_fields, load_explain_person,
+};
 pub use members::{
     HistoryCursor, HistoryRow, MemberRow, segment_history_page, segment_members_page,
 };
 pub(crate) use members::{close_on_merge, forget_people};
+#[cfg(any(test, feature = "test-support"))]
+pub use preview::run_segment_ids;
 pub use preview::{
     SampleRow, SqlParam, SqlQuery, begin_segment_snapshot, run_segment_preview, snapshot_now,
 };

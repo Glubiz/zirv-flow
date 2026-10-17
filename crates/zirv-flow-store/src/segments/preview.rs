@@ -132,6 +132,26 @@ pub async fn run_segment_preview(
     Ok((total, rows))
 }
 
+/// TEST ONLY: runs a compiled query that selects `p.id` and returns the ids, in the order the
+/// database gives them. The comparison tests of the compiler use it to read the members of a
+/// segment and of a batch (`$1` is the workspace, `params` follow, a batch is the last param).
+#[cfg(any(test, feature = "test-support"))]
+pub async fn run_segment_ids(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    query: &SqlQuery,
+) -> Result<Vec<Uuid>, StoreError> {
+    // The SQL comes from the compiler, which binds every value.
+    bind_all(
+        sqlx::query_scalar(sqlx::AssertSqlSafe(query.sql.clone())),
+        workspace,
+        &query.params,
+    )
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -219,6 +239,35 @@ mod tests {
             rows[0].display.as_ref().map(|(kind, _)| kind.as_str()),
             Some("email")
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_ids_of_a_query_are_those_of_its_workspace_and_a_batch_narrows_them(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let pro_a = person(&pool, ws, "a@example.com", "pro").await;
+        let pro_b = person(&pool, ws, "b@example.com", "pro").await;
+        person(&pool, ws, "c@example.com", "free").await;
+        person(&pool, other, "d@example.com", "pro").await;
+        let predicate = "p.traits ->> 'plan' = $2::text";
+        let pro = SqlParam::Text("pro".into());
+        let mut connection = pool.acquire().await.unwrap();
+
+        let all = query(predicate, " ", vec![pro.clone()]);
+        let mut ids = run_segment_ids(&mut connection, ws, &all).await.unwrap();
+        ids.sort();
+        let mut expected = vec![pro_a, pro_b];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        let batch = query(
+            predicate,
+            " AND p.id = ANY($3::uuid[])",
+            vec![pro, SqlParam::UuidArray(vec![pro_a, Uuid::nil()])],
+        );
+        let ids = run_segment_ids(&mut connection, ws, &batch).await.unwrap();
+        assert_eq!(ids, [pro_a]);
     }
 
     #[sqlx::test]
