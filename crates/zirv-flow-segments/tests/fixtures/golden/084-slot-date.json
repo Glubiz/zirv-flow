@@ -1,0 +1,87 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "before",
+        "trait": "birthday",
+        "value": "2025-01-01"
+      },
+      {
+        "op": "after",
+        "trait": "birthday",
+        "value": "2025-01-01"
+      },
+      {
+        "op": "between",
+        "trait": "birthday",
+        "value": [
+          "2025-01-01",
+          "2025-02-01"
+        ]
+      },
+      {
+        "op": "within_last",
+        "trait": "birthday",
+        "value": "P7D"
+      },
+      {
+        "op": "more_than_ago",
+        "trait": "birthday",
+        "value": "PT36H"
+      },
+      {
+        "op": "within_next",
+        "trait": "birthday",
+        "value": "P30D"
+      },
+      {
+        "op": "exists",
+        "trait": "birthday"
+      },
+      {
+        "op": "not_exists",
+        "trait": "birthday"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "birthday"
+    ]
+  },
+  "params": [
+    {
+      "timestamp": "2025-01-01T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-02-01T00:00:00Z"
+    },
+    {
+      "text": "birthday"
+    },
+    {
+      "timestamp": "2025-06-14T00:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-07-15T12:00:00Z"
+    }
+  ],
+  "slots": {
+    "birthday": "trait_d1"
+  },
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (((p.trait_d1 > $2::timestamptz AND p.trait_d1 IS NOT NULL) AND (p.trait_d1 < $2::timestamptz AND p.trait_d1 IS NOT NULL) AND ((p.trait_d1 >= $2::timestamptz AND p.trait_d1 < $3::timestamptz) AND p.trait_d1 IS NOT NULL) AND COALESCE(((jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false) AND (p.trait_d1 <= $5::timestamptz AND p.trait_d1 IS NOT NULL) AND COALESCE((NOT (jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false) AND ((p.trait_d1 > $6::timestamptz AND p.trait_d1 <= $7::timestamptz) AND p.trait_d1 IS NOT NULL) AND ((p.trait_d1 >= $7::timestamptz AND p.trait_d1 < $8::timestamptz) AND p.trait_d1 IS NOT NULL)))",
+  "time_sensitive": true
+}

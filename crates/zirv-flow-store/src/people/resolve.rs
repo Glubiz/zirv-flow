@@ -76,6 +76,8 @@ pub(crate) async fn resolve_person(
     existing: Option<Uuid>,
     trace: &TraceContext,
 ) -> Result<Resolution, StoreError> {
+    // A merge here writes traits, and a new person is a row lock: the slot lock comes first.
+    super::slots::lock_slots_shared(connection, workspace).await?;
     let mut attempt = 0;
     loop {
         let owners = lookup_owners(connection, workspace, identifiers).await?;

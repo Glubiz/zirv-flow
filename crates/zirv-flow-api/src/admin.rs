@@ -74,6 +74,8 @@ pub enum AdminError {
     Conflict(&'static str),
     NotFound(&'static str),
     Store(StoreError),
+    /// A trait slot change that was refused; the problem carries its own code.
+    Slot(zirv_flow_store::SlotError),
     /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
     Secret(SecretError),
 }
@@ -85,6 +87,7 @@ impl fmt::Display for AdminError {
             Self::Conflict(message) => formatter.write_str(message),
             Self::NotFound(what) => write!(formatter, "no such {what}"),
             Self::Store(error) => error.fmt(formatter),
+            Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
         }
     }
@@ -96,7 +99,7 @@ impl Error for AdminError {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) => None,
+            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) => None,
         }
     }
 }

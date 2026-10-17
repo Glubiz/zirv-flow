@@ -171,18 +171,31 @@ mod tests {
 
     fn compile_fixture(fixture: &Value) -> Result<CompiledSegment, Vec<Issue>> {
         let definition = Definition::from_value(&fixture["definition"])?;
-        compile(&definition, &catalog(), &TraitStorage::default(), NOW)
+        compile(&definition, &catalog(), &fixture_storage(fixture), NOW)
+    }
+
+    /// The `ready` slots a fixture assumes: trait key to column name.
+    fn fixture_storage(fixture: &Value) -> TraitStorage {
+        let slots = fixture["slots"].as_object().into_iter().flatten();
+        TraitStorage::with_slots(slots.map(|(key, column)| {
+            let column = column.as_str().expect("a slot is a column name");
+            (key.clone(), column.parse().expect("a known slot column"))
+        }))
     }
 
     fn actual(fixture: &Value, compiled: &CompiledSegment) -> Value {
         let query = compiled.members_sql();
-        json!({
+        let mut actual = json!({
             "definition": fixture["definition"],
             "sql": query.sql,
             "params": query.params.iter().map(Param::to_value).collect::<Vec<_>>(),
             "deps": compiled.deps.to_value(),
             "time_sensitive": compiled.time_sensitive,
-        })
+        });
+        if let Some(slots) = fixture.get("slots") {
+            actual["slots"] = slots.clone();
+        }
+        actual
     }
 
     #[test]
@@ -217,7 +230,7 @@ mod tests {
         format!("{kind:?}").to_lowercase()
     }
 
-    fn visit(node: &Node, catalog: &Catalog, facts: &mut BTreeSet<String>) {
+    fn visit(node: &Node, catalog: &Catalog, slotted: &[String], facts: &mut BTreeSet<String>) {
         match node {
             Node::All(children) | Node::Any(children) if children.is_empty() => {
                 facts.insert(format!("const:{}", matches!(node, Node::All(_))));
@@ -225,13 +238,13 @@ mod tests {
             Node::All(children) | Node::Any(children) => {
                 facts.insert(format!("node:{}", node.key()));
                 for child in children {
-                    visit(child, catalog, facts);
+                    visit(child, catalog, slotted, facts);
                 }
             }
             Node::Not(child) => {
                 facts.insert("node:not".to_owned());
                 facts.insert(format!("not:{}", child.key()));
-                visit(child, catalog, facts);
+                visit(child, catalog, slotted, facts);
             }
             Node::Trait(condition) => {
                 facts.insert("node:trait".to_owned());
@@ -241,6 +254,10 @@ mod tests {
                     kind_name(kind),
                     condition.op.as_str()
                 ));
+                if slotted.contains(&condition.key) {
+                    let op = condition.op.as_str();
+                    facts.insert(format!("slot:{}:{op}", kind_name(kind)));
+                }
             }
             Node::Event(condition) => {
                 facts.insert("node:event".to_owned());
@@ -313,6 +330,20 @@ mod tests {
                 }
             }
         }
+        // A slot serves every operator but `exists` and `not_exists`, which read `jsonb`.
+        for kind in [
+            Kind::String,
+            Kind::Number,
+            Kind::Boolean,
+            Kind::Timestamp,
+            Kind::Date,
+        ] {
+            for op in ops_for(kind) {
+                if !matches!(op, Op::Exists | Op::NotExists) {
+                    required.insert(format!("slot:{}:{}", kind_name(kind), op.as_str()));
+                }
+            }
+        }
         for (name, kind) in [("number", Kind::Number), ("timestamp", Kind::Timestamp)] {
             for op in ops_for(kind) {
                 if !matches!(op, Op::Exists | Op::NotExists) {
@@ -330,7 +361,11 @@ mod tests {
         for (path, fixture) in fixtures() {
             let parsed = Definition::from_value(&fixture["definition"])
                 .unwrap_or_else(|issues| panic!("{path:?} does not parse: {issues:?}"));
-            visit(&normalize(parsed).root, &catalog, &mut covered);
+            let slotted: Vec<String> = fixture["slots"]
+                .as_object()
+                .map(|slots| slots.keys().cloned().collect())
+                .unwrap_or_default();
+            visit(&normalize(parsed).root, &catalog, &slotted, &mut covered);
         }
         let missing: Vec<String> = required().difference(&covered).cloned().collect();
         assert!(

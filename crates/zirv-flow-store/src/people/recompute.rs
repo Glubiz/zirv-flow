@@ -25,6 +25,8 @@ pub async fn recompute_trait_batch(
     trace: &TraceContext,
     job: Option<(Uuid, i32)>,
 ) -> Result<Option<Uuid>, StoreError> {
+    // First, before any row lock: see the lock order in `slots`.
+    super::slots::lock_slots_shared(connection, workspace).await?;
     let people: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT person_id FROM source_records \
          WHERE workspace_id = $1 AND deleted_at IS NULL AND traits ? $2 \

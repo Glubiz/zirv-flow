@@ -18,7 +18,7 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
     use uuid::Uuid;
     use zirv_flow_core::events::{EventMode, SchemaProperty};
-    use zirv_flow_core::people::Precedence;
+    use zirv_flow_core::people::{Precedence, SlotColumn, SlotKind, TraitType};
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceId, WorkspaceName};
     use zirv_flow_segments::generate::{self, NOW};
     use zirv_flow_segments::{
@@ -161,6 +161,7 @@ mod tests {
         connection: &mut PgConnection,
         ws: WorkspaceId,
         people: &[PersonSnapshot],
+        slots: &[(String, SlotColumn)],
     ) -> Vec<Uuid> {
         let ids: Vec<Uuid> = people.iter().map(|_| Uuid::now_v7()).collect();
         let mut rows = [const { Vec::<Value>::new() }; 6];
@@ -229,6 +230,20 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // The slots are filled with the conversion the writers use, from the stored traits.
+        for (key, slot) in slots {
+            let fill = format!(
+                "UPDATE people SET {} = {} WHERE workspace_id = $1",
+                slot.as_str(),
+                slot.value_sql("traits", "$2::text")
+            );
+            sqlx::query(sqlx::AssertSqlSafe(fill))
+                .bind(ws.as_uuid())
+                .bind(key)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
         ids
     }
 
@@ -267,8 +282,10 @@ mod tests {
         definition: &Definition,
         people: &[PersonSnapshot],
         ids: &[Uuid],
+        slots: &[(String, SlotColumn)],
     ) -> Result<(usize, usize), String> {
-        let compiled = compile(definition, catalog, &TraitStorage::default(), NOW)
+        let storage = TraitStorage::with_slots(slots.iter().cloned());
+        let compiled = compile(definition, catalog, &storage, NOW)
             .map_err(|issues| format!("does not compile: {issues:?}"))?;
         let passes: Vec<bool> = people
             .iter()
@@ -337,18 +354,65 @@ mod tests {
         Err(report)
     }
 
+    /// A `ready` slot for every trait that can have one, the lowest free of its type.
+    fn slot_layout(catalog: &Catalog) -> Vec<(String, SlotColumn)> {
+        let mut keys: Vec<(&String, &TraitType)> = catalog.traits.iter().collect();
+        keys.sort_by_key(|(key, _)| *key);
+        let mut taken = Vec::new();
+        let mut layout = Vec::new();
+        for (key, trait_type) in keys {
+            let Some(kind) = SlotKind::of(*trait_type) else {
+                continue;
+            };
+            if let Some(slot) = SlotColumn::of_kind(kind).find(|slot| !taken.contains(slot)) {
+                taken.push(slot);
+                layout.push((key.clone(), slot));
+            }
+        }
+        layout
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn sql_and_evaluator_comparison_agrees_on_generated_cases(pool: PgPool) {
-        let (ws, catalog) = world(&pool).await;
+        generated_comparison(&pool, false).await;
+    }
+
+    /// The same cases with every slottable trait read from its typed column.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sql_and_evaluator_comparison_agrees_on_generated_cases_with_slotted_traits(
+        pool: PgPool,
+    ) {
+        generated_comparison(&pool, true).await;
+    }
+
+    async fn generated_comparison(pool: &PgPool, slotted: bool) {
+        let (ws, catalog) = world(pool).await;
+        let layout = if slotted {
+            slot_layout(&catalog)
+        } else {
+            Vec::new()
+        };
+        let slots = layout.as_slice();
         let (rng_seed, cases) = (generate::seed(), generate::cases());
         println!("comparison: seed {rng_seed}, {cases} cases");
         let generated = generate::sample(&generate::case(), &mut generate::runner(), cases);
         let (mut members, mut others, mut failures) = (0, 0, Vec::new());
         for (number, case) in generated.iter().enumerate() {
             let mut tx = pool.begin().await.unwrap();
-            let ids = seed(&mut tx, ws, &case.people).await;
-            match compare(&mut tx, ws, &catalog, &case.definition, &case.people, &ids).await {
+            let ids = seed(&mut tx, ws, &case.people, slots).await;
+            match compare(
+                &mut tx,
+                ws,
+                &catalog,
+                &case.definition,
+                &case.people,
+                &ids,
+                slots,
+            )
+            .await
+            {
                 Ok((passed, failed)) => {
                     members += passed;
                     others += failed;
@@ -506,13 +570,15 @@ mod tests {
             definitions.push(json!({"trait": stored_at, "op": "between", "value": [bound, "2100-01-01T00:00:00Z"]}));
         }
         let mut tx = pool.begin().await.unwrap();
-        let ids = seed(&mut tx, ws, &people).await;
+        let ids = seed(&mut tx, ws, &people, &[]).await;
         let mut failures = Vec::new();
         let mut checked = 0;
         for value in definitions {
             let definition = definition(value);
             checked += 1;
-            if let Err(report) = compare(&mut tx, ws, &catalog, &definition, &people, &ids).await {
+            if let Err(report) =
+                compare(&mut tx, ws, &catalog, &definition, &people, &ids, &[]).await
+            {
                 failures.push(report);
             }
         }
@@ -603,7 +669,7 @@ mod tests {
             PersonSnapshot::default(),
         ];
         let mut connection = pool.acquire().await.unwrap();
-        let ids: BTreeSet<Uuid> = seed(&mut connection, ws, &people)
+        let ids: BTreeSet<Uuid> = seed(&mut connection, ws, &people, &[])
             .await
             .into_iter()
             .collect();
@@ -646,7 +712,7 @@ mod tests {
             PersonSnapshot::default(),
         ];
         let mut connection = pool.acquire().await.unwrap();
-        let ids = seed(&mut connection, ws, &people).await;
+        let ids = seed(&mut connection, ws, &people, &[]).await;
         for (person, closed) in [(ids[0], false), (ids[1], true)] {
             sqlx::query(
                 "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
@@ -667,5 +733,122 @@ mod tests {
         }
         let members = run_segment_ids(&mut connection, ws, &query).await.unwrap();
         assert_eq!(members, [ids[0]]);
+    }
+
+    fn plan_catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.traits.insert("plan".to_owned(), TraitType::String);
+        catalog
+    }
+
+    /// EXPLAIN of the members query of `{"trait": "plan", "op": "eq", "value": "p777"}`.
+    async fn explain_plan_eq(pool: &PgPool, ws: WorkspaceId, storage: &TraitStorage) -> String {
+        let catalog = plan_catalog();
+        let definition = definition(json!({"trait": "plan", "op": "eq", "value": "p777"}));
+        let compiled = compile(&definition, &catalog, storage, NOW).unwrap();
+        let query = sql_query(compiled.members_sql());
+        let mut explain =
+            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!("EXPLAIN {}", query.sql)))
+                .bind(ws.as_uuid());
+        for param in &query.params {
+            explain = match param {
+                SqlParam::Text(text) => explain.bind(text.clone()),
+                SqlParam::Jsonb(value) => explain.bind(value.clone()),
+                other => panic!("the query binds only text and jsonb: {other:?}"),
+            };
+        }
+        explain.fetch_all(pool).await.unwrap().join("\n")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_string_eq_on_a_ready_slot_uses_its_partial_index_and_jsonb_does_not(pool: PgPool) {
+        let (ws, _) = world(&pool).await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, traits, trait_s1) \
+             SELECT gen_random_uuid(), $1, jsonb_build_object('plan', 'p' || g), 'p' || g \
+             FROM generate_series(1, 20000) g",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE people").execute(&pool).await.unwrap();
+
+        let slotted = TraitStorage::with_slots([("plan".to_owned(), SlotColumn::S1)]);
+        let plan = explain_plan_eq(&pool, ws, &slotted).await;
+        println!("slotted plan:\n{plan}");
+        assert!(plan.contains("people_trait_s1_idx"), "{plan}");
+
+        let jsonb = explain_plan_eq(&pool, ws, &TraitStorage::default()).await;
+        assert!(!jsonb.contains("people_trait_s1_idx"), "{jsonb}");
+    }
+
+    /// The compiler reads a slot only once it is `ready`: the store's snapshot lists no other.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_catalog_lists_a_slot_only_while_it_is_ready(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("cutover").unwrap();
+        let slug = Slug::parse("cutover").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        zirv_flow_store::create_trait_definition(
+            &pool,
+            ws,
+            &zirv_flow_store::NewTraitDefinition {
+                key: "plan".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let storage_of =
+            |snapshot: zirv_flow_store::CatalogSnapshot| TraitStorage::with_slots(snapshot.slots);
+        let compiled_sql = |storage: &TraitStorage| {
+            let definition = definition(json!({"trait": "plan", "op": "eq", "value": "a"}));
+            let compiled = compile(&definition, &plan_catalog(), storage, NOW).unwrap();
+            compiled.members_sql().sql
+        };
+        let mut connection = pool.acquire().await.unwrap();
+
+        let Ok(zirv_flow_store::Assigned::New(slot, generation)) =
+            zirv_flow_store::assign_trait_slot(&mut connection, ws, "plan").await
+        else {
+            panic!("not assigned");
+        };
+        let backfilling = storage_of(segment_catalog(&mut connection, ws).await.unwrap());
+        assert!(
+            !compiled_sql(&backfilling).contains(slot.as_str()),
+            "backfilling reads jsonb"
+        );
+
+        assert!(
+            zirv_flow_store::finish_backfill(&mut connection, ws, "plan", slot, generation)
+                .await
+                .unwrap()
+        );
+        let ready = storage_of(segment_catalog(&mut connection, ws).await.unwrap());
+        assert!(
+            compiled_sql(&ready).contains(slot.as_str()),
+            "ready reads the column"
+        );
+
+        zirv_flow_store::retire_trait_slot(&mut connection, ws, "plan")
+            .await
+            .unwrap();
+        let retiring = storage_of(segment_catalog(&mut connection, ws).await.unwrap());
+        assert!(
+            !compiled_sql(&retiring).contains(slot.as_str()),
+            "retiring reads jsonb"
+        );
     }
 }

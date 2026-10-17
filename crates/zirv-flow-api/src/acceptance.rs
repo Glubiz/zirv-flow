@@ -1979,6 +1979,167 @@ mod tests {
         format!("/api/v1/workspaces/{ws}/traits")
     }
 
+    async fn make_trait(router: &Router, owner: &Login, ws: &str, key: &str, kind: &str) {
+        let reply = call(
+            router,
+            "POST",
+            &traits_uri(ws),
+            Some(json!({"key": key, "type": kind})),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_trait_is_indexed_and_unindexed_by_admins_with_jobs_audit_and_conflicts(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        make_trait(&router, &owner, &ws, "plan", "string").await;
+        make_trait(&router, &owner, &ws, "tags", "string_list").await;
+        let uri = format!("{}/plan/index", traits_uri(&ws));
+
+        let as_member = call(&router, "POST", &uri, None, Auth::Session(&member)).await;
+        let as_read_key = call(&router, "POST", &uri, None, Auth::Key(&read_key)).await;
+        assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(as_read_key.status, StatusCode::FORBIDDEN);
+
+        let marked = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(marked.status, StatusCode::ACCEPTED, "{:?}", marked.body);
+        assert_eq!(marked.body["index_state"], "backfilling");
+        let again = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(again.status, StatusCode::OK);
+        let listed = call(
+            &router,
+            "GET",
+            &traits_uri(&ws),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let plan = listed
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|body| body["key"] == "plan")
+            .unwrap();
+        assert_eq!(plan["index_state"], "backfilling");
+
+        let jobs: Vec<String> = sqlx::query_scalar(
+            "SELECT payload->>'slot' FROM jobs WHERE kind = 'traits.slot_backfill'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(jobs, ["trait_s1"], "one backfill, for the first free slot");
+
+        let retyped = call(
+            &router,
+            "PATCH",
+            &format!("{}/plan", traits_uri(&ws)),
+            Some(json!({"type": "number"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(retyped.status, StatusCode::CONFLICT, "{:?}", retyped.body);
+        assert_eq!(retyped.body["code"], "trait_indexed");
+
+        let list_trait = call(
+            &router,
+            "POST",
+            &format!("{}/tags/index", traits_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "POST",
+            &format!("{}/nope/index", traits_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(list_trait.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+        let unmarked = call(&router, "DELETE", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(unmarked.status, StatusCode::ACCEPTED, "{:?}", unmarked.body);
+        assert_eq!(unmarked.body["index_state"], "retiring");
+        let remark = call(&router, "POST", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(remark.status, StatusCode::CONFLICT);
+        assert_eq!(remark.body["code"], "trait_index_retiring");
+        let twice = call(&router, "DELETE", &uri, None, Auth::Session(&owner)).await;
+        assert_eq!(twice.status, StatusCode::OK);
+        let never = call(
+            &router,
+            "DELETE",
+            &format!("{}/tags/index", traits_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(never.status, StatusCode::CONFLICT);
+        assert_eq!(never.body["code"], "trait_not_indexed");
+
+        let clears: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'traits.slot_clear'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(clears, 1, "the repeated unmark enqueued nothing");
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let indexed = audit
+            .iter()
+            .find(|row| row.action == "trait.indexed")
+            .unwrap();
+        assert_eq!(indexed.summary, json!({"key": "plan", "slot": "trait_s1"}));
+        assert!(audit.iter().any(|row| row.action == "trait.unindexed"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_ninth_string_trait_is_refused_with_trait_slots_full(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        for n in 0..9 {
+            make_trait(&router, &owner, &ws, &format!("s{n}"), "string").await;
+        }
+        for n in 0..8 {
+            let reply = call(
+                &router,
+                "POST",
+                &format!("{}/s{n}/index", traits_uri(&ws)),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        }
+
+        let ninth = call(
+            &router,
+            "POST",
+            &format!("{}/s8/index", traits_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(ninth.status, StatusCode::CONFLICT);
+        assert_eq!(ninth.body["code"], "trait_slots_full");
+        assert!(ninth.body["detail"].as_str().unwrap().contains("8 string"));
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_field_registry_is_created_listed_updated_and_audited(pool: PgPool) {
@@ -11657,7 +11818,7 @@ email,b@example.com,
     async fn refresh_compiled(pool: &PgPool, ws: &str, segment: &str, definition: &Value) {
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        let catalog = crate::segments::catalog_of(
+        let (catalog, storage) = crate::segments::catalog_of(
             zirv_flow_store::segment_catalog(&mut connection, workspace)
                 .await
                 .unwrap(),
@@ -11665,13 +11826,7 @@ email,b@example.com,
         drop(connection);
         let parsed = zirv_flow_segments::parse_and_validate(definition, &catalog).unwrap();
         let now = time::OffsetDateTime::now_utc();
-        let compiled = zirv_flow_segments::compile(
-            &parsed,
-            &catalog,
-            &zirv_flow_segments::TraitStorage::default(),
-            now,
-        )
-        .unwrap();
+        let compiled = zirv_flow_segments::compile(&parsed, &catalog, &storage, now).unwrap();
         let members = crate::segments::preview::sql_query(compiled.members_sql());
         let job_trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::schedule(
             uuid::Uuid::new_v4(),

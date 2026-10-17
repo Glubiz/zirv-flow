@@ -8,9 +8,9 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::Channel;
 use zirv_flow_core::events::{PropertyType, SchemaProperty};
-use zirv_flow_core::people::TraitType;
+use zirv_flow_core::people::{SlotColumn, TraitType};
 
-use crate::{StoreError, list_topics, list_trait_definitions};
+use crate::{StoreError, list_topics, list_trait_definitions, ready_trait_slots};
 
 /// What a workspace defines now: traits that are not archived, the properties of each event
 /// schema's current version, list ids, the ids of segments that are not archived and the
@@ -23,6 +23,9 @@ pub struct CatalogSnapshot {
     pub segments: HashSet<Uuid>,
     /// Each channel's topics: a key with its id.
     pub topics: HashMap<Channel, HashMap<String, Uuid>>,
+    /// The trait slots in state `ready`, which the compiler may read. They come from the same
+    /// snapshot as the traits.
+    pub slots: Vec<(String, SlotColumn)>,
 }
 
 /// Reads the snapshot on `connection`. Run it inside the transaction that uses the result:
@@ -94,6 +97,7 @@ async fn read_catalog(
             .or_default()
             .insert(topic.key, topic.id);
     }
+    snapshot.slots = ready_trait_slots(&mut *connection, workspace).await?;
     Ok(snapshot)
 }
 

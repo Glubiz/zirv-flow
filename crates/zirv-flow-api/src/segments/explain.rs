@@ -354,7 +354,7 @@ pub(crate) async fn explain(
         .await
         .map_err(|error| read_error(error.into_bounded()))?
         .ok_or_else(ApiError::not_found)?;
-    let catalog = catalog_of(
+    let (catalog, _) = catalog_of(
         zirv_flow_store::segment_catalog(&mut tx, workspace.id)
             .await
             .map_err(read_error)?,

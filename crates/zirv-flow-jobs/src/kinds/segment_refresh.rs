@@ -43,6 +43,8 @@ impl JobKind for SegmentRefresh {
                 JobError::new("the trigger is not save, schedule, manual or dependent")
             })?;
 
+        // The slot lock comes before the segment locks: see the lock order in the store's `slots`.
+        zirv_flow_store::hold_trait_slots(ctx.conn(), workspace).await?;
         lock_segment_refresh(ctx.conn(), segment_id).await?;
         let segment = find_segment(&mut *ctx.conn(), workspace, segment_id).await?;
         let Some(segment) = segment.filter(|segment| segment.archived_at.is_none()) else {
@@ -66,9 +68,9 @@ impl JobKind for SegmentRefresh {
 
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        let catalog = catalog_of(segment_catalog(ctx.conn(), workspace).await?);
+        let (catalog, storage) = catalog_of(segment_catalog(ctx.conn(), workspace).await?);
         let compiled = parse_and_validate(&version.definition, &catalog)
-            .and_then(|parsed| compile(&parsed, &catalog, &TraitStorage::default(), now));
+            .and_then(|parsed| compile(&parsed, &catalog, &storage, now));
         let compiled = match compiled {
             Ok(compiled) => compiled,
             // Something the definition reads was archived since the save: the members stay as
@@ -116,14 +118,16 @@ impl JobKind for SegmentRefresh {
 }
 
 /// The compiler's catalog from the store's snapshot.
-pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
-    Catalog {
+pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
+    let storage = TraitStorage::with_slots(snapshot.slots);
+    let catalog = Catalog {
         traits: snapshot.traits,
         events: snapshot.events,
         lists: snapshot.lists,
         segments: snapshot.segments,
         topics: snapshot.topics,
-    }
+    };
+    (catalog, storage)
 }
 
 fn param(param: Param) -> SqlParam {
@@ -272,15 +276,9 @@ mod tests {
     /// What the API does when it saves a definition.
     async fn checked(pool: &PgPool, ws: WorkspaceId, definition: Value) -> NewSegmentVersion {
         let mut connection = pool.acquire().await.unwrap();
-        let catalog = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
+        let (catalog, storage) = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
         let parsed = parse_and_validate(&definition, &catalog).unwrap();
-        let compiled = compile(
-            &parsed,
-            &catalog,
-            &TraitStorage::default(),
-            OffsetDateTime::now_utc(),
-        )
-        .unwrap();
+        let compiled = compile(&parsed, &catalog, &storage, OffsetDateTime::now_utc()).unwrap();
         NewSegmentVersion {
             definition,
             normalized: normalize(parsed).to_value(),
@@ -736,5 +734,44 @@ mod tests {
         let clock = ctx.clock().clone();
 
         assert_eq!(clock.now(ctx.conn()).await.unwrap(), at);
+    }
+
+    /// The slot lock comes before the segment lock: while a retire holds the slot lock, a refresh
+    /// waits for it holding no segment lock. Taken the other way round, a refresh holding the
+    /// segment lock could queue for the slot lock behind a retire that waits on a merge that wants
+    /// the segment lock.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_waiting_for_the_slot_lock_holds_no_segment_lock(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let (clock, _) = manual(OffsetDateTime::now_utc());
+        let seg = create(
+            &pool,
+            ws,
+            "Plan",
+            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+            &TraceContext::root(Cause::api("save")),
+        )
+        .await;
+
+        let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
+        let job = {
+            let pool = pool.clone();
+            let trace = TraceContext::root(Cause::api("manual"));
+            tokio::spawn(async move { run(&pool, ws, seg.id, "manual", trace, &clock).await })
+        };
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert!(
+            crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
+            "the refresh took the segment lock before the slot lock"
+        );
+        zirv_flow_store::commit(retire).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), job)
+            .await
+            .expect("the refresh finishes once the slot lock is free")
+            .unwrap();
     }
 }

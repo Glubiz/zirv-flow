@@ -31,7 +31,7 @@ pub use evaluate::{EvalNode, Evaluation, Observed, Outcome, evaluate};
 pub use normalize::normalize;
 pub use query::{Param, Query};
 pub use snapshot::{PersonSnapshot, SnapshotConsent, SnapshotEvent};
-pub use storage::{Storage, TraitStorage};
+pub use storage::{SlotColumn, Storage, TraitStorage};
 pub use validate::{parse_and_validate, validate};
 pub use zirv_flow_core::segment::{
     ChangeClasses, Definition, Issue, MAX_DEPTH, MAX_ISSUES, MAX_NODES, Node, code,

@@ -5,6 +5,7 @@ pub(crate) mod conflicts;
 pub(crate) mod profile;
 pub(crate) mod registry;
 pub(crate) mod search;
+pub(crate) mod slots;
 pub(crate) mod timeline;
 
 pub(crate) use registry::{

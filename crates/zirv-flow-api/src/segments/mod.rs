@@ -9,7 +9,7 @@ mod schema;
 
 use std::time::Duration;
 
-use zirv_flow_segments::{Catalog, Issue};
+use zirv_flow_segments::{Catalog, Issue, TraitStorage};
 use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
 use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
@@ -19,15 +19,18 @@ pub(crate) use schema::SegmentSchemas;
 /// How long a preview may run before PostgreSQL cancels it (architecture 8.3).
 pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The compiler's catalog from the store's snapshot.
-pub(crate) fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
-    Catalog {
+/// The compiler's catalog and trait storage from the store's snapshot. Only slots in state
+/// `ready` are in the storage, and they come from the same snapshot as the catalog.
+pub(crate) fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
+    let storage = TraitStorage::with_slots(snapshot.slots);
+    let catalog = Catalog {
         traits: snapshot.traits,
         events: snapshot.events,
         lists: snapshot.lists,
         segments: snapshot.segments,
         topics: snapshot.topics,
-    }
+    };
+    (catalog, storage)
 }
 
 /// The 422 `segment_invalid` problem for a definition's issues.

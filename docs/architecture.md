@@ -318,7 +318,7 @@ erDiagram
 
 | Entity | Purpose and key rules |
 |--------|-----------------------|
-| Person | Resolved individual. `traits jsonb` is materialized from contributions; `merged_into` is set on the losing side of a merge. For traits marked "indexed for segments" (OQ-1, 21.1), `people` also carries a fixed set of generic typed slot columns per promotable scalar type: 8 string, 8 number, 6 timestamp, 4 date and 4 boolean per workspace, each with a partial btree index on `(workspace_id, slot)` where the slot is not null. `string_list` traits stay in `jsonb`. |
+| Person | Resolved individual. `traits jsonb` is materialized from contributions; `merged_into` is set on the losing side of a merge. For traits marked "indexed for segments" (OQ-1, 21.1), `people` also carries a fixed set of generic typed slot columns per promotable scalar type: 8 string, 8 number, 6 timestamp, 4 date and 4 boolean per workspace, each with a partial btree index on `(workspace_id, slot)` where the slot is not null. `string_list` traits stay in `jsonb`. | Slots are live: columns `trait_s1..s8`, `trait_n1..n8`, `trait_t1..t6`, `trait_d1..d4` (UTC midnight) and `trait_b1..b4`; a definition holds one in state `backfilling`, `ready` or `retiring`, and every writer of `people.traits` takes `pg_advisory_xact_lock_shared(7000, hashtext(workspace))` in its own statement before reading the assignments while every assignment change takes the exclusive form.
 | Identity | `(kind, normalized value)` per person: email, phone, anonymous_id, external id namespaced per source. Unique on `(workspace_id, kind, value)`. |
 | Trait definition | Field registry: key, type (string, number, boolean, timestamp, date, string list), precedence policy, PII flag, channel-address flag. Values are validated on write, so compiled reads cast safely. |
 | Source record | Ledger row per `(source, stream, record key)`: mapped payload, content hash, person, last seen run, deletion mark. These are the per-source contributions traits are computed from. |
@@ -2107,7 +2107,8 @@ they were ruled as their capabilities were added to the plan.
   completes. Unmarking retires the slot safely before it is cleared or reassigned. Marking is refused when no slot of the type is free; the trait then
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
-  traits cover the equality searches.
+  traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
+  Known limitation: migration 0033 builds its 30 partial indexes in one transaction, which blocks writes to `people` for the build on a populated install; index creation must be revisited before upgrades of populated installations are supported.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

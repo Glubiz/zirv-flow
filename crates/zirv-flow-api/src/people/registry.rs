@@ -38,6 +38,9 @@ pub(crate) struct TraitBody {
     /// Registered automatically from an incoming record rather than created by a person.
     inferred: bool,
     archived: bool,
+    /// Set while the trait holds a typed slot: `backfilling`, `ready` (segments read the column) or
+    /// `retiring`. Null for a trait stored only as JSON.
+    index_state: Option<String>,
     description: String,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
@@ -58,6 +61,7 @@ impl From<&TraitDefinition> for TraitBody {
             channel_address: definition.channel_address,
             inferred: definition.inferred,
             archived: definition.archived,
+            index_state: None,
             description: definition.description.clone(),
             created_at: definition.created_at,
             updated_at: definition.updated_at,
@@ -204,6 +208,15 @@ pub(crate) async fn update_trait(
     request: &UpdateTraitRequest,
 ) -> Result<TraitDefinition, AdminError> {
     if request.trait_type.is_some() {
+        // A slot is typed, so a trait that holds one is refused as a conflict with its index;
+        // any other attempt is a plain validation failure.
+        let mut connection = zirv_flow_store::begin(pool).await?;
+        if zirv_flow_store::trait_slot_of(&mut connection, workspace, key)
+            .await?
+            .is_some()
+        {
+            return Err(AdminError::Slot(zirv_flow_store::SlotError::TypeLocked));
+        }
         return Err(invalid("type", "cannot be changed"));
     }
     let mut fields: Vec<&'static str> = Vec::new();
@@ -293,7 +306,25 @@ pub(crate) async fn list(
 ) -> Result<Json<Vec<TraitBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let definitions = zirv_flow_store::list_trait_definitions(&state.pool, workspace.id).await?;
-    Ok(Json(definitions.iter().map(TraitBody::from).collect()))
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let slots = zirv_flow_store::trait_slot_assignments(&mut connection, workspace.id).await?;
+    Ok(Json(
+        definitions
+            .iter()
+            .map(|definition| {
+                let mut body = TraitBody::from(definition);
+                body.index_state = slots
+                    .iter()
+                    .find(|(key, _)| *key == definition.key)
+                    .map(|(_, assignment)| assignment.state.as_str().to_owned());
+                body
+            })
+            .collect(),
+    ))
 }
 
 /// Registers a trait.
@@ -341,6 +372,7 @@ pub(crate) async fn create(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or trait, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "`trait_indexed`: the type of a trait that holds a slot cannot change", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid field, no field at all, or an attempt to change the type", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -354,7 +386,16 @@ pub(crate) async fn update(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let definition =
         update_trait(&state.pool, &principal.context(), workspace.id, &key, &body).await?;
-    Ok(Json(TraitBody::from(&definition)))
+    let mut body = TraitBody::from(&definition);
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    body.index_state = zirv_flow_store::trait_slot_of(&mut connection, workspace.id, &key)
+        .await?
+        .map(|assignment| assignment.state.as_str().to_owned());
+    Ok(Json(body))
 }
 
 #[cfg(test)]
