@@ -1,0 +1,96 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "eq",
+        "trait": "name",
+        "value": "Ada"
+      },
+      {
+        "op": "neq",
+        "trait": "name",
+        "value": "Bob"
+      },
+      {
+        "op": "in",
+        "trait": "name",
+        "value": [
+          "Ada",
+          "Grace"
+        ]
+      },
+      {
+        "op": "not_in",
+        "trait": "name",
+        "value": [
+          "Bob",
+          "Eve"
+        ]
+      },
+      {
+        "op": "contains",
+        "trait": "name",
+        "value": "da"
+      },
+      {
+        "op": "starts_with",
+        "trait": "name",
+        "value": "Ad"
+      },
+      {
+        "op": "exists",
+        "trait": "name"
+      },
+      {
+        "op": "not_exists",
+        "trait": "name"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "name"
+    ]
+  },
+  "params": [
+    {
+      "text": "da"
+    },
+    {
+      "text": "Ada"
+    },
+    {
+      "text": "name"
+    },
+    {
+      "text_array": [
+        "Ada",
+        "Grace"
+      ]
+    },
+    {
+      "text": "Bob"
+    },
+    {
+      "text_array": [
+        "Bob",
+        "Eve"
+      ]
+    },
+    {
+      "text": "Ad"
+    }
+  ],
+  "slots": {
+    "name": "trait_s1"
+  },
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (((strpos(p.trait_s1, $2::text) > 0 AND p.trait_s1 IS NOT NULL) AND (p.trait_s1 = $3::text AND p.trait_s1 IS NOT NULL) AND COALESCE(((jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false) AND (p.trait_s1 = ANY($5::text[]) AND p.trait_s1 IS NOT NULL) AND (p.trait_s1 <> $6::text AND p.trait_s1 IS NOT NULL) AND COALESCE((NOT (jsonb_typeof((p.traits -> $4::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $4::text)) <> 'null')), false) AND (p.trait_s1 <> ALL($7::text[]) AND p.trait_s1 IS NOT NULL) AND (left(p.trait_s1, char_length($8::text)) = $8::text AND p.trait_s1 IS NOT NULL)))",
+  "time_sensitive": false
+}

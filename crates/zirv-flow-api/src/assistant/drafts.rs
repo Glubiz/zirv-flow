@@ -887,9 +887,9 @@ async fn recheck_segment(
     if saved.as_ref().map(digest) != draft.base_digest {
         return Err(ApiError::ai_draft_outdated());
     }
-    let catalog = catalog_of(zirv_flow_store::segment_catalog(tx, workspace).await?);
+    let (catalog, storage) = catalog_of(zirv_flow_store::segment_catalog(tx, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *tx).await?;
-    check_definition(content, &catalog, draft.segment_id, now)
+    check_definition(content, &catalog, &storage, draft.segment_id, now)
         .map(|_| ())
         .map_err(|issues| {
             ApiError::ai_draft_invalid_issues(

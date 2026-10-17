@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
-use zirv_flow_segments::{Param, Query, TraitStorage, compile, parse_and_validate};
+use zirv_flow_segments::{Param, Query, compile, parse_and_validate};
 use zirv_flow_store::{DataAge, SqlParam, SqlQuery, StoreError};
 
 use super::{catalog_of, issues_error};
@@ -177,14 +177,13 @@ pub(crate) async fn preview(
             .await
             .map_err(read_error)?;
     let compiled_at = state.clock.now(&mut tx).await.map_err(read_error)?;
-    let catalog = catalog_of(
+    let (catalog, storage) = catalog_of(
         zirv_flow_store::segment_catalog(&mut tx, workspace.id)
             .await
             .map_err(read_error)?,
     );
     let definition = parse_and_validate(&body.definition, &catalog).map_err(issues_error)?;
-    let compiled = compile(&definition, &catalog, &TraitStorage::default(), compiled_at)
-        .map_err(issues_error)?;
+    let compiled = compile(&definition, &catalog, &storage, compiled_at).map_err(issues_error)?;
     let (count, sample) = zirv_flow_store::run_segment_preview(
         &mut tx,
         workspace.id,

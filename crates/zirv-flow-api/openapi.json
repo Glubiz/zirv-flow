@@ -13193,8 +13193,226 @@
               }
             }
           },
+          "409": {
+            "description": "`trait_indexed`: the type of a trait that holds a slot cannot change",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
             "description": "An invalid field, no field at all, or an attempt to change the type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/traits/{key}/index": {
+      "post": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Marks a trait as hot: it is copied into a typed column, and segments read the column once\nthe backfill has finished. Admins only.",
+        "operationId": "index_trait",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Trait key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trait already holds a slot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexBody"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A slot was assigned and the backfill enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or trait, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`trait_slots_full`: every slot of the type is in use; `trait_index_retiring`: the previous index is still being removed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A string_list or archived trait cannot be indexed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Takes a trait back from its slot: segments read the trait from its stored value again at\nonce, and the column is cleared and freed in the background. Admins only.",
+        "operationId": "unindex_trait",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Trait key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The slot was already retiring",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexBody"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The slot is retiring and the clear enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or trait, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`trait_not_indexed`: the trait holds no slot",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -17395,6 +17613,24 @@
           }
         }
       },
+      "IndexBody": {
+        "type": "object",
+        "description": "Where a trait's slot is in its life.",
+        "required": [
+          "key",
+          "index_state"
+        ],
+        "properties": {
+          "index_state": {
+            "type": "string",
+            "description": "`backfilling`, `ready` or `retiring`.",
+            "example": "backfilling"
+          },
+          "key": {
+            "type": "string"
+          }
+        }
+      },
       "IngestRejectBody": {
         "type": "object",
         "required": [
@@ -21530,6 +21766,13 @@
           },
           "description": {
             "type": "string"
+          },
+          "index_state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set while the trait holds a typed slot: `backfilling`, `ready` (segments read the column) or\n`retiring`. Null for a trait stored only as JSON."
           },
           "inferred": {
             "type": "boolean",

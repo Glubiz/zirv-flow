@@ -2180,6 +2180,30 @@ export interface paths {
         patch: operations["update_trait"];
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/traits/{key}/index": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Marks a trait as hot: it is copied into a typed column, and segments read the column once
+         *     the backfill has finished. Admins only.
+         */
+        post: operations["index_trait"];
+        /**
+         * Takes a trait back from its slot: segments read the trait from its stored value again at
+         *     once, and the column is cleared and freed in the background. Admins only.
+         */
+        delete: operations["unindex_trait"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/webhooks": {
         parameters: {
             query?: never;
@@ -3778,6 +3802,15 @@ export interface components {
             /** @description In row order. */
             rejects: components["schemas"]["ImportRejectBody"][];
         };
+        /** @description Where a trait's slot is in its life. */
+        IndexBody: {
+            /**
+             * @description `backfilling`, `ready` or `retiring`.
+             * @example backfilling
+             */
+            index_state: string;
+            key: string;
+        };
         IngestRejectBody: {
             /** Format: uuid */
             id: string;
@@ -5286,6 +5319,11 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             description: string;
+            /**
+             * @description Set while the trait holds a typed slot: `backfilling`, `ready` (segments read the column) or
+             *     `retiring`. Null for a trait stored only as JSON.
+             */
+            index_state?: string | null;
             /** @description Registered automatically from an incoming record rather than created by a person. */
             inferred: boolean;
             key: string;
@@ -14499,8 +14537,166 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description `trait_indexed`: the type of a trait that holds a slot cannot change */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description An invalid field, no field at all, or an attempt to change the type */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    index_trait: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Trait key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The trait already holds a slot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexBody"];
+                };
+            };
+            /** @description A slot was assigned and the backfill enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or trait, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `trait_slots_full`: every slot of the type is in use; `trait_index_retiring`: the previous index is still being removed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A string_list or archived trait cannot be indexed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    unindex_trait: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Trait key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The slot was already retiring */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexBody"];
+                };
+            };
+            /** @description The slot is retiring and the clear enqueued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or trait, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `trait_not_indexed`: the trait holds no slot */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

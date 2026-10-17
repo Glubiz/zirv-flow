@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use time::{Duration, OffsetDateTime};
 use zirv_flow_core::consent::{Channel, ConsentStatus};
 use zirv_flow_core::events::PropertyType;
-use zirv_flow_core::people::TraitType;
+use zirv_flow_core::people::{SlotColumn, SlotKind, TraitType, number_sql, time_sql};
 use zirv_flow_core::segment::{
     AggFn, ChangeClasses, ConsentCondition, EventCondition, Issue, Node, Op, TraitCondition,
     Window, code,
@@ -44,6 +44,7 @@ pub(crate) fn lower(
         deps: Deps::default(),
         time_sensitive: false,
         issues: Vec::new(),
+        explicit_ranges: false,
     };
     let predicate = lowerer.node(root);
     lowerer.need(ChangeClasses::MERGE);
@@ -90,6 +91,8 @@ struct Lowerer<'a> {
     deps: Deps,
     time_sensitive: bool,
     issues: Vec<Issue>,
+    /// Lower a time range as two comparisons, which a btree on a slot serves, rather than `<@`.
+    explicit_ranges: bool,
 }
 
 impl Lowerer<'_> {
@@ -213,11 +216,18 @@ impl Lowerer<'_> {
         let Some(kind) = self.catalog.traits.get(&condition.key).copied() else {
             return self.fail(code::UNKNOWN_TRAIT);
         };
-        match self.storage.of(&condition.key) {
-            Storage::Jsonb => {}
-        }
         self.deps.traits.insert(condition.key.clone());
         self.need(ChangeClasses::TRAITS);
+        if let Some(slot) = self.slot_of(&condition.key, kind)
+            && !matches!(condition.op, Op::Exists | Op::NotExists)
+        {
+            return self.slot_leaf(
+                slot,
+                Kind::from(kind),
+                condition.op,
+                condition.value.as_ref(),
+            );
+        }
         self.leaf(
             Table::Person,
             &condition.key,
@@ -231,6 +241,63 @@ impl Lowerer<'_> {
         let mut field = Self::unbound_field(table, key);
         field.key_sql = self.text(key);
         field
+    }
+
+    /// The slot a `ready` trait is read from. A slot of another kind than the trait is ignored
+    /// and the trait is read from `jsonb`, which cannot happen for a slot assigned by type.
+    fn slot_of(&self, key: &str, kind: TraitType) -> Option<SlotColumn> {
+        match self.storage.of(key) {
+            Storage::Slot(slot) if Some(slot.kind()) == SlotKind::of(kind) => Some(slot),
+            Storage::Slot(_) | Storage::Jsonb => None,
+        }
+    }
+
+    /// One two-valued leaf over a slot column, where NULL is a missing, wrongly typed or invalid
+    /// value. `exists` and `not_exists` are not lowered here: a slot cannot tell a missing value
+    /// from a present one of the wrong type, so they read `jsonb`.
+    fn slot_leaf(&mut self, slot: SlotColumn, kind: Kind, op: Op, value: Option<&Value>) -> String {
+        if op.is_relative() {
+            self.time_sensitive = true;
+        }
+        let column = format!("p.{}", slot.as_str());
+        let inner = match kind {
+            Kind::String => match (op, value) {
+                (Op::Eq, Some(Value::String(wanted))) => {
+                    format!("{column} = {}", self.text(wanted))
+                }
+                (Op::Eq, _) => self.fail(code::VALUE_TYPE_MISMATCH),
+                _ => self.string_comparison(&column, op, value),
+            },
+            Kind::Number | Kind::Integer => self.number(&column, op, value),
+            Kind::Boolean => match (op, value) {
+                (Op::Eq, Some(Value::Bool(true))) => format!("{column} IS TRUE"),
+                (Op::Eq, Some(Value::Bool(false))) => format!("{column} IS FALSE"),
+                _ => self.fail(code::VALUE_TYPE_MISMATCH),
+            },
+            Kind::Timestamp | Kind::Date => {
+                self.explicit_ranges = true;
+                let inner = self.time(&column, kind, op, value);
+                self.explicit_ranges = false;
+                inner
+            }
+            Kind::StringList | Kind::Object => self.fail(code::OPERATOR_NOT_ALLOWED),
+        };
+        // `AND IS NOT NULL` makes the leaf two-valued (NULL AND false is false) while the
+        // comparison stays a plain column predicate the partial index serves.
+        format!("({inner} AND {column} IS NOT NULL)")
+    }
+
+    /// A trait as `timestamptz`: its slot when `ready`, else the `jsonb` expression.
+    fn trait_time(&mut self, key: &str, kind: Kind) -> String {
+        let trait_type = match kind {
+            Kind::Date => TraitType::Date,
+            _ => TraitType::Timestamp,
+        };
+        if let Some(slot) = self.slot_of(key, trait_type) {
+            return format!("p.{}", slot.as_str());
+        }
+        let field = self.field(Table::Person, key);
+        time_expr(&field, kind)
     }
 
     /// A field whose key is not bound, for a containment that carries the key in its own value.
@@ -310,8 +377,13 @@ impl Lowerer<'_> {
             };
         }
         let guard = format!("jsonb_typeof({}) = 'string'", field.json());
-        let text = field.text();
-        let comparison = match op {
+        let comparison = self.string_comparison(&field.text(), op, value);
+        format!("CASE WHEN {guard} THEN {comparison} END")
+    }
+
+    /// A string comparison other than equality over a text expression.
+    fn string_comparison(&mut self, text: &str, op: Op, value: Option<&Value>) -> String {
+        match op {
             Op::Neq | Op::Contains | Op::StartsWith => {
                 let Some(Value::String(wanted)) = value else {
                     return self.fail(code::VALUE_TYPE_MISMATCH);
@@ -334,9 +406,8 @@ impl Lowerer<'_> {
                     format!("{text} <> ALL({items})")
                 }
             }
-            _ => return self.fail(code::OPERATOR_NOT_ALLOWED),
-        };
-        format!("CASE WHEN {guard} THEN {comparison} END")
+            _ => self.fail(code::OPERATOR_NOT_ALLOWED),
+        }
     }
 
     /// Compares a `float8` expression (a trait, a property or an aggregate).
@@ -376,6 +447,19 @@ impl Lowerer<'_> {
         format!("{expr} {symbol} {wanted}")
     }
 
+    /// `expr` inside the range from `low` to `high`. Over a slot it is two comparisons, which a
+    /// btree serves; over `jsonb` it is the range containment the golden corpus pins.
+    fn within(&self, expr: &str, low: &str, high: &str, bounds: &str) -> String {
+        if !self.explicit_ranges {
+            return format!("{expr} <@ tstzrange({low}, {high}, '{bounds}')");
+        }
+        let (open, close) = match bounds {
+            "(]" => (">", "<="),
+            _ => (">=", "<"),
+        };
+        format!("({expr} {open} {low} AND {expr} {close} {high})")
+    }
+
     /// Compares a `timestamptz` expression. A date is already at UTC midnight.
     fn time(&mut self, expr: &str, kind: Kind, op: Op, value: Option<&Value>) -> String {
         match op {
@@ -393,7 +477,7 @@ impl Lowerer<'_> {
                 };
                 let start = self.instant(start);
                 let end = self.instant(end);
-                format!("{expr} <@ tstzrange({start}, {end}, '[)')")
+                self.within(expr, &start, &end, "[)")
             }
             Op::WithinLast | Op::MoreThanAgo | Op::WithinNext => {
                 let Some(span) = value.and_then(span_of) else {
@@ -408,13 +492,13 @@ impl Lowerer<'_> {
                     Op::WithinLast => {
                         let from = self.instant(earlier);
                         let now = self.instant(self.now);
-                        format!("{expr} <@ tstzrange({from}, {now}, '(]')")
+                        self.within(expr, &from, &now, "(]")
                     }
                     Op::MoreThanAgo => format!("{expr} <= {}", self.instant(earlier)),
                     _ => {
                         let now = self.instant(self.now);
                         let to = self.instant(later);
-                        format!("{expr} <@ tstzrange({now}, {to}, '[)')")
+                        self.within(expr, &now, &to, "[)")
                     }
                 }
             }
@@ -450,8 +534,8 @@ impl Lowerer<'_> {
             Some(TraitType::Date) => Kind::Date,
             _ => Kind::Timestamp,
         };
-        let field = self.field(Table::Person, key);
-        format!("({} IS NOT NULL AND {body})", time_expr(&field, kind))
+        let since = self.trait_time(key, kind);
+        format!("({since} IS NOT NULL AND {body})")
     }
 
     fn event_rows(&mut self, condition: &EventCondition) -> String {
@@ -555,8 +639,8 @@ impl Lowerer<'_> {
                 };
                 self.deps.traits.insert(key.clone());
                 self.need(ChangeClasses::TRAITS);
-                let field = self.field(Table::Person, key);
-                format!("e.occurred_at >= {}", time_expr(&field, kind))
+                let since = self.trait_time(key, kind);
+                format!("e.occurred_at >= {since}")
             }
         }
     }
@@ -568,48 +652,14 @@ fn presence(field: &Field) -> String {
     format!("(jsonb_typeof({json}) IS NOT NULL AND jsonb_typeof({json}) <> 'null')")
 }
 
-/// The value as `float8`, or NULL when it is not a number, its magnitude is past `1e300`, or
-/// `integral` is set and it has a fractional part. The nesting keeps the cast from running on a
-/// wrong type.
+/// The value as `float8`, shared with the write path (see [`number_sql`]).
 fn number_expr(json: &str, integral: bool) -> String {
-    let whole = if integral {
-        format!(" AND ({json})::numeric = trunc(({json})::numeric)")
-    } else {
-        String::new()
-    };
-    format!(
-        "CASE WHEN jsonb_typeof({json}) = 'number' THEN \
-         CASE WHEN abs(({json})::numeric) <= 1e300{whole} THEN ({json})::float8 END END"
-    )
+    number_sql(json, integral)
 }
 
-/// The RFC 3339 shape the write path accepts. PostgreSQL alone also takes `infinity`, `now` and
-/// other spellings the write path refuses.
-const TIMESTAMP_SHAPE: &str = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$";
-const DATE_SHAPE: &str = "^[0-9]{4}-[0-9]{2}-[0-9]{2}$";
-
-/// The value as `timestamptz`, or NULL when it is not a string in the write path's shape that
-/// PostgreSQL also accepts. A date is taken at UTC midnight.
+/// The value as `timestamptz`, shared with the write path (see [`time_sql`]).
 fn time_expr(field: &Field, kind: Kind) -> String {
-    let text = field.text();
-    let (cast, sql_type, shape) = if kind == Kind::Date {
-        (
-            format!("(({text})::date::timestamp AT TIME ZONE 'UTC')"),
-            "date",
-            DATE_SHAPE,
-        )
-    } else {
-        (
-            format!("({text})::timestamptz"),
-            "timestamptz",
-            TIMESTAMP_SHAPE,
-        )
-    };
-    format!(
-        "CASE WHEN jsonb_typeof({}) = 'string' THEN \
-         CASE WHEN {text} ~ '{shape}' AND pg_input_is_valid({text}, '{sql_type}') THEN {cast} END END",
-        field.json()
-    )
+    time_sql(&field.json(), &field.text(), kind == Kind::Date)
 }
 
 fn pair<T>(value: Option<&Value>, read: impl Fn(&Value) -> Option<T>) -> Option<[T; 2]> {
@@ -644,6 +694,7 @@ mod tests {
             deps: Deps::default(),
             time_sensitive: false,
             issues: Vec::new(),
+            explicit_ranges: false,
         };
         assert_eq!(lowerer.text("a"), "$2::text");
         assert_eq!(lowerer.text("b"), "$3::text");

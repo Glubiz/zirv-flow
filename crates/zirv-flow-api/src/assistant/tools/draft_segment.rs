@@ -75,11 +75,22 @@ pub(crate) fn check_draft(
     own: Option<Uuid>,
     now: OffsetDateTime,
 ) -> Result<Value, Vec<String>> {
+    check_draft_with(arguments, catalog, &TraitStorage::default(), own, now)
+}
+
+/// [`check_draft`] with the workspace's trait storage, as a save compiles with it.
+pub(crate) fn check_draft_with(
+    arguments: &Value,
+    catalog: &Catalog,
+    storage: &TraitStorage,
+    own: Option<Uuid>,
+    now: OffsetDateTime,
+) -> Result<Value, Vec<String>> {
     let schema = DraftSegment::parameters().map_err(|_| arguments_invalid_lines())?;
     schema.validate_value(arguments)?;
     let args: DraftSegmentArgs =
         serde_json::from_value(arguments.clone()).map_err(|_| arguments_invalid_lines())?;
-    check_definition(&args.definition, catalog, own, now)
+    check_definition(&args.definition, catalog, storage, own, now)
         .map(|parsed| parsed.to_value())
         .map_err(|issues| lines_of(&issues))
 }
@@ -90,6 +101,7 @@ pub(crate) fn check_draft(
 pub(crate) fn check_definition(
     draft: &Value,
     catalog: &Catalog,
+    storage: &TraitStorage,
     own: Option<Uuid>,
     now: OffsetDateTime,
 ) -> Result<Definition, Vec<Issue>> {
@@ -103,7 +115,7 @@ pub(crate) fn check_definition(
                 .collect());
         }
     }
-    compile(&parsed, catalog, &TraitStorage::default(), now)?;
+    compile(&parsed, catalog, storage, now)?;
     Ok(parsed)
 }
 
@@ -152,8 +164,8 @@ impl AiTool<ToolContext> for DraftSegment {
                 zirv_flow_store::read_segment_catalog(&context.state.pool, context.workspace)
                     .await
                     .map_err(failed)?;
-            let catalog = catalog_of(snapshot);
-            check_draft(arguments, &catalog, *segment_id, now)
+            let (catalog, storage) = catalog_of(snapshot);
+            check_draft_with(arguments, &catalog, &storage, *segment_id, now)
                 .map(ToolOutput::Draft)
                 .map_err(ToolError::Invalid)
         })

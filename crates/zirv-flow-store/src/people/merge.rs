@@ -9,6 +9,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{recompute, record_decision};
+use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
 use crate::changes::mark_people;
 use crate::consent;
 use crate::lists::{lock_lists_for_merge, move_on_merge};
@@ -60,6 +61,8 @@ pub(super) async fn merge_people(
     losers: &[Uuid],
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
+    // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
+    let slots = lock_and_read_writer_slots(connection, workspace).await?;
     lock_lists_for_merge(connection, workspace, losers).await?;
     // Both sides are marked before anything touches the segments. The next pass then sees the
     // loser as merged, so a row that a concurrent full refresh opens for it after this merge
@@ -105,17 +108,19 @@ pub(super) async fn merge_people(
         move_on_merge(connection, workspace, loser, survivor, trace).await?;
         crate::segments::close_on_merge(connection, workspace, loser, trace).await?;
         // The loser keeps no traits: reads follow merged_into to the survivor's.
-        sqlx::query(
-            "UPDATE people SET merged_into = $3, traits = '{}'::jsonb, \
-                trait_sources = '{}'::jsonb, updated_at = now() \
+        let reset = format!(
+            "UPDATE people SET merged_into = $3, traits = '{{}}'::jsonb, \
+                trait_sources = '{{}}'::jsonb, updated_at = now(){} \
              WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(loser)
-        .bind(survivor)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+            slot_nulls_sql(&slots)
+        );
+        sqlx::query(sqlx::AssertSqlSafe(reset))
+            .bind(workspace.as_uuid())
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
         sqlx::query(
             "UPDATE people SET merged_into = $3 WHERE workspace_id = $1 AND merged_into = $2",
         )

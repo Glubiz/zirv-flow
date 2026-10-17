@@ -1,0 +1,128 @@
+{
+  "definition": {
+    "all": [
+      {
+        "op": "eq",
+        "trait": "age",
+        "value": 30
+      },
+      {
+        "op": "neq",
+        "trait": "age",
+        "value": 31
+      },
+      {
+        "op": "gt",
+        "trait": "age",
+        "value": 18
+      },
+      {
+        "op": "gte",
+        "trait": "age",
+        "value": 19
+      },
+      {
+        "op": "lt",
+        "trait": "age",
+        "value": 65
+      },
+      {
+        "op": "lte",
+        "trait": "age",
+        "value": 64.5
+      },
+      {
+        "op": "between",
+        "trait": "age",
+        "value": [
+          20,
+          40
+        ]
+      },
+      {
+        "op": "in",
+        "trait": "age",
+        "value": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "op": "not_in",
+        "trait": "age",
+        "value": [
+          4,
+          5
+        ]
+      },
+      {
+        "op": "exists",
+        "trait": "age"
+      },
+      {
+        "op": "not_exists",
+        "trait": "age"
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 33,
+    "consent": [],
+    "events": [],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "age"
+    ]
+  },
+  "params": [
+    {
+      "float": 20.0
+    },
+    {
+      "float": 40.0
+    },
+    {
+      "float": 30.0
+    },
+    {
+      "text": "age"
+    },
+    {
+      "float": 18.0
+    },
+    {
+      "float": 19.0
+    },
+    {
+      "float_array": [
+        1.0,
+        2.0,
+        3.0
+      ]
+    },
+    {
+      "float": 65.0
+    },
+    {
+      "float": 64.5
+    },
+    {
+      "float": 31.0
+    },
+    {
+      "float_array": [
+        4.0,
+        5.0
+      ]
+    }
+  ],
+  "slots": {
+    "age": "trait_n1"
+  },
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (((p.trait_n1 BETWEEN $2::float8 AND $3::float8 AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 = $4::float8 AND p.trait_n1 IS NOT NULL) AND COALESCE(((jsonb_typeof((p.traits -> $5::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $5::text)) <> 'null')), false) AND (p.trait_n1 > $6::float8 AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 >= $7::float8 AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 = ANY($8::float8[]) AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 < $9::float8 AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 <= $10::float8 AND p.trait_n1 IS NOT NULL) AND (p.trait_n1 <> $11::float8 AND p.trait_n1 IS NOT NULL) AND COALESCE((NOT (jsonb_typeof((p.traits -> $5::text)) IS NOT NULL AND jsonb_typeof((p.traits -> $5::text)) <> 'null')), false) AND (p.trait_n1 <> ALL($12::float8[]) AND p.trait_n1 IS NOT NULL)))",
+  "time_sensitive": false
+}

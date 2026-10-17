@@ -588,6 +588,7 @@ impl From<crate::admin::AdminError> for ApiError {
             AdminError::Conflict(detail) => Self::new(StatusCode::CONFLICT, detail),
             AdminError::NotFound(_) => Self::not_found(),
             AdminError::Store(error) => error.into(),
+            AdminError::Slot(error) => crate::people::slots::slot_problem(&error),
             AdminError::Secret(_) => Self::internal(),
         }
     }

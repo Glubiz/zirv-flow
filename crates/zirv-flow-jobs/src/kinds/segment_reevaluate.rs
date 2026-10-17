@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
-use zirv_flow_segments::{TraitStorage, compile, parse_and_validate};
+use zirv_flow_segments::{compile, parse_and_validate};
 use zirv_flow_store::{
     Clock, DirtyBatch, NewDecision, PgPool, REEVALUATE_JOB_KIND, ReevaluateApply, append_decision,
     apply_reevaluation, begin, claim_dirty, commit, find_segment, find_segment_version,
@@ -90,6 +90,8 @@ impl Run {
     /// One pass; returns how many people it claimed.
     async fn pass(&self, pool: &PgPool) -> Result<usize, JobError> {
         let mut tx = begin(pool).await?;
+        // The slot lock comes before every other lock of the pass: see the store's `slots`.
+        zirv_flow_store::hold_trait_slots(&mut tx, self.workspace).await?;
         let claimed = claim_dirty(&mut tx, self.workspace, BATCH).await?;
         if claimed.is_empty() {
             return Ok(0);
@@ -103,7 +105,7 @@ impl Run {
             // Read once the locks are held, so the time is no earlier than the refresh that
             // held them committed.
             let now = self.clock.now(&mut tx).await?;
-            let catalog = catalog_of(segment_catalog(&mut tx, self.workspace).await?);
+            let (catalog, storage) = catalog_of(segment_catalog(&mut tx, self.workspace).await?);
             for segment_id in order {
                 // A segment is judged by what it is now that its lock is held.
                 let Some(segment) = find_segment(&mut *tx, self.workspace, segment_id)
@@ -128,7 +130,7 @@ impl Run {
                     "the current version of the segment is missing",
                 ))?;
                 let compiled = parse_and_validate(&version.definition, &catalog)
-                    .and_then(|parsed| compile(&parsed, &catalog, &TraitStorage::default(), now));
+                    .and_then(|parsed| compile(&parsed, &catalog, &storage, now));
                 let Ok(compiled) = compiled else {
                     // Something the definition reads was archived since the save: the members
                     // stay as they were, and the other segments still get their pass.
@@ -257,15 +259,9 @@ mod tests {
 
     async fn content(pool: &PgPool, ws: WorkspaceId, definition: Value) -> NewSegmentVersion {
         let mut connection = pool.acquire().await.unwrap();
-        let catalog = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
+        let (catalog, storage) = catalog_of(segment_catalog(&mut connection, ws).await.unwrap());
         let parsed = parse_and_validate(&definition, &catalog).unwrap();
-        let compiled = compile(
-            &parsed,
-            &catalog,
-            &TraitStorage::default(),
-            OffsetDateTime::now_utc(),
-        )
-        .unwrap();
+        let compiled = compile(&parsed, &catalog, &storage, OffsetDateTime::now_utc()).unwrap();
         NewSegmentVersion {
             definition,
             normalized: normalize(parsed).to_value(),
@@ -1254,5 +1250,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events, 0);
+    }
+
+    /// The slot lock comes before the segment locks of a pass: while a retire holds the slot lock,
+    /// a pass that has people to evaluate waits for it holding no segment lock.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_waiting_for_the_slot_lock_holds_no_segment_lock(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let clock = clock();
+        let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+        full_refresh(&pool, ws, seg.id, &clock).await;
+        reevaluate(&pool, ws, &clock).await;
+        // A change marks a person, so the next pass has a segment to lock.
+        identify(
+            &pool,
+            ws,
+            "ada@example.com",
+            "pro",
+            &TraceContext::root(Cause::api("enter")),
+        )
+        .await;
+        assert_eq!(dirty(&pool).await, 1);
+
+        let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
+        let job = {
+            let pool = pool.clone();
+            tokio::spawn(async move { reevaluate(&pool, ws, &clock).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        assert!(
+            crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
+            "the pass took a segment lock before the slot lock"
+        );
+        zirv_flow_store::commit(retire).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), job)
+            .await
+            .expect("the pass finishes once the slot lock is free")
+            .unwrap();
+        assert_eq!(dirty(&pool).await, 0);
     }
 }

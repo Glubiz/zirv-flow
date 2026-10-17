@@ -164,6 +164,10 @@ fn routes() -> Router<AppState> {
             patch(people::update),
         )
         .route(
+            "/api/v1/workspaces/{ws}/traits/{key}/index",
+            post(people::slots::index).delete(people::slots::unindex),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/identity-conflicts",
             get(people::conflicts::list),
         )
