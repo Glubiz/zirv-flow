@@ -76,10 +76,6 @@ pub enum Assigned {
     Existing(SlotAssignment),
 }
 
-fn lock_error(error: sqlx::Error) -> StoreError {
-    StoreError::query(error)
-}
-
 /// Takes the writer lock of the workspace until the transaction ends.
 pub(crate) async fn lock_slots_shared(
     connection: &mut PgConnection,
@@ -90,7 +86,7 @@ pub(crate) async fn lock_slots_shared(
         .bind(workspace.as_uuid().to_string())
         .execute(connection)
         .await
-        .map_err(lock_error)?;
+        .map_err(StoreError::query)?;
     Ok(())
 }
 
@@ -115,12 +111,15 @@ pub(crate) async fn lock_slots_exclusive(
         .bind(workspace.as_uuid().to_string())
         .execute(connection)
         .await
-        .map_err(lock_error)?;
+        .map_err(StoreError::query)?;
     Ok(())
 }
 
+fn corrupt() -> StoreError {
+    StoreError::query(sqlx::Error::Decode("unknown trait slot".into()))
+}
+
 fn decode(slot: &str, state: &str) -> Result<SlotAssignment, StoreError> {
-    let corrupt = || StoreError::query(sqlx::Error::Decode("unknown trait slot".into()));
     Ok(SlotAssignment {
         slot: slot.parse().map_err(|_| corrupt())?,
         state: state.parse().map_err(|_| corrupt())?,
@@ -177,12 +176,7 @@ pub(crate) async fn lock_and_read_writer_slots(
     .await
     .map_err(StoreError::query)?;
     rows.into_iter()
-        .map(|(key, slot)| {
-            let slot = slot
-                .parse()
-                .map_err(|_| StoreError::query(sqlx::Error::Decode("unknown trait slot".into())))?;
-            Ok((key, slot))
-        })
+        .map(|(key, slot)| Ok((key, slot.parse().map_err(|_| corrupt())?)))
         .collect()
 }
 
@@ -225,7 +219,7 @@ pub async fn assign_trait_slot(
     let definition = find_trait_definition_for_update(&mut *connection, workspace, key)
         .await?
         .ok_or(SlotError::NoSuchTrait)?;
-    if let Some(assignment) = assignment_of(connection, workspace, key).await? {
+    if let Some(assignment) = trait_slot_of(connection, workspace, key).await? {
         return match assignment.state {
             SlotState::Retiring => Err(SlotError::Retiring),
             _ => Ok(Assigned::Existing(assignment)),
@@ -268,14 +262,6 @@ pub async fn trait_slot_of(
     workspace: WorkspaceId,
     key: &str,
 ) -> Result<Option<SlotAssignment>, StoreError> {
-    assignment_of(connection, workspace, key).await
-}
-
-async fn assignment_of(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    key: &str,
-) -> Result<Option<SlotAssignment>, StoreError> {
     let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT slot, slot_state FROM trait_definitions WHERE workspace_id = $1 AND key = $2",
     )
@@ -310,7 +296,7 @@ pub async fn retire_trait_slot(
     find_trait_definition_for_update(&mut *connection, workspace, key)
         .await?
         .ok_or(SlotError::NoSuchTrait)?;
-    let assignment = assignment_of(connection, workspace, key)
+    let assignment = trait_slot_of(connection, workspace, key)
         .await?
         .ok_or(SlotError::NotIndexed)?;
     if assignment.state == SlotState::Retiring {
@@ -337,6 +323,15 @@ pub enum SlotStep {
     Finish,
     /// The assignment is no longer in the state this job works on; nothing to do.
     Stale,
+}
+
+/// A full batch means more people may remain; a short one is the last.
+fn batch_step(done: usize, cursor: Option<Uuid>) -> SlotStep {
+    if i64::try_from(done).is_ok_and(|n| n == SLOT_BATCH) {
+        SlotStep::More(cursor)
+    } else {
+        SlotStep::Finish
+    }
 }
 
 /// Backfills up to [`SLOT_BATCH`] people after `after`, in id order, with `conv(traits -> key)`.
@@ -373,12 +368,7 @@ pub async fn backfill_slot_batch(
         .fetch_all(connection)
         .await
         .map_err(StoreError::query)?;
-    let full = i64::try_from(ids.len()).is_ok_and(|n| n == SLOT_BATCH);
-    Ok(if full {
-        SlotStep::More(ids.into_iter().max())
-    } else {
-        SlotStep::Finish
-    })
+    Ok(batch_step(ids.len(), ids.into_iter().max()))
 }
 
 /// Sets the slot `ready` under the exclusive lock, after the last batch. Writers already write
@@ -429,12 +419,7 @@ pub async fn clear_slot_batch(
         .fetch_all(connection)
         .await
         .map_err(StoreError::query)?;
-    let full = i64::try_from(ids.len()).is_ok_and(|n| n == SLOT_BATCH);
-    Ok(if full {
-        SlotStep::More(None)
-    } else {
-        SlotStep::Finish
-    })
+    Ok(batch_step(ids.len(), None))
 }
 
 /// Frees a cleared slot under the exclusive lock, so another trait of the type can take it.
