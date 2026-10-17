@@ -815,6 +815,7 @@ pub fn person() -> impl Strategy<Value = PersonSnapshot> {
                 traits,
                 events,
                 capped_events: Default::default(),
+                events_complete_after: None,
                 lists,
                 consent,
                 identifier_kinds,

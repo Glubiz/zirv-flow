@@ -7760,6 +7760,137 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/people/{id}/explain": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "Why one person is in or out of a segment. The reference evaluator runs the segment's current\nversion (or `version`) over the person's traits, the events the definition reads, lists,\nconsent, identifier kinds and open memberships, and returns the tree of conditions with what\neach saw. `member` and `entered_at` are the stored membership, which can differ from the fresh\n`outcome` while a refresh is pending. A person with more events of a name than one explain\nloads makes the conditions on that name `unknown` with the reason `capped`. A person that was\nmerged into another is explained as the survivor, with `merged_from` set. PII trait values and\nPII event-property values and aggregates are masked unless the caller is the owner, a\nworkspace admin or an `admin` key; identifier values are never shown. A saved version that\nno longer validates against the workspace is 422 `segment_invalid`. A read that runs past its\ntime limit is 503 with the code `explain_timeout`.",
+        "operationId": "explain_person_segment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "segment",
+            "in": "query",
+            "description": "The segment to explain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "The segment version; default the current one",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The evaluation tree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "segment is missing or malformed, or version is not a positive whole number",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, person, segment or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The saved version no longer validates (`code` is `segment_invalid`, with `issues`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `explain_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/people/{id}/lists": {
       "get": {
         "tags": [
@@ -16084,6 +16215,112 @@
           }
         }
       },
+      "ExplainBody": {
+        "type": "object",
+        "required": [
+          "segment_id",
+          "version",
+          "person_id",
+          "evaluated_at",
+          "outcome",
+          "member",
+          "tree"
+        ],
+        "properties": {
+          "entered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the open membership started; null when `member` is false."
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The time the evaluation ran at, which fixes every relative window."
+          },
+          "member": {
+            "type": "boolean",
+            "description": "Whether the person is an open member now, as stored. It can differ from `outcome` while a\nrefresh is pending; the two are not reconciled."
+          },
+          "merged_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id that was asked for, when it was merged into `person_id`; null otherwise."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/OutcomeBody",
+            "description": "The fresh evaluation."
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The person evaluated: the survivor when the id asked for was merged into another."
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tree": {
+            "$ref": "#/components/schemas/ExplainNodeBody"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version evaluated: the current one unless `version` was asked for."
+          }
+        }
+      },
+      "ExplainNodeBody": {
+        "type": "object",
+        "required": [
+          "pointer",
+          "kind",
+          "outcome",
+          "children"
+        ],
+        "properties": {
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainNodeBody"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "description": "The node kind: `all`, `any`, `not`, `trait`, `event`, `list`, `segment`, `consent` or\n`identifier`."
+          },
+          "observed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ObservedBody",
+                "description": "What the condition saw; absent for `all`, `any` and `not`, and for an unknown node."
+              }
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/OutcomeBody"
+          },
+          "pointer": {
+            "type": "string",
+            "description": "The JSON pointer of the node in the segment version's definition; empty for the root."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`capped` on an unknown node: the UI shows \"unable to explain\"."
+          }
+        }
+      },
       "ExploreBreakdownBody": {
         "type": "object",
         "required": [
@@ -17641,6 +17878,60 @@
             "description": "The source's manifest uses the authorization-code grant, so an admin must connect an\naccount before it can sync."
           }
         }
+      },
+      "ObservedBody": {
+        "type": "object",
+        "description": "What a condition saw. Which fields are present depends on the node kind: a trait has `value`,\n`masked` or `missing`; an event condition has `count` and, with an aggregate, `value` or\n`masked`; a list, a segment, an identifier or consent has `present`, and consent also\n`status`.",
+        "properties": {
+          "count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many events matched the condition's window and filters.",
+            "minimum": 0
+          },
+          "masked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True when the value is personal data and the caller may not see values."
+          },
+          "missing": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True when the trait is not stored, or the key is not a property of the event."
+          },
+          "present": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the person holds the list, segment, identifier kind or consent state."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The recorded consent status for the condition's channel and topic; `unknown` when there\nis no row."
+          },
+          "value": {
+            "description": "The stored trait value, or the aggregate over the matching events."
+          }
+        }
+      },
+      "OutcomeBody": {
+        "type": "string",
+        "description": "How a node came out.",
+        "enum": [
+          "pass",
+          "fail",
+          "unknown"
+        ]
       },
       "PartitionLagBody": {
         "type": "object",

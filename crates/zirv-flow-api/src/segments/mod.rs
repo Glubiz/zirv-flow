@@ -2,6 +2,7 @@
 //! under the cycle check, and preview with data age.
 
 pub(crate) mod crud;
+pub(crate) mod explain;
 pub(crate) mod members;
 pub(crate) mod preview;
 mod schema;

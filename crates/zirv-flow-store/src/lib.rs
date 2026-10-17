@@ -138,16 +138,17 @@ pub use privacy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
 pub use segments::{
-    CADENCE_MINUTES, CatalogSnapshot, DEFAULT_CADENCE_MINUTES, DataAge, FeedingSource,
-    HistoryCursor, HistoryRow, MemberRow, MembershipCause, NewSegment, NewSegmentVersion,
-    REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome, RefreshRequest,
-    RefreshTrigger, SampleRow, Segment, SegmentError, SegmentPatch, SegmentRef, SegmentVersion,
-    SqlParam, SqlQuery, apply_refresh, archive_segment, begin_segment_snapshot, create_segment,
-    decision_cause_kind, enqueue_refresh, find_segment, find_segment_version,
-    list_segment_versions, list_segments, lock_segment_refresh, lock_segments, membership_cause,
-    membership_trace, reconcile_segment_schedules, run_segment_preview, segment_catalog,
-    segment_cron, segment_data_age, segment_history_page, segment_members_page, snapshot_now,
-    update_segment,
+    CADENCE_MINUTES, CatalogSnapshot, ClearFields, DEFAULT_CADENCE_MINUTES, DataAge,
+    EXPLAIN_EVENT_CAP, ExplainConsent, ExplainEvent, ExplainEventScope, ExplainPerson,
+    FeedingSource, HistoryCursor, HistoryRow, MemberRow, MembershipCause, NewSegment,
+    NewSegmentVersion, REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome,
+    RefreshRequest, RefreshTrigger, SampleRow, Segment, SegmentError, SegmentPatch, SegmentRef,
+    SegmentVersion, SqlParam, SqlQuery, apply_refresh, archive_segment, begin_segment_snapshot,
+    create_segment, decision_cause_kind, enqueue_refresh, explain_clear_fields, find_segment,
+    find_segment_version, list_segment_versions, list_segments, load_explain_person,
+    lock_segment_refresh, lock_segments, membership_cause, membership_trace,
+    reconcile_segment_schedules, run_segment_preview, segment_catalog, segment_cron,
+    segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
 };
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
@@ -290,7 +291,7 @@ impl StoreError {
     /// Reclassifies a query cancelled at its statement timeout (SQLSTATE 57014) as a timeout.
     /// For the errors of a bounded read that goes through helpers which report plain query
     /// failures; any other error is returned as it was.
-    pub(crate) fn into_bounded(self) -> Self {
+    pub fn into_bounded(self) -> Self {
         let cancelled = matches!(self.kind, StoreErrorKind::Query)
             && self
                 .source

@@ -11546,4 +11546,591 @@ email,b@example.com,
         );
         assert_eq!(reply.body["code"], "segment_preview_timeout");
     }
+
+    // ---- Per-person explain (#123) ----
+
+    fn explain_uri(ws: &str, person: &str, segment: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/people/{person}/explain?segment={segment}")
+    }
+
+    async fn define_trait(pool: &PgPool, ws: &str, key: &str, pii: bool) {
+        zirv_flow_store::create_trait_definition(
+            pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewTraitDefinition {
+                key: key.into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An event schema with the given properties, published.
+    async fn define_event(pool: &PgPool, ws: &str, name: &str, properties: Value) {
+        let ws: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        zirv_flow_store::create_event_schema(
+            pool,
+            ws,
+            &zirv_flow_store::NewEventSchema {
+                name: name.into(),
+                mode: zirv_flow_core::events::EventMode::Warn,
+                description: String::new(),
+                properties: serde_json::from_value(properties).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::publish_schema_draft(&mut connection, ws, name, None)
+            .await
+            .unwrap();
+    }
+
+    /// An `order` event schema whose `total` is personal data and whose `sku` is not.
+    async fn define_order(pool: &PgPool, ws: &str) {
+        define_event(
+            pool,
+            ws,
+            "order",
+            json!([
+                {"name": "total", "type": "number", "pii": true},
+                {"name": "sku", "type": "string"}
+            ]),
+        )
+        .await;
+    }
+
+    /// A person with an email and the given traits; returns the person id as text.
+    async fn explain_person(pool: &PgPool, ws: &str, email: &str, traits: Value) -> String {
+        let mut record = profile(email, &[("email", email)]);
+        record.traits = traits.as_object().cloned().unwrap();
+        zirv_flow_store::apply_profile_batch(pool, ws.parse().unwrap(), &[record])
+            .await
+            .unwrap();
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT person_id FROM identities WHERE value = $1 AND workspace_id = $2",
+        )
+        .bind(email)
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .to_string()
+    }
+
+    /// `count` events of `name`, one second apart from a day ago, each with `total`.
+    async fn seed_events(
+        pool: &PgPool,
+        ws: &str,
+        person: &str,
+        name: &str,
+        count: i32,
+        total: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                source, trace_id, validation_state, properties) \
+             SELECT gen_random_uuid(), $1, $2, $3, \
+                now() - interval '1 day' - n * interval '1 second', now(), 'test', \
+                gen_random_uuid(), 'valid', jsonb_build_object('total', $5::float8, 'sku', 'a') \
+             FROM generate_series(1, $4) n",
+        )
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .bind(person.parse::<uuid::Uuid>().unwrap())
+        .bind(name)
+        .bind(count)
+        .bind(total)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Computes the members of `definition` with the real compiler and applies them as a full
+    /// refresh of version 1.
+    async fn refresh_compiled(pool: &PgPool, ws: &str, segment: &str, definition: &Value) {
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let catalog = crate::segments::catalog_of(
+            zirv_flow_store::segment_catalog(&mut connection, workspace)
+                .await
+                .unwrap(),
+        );
+        drop(connection);
+        let parsed = zirv_flow_segments::parse_and_validate(definition, &catalog).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        let compiled = zirv_flow_segments::compile(
+            &parsed,
+            &catalog,
+            &zirv_flow_segments::TraitStorage::default(),
+            now,
+        )
+        .unwrap();
+        let members = crate::segments::preview::sql_query(compiled.members_sql());
+        let job_trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::schedule(
+            uuid::Uuid::new_v4(),
+        ));
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        zirv_flow_store::apply_refresh(
+            &mut tx,
+            &zirv_flow_store::RefreshApply {
+                workspace,
+                segment: segment.parse().unwrap(),
+                version: 1,
+                members: &members,
+                now,
+                cause: zirv_flow_store::MembershipCause::Initial,
+                trace: &job_trace,
+                job: (uuid::Uuid::new_v4(), 1),
+                job_trace: &job_trace,
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+    }
+
+    async fn segment_id(
+        router: &Router,
+        owner: &Login,
+        ws: &str,
+        name: &str,
+        def: Value,
+    ) -> String {
+        make_segment(router, Auth::Session(owner), ws, name, def)
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn explain_as(router: &Router, who: Auth<'_>, uri: &str) -> Reply {
+        call(router, "GET", uri, None, who).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_agrees_with_the_refreshed_membership_and_shows_what_each_condition_saw(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        define_order(&pool, &ws).await;
+        let definition = json!({"v": 1, "all": [
+            {"trait": "plan", "op": "eq", "value": "pro"},
+            {"event": "order", "window": {"last": "P30D"},
+             "agg": {"fn": "count", "op": "gte", "value": 2}},
+        ]});
+        let id = segment_id(&router, &owner, &ws, "Buyers", definition.clone()).await;
+        let two_orders = explain_person(&pool, &ws, "a@example.com", json!({"plan": "pro"})).await;
+        let one_order = explain_person(&pool, &ws, "b@example.com", json!({"plan": "pro"})).await;
+        let free = explain_person(&pool, &ws, "c@example.com", json!({"plan": "free"})).await;
+        let none = explain_person(&pool, &ws, "d@example.com", json!({"plan": "pro"})).await;
+        seed_events(&pool, &ws, &two_orders, "order", 2, 10.0).await;
+        seed_events(&pool, &ws, &one_order, "order", 1, 10.0).await;
+        seed_events(&pool, &ws, &free, "order", 3, 10.0).await;
+        refresh_compiled(&pool, &ws, &id, &definition).await;
+
+        let mut replies = Vec::new();
+        for person in [&two_orders, &one_order, &free, &none] {
+            let uri = explain_uri(&ws, person, &id);
+            replies.push(explain_as(&router, Auth::Session(&owner), &uri).await);
+        }
+
+        for reply in &replies {
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            let member = reply.body["member"].as_bool().unwrap();
+            assert_eq!(
+                reply.body["outcome"],
+                if member { "pass" } else { "fail" },
+                "{:?}",
+                reply.body
+            );
+            assert_eq!(reply.body["entered_at"].is_string(), member);
+            assert_eq!(reply.body["segment_id"], id.as_str());
+            assert_eq!(reply.body["version"], 1);
+            assert!(reply.body["evaluated_at"].is_string());
+        }
+        let members: Vec<bool> = replies
+            .iter()
+            .map(|reply| reply.body["member"].as_bool().unwrap())
+            .collect();
+        assert_eq!(members, [true, false, false, false]);
+        // "2 orders in the window, needs 2 or more".
+        let tree = &replies[0].body["tree"];
+        assert_eq!(tree["kind"], "all");
+        assert_eq!(tree["pointer"], "");
+        assert_eq!(tree["children"][0]["kind"], "trait");
+        assert_eq!(tree["children"][0]["pointer"], "/all/0");
+        assert_eq!(tree["children"][0]["observed"], json!({"value": "pro"}));
+        assert_eq!(tree["children"][1]["kind"], "event");
+        assert_eq!(tree["children"][1]["pointer"], "/all/1");
+        assert_eq!(tree["children"][1]["outcome"], "pass");
+        assert_eq!(
+            tree["children"][1]["observed"],
+            json!({"count": 2, "value": 2})
+        );
+        let short = &replies[1].body["tree"]["children"][1];
+        assert_eq!(short["outcome"], "fail");
+        assert_eq!(short["observed"], json!({"count": 1, "value": 1}));
+        let wrong_plan = &replies[2].body["tree"]["children"];
+        assert_eq!(wrong_plan[0]["outcome"], "fail");
+        assert_eq!(wrong_plan[1]["observed"]["count"], 3);
+        assert_eq!(
+            replies[3].body["tree"]["children"][1]["observed"]["count"],
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_masks_pii_values_for_a_member_and_shows_them_to_an_admin(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_trait(&pool, &ws, "city", true).await;
+        define_trait(&pool, &ws, "plan", false).await;
+        define_order(&pool, &ws).await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (admin_id, admin) = user(&pool, &router, "admin@example.com").await;
+        add_member(&router, &owner, &ws, admin_id, "admin").await;
+        let definition = json!({"v": 1, "all": [
+            {"trait": "city", "op": "eq", "value": "Aarhus"},
+            {"trait": "plan", "op": "eq", "value": "pro"},
+            {"event": "order", "agg": {"fn": "sum", "prop": "total", "op": "gte", "value": 5}},
+            {"event": "order", "agg": {"fn": "count", "op": "gte", "value": 1}},
+            {"identifier": "email"},
+        ]});
+        let id = segment_id(&router, &owner, &ws, "Locals", definition).await;
+        let person = explain_person(
+            &pool,
+            &ws,
+            "ada@example.com",
+            json!({"city": "Aarhus", "plan": "pro"}),
+        )
+        .await;
+        seed_events(&pool, &ws, &person, "order", 2, 7.5).await;
+        let uri = explain_uri(&ws, &person, &id);
+
+        let as_member = explain_as(&router, Auth::Session(&member), &uri).await;
+        let as_admin = explain_as(&router, Auth::Session(&admin), &uri).await;
+        let as_owner = explain_as(&router, Auth::Session(&owner), &uri).await;
+
+        let masked = as_member.body["tree"]["children"].clone();
+        assert_eq!(as_member.status, StatusCode::OK, "{:?}", as_member.body);
+        assert_eq!(masked[0]["observed"], json!({"masked": true}));
+        assert_eq!(masked[1]["observed"], json!({"value": "pro"}));
+        assert_eq!(masked[2]["observed"], json!({"count": 2, "masked": true}));
+        assert_eq!(masked[3]["observed"], json!({"count": 2, "value": 2}));
+        assert_eq!(masked[4]["observed"], json!({"present": true}));
+        for revealed in [&as_admin, &as_owner] {
+            let shown = &revealed.body["tree"]["children"];
+            assert_eq!(shown[0]["observed"], json!({"value": "Aarhus"}));
+            assert_eq!(shown[2]["observed"], json!({"count": 2, "value": 15.0}));
+        }
+        assert!(!as_member.body.to_string().contains("Aarhus"));
+        assert!(!as_member.body.to_string().contains("ada@example.com"));
+        assert!(!as_owner.body.to_string().contains("ada@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_is_unknown_for_an_event_name_past_the_cap_and_decided_otherwise(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        define_order(&pool, &ws).await;
+        define_event(&pool, &ws, "view", json!([])).await;
+        let any = json!({"v": 1, "any": [
+            {"event": "view"},
+            {"event": "order"},
+            {"trait": "plan", "op": "eq", "value": "pro"},
+        ]});
+        let all = json!({"v": 1, "all": [
+            {"event": "view"},
+            {"trait": "plan", "op": "eq", "value": "free"},
+        ]});
+        let any_id = segment_id(&router, &owner, &ws, "Any", any).await;
+        let all_id = segment_id(&router, &owner, &ws, "All", all).await;
+        let person = explain_person(&pool, &ws, "busy@example.com", json!({"plan": "pro"})).await;
+        let cap = i32::try_from(zirv_flow_store::EXPLAIN_EVENT_CAP).unwrap();
+        seed_events(&pool, &ws, &person, "view", cap + 1, 1.0).await;
+        seed_events(&pool, &ws, &person, "order", 1, 1.0).await;
+        // `order` is the newest event, so the cut falls in `view` alone.
+        sqlx::query("UPDATE events SET occurred_at = now() WHERE name = 'order'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let any = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &any_id),
+        )
+        .await;
+        let all = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &all_id),
+        )
+        .await;
+
+        // A known pass decides `any` over the unknown leaf.
+        assert_eq!(any.status, StatusCode::OK, "{:?}", any.body);
+        assert_eq!(any.body["outcome"], "pass");
+        let leaves = &any.body["tree"]["children"];
+        assert_eq!(leaves[0]["outcome"], "unknown");
+        assert_eq!(leaves[0]["reason"], "capped");
+        assert!(leaves[0].get("observed").is_none());
+        assert_eq!(leaves[1]["outcome"], "pass");
+        assert!(leaves[1].get("reason").is_none());
+        // A known fail decides `all`, so the unknown leaf does not make it unknown.
+        assert_eq!(all.body["outcome"], "fail");
+        assert_eq!(all.body["tree"]["children"][0]["outcome"], "unknown");
+        assert_eq!(all.body["tree"]["children"][1]["outcome"], "fail");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_propagates_unknown_up_when_nothing_else_decides(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        define_order(&pool, &ws).await;
+        let definition = json!({"v": 1, "all": [
+            {"trait": "plan", "op": "eq", "value": "pro"},
+            {"not": {"event": "order"}},
+        ]});
+        let id = segment_id(&router, &owner, &ws, "Quiet", definition).await;
+        let person = explain_person(&pool, &ws, "busy@example.com", json!({"plan": "pro"})).await;
+        let cap = i32::try_from(zirv_flow_store::EXPLAIN_EVENT_CAP).unwrap();
+        seed_events(&pool, &ws, &person, "order", cap + 1, 1.0).await;
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["outcome"], "unknown");
+        assert_eq!(reply.body["tree"]["reason"], "capped");
+        let negated = &reply.body["tree"]["children"][1];
+        assert_eq!(negated["outcome"], "unknown");
+        assert_eq!(negated["reason"], "capped");
+        assert_eq!(negated["children"][0]["outcome"], "unknown");
+        assert_eq!(reply.body["tree"]["children"][0]["outcome"], "pass");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_is_isolated_per_workspace_and_checks_the_query(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let alpha = workspace(&router, &owner, "Alpha").await;
+        let beta = workspace(&router, &owner, "Beta").await;
+        define_plan(&pool, &alpha).await;
+        define_plan(&pool, &beta).await;
+        let (_, read_key) = make_key(&router, &owner, &alpha, &["read"]).await;
+        let ours = segment_id(&router, &owner, &alpha, "Pros", plan_is("pro")).await;
+        let theirs = segment_id(&router, &owner, &beta, "Pros", plan_is("pro")).await;
+        let our_person =
+            explain_person(&pool, &alpha, "a@example.com", json!({"plan": "pro"})).await;
+        let their_person =
+            explain_person(&pool, &beta, "b@example.com", json!({"plan": "pro"})).await;
+        let session = || Auth::Session(&owner);
+
+        let fine = explain_as(
+            &router,
+            Auth::Key(&read_key),
+            &explain_uri(&alpha, &our_person, &ours),
+        )
+        .await;
+        let foreign_person = explain_as(
+            &router,
+            session(),
+            &explain_uri(&alpha, &their_person, &ours),
+        )
+        .await;
+        let foreign_segment = explain_as(
+            &router,
+            session(),
+            &explain_uri(&alpha, &our_person, &theirs),
+        )
+        .await;
+        let foreign_workspace = explain_as(
+            &router,
+            Auth::Key(&read_key),
+            &explain_uri(&beta, &our_person, &theirs),
+        )
+        .await;
+        let own_uri = explain_uri(&alpha, &our_person, &ours);
+        let no_such_version = explain_as(&router, session(), &format!("{own_uri}&version=9")).await;
+        let version_one = explain_as(&router, session(), &format!("{own_uri}&version=1")).await;
+        let no_segment = explain_as(
+            &router,
+            session(),
+            &format!("/api/v1/workspaces/{alpha}/people/{our_person}/explain"),
+        )
+        .await;
+        let anonymous = explain_as(&router, Auth::Anonymous, &own_uri).await;
+
+        assert_eq!(fine.status, StatusCode::OK, "{:?}", fine.body);
+        assert_eq!(fine.body["person_id"], our_person.as_str());
+        assert_eq!(foreign_person.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_segment.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_workspace.status, StatusCode::NOT_FOUND);
+        assert_eq!(no_such_version.status, StatusCode::NOT_FOUND);
+        assert_eq!(version_one.status, StatusCode::OK);
+        assert_eq!(version_one.body["version"], 1);
+        assert_eq!(no_segment.status, StatusCode::BAD_REQUEST);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explain_past_its_time_limit_is_a_503_with_its_own_code(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let id = segment_id(&router, &owner, &ws, "Pros", plan_is("pro")).await;
+        let person = explain_person(&pool, &ws, "a@example.com", json!({"plan": "pro"})).await;
+        // Reading the person is held by a lock on the people table until the timeout cancels it.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE people IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "explain_timeout");
+    }
+
+    /// An explain whose first read of `table` is held by a lock, with a 100 ms limit.
+    async fn explain_timeout_on(pool: PgPool, table: &str) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let id = segment_id(&router, &owner, &ws, "Pros", plan_is("pro")).await;
+        let person = explain_person(&pool, &ws, "a@example.com", json!({"plan": "pro"})).await;
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{table}: {:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "explain_timeout", "{table}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explain_stalled_reading_the_segment_is_a_503_with_its_own_code(pool: PgPool) {
+        explain_timeout_on(pool, "segments").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explain_stalled_reading_the_version_is_a_503_with_its_own_code(pool: PgPool) {
+        explain_timeout_on(pool, "segment_versions").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_window_inside_the_loaded_span_decides_even_when_the_name_is_capped(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_order(&pool, &ws).await;
+        let definition = json!({"v": 1, "all": [
+            {"event": "order", "window": {"last": "P1D"},
+             "agg": {"fn": "count", "op": "gte", "value": 1}},
+            {"event": "order", "window": {"last": "P365D"},
+             "agg": {"fn": "count", "op": "gte", "value": 1}},
+        ]});
+        let id = segment_id(&router, &owner, &ws, "Recent", definition.clone()).await;
+        let person = explain_person(&pool, &ws, "busy@example.com", json!({})).await;
+        let cap = i32::try_from(zirv_flow_store::EXPLAIN_EVENT_CAP).unwrap();
+        // Seeded from a day ago; move them two days back, past the one-day window.
+        seed_events(&pool, &ws, &person, "order", cap + 1, 1.0).await;
+        sqlx::query("UPDATE events SET occurred_at = occurred_at - interval '1 day'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh_compiled(&pool, &ws, &id, &definition).await;
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+
+        // The refresh sees no order in the last day and says fail; so does explain.
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["member"], false);
+        assert_eq!(reply.body["outcome"], "fail");
+        let leaves = &reply.body["tree"]["children"];
+        assert_eq!(leaves[0]["outcome"], "fail");
+        assert_eq!(leaves[0]["observed"]["count"], 0);
+        assert_eq!(leaves[1]["outcome"], "unknown");
+        assert_eq!(leaves[1]["reason"], "capped");
+    }
 }

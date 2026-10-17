@@ -5,6 +5,7 @@
 //! parameters, and never touches a database. The reference evaluator lives here too, and behind
 //! `test-support` the proptest generators that check the SQL against it.
 
+mod bounds;
 mod catalog;
 mod compile;
 mod deps;
@@ -22,6 +23,7 @@ mod stored_time;
 mod time_value;
 mod validate;
 
+pub use bounds::event_lower_bounds;
 pub use catalog::Catalog;
 pub use compile::{CompiledSegment, compile};
 pub use deps::Deps;

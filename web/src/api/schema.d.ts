@@ -1322,6 +1322,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/people/{id}/explain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Why one person is in or out of a segment. The reference evaluator runs the segment's current
+         *     version (or `version`) over the person's traits, the events the definition reads, lists,
+         *     consent, identifier kinds and open memberships, and returns the tree of conditions with what
+         *     each saw. `member` and `entered_at` are the stored membership, which can differ from the fresh
+         *     `outcome` while a refresh is pending. A person with more events of a name than one explain
+         *     loads makes the conditions on that name `unknown` with the reason `capped`. A person that was
+         *     merged into another is explained as the survivor, with `merged_from` set. PII trait values and
+         *     PII event-property values and aggregates are masked unless the caller is the owner, a
+         *     workspace admin or an `admin` key; identifier values are never shown. A saved version that
+         *     no longer validates against the workspace is 422 `segment_invalid`. A read that runs past its
+         *     time limit is 503 with the code `explain_timeout`.
+         */
+        get: operations["explain_person_segment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/people/{id}/lists": {
         parameters: {
             query?: never;
@@ -3278,6 +3307,57 @@ export interface components {
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
         };
+        ExplainBody: {
+            /**
+             * Format: date-time
+             * @description When the open membership started; null when `member` is false.
+             */
+            entered_at?: string | null;
+            /**
+             * Format: date-time
+             * @description The time the evaluation ran at, which fixes every relative window.
+             */
+            evaluated_at: string;
+            /**
+             * @description Whether the person is an open member now, as stored. It can differ from `outcome` while a
+             *     refresh is pending; the two are not reconciled.
+             */
+            member: boolean;
+            /**
+             * Format: uuid
+             * @description The id that was asked for, when it was merged into `person_id`; null otherwise.
+             */
+            merged_from?: string | null;
+            /** @description The fresh evaluation. */
+            outcome: components["schemas"]["OutcomeBody"];
+            /**
+             * Format: uuid
+             * @description The person evaluated: the survivor when the id asked for was merged into another.
+             */
+            person_id: string;
+            /** Format: uuid */
+            segment_id: string;
+            tree: components["schemas"]["ExplainNodeBody"];
+            /**
+             * Format: int32
+             * @description The version evaluated: the current one unless `version` was asked for.
+             */
+            version: number;
+        };
+        ExplainNodeBody: {
+            children: components["schemas"]["ExplainNodeBody"][];
+            /**
+             * @description The node kind: `all`, `any`, `not`, `trait`, `event`, `list`, `segment`, `consent` or
+             *     `identifier`.
+             */
+            kind: string;
+            observed?: null | components["schemas"]["ObservedBody"];
+            outcome: components["schemas"]["OutcomeBody"];
+            /** @description The JSON pointer of the node in the segment version's definition; empty for the root. */
+            pointer: string;
+            /** @description `capped` on an unknown node: the UI shows "unable to explain". */
+            reason?: string | null;
+        };
         ExploreBreakdownBody: {
             /**
              * Format: int64
@@ -3923,6 +4003,34 @@ export interface components {
              */
             required: boolean;
         };
+        /**
+         * @description What a condition saw. Which fields are present depends on the node kind: a trait has `value`,
+         *     `masked` or `missing`; an event condition has `count` and, with an aggregate, `value` or
+         *     `masked`; a list, a segment, an identifier or consent has `present`, and consent also
+         *     `status`.
+         */
+        ObservedBody: {
+            /** @description How many events matched the condition's window and filters. */
+            count?: number | null;
+            /** @description True when the value is personal data and the caller may not see values. */
+            masked?: boolean | null;
+            /** @description True when the trait is not stored, or the key is not a property of the event. */
+            missing?: boolean | null;
+            /** @description Whether the person holds the list, segment, identifier kind or consent state. */
+            present?: boolean | null;
+            /**
+             * @description The recorded consent status for the condition's channel and topic; `unknown` when there
+             *     is no row.
+             */
+            status?: string | null;
+            /** @description The stored trait value, or the aggregate over the matching events. */
+            value?: unknown;
+        };
+        /**
+         * @description How a node came out.
+         * @enum {string}
+         */
+        OutcomeBody: "pass" | "fail" | "unknown";
         PartitionLagBody: {
             /** Format: int64 */
             lag: number;
@@ -10682,6 +10790,90 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explain_person_segment: {
+        parameters: {
+            query: {
+                /** @description The segment to explain */
+                segment: string;
+                /** @description The segment version; default the current one */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The evaluation tree */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplainBody"];
+                };
+            };
+            /** @description segment is missing or malformed, or version is not a positive whole number */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, person, segment or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The saved version no longer validates (`code` is `segment_invalid`, with `issues`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `explain_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
