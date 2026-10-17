@@ -14,10 +14,12 @@ use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed, rule_for};
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::merge::merge_people;
 use crate::StoreError;
+use crate::changes::mark_person;
 
 /// How many times a record's resolution runs when identity inserts keep losing races.
 const MAX_ATTEMPTS: u32 = 3;
@@ -161,6 +163,17 @@ pub(crate) async fn resolve_person(
                 delete_new_person(connection, workspace, person_id).await?;
             }
             continue;
+        }
+        if inserted > 0 {
+            mark_person(
+                connection,
+                workspace,
+                person_id,
+                ChangeClasses::IDENTIFIERS,
+                trace,
+                None,
+            )
+            .await?;
         }
         let merged = match merge {
             Some((survivor, losers)) => {

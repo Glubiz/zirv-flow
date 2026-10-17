@@ -122,7 +122,8 @@ mod tests {
                 "import.run",
                 "sync.run",
                 "kafka.consume",
-                "segment.refresh"
+                "segment.refresh",
+                "segment.reevaluate"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -165,6 +166,7 @@ mod tests {
                 "sync.run",
                 "kafka.consume",
                 "segment.refresh",
+                "segment.reevaluate",
                 "test.first",
                 "test.second"
             ]

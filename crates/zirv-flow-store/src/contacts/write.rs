@@ -378,6 +378,7 @@ pub async fn write_contact(
     }
     remember(&mut savepoint, workspace, idempotency, status).await?;
     let contact = find_contact(&mut savepoint, workspace, key).await?;
+    crate::changes::request_reevaluation(&mut savepoint, workspace).await?;
     savepoint.commit().await.map_err(StoreError::query)?;
     Ok(Written {
         status,
@@ -408,6 +409,7 @@ pub async fn delete_contact(
         return Err(WriteError::NotFound);
     }
     remember(&mut savepoint, workspace, idempotency, 204).await?;
+    crate::changes::request_reevaluation(&mut savepoint, workspace).await?;
     savepoint.commit().await.map_err(StoreError::query)?;
     Ok(Written {
         status: 204,

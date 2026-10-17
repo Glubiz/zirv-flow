@@ -6,12 +6,14 @@ use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed};
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::record_decision;
 use super::merge::current_person;
 use super::profiles::{IdentityConflict, conflict_columns};
 use crate::StoreError;
+use crate::changes::{mark_people, request_reevaluation};
 
 /// How a conflict is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +124,8 @@ pub async fn resolve_conflict(
     let outcome = match resolution {
         ConflictResolution::KeepSeparate => "kept_separate",
         ConflictResolution::MoveIdentifier { to_person_id } => {
-            move_identifier(connection, workspace, &conflict, to_person_id).await?;
+            move_identifier(connection, workspace, &conflict, to_person_id, trace).await?;
+            request_reevaluation(connection, workspace).await?;
             "identifier_moved"
         }
     };
@@ -159,6 +162,7 @@ async fn move_identifier(
     workspace: WorkspaceId,
     conflict: &IdentityConflict,
     to_person_id: Uuid,
+    trace: &TraceContext,
 ) -> Result<(), ResolveError> {
     let identity_id = conflict.identity_id.ok_or(ResolveError::NoIdentifier)?;
     // The people the conflict names may have been merged since; the survivors stand for them.
@@ -234,6 +238,16 @@ async fn move_identifier(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+    // Both parties gained or lost an identifier.
+    mark_people(
+        connection,
+        workspace,
+        &parties,
+        ChangeClasses::IDENTIFIERS,
+        trace,
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -533,5 +547,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(still.resolved_at.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn moving_an_identifier_marks_both_people_in_the_identifiers_class(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (one, two, conflict) = blocked(&pool, ws).await;
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        resolve(
+            &pool,
+            ws,
+            conflict.id,
+            ConflictResolution::MoveIdentifier { to_person_id: two },
+        )
+        .await
+        .unwrap();
+
+        let marks: Vec<(Uuid, i16)> =
+            sqlx::query_as("SELECT person_id, classes FROM person_changes ORDER BY person_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mut expected = vec![(one, 16), (two, 16)];
+        expected.sort();
+        assert_eq!(marks, expected);
     }
 }

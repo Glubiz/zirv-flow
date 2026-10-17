@@ -117,7 +117,7 @@ impl JobKind for SegmentRefresh {
 }
 
 /// The compiler's catalog from the store's snapshot.
-fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
+pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
     let storage = TraitStorage::with_slots(snapshot.slots);
     let catalog = Catalog {
         traits: snapshot.traits,

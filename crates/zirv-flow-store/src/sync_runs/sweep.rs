@@ -128,6 +128,7 @@ pub async fn sweep_unreached(
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
+        crate::changes::request_reevaluation(&mut tx, unit.workspace).await?;
     }
     commit(tx).await?;
     Ok(SweepOutcome::Swept {
@@ -706,5 +707,33 @@ mod tests {
         .unwrap();
         assert!(partitions > 2);
         assert_eq!(partitions, indexed, "every partition has the record index");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_that_removes_records_requests_the_reevaluation_it_marked(pool: PgPool) {
+        let fx = second_run(&pool, 2).await;
+        let source = fx.source_id.to_string();
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs WHERE kind = 'segment.reevaluate'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let swept = sweep_unreached(&pool, &unit(&fx, &source, None))
+            .await
+            .unwrap();
+
+        assert!(matches!(swept, SweepOutcome::Swept { removed: 2, .. }));
+        assert!(count(&pool, "SELECT count(*) FROM person_changes").await > 0);
+        let jobs = count(
+            &pool,
+            "SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'",
+        )
+        .await;
+        assert_eq!(jobs, 1);
     }
 }

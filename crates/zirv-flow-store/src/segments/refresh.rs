@@ -214,21 +214,70 @@ pub struct RefreshOutcome {
     pub exited: i64,
 }
 
+/// Which people a diff statement covers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Scope {
+    /// The whole segment, under one trace and cause.
+    Segment,
+    /// The people of a dirty batch only, each under the trace and cause of its own mark.
+    Batch,
+}
+
 /// The diff statement for the compiled `members` query. The extra values bind after the compiled
-/// ones: `$1` is the workspace, the compiled values take `$2` to `$k + 1` and these follow in
-/// order: the segment, the version, the time, the trace id, the cause, the decision's cause kind
-/// and id, the job id and the attempt.
-fn refresh_statement(members: &SqlQuery) -> String {
-    let base = members.params.len() + 1;
-    let segment = format!("${}::uuid", base + 1);
-    let version = format!("${}::int4", base + 2);
-    let now = format!("${}::timestamptz", base + 3);
-    let trace = format!("${}::uuid", base + 4);
-    let cause = format!("${}::text", base + 5);
-    let cause_kind = format!("${}::text", base + 6);
-    let cause_id = format!("${}::text", base + 7);
-    let job = format!("${}::uuid", base + 8);
-    let attempt = format!("${}::int4", base + 9);
+/// ones: `$1` is the workspace and the compiled values take `$2` to `$k + 1`. For
+/// [`Scope::Segment`] these follow in order: the segment, the version, the time, the trace id,
+/// the cause, the decision's cause kind and id, the job id and the attempt.
+///
+/// For [`Scope::Batch`], `members` is the batch query, which reads the batch's people as `$k + 2`
+/// (a `uuid[]`). These follow in order: those people, the segment, the version, the time, the
+/// cause, the people's trace ids, cause kinds and cause ids as three arrays parallel to the
+/// people, the job id and the attempt. Each change is recorded under its person's trace and
+/// decision cause.
+pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope) -> String {
+    let mut at = members.params.len() + 1;
+    let mut next = || {
+        at += 1;
+        at
+    };
+    let people = (scope == Scope::Batch).then(&mut next);
+    let segment = format!("${}::uuid", next());
+    let version = format!("${}::int4", next());
+    let now = format!("${}::timestamptz", next());
+    // What each change is recorded under: one value for the segment, or the person's own.
+    let (trace, cause, cause_kind, cause_id, batch_cte, join) = match scope {
+        Scope::Segment => {
+            let trace = format!("${}::uuid", next());
+            let cause = format!("${}::text", next());
+            let cause_kind = format!("${}::text", next());
+            let cause_id = format!("${}::text", next());
+            (trace, cause, cause_kind, cause_id, String::new(), "")
+        }
+        Scope::Batch => {
+            let cause = format!("${}::text", next());
+            let traces = next();
+            let kinds = next();
+            let ids = next();
+            let people = people.unwrap_or_default();
+            (
+                "r.trace_id".to_owned(),
+                cause,
+                "r.cause_kind".to_owned(),
+                "r.cause_id".to_owned(),
+                format!(
+                    "batch AS (SELECT * FROM unnest(${people}::uuid[], ${traces}::uuid[], \
+                         ${kinds}::text[], ${ids}::text[]) \
+                         AS b(person_id, trace_id, cause_kind, cause_id)), "
+                ),
+                " JOIN batch r ON r.person_id = i.person_id",
+            )
+        }
+    };
+    let job = format!("${}::uuid", next());
+    let attempt = format!("${}::int4", next());
+    // The people of the segment's open rows the diff may close.
+    let leaving_scope = people.map_or_else(String::new, |people| {
+        format!(" AND m.person_id = ANY(${people}::uuid[])")
+    });
     // The event and the decision of each change; `kind` is `entered` or `exited` and `from` the
     // CTE that lists the people.
     let recorded = |kind: &str, from: &str| {
@@ -236,41 +285,51 @@ fn refresh_statement(members: &SqlQuery) -> String {
             "{kind}_events AS ( \
                  INSERT INTO events (id, workspace_id, person_id, name, occurred_at, \
                      received_at, properties, source, trace_id, validation_state) \
-                 SELECT gen_random_uuid(), $1, person_id, 'segment.{kind}', {now}, {now}, \
+                 SELECT gen_random_uuid(), $1, i.person_id, 'segment.{kind}', {now}, {now}, \
                      jsonb_build_object('segment_id', {segment}::text, 'version', {version}, \
                                         'cause', {cause}), \
-                     'segments', {trace}, 'valid' FROM {from} RETURNING 1), \
+                     'segments', {trace}, 'valid' FROM {from} i{join} RETURNING 1), \
              {kind}_decisions AS ( \
                  INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
                      reason, cause_kind, cause_id, subject_ids, job_id, attempt) \
                  SELECT gen_random_uuid(), $1, {trace}, 'segment.{kind}', '{kind}', {cause}, \
                      {cause_kind}, {cause_id}, \
-                     jsonb_build_object('segment', {segment}::text, 'person', person_id::text), \
-                     {job}, {attempt} FROM {from} RETURNING 1)"
+                     jsonb_build_object('segment', {segment}::text, 'person', i.person_id::text), \
+                     {job}, {attempt} FROM {from} i{join} RETURNING 1)"
         )
     };
     let entered = recorded("entered", "inserted");
     let exited = recorded("exited", "closed");
+    // The trace a row is opened or closed under, reached through the batch in a batch diff.
+    let (enter_join, leave_join) = match scope {
+        Scope::Segment => ("", ""),
+        Scope::Batch => (
+            " JOIN batch r ON r.person_id = e.person_id",
+            " JOIN batch r ON r.person_id = l.person_id",
+        ),
+    };
     format!(
-        "WITH target AS ({members_sql}), \
+        "WITH {batch_cte}target AS ({members_sql}), \
          entering AS ( \
              SELECT t.id AS person_id FROM target t \
              WHERE NOT EXISTS (SELECT 1 FROM segment_members m \
                  WHERE m.workspace_id = $1 AND m.segment_id = {segment} \
                    AND m.person_id = t.id AND m.exited_at IS NULL)), \
          leaving AS ( \
-             SELECT m.id AS row_id FROM segment_members m \
+             SELECT m.id AS row_id, m.person_id FROM segment_members m \
              WHERE m.workspace_id = $1 AND m.segment_id = {segment} AND m.exited_at IS NULL \
+               {leaving_scope} \
                AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = m.person_id)), \
          inserted AS ( \
              INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
                  entered_at, entered_trace_id, entered_cause) \
-             SELECT $1, {segment}, person_id, {version}, {now}, {trace}, {cause} FROM entering \
+             SELECT $1, {segment}, e.person_id, {version}, {now}, {trace}, {cause} \
+             FROM entering e{enter_join} \
              RETURNING person_id), \
          closed AS ( \
              UPDATE segment_members m SET exited_version = {version}, exited_at = {now}, \
                  exited_trace_id = {trace}, exited_cause = {cause} \
-             FROM leaving l WHERE m.id = l.row_id AND m.exited_at IS NULL \
+             FROM leaving l{leave_join} WHERE m.id = l.row_id AND m.exited_at IS NULL \
              RETURNING m.person_id), \
          {entered}, {exited} \
          SELECT ARRAY[ \
@@ -298,7 +357,7 @@ pub async fn apply_refresh(
     connection: &mut PgConnection,
     apply: &RefreshApply<'_>,
 ) -> Result<RefreshOutcome, StoreError> {
-    let statement = refresh_statement(apply.members);
+    let statement = refresh_statement(apply.members, Scope::Segment);
     let query = bind_all(
         sqlx::query_scalar::<_, Vec<i64>>(sqlx::AssertSqlSafe(statement)),
         apply.workspace,
@@ -496,11 +555,14 @@ mod tests {
 
     #[test]
     fn the_extra_values_are_numbered_after_the_compiled_ones() {
-        let one = refresh_statement(&plan_query("pro"));
-        let none = refresh_statement(&SqlQuery {
-            sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1".into(),
-            params: Vec::new(),
-        });
+        let one = refresh_statement(&plan_query("pro"), Scope::Segment);
+        let none = refresh_statement(
+            &SqlQuery {
+                sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1".into(),
+                params: Vec::new(),
+            },
+            Scope::Segment,
+        );
 
         // One compiled value: the segment is $3 and the attempt is $11.
         assert!(one.contains("segment_id = $3::uuid"));

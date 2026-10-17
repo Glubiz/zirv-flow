@@ -16,12 +16,14 @@ use zirv_flow_core::contacts;
 use zirv_flow_core::people::{
     Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::token::sha256;
 use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
 use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
 use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
+use crate::changes::mark_person;
 use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
@@ -77,6 +79,7 @@ pub async fn apply_profile_batch(
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
     let outcomes = apply_profile_records(&mut tx, workspace, records).await?;
+    crate::changes::request_reevaluation(&mut tx, workspace).await?;
     commit(tx).await?;
     Ok(outcomes)
 }
@@ -150,6 +153,7 @@ pub async fn remove_contribution(
     let removed =
         remove_contribution_in(&mut tx, workspace, source, stream, record_key, trace).await?;
     if removed.is_some() {
+        crate::changes::request_reevaluation(&mut tx, workspace).await?;
         commit(tx).await?;
     }
     Ok(removed.is_some())
@@ -224,10 +228,18 @@ pub(crate) async fn remove_contribution_in(
         person_id,
         record_id,
         &identifiers,
+        trace,
     )
     .await?;
     remove_record_events(&mut *connection, workspace, record_id).await?;
-    mark_dirty(&mut *connection, workspace, person_id).await?;
+    mark_dirty(
+        &mut *connection,
+        workspace,
+        person_id,
+        ChangeClasses::TRAITS | ChangeClasses::EVENTS,
+        trace,
+    )
+    .await?;
     record_decision(
         &mut *connection,
         workspace,
@@ -294,6 +306,7 @@ async fn remove_unshared_identities(
     person_id: Uuid,
     record_id: Uuid,
     identifiers: &Value,
+    trace: &TraceContext,
 ) -> Result<(), StoreError> {
     let doomed: Vec<Uuid> = sqlx::query_scalar(
         "SELECT i.id FROM identities i \
@@ -327,7 +340,14 @@ async fn remove_unshared_identities(
             .await
             .map_err(StoreError::query)?;
     }
-    Ok(())
+    mark_dirty(
+        connection,
+        workspace,
+        person_id,
+        ChangeClasses::IDENTIFIERS,
+        trace,
+    )
+    .await
 }
 
 /// Whether the person has no live source record, no event and no explicit consent.
@@ -429,7 +449,14 @@ pub(crate) async fn apply_profile_record(
         && previous != person_id
         && recompute(connection, workspace, previous, &row.trait_keys()).await?
     {
-        mark_dirty(connection, workspace, previous).await?;
+        mark_dirty(
+            connection,
+            workspace,
+            previous,
+            ChangeClasses::TRAITS,
+            &record.trace,
+        )
+        .await?;
         record_decision(
             connection,
             workspace,
@@ -450,7 +477,14 @@ pub(crate) async fn apply_profile_record(
     keys.dedup();
     let changed = recompute(connection, workspace, person_id, &keys).await?;
     if changed || resolution.created {
-        mark_dirty(connection, workspace, person_id).await?;
+        mark_dirty(
+            connection,
+            workspace,
+            person_id,
+            ChangeClasses::TRAITS,
+            &record.trace,
+        )
+        .await?;
     }
     if changed {
         record_decision(
@@ -807,6 +841,7 @@ async fn upsert_ledger_row(
                     person_id,
                     row.id,
                     &Value::Array(released),
+                    &record.trace,
                 )
                 .await?;
             }
@@ -978,35 +1013,15 @@ fn float_is_integer(float: f64, integer: i128) -> bool {
     float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == integer
 }
 
+/// Marks the person dirty in `classes`, on the trace of the change (see `changes`).
 pub(super) async fn mark_dirty(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person_id: Uuid,
+    classes: ChangeClasses,
+    trace: &TraceContext,
 ) -> Result<(), StoreError> {
-    mark_changed(connection, workspace, person_id, None).await
-}
-
-/// Marks the person dirty. `late_from` is the `occurred_at` of a late event: the mark keeps
-/// the earliest one until it is consumed.
-pub(crate) async fn mark_changed(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    person_id: Uuid,
-    late_from: Option<OffsetDateTime>,
-) -> Result<(), StoreError> {
-    sqlx::query(
-        "INSERT INTO person_changes (workspace_id, person_id, late_from) VALUES ($1, $2, $3) \
-         ON CONFLICT (workspace_id, person_id) DO UPDATE \
-         SET changed_at = now(), \
-             late_from = LEAST(person_changes.late_from, EXCLUDED.late_from)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person_id)
-    .bind(late_from)
-    .execute(connection)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(())
+    mark_person(connection, workspace, person_id, classes, trace, None).await
 }
 
 pub(super) async fn record_decision(
@@ -2623,5 +2638,52 @@ mod tests {
             "the removal locked the person before the record"
         );
         assert!(removal.await.unwrap().unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_trait_change_an_added_identifier_and_a_removed_record_mark_their_classes(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "plan", Precedence::Latest, &[]).await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let first = record("crm", "1", "a@example.com", json!({"plan": "free"}), at);
+        let ada = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let marks = || async {
+            let marks: Vec<(Uuid, i16, Option<String>)> =
+                sqlx::query_as("SELECT person_id, classes, cause_id FROM person_changes")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            sqlx::query("DELETE FROM person_changes")
+                .execute(&pool)
+                .await
+                .unwrap();
+            marks
+        };
+        // A new person is marked for her traits and her identifier.
+        assert_eq!(marks().await, [(ada, 1 | 16, Some("test".into()))]);
+
+        // A changed trait is the traits class alone.
+        let changed = record("crm", "1", "a@example.com", json!({"plan": "pro"}), at);
+        apply_profile_batch(&pool, ws, &[changed]).await.unwrap();
+        assert_eq!(marks().await, [(ada, 1, Some("test".into()))]);
+
+        // A second record that only adds an identifier changes no trait.
+        let mut extra = record("crm", "1", "a@example.com", json!({"plan": "pro"}), at);
+        extra
+            .identifiers
+            .push(("email".into(), "a2@example.com".into()));
+        apply_profile_batch(&pool, ws, &[extra]).await.unwrap();
+        assert_eq!(marks().await, [(ada, 16, Some("test".into()))]);
+
+        // Removing the record marks its traits and events, and the identifiers it took with it.
+        remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+            .await
+            .unwrap();
+        let removed = marks().await;
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].1 & 3, 3);
     }
 }

@@ -771,6 +771,7 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
   workspace member or a `write` key. Writes are audited as `segment.created`,
   `segment.updated` (with the version) and `segment.archived`; the audit never holds a
   definition's values.
+- **In the web UI.** Open **Segments** to build a segment from nested all, any and not groups and conditions, watch the matching count update as you edit, save versions, see members and history, and ask on a person's profile why they are or are not in a segment.
 
 ## Contacts
 

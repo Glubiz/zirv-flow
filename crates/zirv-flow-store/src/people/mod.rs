@@ -25,7 +25,7 @@ pub(crate) use apply::{
     apply_profile_record, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
 };
-pub(crate) use apply::{mark_changed, normalize_identifiers, record_resolution};
+pub(crate) use apply::{normalize_identifiers, record_resolution};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };

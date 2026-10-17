@@ -5,10 +5,12 @@
 
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::apply::{mark_dirty, recompute, record_decision};
+use super::apply::{recompute, record_decision};
 use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
+use crate::changes::mark_people;
 use crate::consent;
 use crate::lists::{lock_lists_for_merge, move_on_merge};
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
@@ -62,6 +64,24 @@ pub(super) async fn merge_people(
     // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
     let slots = lock_and_read_writer_slots(connection, workspace).await?;
     lock_lists_for_merge(connection, workspace, losers).await?;
+    // Both sides are marked before anything touches the segments. The next pass then sees the
+    // loser as merged, so a row that a concurrent full refresh opens for it after this merge
+    // closed its rows is closed by that pass. Marking first also keeps a pass that holds a
+    // mark from waiting on a segment row this merge holds.
+    let mut marked = losers.to_vec();
+    marked.push(survivor);
+    mark_people(
+        connection,
+        workspace,
+        &marked,
+        ChangeClasses::MERGE,
+        trace,
+        None,
+    )
+    .await?;
+    // The segments the losers are open members of are locked in the pass's order before any of
+    // their rows is written, so this merge and a pass can never wait on each other.
+    crate::segments::lock_segments_of_people(connection, workspace, losers).await?;
     for &loser in losers {
         let mut identity_ids: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE identities SET person_id = $3 \
@@ -87,12 +107,6 @@ pub(super) async fn merge_people(
         record_ids.sort();
         move_on_merge(connection, workspace, loser, survivor, trace).await?;
         crate::segments::close_on_merge(connection, workspace, loser, trace).await?;
-        sqlx::query("DELETE FROM person_changes WHERE workspace_id = $1 AND person_id = $2")
-            .bind(workspace.as_uuid())
-            .bind(loser)
-            .execute(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
         // The loser keeps no traits: reads follow merged_into to the survivor's.
         let reset = format!(
             "UPDATE people SET merged_into = $3, traits = '{{}}'::jsonb, \
@@ -179,7 +193,6 @@ pub(super) async fn merge_people(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    mark_dirty(connection, workspace, survivor).await?;
     if recompute(connection, workspace, survivor, &keys).await? {
         record_decision(
             connection,
@@ -508,13 +521,22 @@ mod tests {
             .unwrap();
         assert_eq!(conflicts[0].resolution.as_deref(), Some("merged"));
         assert!(conflicts[0].resolved_at.is_some());
-        let dirty: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM person_changes WHERE person_id = $1")
-                .bind(anonymous)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(dirty, 0);
+        // Both sides are marked in the merge class on the merge's trace, so the next pass
+        // closes any row a concurrent refresh opened for the loser.
+        let marks: Vec<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(
+            "SELECT person_id, (classes & 32) = 32, trace_id FROM person_changes \
+             WHERE person_id = ANY($1) ORDER BY person_id",
+        )
+        .bind([anonymous, identified])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut expected = vec![
+            (anonymous, true, Some(both.trace.trace_id.as_uuid())),
+            (identified, true, Some(both.trace.trace_id.as_uuid())),
+        ];
+        expected.sort();
+        assert_eq!(marks, expected);
     }
 
     #[sqlx::test]

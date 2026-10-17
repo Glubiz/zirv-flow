@@ -11,13 +11,17 @@ use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, delete_expired_import_data, disable_schedule, due_schedules, enqueue,
-    enqueue_drain, ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
-    expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
-    reap_expired, reconcile_segment_schedules, stream_freshness, try_lead,
+    database_now, delete_expired_import_data, dirty_backlog, dirty_heads, disable_schedule,
+    due_schedules, enqueue, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
+    ensure_event_partitions, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
+    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_segment_schedules,
+    stream_freshness, try_lead,
 };
 
-use crate::metrics::{FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_inbox_age};
+use crate::metrics::{
+    FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_dirty_age, set_dirty_backlog,
+    set_inbox_age,
+};
 
 /// Schedules handled per tick; more than this carry over to the next tick.
 const DUE_BATCH: i64 = 100;
@@ -38,6 +42,9 @@ const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
+
+/// How long a dirty mark waits before the leader enqueues a re-evaluation for its workspace.
+const STALE_DIRTY: Duration = Duration::from_secs(2);
 
 /// How often the scheduler works.
 #[derive(Clone, Debug)]
@@ -67,6 +74,8 @@ pub struct LeaderReport {
     pub reaped: Reaped,
     /// Ingest drains the safety net enqueued for inboxes that had waited too long.
     pub drains: u64,
+    /// Re-evaluations the safety net enqueued for dirty marks that had waited too long.
+    pub reevaluations: u64,
     pub counts: QueueCounts,
 }
 
@@ -324,6 +333,7 @@ impl Scheduler {
             );
         }
         let drains = self.wake_stale_inboxes().await?;
+        let reevaluations = self.wake_stale_dirty().await?;
         let depths = queue_depths(&self.pool).await?;
         self.gauges
             .lock()
@@ -343,6 +353,7 @@ impl Scheduler {
             skipped,
             reaped,
             drains,
+            reevaluations,
             counts,
         })
     }
@@ -369,6 +380,36 @@ impl Scheduler {
                 "ingest.safety_net".to_owned(),
             ));
             if enqueue_drain(&self.pool, head.workspace_id, &trace).await? {
+                enqueued += 1;
+            }
+        }
+        Ok(enqueued)
+    }
+
+    /// The dirty-set safety net: enqueues `segment.reevaluate` for every workspace whose oldest
+    /// mark is more than [`STALE_DIRTY`] older than the database clock. The unique key makes it a
+    /// no-op while a re-evaluation is ready or running. It covers a mark that landed after the
+    /// job's last claim, a request that rolled back and a run that ran out of its time budget.
+    /// Also publishes the dirty backlog and the age of the oldest mark anywhere. Returns the
+    /// re-evaluations enqueued.
+    async fn wake_stale_dirty(&self) -> Result<u64, StoreError> {
+        let heads = dirty_heads(&self.pool).await?;
+        let oldest = heads
+            .iter()
+            .map(|head| head.age_seconds)
+            .fold(0.0_f64, f64::max);
+        set_dirty_age(oldest);
+        set_dirty_backlog(dirty_backlog(&self.pool).await?);
+        let mut enqueued = 0;
+        for head in heads
+            .iter()
+            .filter(|head| head.age_seconds > STALE_DIRTY.as_secs_f64())
+        {
+            let trace = TraceContext::root(Cause::from_stored(
+                CauseKind::Api,
+                "segment.safety_net".to_owned(),
+            ));
+            if enqueue_reevaluate(&self.pool, head.workspace_id, &trace).await? {
                 enqueued += 1;
             }
         }
@@ -1141,6 +1182,105 @@ mod tests {
             .parse()
             .unwrap();
         assert!((39.0..120.0).contains(&age), "{age}");
+    }
+
+    async fn mark_dirty_aged(pool: &PgPool, ws: WorkspaceId, age_seconds: i32) {
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO person_changes (workspace_id, person_id, classes, changed_at) \
+             VALUES ($1, $2, 1, now() - make_interval(secs => $3))",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(f64::from(age_seconds))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn reevaluate_jobs(pool: &PgPool) -> Vec<Option<String>> {
+        sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'segment.reevaluate'")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dirty_safety_net_enqueues_for_a_stale_workspace_and_does_nothing_while_the_job_is_ready_or_running(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let stale = inbox_workspace(&pool, "stale").await;
+        let fresh = inbox_workspace(&pool, "fresh").await;
+        mark_dirty_aged(&pool, stale, 5).await;
+        mark_dirty_aged(&pool, stale, 0).await;
+        mark_dirty_aged(&pool, fresh, 0).await;
+        let mut scheduler = scheduler(&pool);
+
+        let first = led(scheduler.tick_at(BASE).await.unwrap());
+        // The job is ready now.
+        let while_ready = led(scheduler.tick_at(BASE).await.unwrap());
+        zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &["segment.reevaluate"],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // And now it is running.
+        let while_running = led(scheduler.tick_at(BASE).await.unwrap());
+
+        assert_eq!(
+            (
+                first.reevaluations,
+                while_ready.reevaluations,
+                while_running.reevaluations
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            reevaluate_jobs(&pool).await,
+            [Some(format!("segment.reevaluate:{}", stale.as_uuid()))]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_dirty_backlog_and_the_age_of_the_oldest_mark(pool: PgPool) {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        mark_dirty_aged(&pool, ws, 40).await;
+        mark_dirty_aged(&pool, ws, 1).await;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut scheduler = scheduler(&pool);
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        scheduler.tick_at(BASE).await.unwrap();
+
+        let output = handle.render();
+        let gauge = |name: &str| -> f64 {
+            output
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("no {name} in {output}"))
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(gauge("zirv_flow_segment_dirty_backlog"), 2.0);
+        assert!((39.0..120.0).contains(&gauge("zirv_flow_segment_dirty_age_seconds")));
     }
 
     /// A workspace with one source whose streams `fresh`, `stale`, `failing` and `off` are set

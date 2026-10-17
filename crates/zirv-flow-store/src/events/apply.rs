@@ -19,15 +19,15 @@ use zirv_flow_core::events::{
     check_properties, evaluate, infer_properties, is_reserved_event_name, mask_sample, redact,
     validate_event_name,
 };
-use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
+use zirv_flow_core::segment::ChangeClasses;
+use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use super::debugger::{FeedEntry, is_watched, notify_feed, outcome_label, write_feed};
 use super::schemas::{
     EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
 };
-use crate::people::{
-    find_known_person, mark_changed, normalize_identifiers, record_resolution, resolve_person,
-};
+use crate::changes::mark_person;
+use crate::people::{find_known_person, normalize_identifiers, record_resolution, resolve_person};
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 const MAX_MESSAGE_ID_CHARS: usize = 256;
@@ -82,6 +82,7 @@ pub async fn apply_event_batch(
 ) -> Result<Vec<EventOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
     let outcomes = apply_event_records(&mut tx, workspace, key, records).await?;
+    crate::changes::request_reevaluation(&mut tx, workspace).await?;
     commit(tx).await?;
     Ok(outcomes)
 }
@@ -494,10 +495,16 @@ pub(crate) async fn insert_event(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    mark_changed(
+    let trace = TraceContext {
+        trace_id: TraceId::from_uuid(event.trace_id),
+        cause: Cause::event(event.id),
+    };
+    mark_person(
         connection,
         workspace,
         event.person_id,
+        ChangeClasses::EVENTS,
+        &trace,
         event.late.then_some(event.occurred_at),
     )
     .await
@@ -1764,5 +1771,37 @@ mod tests {
         let second =
             tokio::time::timeout(std::time::Duration::from_millis(300), listener.recv()).await;
         assert!(second.is_err(), "one notification per batch");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_marks_its_person_in_the_events_class_on_its_own_trace_and_cause(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+
+        apply_one(&pool, ws, event("anything", json!({}))).await;
+
+        let (event_id, event_trace): (Uuid, Uuid) =
+            sqlx::query_as("SELECT id, trace_id FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (classes, trace, kind, id): (i16, Option<Uuid>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT classes, trace_id, cause_kind, cause_id FROM person_changes")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // The new person's identifier was marked first; the event's mark is the latest.
+        assert_eq!(classes, 2 | 16);
+        assert_eq!(trace, Some(event_trace));
+        assert_eq!(kind.as_deref(), Some("event"));
+        assert_eq!(id, Some(event_id.to_string()));
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 1);
     }
 }
