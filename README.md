@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer and the mapping and manifest assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), and the AI provider layer and the mapping, manifest and segment assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -1310,7 +1310,7 @@ keeps; otherwise the panel says why it did not run.
   `ai.draft.accepted`.
 - **Metrics.** `zirv_flow_ai_draft_runs_total{kind,outcome}` (`valid`, `invalid`, `failed`),
   `zirv_flow_ai_drafts_accepted_total{kind}`, and the existing `zirv_flow_ai_calls_total` under the
-  features `mapping`, `manifest` and `evaluation`.
+  features `mapping`, `manifest`, `segment`, `segment_explain` and `evaluation`.
 - **Timeouts.** A run is one synchronous request of up to (1 + `ai.max_repair_attempts`) calls. A
   reverse proxy needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s for
   `POST /api/v1/workspaces/{ws}/ai/drafts`.
@@ -1319,6 +1319,44 @@ keeps; otherwise the panel says why it did not run.
   against the budget) and prints one JSON line per case with the properties that held, the ones
   that did not, attempts, tokens, cost and model. It exits 0 whatever the score. CI runs the same
   cases on a fake provider and never calls a model.
+
+### Segment assistant
+
+On a segment (new or saved), an admin of a workspace with the assistant on sees **Draft with the
+assistant** under the builder and **Explain this segment** on the page. Neither is shown to a
+member, and neither while the assistant is off.
+
+- **Draft.** Say who should belong. The model calls `draft_segment` with a whole definition, which
+  is checked with the rules a builder save applies (the parser, the validator against the
+  workspace's catalog and the compiler). Problems go back to it as a code and a JSON pointer, never
+  a value, at most `ai.max_repair_attempts` times. A valid draft is shown as a difference from the
+  saved version with the live count of the draft. **Accept** loads it into the builder as the
+  unsaved copy of that segment, after a dialog if you had unsaved edits to the conditions; **Save**
+  publishes it, as always. A segment draft names the segment (or none, for a new one), has no
+  source, and stores the SHA-256 of the saved version it was made from.
+- **Explain.** `POST /api/v1/workspaces/{ws}/segments/{id}/ai/explain` (optional body
+  `{"version": n}`, default the current version) answers `{version, summary, nodes: [{pointer,
+  text}]}`. The model calls `explain_segment`; every pointer must be a node of that version, every
+  condition must be cited exactly once and the texts are plain text (500 characters per node, 1,000
+  for the summary). Nothing is stored. The page shows each condition in the builder's own words
+  next to the sentence. 404 for an unknown segment or version, 422 `ai_explain_failed` (with issue
+  codes) when the attempts run out.
+- **Privacy.** The model is told trait keys, types and descriptions, event names with property
+  names and types, list and segment names, consent topics and identifier kinds. It is never told a
+  trait or event value, a count, a sample or a member. With the personal-data opt-in off, every
+  string literal in the saved definition that is compared with a trait or event property that is
+  not declared non-personal (or is not defined) is replaced by a placeholder such as `(kept:1)`
+  and put back in the draft, so the model keeps it by leaving the placeholder where it is. A
+  placeholder moved to another condition, or made up, is a problem it must fix. With the opt-in the
+  definition is sent as it is, fenced as personal data.
+- **Accept.** `POST .../ai/drafts/{id}/accept` locks the segments of the workspace the way a save
+  does, answers 409 `ai_draft_outdated` when the current version is no longer the one the draft was
+  made from, and 409 `ai_draft_invalid` with the issues when the definition no longer validates
+  (for example, a field archived since). It writes no segment version and is audited as
+  `ai.draft.accepted` with the kind and the segment.
+- **Roles.** The same as the other assistants: an admin, signed in (an API key is 403
+  `ai_user_required`), with the assistant on. A member who may edit segments does not see the
+  panel; saving what was accepted needs write access, as any save does.
 
 ## Sources
 

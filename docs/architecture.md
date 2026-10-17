@@ -1511,6 +1511,21 @@ run stores a row with no content). `POST .../ai/drafts/{id}/accept` re-checks th
 audits `ai.draft.accepted` and returns it; the editor holds it as its unsaved draft, and saving
 stays `PUT .../streams/{name}` or `PATCH .../sources/{id}`.
 
+As built (M4, #126): the registry gains `draft_segment` (draft) and `explain_segment` (read), five
+tools in all. `draft_segment` takes a whole definition and runs `parse_and_validate`, the
+self-reference check and `compile` (which normalizes) against the catalog read for the call, and
+returns the definition or `code at pointer` lines. `explain_segment` is checked against the saved
+version's definition: every pointer a node, every condition cited once, plain text with a length
+cap; its output goes to the caller and is not stored (a read tool that returns the checked
+explanation as `ToolOutput::Draft`, since it is not request content). `ai_drafts` gained the
+`segment` kind and a nullable `segment_id`, and the source and stream rules were split per kind. The
+context is built from `segment_catalog_details` (definitions only, no value of any person). In
+the saved definition each string literal compared with a trait or property not declared
+non-personal becomes a placeholder before it is sent and is restored in the draft, only in the
+node it was sent in. Accept takes the segments lock of a save, compares the digest of the current
+version and re-checks the definition, and writes no version. The golden corpus has `segment` and
+`explain` kinds.
+
 ### 13.3 Authorization and untrusted input
 
 The server authenticates every tool call as the requesting user, rechecks its
