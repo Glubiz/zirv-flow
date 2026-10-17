@@ -62,3 +62,39 @@ fn workspace_and_id(
         .and_then(|text| Uuid::parse_str(text).ok());
     workspace.zip(id).ok_or_else(|| JobError::new(expected))
 }
+
+/// Helpers of the tests that guard the lock order of the segment jobs: the slot lock comes
+/// before every segment lock.
+#[cfg(test)]
+pub(crate) mod slot_order {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+    use zirv_flow_core::WorkspaceId;
+    use zirv_flow_store::{REFRESH_LOCK_CLASS, SLOT_LOCK_CLASS, Tx, begin};
+
+    /// A transaction holding the exclusive slot lock of the workspace, as a retire does, so a job
+    /// that asks for the shared lock waits. Dropping or committing it releases the lock.
+    pub(crate) async fn hold_slot_lock_exclusively(pool: &PgPool, ws: WorkspaceId) -> Tx {
+        let mut tx = begin(pool).await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2::text))")
+            .bind(SLOT_LOCK_CLASS)
+            .bind(ws.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx
+    }
+
+    /// Whether nobody holds the refresh lock of `segment`: a job still waiting for the slot lock
+    /// must not hold it.
+    pub(crate) async fn segment_lock_is_free(pool: &PgPool, segment: Uuid) -> bool {
+        sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || '/' || $2::text, 0))",
+        )
+        .bind(REFRESH_LOCK_CLASS)
+        .bind(segment)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+}

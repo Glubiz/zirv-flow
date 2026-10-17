@@ -332,6 +332,18 @@ pub enum SlotStep {
     Stale,
 }
 
+/// After a short backfill batch: is any person left after the cursor?
+const BACKFILL_PROBE: &str = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \n                                AND ($2::uuid IS NULL OR id > $2))";
+
+/// After a short clear batch: does any person still hold a value in the slot? The cursor is
+/// always null; the probe only needs the parameter to exist.
+fn clear_probe(slot: SlotColumn) -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND {} IS NOT NULL \n         AND $2::uuid IS NULL)",
+        slot.as_str()
+    )
+}
+
 /// Whether a batch was the last. A short batch does not say so: `FOR UPDATE` under READ COMMITTED
 /// skips a row that was deleted while the batch waited for its lock, and PostgreSQL does not fetch
 /// a replacement. So the job finishes only when the probe finds no person left to do.
@@ -393,9 +405,7 @@ pub async fn backfill_slot_batch(
         .map_err(StoreError::query)?;
     // The cursor moves past every row the batch returned; a row deleted meanwhile is gone.
     let cursor = ids.iter().max().copied().or(after);
-    let probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
-                 AND ($2::uuid IS NULL OR id > $2))";
-    batch_step(connection, probe, workspace, ids.len(), cursor).await
+    batch_step(connection, BACKFILL_PROBE, workspace, ids.len(), cursor).await
 }
 
 /// Sets the slot `ready` under the exclusive lock, after the last batch. Writers already write
@@ -449,12 +459,7 @@ pub async fn clear_slot_batch(
         .await
         .map_err(StoreError::query)?;
     // The cursor is always null here; the probe only needs the parameter to exist.
-    let probe = format!(
-        "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND {} IS NOT NULL \
-         AND $2::uuid IS NULL)",
-        slot.as_str()
-    );
-    batch_step(connection, &probe, workspace, ids.len(), None).await
+    batch_step(connection, &clear_probe(slot), workspace, ids.len(), None).await
 }
 
 /// Frees a cleared slot under the exclusive lock, so another trait of the type can take it. A
@@ -1295,8 +1300,7 @@ mod db_tests {
                 .await
                 .unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        let probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
-                     AND ($2::uuid IS NULL OR id > $2))";
+        let probe = BACKFILL_PROBE;
 
         let early = batch_step(&mut connection, probe, ws, 2, Some(ids[1]))
             .await
@@ -1311,11 +1315,19 @@ mod db_tests {
         assert_eq!(early, SlotStep::More(Some(ids[1])));
         assert_eq!(last, SlotStep::Finish);
         assert_eq!(empty, SlotStep::More(None), "people remain after no cursor");
-        let clear_probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
-                           AND trait_s1 IS NOT NULL AND $2::uuid IS NULL)";
-        let still = batch_step(&mut connection, clear_probe, ws, 3, None)
+        // The clear probe is the production one: people still hold the slot, then none do.
+        let probe = clear_probe(SlotColumn::S1);
+        let still = batch_step(&mut connection, &probe, ws, 3, None)
             .await
             .unwrap();
         assert_eq!(still, SlotStep::More(None), "slots are still filled");
+        sqlx::query("UPDATE people SET trait_s1 = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let done = batch_step(&mut connection, &probe, ws, 3, None)
+            .await
+            .unwrap();
+        assert_eq!(done, SlotStep::Finish, "no slot holds a value");
     }
 }

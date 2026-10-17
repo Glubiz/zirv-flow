@@ -735,4 +735,43 @@ mod tests {
 
         assert_eq!(clock.now(ctx.conn()).await.unwrap(), at);
     }
+
+    /// The slot lock comes before the segment lock: while a retire holds the slot lock, a refresh
+    /// waits for it holding no segment lock. Taken the other way round, a refresh holding the
+    /// segment lock could queue for the slot lock behind a retire that waits on a merge that wants
+    /// the segment lock.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_waiting_for_the_slot_lock_holds_no_segment_lock(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let (clock, _) = manual(OffsetDateTime::now_utc());
+        let seg = create(
+            &pool,
+            ws,
+            "Plan",
+            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+            &TraceContext::root(Cause::api("save")),
+        )
+        .await;
+
+        let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
+        let job = {
+            let pool = pool.clone();
+            let trace = TraceContext::root(Cause::api("manual"));
+            tokio::spawn(async move { run(&pool, ws, seg.id, "manual", trace, &clock).await })
+        };
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert!(
+            crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
+            "the refresh took the segment lock before the slot lock"
+        );
+        zirv_flow_store::commit(retire).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), job)
+            .await
+            .expect("the refresh finishes once the slot lock is free")
+            .unwrap();
+    }
 }

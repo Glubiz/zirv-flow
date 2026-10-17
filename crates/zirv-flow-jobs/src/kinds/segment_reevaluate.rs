@@ -1251,4 +1251,46 @@ mod tests {
             .unwrap();
         assert_eq!(events, 0);
     }
+
+    /// The slot lock comes before the segment locks of a pass: while a retire holds the slot lock,
+    /// a pass that has people to evaluate waits for it holding no segment lock.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_waiting_for_the_slot_lock_holds_no_segment_lock(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let clock = clock();
+        let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+        full_refresh(&pool, ws, seg.id, &clock).await;
+        reevaluate(&pool, ws, &clock).await;
+        // A change marks a person, so the next pass has a segment to lock.
+        identify(
+            &pool,
+            ws,
+            "ada@example.com",
+            "pro",
+            &TraceContext::root(Cause::api("enter")),
+        )
+        .await;
+        assert_eq!(dirty(&pool).await, 1);
+
+        let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
+        let job = {
+            let pool = pool.clone();
+            tokio::spawn(async move { reevaluate(&pool, ws, &clock).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        assert!(
+            crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
+            "the pass took a segment lock before the slot lock"
+        );
+        zirv_flow_store::commit(retire).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), job)
+            .await
+            .expect("the pass finishes once the slot lock is free")
+            .unwrap();
+        assert_eq!(dirty(&pool).await, 0);
+    }
 }
