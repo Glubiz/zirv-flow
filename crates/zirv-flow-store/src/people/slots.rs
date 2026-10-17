@@ -1180,4 +1180,119 @@ mod db_tests {
         assert!(retired.unwrap().is_ok(), "the retire finished");
         assert!(writer.unwrap().is_ok(), "the writer finished");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_clear_batch_that_loses_locked_rows_to_a_concurrent_clear_does_not_end_the_clear(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        let people = i64::try_from(SLOT_BATCH).unwrap() + 100;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, traits, trait_s1) \
+             SELECT gen_random_uuid(), $1, jsonb_build_object('plan', 'p' || g), 'p' || g \
+             FROM generate_series(1, $2) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(people)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+        assert_eq!(slot, SlotColumn::S1);
+        retire(&pool, ws, "plan").await;
+        let ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        // A writer empties some slots inside the batch's range while the batch waits on them.
+        let mut other = begin(&pool).await.unwrap();
+        sqlx::query("UPDATE people SET trait_s1 = NULL WHERE id = ANY($1)")
+            .bind(&ids[10..20])
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let batch = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+                    .await
+                    .unwrap();
+                commit(tx).await.unwrap();
+                step
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        commit(other).await.unwrap();
+        let step = batch.await.unwrap();
+        assert!(matches!(step, SlotStep::More(_)), "{step:?}");
+        loop {
+            let mut tx = begin(&pool).await.unwrap();
+            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            if step == SlotStep::Finish {
+                break;
+            }
+        }
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM people WHERE trait_s1 IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// A short batch is not the last one: PostgreSQL can return fewer rows than the limit when a
+    /// locked row is gone or no longer matches, with more still to do.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_short_batch_finishes_only_when_no_person_is_left(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, trait_s1) \
+             SELECT gen_random_uuid(), $1, 'x' FROM generate_series(1, 5)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
+                     AND ($2::uuid IS NULL OR id > $2))";
+
+        let early = batch_step(&mut connection, probe, ws, 2, Some(ids[1]))
+            .await
+            .unwrap();
+        let last = batch_step(&mut connection, probe, ws, 2, Some(ids[4]))
+            .await
+            .unwrap();
+        let empty = batch_step(&mut connection, probe, ws, 0, None)
+            .await
+            .unwrap();
+
+        assert_eq!(early, SlotStep::More(Some(ids[1])));
+        assert_eq!(last, SlotStep::Finish);
+        assert_eq!(empty, SlotStep::More(None), "people remain after no cursor");
+        let clear_probe = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
+                           AND trait_s1 IS NOT NULL AND $2::uuid IS NULL)";
+        let still = batch_step(&mut connection, clear_probe, ws, 3, None)
+            .await
+            .unwrap();
+        assert_eq!(still, SlotStep::More(None), "slots are still filled");
+    }
 }
