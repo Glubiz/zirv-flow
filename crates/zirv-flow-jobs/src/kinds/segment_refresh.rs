@@ -116,7 +116,7 @@ impl JobKind for SegmentRefresh {
 }
 
 /// The compiler's catalog from the store's snapshot.
-fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
+pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> Catalog {
     Catalog {
         traits: snapshot.traits,
         events: snapshot.events,

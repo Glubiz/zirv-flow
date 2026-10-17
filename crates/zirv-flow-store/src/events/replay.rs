@@ -760,6 +760,7 @@ async fn store_replayed(
         },
     )
     .await?;
+    crate::changes::request_reevaluation(connection, workspace).await?;
     mark_replayed(connection, workspace, reject.id, event_id).await?;
     // A replayed event is an outcome like any other: watched viewers see it.
     if is_watched(connection, workspace).await? {
@@ -1487,5 +1488,29 @@ mod tests {
 
         assert!(asked.is_none());
         assert_eq!(judge.schema_loads, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_that_stores_an_event_requests_the_reevaluation_it_marked(pool: PgPool) {
+        let (ws, reject) = rejected(&pool).await;
+        fix_the_schema(&pool, ws).await;
+        sqlx::query("DELETE FROM jobs WHERE kind = 'segment.reevaluate'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let totals = replay_rejects(&pool, ws, &key(), &[reject], &manual_trace(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(totals.accepted, 1);
+        assert_eq!(count(&pool, "person_changes").await, 1);
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 1);
     }
 }

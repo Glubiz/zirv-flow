@@ -3,9 +3,11 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute};
+use crate::changes::request_reevaluation;
 use crate::{NewDecision, StoreError, append_decision};
 
 /// How many people one recompute batch covers.
@@ -39,7 +41,7 @@ pub async fn recompute_trait_batch(
     let keys = [key.to_owned()];
     for &person in &people {
         if recompute(connection, workspace, person, &keys).await? {
-            mark_dirty(connection, workspace, person).await?;
+            mark_dirty(connection, workspace, person, ChangeClasses::TRAITS, trace).await?;
             append_decision(
                 &mut *connection,
                 &NewDecision {
@@ -54,6 +56,9 @@ pub async fn recompute_trait_batch(
             )
             .await?;
         }
+    }
+    if !people.is_empty() {
+        request_reevaluation(connection, workspace).await?;
     }
     let full = i64::try_from(people.len()).is_ok_and(|n| n == RECOMPUTE_BATCH);
     Ok(if full { people.last().copied() } else { None })
