@@ -945,7 +945,7 @@ mod db_tests {
     async fn a_batch_that_loses_a_locked_row_to_a_delete_does_not_end_the_backfill(pool: PgPool) {
         let ws = workspace(&pool).await;
         define(&pool, ws, "plan", TraitType::String).await;
-        let people = i64::try_from(SLOT_BATCH).unwrap() + 100;
+        let people = SLOT_BATCH + 100;
         sqlx::query(
             "INSERT INTO people (id, workspace_id, traits) \
              SELECT gen_random_uuid(), $1, jsonb_build_object('plan', 'p' || g) \
@@ -1196,7 +1196,7 @@ mod db_tests {
     ) {
         let ws = workspace(&pool).await;
         define(&pool, ws, "plan", TraitType::String).await;
-        let people = i64::try_from(SLOT_BATCH).unwrap() + 100;
+        let people = SLOT_BATCH + 100;
         sqlx::query(
             "INSERT INTO people (id, workspace_id, traits, trait_s1) \
              SELECT gen_random_uuid(), $1, jsonb_build_object('plan', 'p' || g), 'p' || g \
