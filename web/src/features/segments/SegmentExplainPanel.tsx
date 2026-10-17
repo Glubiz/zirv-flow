@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
@@ -30,27 +30,34 @@ const KIND_WORDS: Record<string, string> = {
 };
 
 function ObservedValue({ observed }: { observed: Observed }) {
+  const has = (value: unknown) => value !== undefined && value !== null;
+  const parts: React.ReactNode[] = [];
+  if (has(observed.count)) {
+    parts.push(<>{observed.count} matching {observed.count === 1 ? "event" : "events"}</>);
+  }
   if (observed.masked) {
-    return (
-      <>
-        Seen: <HiddenValue what="The value" />
-      </>
-    );
+    parts.push(<>{has(observed.count) ? "value " : ""}<HiddenValue what="The value" /></>);
+  } else if (observed.missing) {
+    parts.push(<>no value</>);
+  } else if (has(observed.status)) {
+    parts.push(<>consent is {observed.status.replaceAll("_", " ")}</>);
+  } else if (has(observed.present)) {
+    parts.push(<>{observed.present ? "yes" : "no"}</>);
+  } else if (has(observed.value)) {
+    parts.push(<>{has(observed.count) ? "value " : ""}{valueText(observed.value)}</>);
   }
-  if (observed.missing) return <>Seen: no value</>;
-  if (observed.count !== undefined && observed.count !== null) {
-    return <>Seen: {observed.count} matching {observed.count === 1 ? "event" : "events"}</>;
-  }
-  if (observed.status !== undefined && observed.status !== null) {
-    return <>Seen: consent is {observed.status.replaceAll("_", " ")}</>;
-  }
-  if (observed.present !== undefined && observed.present !== null) {
-    return <>Seen: {observed.present ? "yes" : "no"}</>;
-  }
-  if (observed.value !== undefined && observed.value !== null) {
-    return <>Seen: {valueText(observed.value)}</>;
-  }
-  return null;
+  if (parts.length === 0) return null;
+  return (
+    <>
+      Seen:{" "}
+      {parts.map((part, at) => (
+        <Fragment key={at}>
+          {at > 0 ? ", " : ""}
+          {part}
+        </Fragment>
+      ))}
+    </>
+  );
 }
 
 function TreeNode({ node, definition, names }: { node: ExplainNode; definition: Node | null; names: Names }) {
@@ -87,9 +94,10 @@ function TreeNode({ node, definition, names }: { node: ExplainNode; definition: 
   );
 }
 
-function Summary({ explain, workspaceId }: { explain: Explain; workspaceId: string }) {
+function Summary({ explain, workspaceId, currentVersion }: { explain: Explain; workspaceId: string; currentVersion: number | null }) {
+  const older = currentVersion !== null && explain.version !== currentVersion;
   const decided = explain.outcome !== "unknown";
-  const pending = decided && (explain.outcome === "pass") !== explain.member;
+  const pending = decided && !older && (explain.outcome === "pass") !== explain.member;
   return (
     <div className="stack-tight">
       <p className="strong">
@@ -105,6 +113,11 @@ function Summary({ explain, workspaceId }: { explain: Explain; workspaceId: stri
           : "Stored as not a member."}{" "}
         Worked out at {formatDateTime(explain.evaluated_at)} against version {explain.version}.
       </p>
+      {older ? (
+        <p className="notice" role="status">
+          This is version {explain.version}. The stored membership refers to the current version, {currentVersion}.
+        </p>
+      ) : null}
       {pending ? (
         <p className="notice" role="status">
           A refresh is pending: the stored membership has not caught up with this answer yet.
@@ -252,7 +265,11 @@ export function SegmentExplainPanel({ workspaceId, personId }: PanelProps) {
           <Failure error={explain.error} onRetry={explain.reload} />
         ) : explain.data ? (
           <>
-            <Summary explain={explain.data} workspaceId={workspaceId} />
+            <Summary
+              explain={explain.data}
+              workspaceId={workspaceId}
+              currentVersion={segments.status === "ready" ? (segments.data.find((entry) => entry.id === explain.data?.segment_id)?.current_version ?? null) : null}
+            />
             <ul role="tree" aria-label="Why, condition by condition" className="tree-list">
               <TreeNode node={explain.data.tree} definition={definitionOf(explain.data)} names={names} />
             </ul>

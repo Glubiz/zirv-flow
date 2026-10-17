@@ -269,6 +269,25 @@ export function fromDefinition(definition: Definition): Node {
   return copy as unknown as Node;
 }
 
+function deepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((entry: unknown, at) => deepEqual(entry, right[at]))
+    );
+  }
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) return false;
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const keys = Object.keys(a).filter((key) => a[key] !== undefined);
+  const others = Object.keys(b).filter((key) => b[key] !== undefined);
+  return keys.length === others.length && keys.every((key) => deepEqual(a[key], b[key]));
+}
+
+/** Whether two trees say the same thing: the order of a node's keys does not matter, the order of a list does. */
 export function sameDefinition(left: Node, right: Node): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return deepEqual(left, right);
 }

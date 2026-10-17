@@ -110,8 +110,20 @@ export const VERSION_1 = {
   time_sensitive: false,
 };
 
+/** The same JSON with the keys of every object in the opposite order, as PostgreSQL jsonb hands them back. */
+export function reordered(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reordered);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .reverse()
+      .map(([key, entry]) => [key, reordered(entry)]),
+  );
+}
+
 export function detail(overrides: Record<string, unknown> = {}, version: Record<string, unknown> = {}) {
-  const current = { ...VERSION_1, ...version };
+  const merged = { ...VERSION_1, ...version };
+  const current = { ...merged, definition: reordered(merged.definition) };
   return { ...segmentRow({ current_version: current["version"] }), ...overrides, current };
 }
 

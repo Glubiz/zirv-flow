@@ -174,6 +174,48 @@ describe("segment explain panel", () => {
     expect(within(masked).getByText("Hidden")).toBeInTheDocument();
   });
 
+  it("shows both the count and the value of an event with a summary, masking the value as usual", async () => {
+    const tree = leaf("", "all", "pass", {
+      children: [
+        leaf("/all/0", "event", "pass", { observed: { count: 3, value: 80 } }),
+        leaf("/all/1", "event", "pass", { observed: { count: 1, masked: true } }),
+      ],
+    });
+    mockApi(routes(() => json(explainBody(tree))));
+    const user = userEvent.setup();
+    mount();
+    await choose(user);
+
+    await screen.findByText("In the segment");
+    expect(screen.getByText("Seen: 3 matching events, value 80")).toBeInTheDocument();
+    const masked = screen.getAllByRole("treeitem")[2]!;
+    expect(within(masked).getByText(/Seen: 1 matching event, value/)).toBeInTheDocument();
+    expect(within(masked).getByText("Hidden")).toBeInTheDocument();
+  });
+
+  it("notes that a refresh is pending only for the current version", async () => {
+    const failing = leaf("", "all", "fail");
+    mockApi({
+      ...routes(() => json(explainBody(failing, { member: true, version: 2 }))),
+      [`GET ${WS}/segments`]: () => json([segmentRow({ current_version: 2 })]),
+    });
+    const user = userEvent.setup();
+    const view = mount();
+    await choose(user);
+    expect(await screen.findByText(/A refresh is pending/)).toBeInTheDocument();
+    expect(screen.queryByText(/refers to the current version/)).not.toBeInTheDocument();
+    view.unmount();
+
+    mockApi({
+      ...routes(() => json(explainBody(failing, { member: true, version: 1 }))),
+      [`GET ${WS}/segments`]: () => json([segmentRow({ current_version: 2 })]),
+    });
+    mount();
+    await choose(user);
+    expect(await screen.findByText(/The stored membership refers to the current version, 2\./)).toBeInTheDocument();
+    expect(screen.queryByText(/A refresh is pending/)).not.toBeInTheDocument();
+  });
+
   it("notes that the profile of a merged person is shown", async () => {
     const mergedFrom = "77777777-0000-4000-8000-000000000001";
     mockApi(routes(() => json(explainBody(PASSING, { merged_from: mergedFrom }))));

@@ -1,17 +1,14 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE } from "../test/mockApi";
 import { AppRoutes } from "./App";
 
 function renderApp(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
-    </MemoryRouter>,
-  );
+  const router = createMemoryRouter([{ path: "*", element: <AppRoutes /> }], { initialEntries: [path] });
+  return render(<RouterProvider router={router} />);
 }
 
 describe("first run", () => {

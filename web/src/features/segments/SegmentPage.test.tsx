@@ -119,6 +119,42 @@ describe("saving a segment", () => {
     await waitFor(() => expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument());
   });
 
+  it("is clean after a save even though the API returns the keys in another order", async () => {
+    const odense = { v: 1, all: [{ trait: "city", op: "eq", value: "Odense" }] };
+    mockApi({ ...base(), [`PATCH ${SEGMENT}`]: () => json(detail({}, { version: 2, definition: odense })) });
+    const user = userEvent.setup();
+    mountPage();
+
+    const value = await screen.findByLabelText("Value");
+    await user.clear(value);
+    await user.type(value, "Odense");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved as version 2.")).toBeInTheDocument();
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    expect(screen.getByText("Version 2 is saved.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.click(screen.getByRole("link", { name: "All segments" }));
+    expect(await screen.findByText("The segment list was reached")).toBeInTheDocument();
+  });
+
+  it("is clean after a rename with spaces around the name", async () => {
+    const calls = mockApi({ ...base(), [`PATCH ${SEGMENT}`]: () => json(detail({ name: "Renamed" })) });
+    const user = userEvent.setup();
+    mountPage();
+
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "  Renamed  ");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(bodyOf(calls, "PATCH", SEGMENT)).toEqual({ name: "Renamed" });
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("Renamed");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
   it("updates only the header when the definition is untouched", async () => {
     const calls = mockApi({
       ...base(),

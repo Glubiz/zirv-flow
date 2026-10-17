@@ -143,6 +143,7 @@ function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & 
         );
         setSaved(created);
         onSaved?.(created);
+        guard.release();
         void navigate(`/w/${workspaceId}/segments/${created.id}`);
         return;
       }
@@ -158,6 +159,10 @@ function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & 
         }),
       );
       setSaved(updated);
+      setName(updated.name);
+      setDescription(updated.description);
+      setCadence(updated.cadence_minutes);
+      setRoot(fromDefinition(updated.current.definition));
       onSaved?.(updated);
       setNotice(definitionChanged ? `Saved as version ${updated.current_version}.` : "Saved.");
     } catch (error) {

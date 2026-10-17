@@ -1,51 +1,52 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useRef } from "react";
+import { useBlocker } from "react-router";
 
 export interface LeaveGuard {
   /** The in-app address the person tried to open while changes were unsaved; null when none. */
   pending: string | null;
   stay: () => void;
   leave: () => void;
+  /** Lets the next navigation through without asking, for one the page itself makes after a save. */
+  release: () => void;
 }
 
 /**
- * While `dirty`, a click on an in-app link is held back and reported as `pending` so the page can ask
- * in its own dialog, and closing or reloading the tab gets the browser's own warning. The router in use
- * is not a data router, so it has no blocker to ask; links are the way out of a page that this can see.
+ * While `dirty`, any navigation to another page (a link, Back or Forward, or code calling
+ * `navigate`) is held by the router's blocker and reported as `pending` so the page can ask in its
+ * own dialog, and closing or reloading the tab gets the browser's own warning.
  */
 export function useLeaveGuard(dirty: boolean): LeaveGuard {
-  const navigate = useNavigate();
-  const [pending, setPending] = useState<string | null>(null);
+  const dirtyNow = useRef(dirty);
+  const released = useRef(false);
+
+  useEffect(() => {
+    dirtyNow.current = dirty;
+  });
+
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      dirtyNow.current && !released.current && currentLocation.pathname !== nextLocation.pathname,
+  );
 
   useEffect(() => {
     if (!dirty) return;
-    function onClick(event: MouseEvent) {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
-      const href = link?.getAttribute("href");
-      if (!link || !href?.startsWith("/") || link.getAttribute("target") === "_blank") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setPending(href);
-    }
     function onUnload(event: BeforeUnloadEvent) {
       event.preventDefault();
     }
-    document.addEventListener("click", onClick, true);
     window.addEventListener("beforeunload", onUnload);
-    return () => {
-      document.removeEventListener("click", onClick, true);
-      window.removeEventListener("beforeunload", onUnload);
-    };
+    return () => window.removeEventListener("beforeunload", onUnload);
   }, [dirty]);
 
   return {
-    pending,
-    stay: () => setPending(null),
+    pending: blocker.state === "blocked" ? blocker.location.pathname : null,
+    stay: () => {
+      if (blocker.state === "blocked") blocker.reset();
+    },
     leave: () => {
-      const target = pending;
-      setPending(null);
-      if (target !== null) void navigate(target);
+      if (blocker.state === "blocked") blocker.proceed();
+    },
+    release: () => {
+      released.current = true;
     },
   };
 }
