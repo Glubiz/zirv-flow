@@ -15,7 +15,9 @@ import {
   ResourceView,
   shortId,
 } from "../../ui";
+import { useAssistantEnabled } from "../assistant";
 import { useSegmentAccess } from "./access";
+import { AssistantExplanation } from "./AssistantExplanation";
 import { fromDefinition } from "./ast";
 import { cadenceLabel, causeLabel } from "./labels";
 import { DataAgeNote, personLabel } from "./LiveCount";
@@ -45,7 +47,9 @@ export function SegmentPage() {
 }
 
 function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentId: string }) {
-  const { canWrite } = useSegmentAccess(workspaceId);
+  const { canWrite, canUseAssistant } = useSegmentAccess(workspaceId);
+  const assistantOn = useAssistantEnabled(workspaceId, canUseAssistant);
+  const [explaining, setExplaining] = useState(false);
   const segment = useResource(
     () =>
       unwrap(client.GET("/api/v1/workspaces/{ws}/segments/{id}", { params: { path: { ws: workspaceId, id: segmentId } } })),
@@ -96,7 +100,18 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
       <PageHeader
         title={data.name}
         lede={data.description || undefined}
-        actions={canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
+        actions={
+          canWrite || assistantOn ? (
+            <div className="row">
+              {assistantOn ? (
+                <Button onClick={() => setExplaining((open) => !open)} aria-expanded={explaining}>
+                  {explaining ? "Hide the explanation" : "Explain this segment"}
+                </Button>
+              ) : null}
+              {canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
+            </div>
+          ) : null
+        }
       />
       <dl className="facts">
         <div>
@@ -116,6 +131,15 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           <dd>{data.current_version}</dd>
         </div>
       </dl>
+      {assistantOn && explaining ? (
+        <AssistantExplanation
+          key={data.current_version}
+          workspaceId={workspaceId}
+          segmentId={segmentId}
+          definition={data.current.definition}
+          onClose={() => setExplaining(false)}
+        />
+      ) : null}
       <div className="subnav" role="tablist" aria-label="Segment" onKeyDown={onKey}>
         {TABS.map((entry) => (
           <button
@@ -134,7 +158,13 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
         ))}
       </div>
       <div role="tabpanel" id="segment-panel-definition" aria-labelledby="segment-tab-definition" hidden={tab !== "definition"}>
-        <SegmentForm workspaceId={workspaceId} segment={data} canWrite={canWrite} onSaved={() => segment.reload()} />
+        <SegmentForm
+          workspaceId={workspaceId}
+          segment={data}
+          canWrite={canWrite}
+          assistant={assistantOn}
+          onSaved={() => segment.reload()}
+        />
       </div>
       {tab === "members" ? (
         <div role="tabpanel" id="segment-panel-members" aria-labelledby="segment-tab-members">

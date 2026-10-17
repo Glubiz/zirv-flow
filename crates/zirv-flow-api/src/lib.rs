@@ -220,6 +220,10 @@ fn routes() -> Router<AppState> {
             post(segments::members::refresh),
         )
         .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/ai/explain",
+            post(assistant::explain::explain),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}",
             get(people::profile::get),
         )

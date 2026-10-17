@@ -7,9 +7,11 @@ pub(crate) mod diff;
 pub(crate) mod dispatch;
 pub(crate) mod drafts;
 pub(crate) mod evaluation;
+pub(crate) mod explain;
 pub(crate) mod prompt;
 pub(crate) mod runtime;
 pub(crate) mod schema;
+pub(crate) mod segment_context;
 pub(crate) mod settings;
 pub(crate) mod tools;
 

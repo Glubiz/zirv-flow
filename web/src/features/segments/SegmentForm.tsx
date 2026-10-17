@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type components, type DefinitionIssue, type ErrorSummary } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState, Panel, SelectField, TextAreaField, TextField } from "../../ui";
+import { AssistantPanel } from "../assistant";
 import {
   fromDefinition,
   isComplete,
@@ -11,12 +12,14 @@ import {
   sameDefinition,
   startsWith,
   toDefinition,
+  type Definition,
   type Node,
   type Path,
 } from "./ast";
 import { Builder } from "./Builder";
 import type { PlacedIssue } from "./builderContext";
 import { traitTypes, useCatalog, useEventTypes, type Catalog } from "./catalog";
+import { DraftPreview } from "./DraftPreview";
 import { asCadence, CADENCES, issueMessage, type Cadence } from "./labels";
 import { LiveCount } from "./LiveCount";
 import { useLeaveGuard } from "./useLeaveGuard";
@@ -64,10 +67,15 @@ interface FormProps {
   canWrite: boolean;
   /** Called with the segment as saved, for the page around the form to show. */
   onSaved?: (segment: SegmentDetail) => void;
+  /**
+   * Offer the assistant under the builder: the person is an admin and the workspace has it on. The
+   * form never asks; the page around it does, once.
+   */
+  assistant?: boolean;
 }
 
 /** The header fields, the builder and the live count of one segment, new or saved. */
-export function SegmentForm({ workspaceId, segment, canWrite, onSaved }: FormProps) {
+export function SegmentForm({ workspaceId, segment, canWrite, onSaved, assistant }: FormProps) {
   const catalog = useCatalog(workspaceId);
   if (catalog.status === "loading") {
     return <LoadingState label="Loading the fields, events and lists to choose from" />;
@@ -79,10 +87,19 @@ export function SegmentForm({ workspaceId, segment, canWrite, onSaved }: FormPro
       </Panel>
     );
   }
-  return <Form workspaceId={workspaceId} segment={segment} canWrite={canWrite} onSaved={onSaved} catalog={catalog.catalog} />;
+  return (
+    <Form
+      workspaceId={workspaceId}
+      segment={segment}
+      canWrite={canWrite}
+      onSaved={onSaved}
+      assistant={assistant}
+      catalog={catalog.catalog}
+    />
+  );
 }
 
-function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & { catalog: Catalog }) {
+function Form({ workspaceId, segment, canWrite, onSaved, assistant, catalog }: FormProps & { catalog: Catalog }) {
   const navigate = useNavigate();
   const [saved, setSaved] = useState(segment);
   const baseline = {
@@ -98,6 +115,7 @@ function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & 
   const [issues, setIssues] = useState<Issues>({ placed: [], unplaced: [] });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [replacing, setReplacing] = useState<{ resolve: (replace: boolean) => void } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const latestRoot = useRef(root);
 
@@ -181,9 +199,28 @@ function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & 
     }
   }
 
+  /** Loads the assistant's accepted draft as the builder's unsaved copy. Saving stays the person's. */
+  function loadDraft(content: unknown) {
+    setRoot(fromDefinition(content as Definition));
+    setIssues({ placed: [], unplaced: [] });
+    setFailure(null);
+    setNotice("The assistant's draft is loaded in the builder. It is not saved yet.");
+  }
+
+  /** Accepting replaces the conditions, so unsaved edits to them are asked about first, in a dialog. */
+  function confirmReplace(): boolean | Promise<boolean> {
+    if (!definitionChanged) return true;
+    return new Promise<boolean>((resolve) => setReplacing({ resolve }));
+  }
+
+  function answerReplace(replace: boolean) {
+    replacing?.resolve(replace);
+    setReplacing(null);
+  }
+
   const canSave = canWrite && !busy && name.trim() !== "" && complete && (saved === null || dirty);
 
-  return (
+  const form = (
     <form className="stack" onSubmit={(event) => void save(event)} noValidate>
       <Panel title="About this segment">
         <div className="stack">
@@ -280,6 +317,37 @@ function Form({ workspaceId, segment, canWrite, onSaved, catalog }: FormProps & 
         </Dialog>
       ) : null}
     </form>
+  );
+  return (
+    <div className="stack">
+      {form}
+      {assistant && canWrite ? (
+        <Panel>
+          <AssistantPanel
+            workspaceId={workspaceId}
+            kind="segment"
+            segmentId={saved?.id}
+            onAccept={loadDraft}
+            confirmAccept={confirmReplace}
+            renderPreview={(content) => <DraftPreview workspaceId={workspaceId} content={content} />}
+          />
+        </Panel>
+      ) : null}
+      {replacing !== null ? (
+        <Dialog title="Replace your unsaved changes?" onClose={() => answerReplace(false)}>
+          <p className="muted">
+            The builder has conditions you changed and have not saved. Accepting the draft replaces all of the conditions with the
+            assistant&rsquo;s. The name, description and schedule stay as they are.
+          </p>
+          <div className="dialog-actions">
+            <Button onClick={() => answerReplace(false)}>Keep my changes</Button>
+            <Button variant="primary" onClick={() => answerReplace(true)}>
+              Replace with the draft
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
+    </div>
   );
 }
 

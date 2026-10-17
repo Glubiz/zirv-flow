@@ -1418,6 +1418,7 @@ mod tests {
             kind: DraftKind::Mapping,
             source_id: Some(source),
             stream_name: Some("contacts"),
+            segment_id: None,
             status: DraftStatus::Valid,
             content: Some(&content),
             base_digest: None,
