@@ -1759,7 +1759,7 @@ mod tests {
         fx.segment_traits().await;
         let segment = fx.segment("Free in two cities", saved_definition()).await;
         let sent = fx.fake.call_count();
-        // The first placeholder moves onto the plan; a third one is made up.
+        // The first placeholder moves onto the plan; one under the city is made up.
         fx.fake.push(answer(
             "draft_segment",
             json!({"definition": {"v": 1, "all": [
@@ -1777,7 +1777,6 @@ mod tests {
         let feedback = last_feedback(&fx.requests_after(sent)[1]);
         for line in [
             "placeholder_moved at /all/0/value",
-            "placeholder_moved at /all/1/value/0",
             "placeholder_invented at /all/1/value/1",
         ] {
             assert!(feedback.contains(line), "{line} missing from {feedback}");

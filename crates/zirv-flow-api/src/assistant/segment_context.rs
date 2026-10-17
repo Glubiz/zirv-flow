@@ -175,29 +175,34 @@ pub(crate) fn nodes(root: &Value) -> Vec<NodeRef<'_>> {
     found
 }
 
-/// The string literals of one `value` member, at `pointer`: the string itself, or each string of
-/// an array.
+/// Whether a JSON value is a scalar literal: a string, a number or a boolean.
+fn is_scalar(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
+/// The scalar literals of one `value` member, at `pointer`: the value itself, or each item of an
+/// array (the items of `in`, `not_in` and `between`).
 fn value_slots(value: Option<&Value>, pointer: &str, owner: &Owner, out: &mut Vec<Slot>) {
     match value {
-        Some(Value::String(_)) => out.push(Slot {
+        Some(scalar) if is_scalar(scalar) => out.push(Slot {
             pointer: pointer.to_owned(),
             owner: owner.clone(),
         }),
         Some(Value::Array(items)) => {
-            for (index, item) in items.iter().enumerate() {
-                if item.is_string() {
-                    out.push(Slot {
-                        pointer: pointer_push(pointer, &index.to_string()),
-                        owner: owner.clone(),
-                    });
-                }
+            for (index, _) in items.iter().enumerate().filter(|(_, item)| is_scalar(item)) {
+                out.push(Slot {
+                    pointer: pointer_push(pointer, &index.to_string()),
+                    owner: owner.clone(),
+                });
             }
         }
         _ => {}
     }
 }
 
-/// Every string literal a definition compares a trait, an event property or an aggregate against.
+/// Every scalar literal a definition compares a trait, an event property or an aggregate over a
+/// property against. A count with no property compares a number of events, not a value of any
+/// trait or property, so it has no slot.
 pub(crate) fn literal_slots(definition: &Value) -> Vec<Slot> {
     let mut slots = Vec::new();
     for node in nodes(definition) {
@@ -240,7 +245,10 @@ pub(crate) fn literal_slots(definition: &Value) -> Vec<Slot> {
                     let at = pointer_push(&pointer_push(&filters, &index.to_string()), "value");
                     value_slots(filter.get("value"), &at, &property(filter), &mut slots);
                 }
-                if let Some(agg) = map.get("agg") {
+                if let Some(agg) = map
+                    .get("agg")
+                    .filter(|agg| agg.get("prop").is_some_and(Value::is_string))
+                {
                     let at = pointer_push(&pointer_push(&node.pointer, "agg"), "value");
                     value_slots(agg.get("value"), &at, &property(agg), &mut slots);
                 }
@@ -298,7 +306,8 @@ impl ClearKeys {
 struct Placeholder {
     token: String,
     slot: Slot,
-    original: String,
+    /// The literal as it was, with its JSON type.
+    original: Value,
 }
 
 /// The literals replaced in the definition a model was shown, to put back in its answer.
@@ -327,9 +336,10 @@ impl Placeholders {
         self.entries.is_empty()
     }
 
-    /// Puts every placeholder that is still in the node it was sent in back as its literal, then
-    /// names every other string that looks like one, as `code at <pointer>`. A moved placeholder
-    /// and an invented one are both left in place.
+    /// Puts every placeholder that sits under the trait, or the event property, it was sent under
+    /// back as its literal (with its JSON type), wherever the node moved to. Then names every other
+    /// string that looks like one, as `code at <pointer>`. A placeholder under another owner and
+    /// an invented one are both left in place.
     pub(crate) fn restore(&self, draft: &mut Value) -> Vec<String> {
         let mut restored: HashSet<String> = HashSet::new();
         for slot in literal_slots(draft) {
@@ -339,10 +349,10 @@ impl Placeholders {
             let Some(entry) = self.entries.iter().find(|entry| entry.token == *text) else {
                 continue;
             };
-            if entry.slot == slot
+            if entry.slot.owner == slot.owner
                 && let Some(target) = draft.pointer_mut(&slot.pointer)
             {
-                *target = Value::String(entry.original.clone());
+                *target = entry.original.clone();
                 restored.insert(slot.pointer);
             }
         }
@@ -391,10 +401,25 @@ impl Placeholders {
     /// The text with every placeholder it repeats replaced by its literal. For an explanation,
     /// which goes to the admin who owns the definition and is never stored.
     pub(crate) fn restore_text(&self, text: &str) -> String {
-        let mut out = text.to_owned();
-        for entry in &self.entries {
-            out = out.replace(&entry.token, &entry.original);
+        // One pass: replaced text is never scanned again, so a literal that reads like another
+        // placeholder stays as it is.
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(TOKEN_OPEN) {
+            out.push_str(&rest[..at]);
+            rest = &rest[at..];
+            let end = rest.find(')').map_or(rest.len(), |close| close + 1);
+            let candidate = &rest[..end];
+            match self.entries.iter().find(|entry| entry.token == candidate) {
+                Some(entry) => out.push_str(&match &entry.original {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                }),
+                None => out.push_str(candidate),
+            }
+            rest = &rest[end..];
         }
+        out.push_str(rest);
         out
     }
 }
@@ -408,7 +433,7 @@ pub(crate) fn mask(definition: &Value, clear: &ClearKeys) -> (Value, Placeholder
         if !clear.is_personal(&slot.owner) {
             continue;
         }
-        let Some(Value::String(original)) = masked.pointer(&slot.pointer).cloned() else {
+        let Some(original) = masked.pointer(&slot.pointer).cloned() else {
             continue;
         };
         let token = format!("{TOKEN_OPEN}{})", table.entries.len() + 1);
@@ -709,26 +734,198 @@ mod tests {
     }
 
     #[test]
-    fn a_placeholder_moved_to_another_node_is_an_issue_and_stays_in_place() {
+    fn a_placeholder_put_under_another_trait_is_an_issue_and_stays_in_place() {
         let (mut draft, table) = mask(&definition(), &ClearKeys::of(&details()));
-        // The model puts the city list's placeholder on another trait, and another in a new node.
+        // The model puts the city placeholder on the plan.
         draft["all"][1]["value"] = json!("(kept:1)");
-        draft["all"].as_array_mut().unwrap().push(json!(
-            {"trait": "city", "op": "eq", "value": "(kept:2)"}
-        ));
 
         let lines = table.restore(&mut draft);
 
-        assert_eq!(
-            lines,
-            [
-                "placeholder_moved at /all/1/value",
-                "placeholder_moved at /all/4/value"
-            ]
-        );
-        // The ones that stayed are restored.
+        assert_eq!(lines, ["placeholder_moved at /all/1/value"]);
+        // The ones that stayed under their trait are restored.
         assert_eq!(draft.pointer("/all/0/value/0"), Some(&json!("Aarhus")));
         assert!(!lines.join("").contains("Aarhus"));
+    }
+
+    /// The masked definition, changed by `change`, restored: no issue, and the literals back.
+    fn restored_after(change: impl FnOnce(&mut Vec<Value>)) -> Value {
+        let (mut draft, table) = mask(&definition(), &ClearKeys::of(&details()));
+        change(draft["all"].as_array_mut().unwrap());
+        let lines = table.restore(&mut draft);
+        assert_eq!(lines, Vec::<String>::new());
+        draft
+    }
+
+    #[test]
+    fn a_placeholder_is_restored_wherever_its_node_moved_under_the_same_owner() {
+        let original = definition();
+        let nodes = original["all"].as_array().unwrap().clone();
+
+        // A sibling before it is removed: everything shifts up.
+        let removed = restored_after(|all| {
+            all.remove(1);
+        });
+        assert_eq!(removed["all"], json!([nodes[0], nodes[2], nodes[3]]));
+        // The node that held a placeholder is removed, the others keep theirs.
+        let without_city = restored_after(|all| {
+            all.remove(0);
+        });
+        assert_eq!(without_city["all"], json!([nodes[1], nodes[2], nodes[3]]));
+        // A sibling is inserted before the masked nodes.
+        let inserted = restored_after(|all| {
+            all.insert(0, json!({"trait": "plan", "op": "exists"}));
+        });
+        assert_eq!(inserted["all"][1], nodes[0]);
+        assert_eq!(inserted["all"][3], nodes[2]);
+        // The nodes are reordered.
+        let reordered = restored_after(|all| all.reverse());
+        assert_eq!(
+            reordered["all"],
+            json!([nodes[3], nodes[2], nodes[1], nodes[0]])
+        );
+        // The condition is moved into a group of its own.
+        let nested = restored_after(|all| {
+            let city = all.remove(0);
+            all.push(json!({"any": [city]}));
+        });
+        assert_eq!(nested["all"][3]["any"][0], nodes[0]);
+    }
+
+    #[test]
+    fn a_placeholder_moved_onto_another_property_of_the_event_is_refused() {
+        let (mut draft, table) = mask(&definition(), &ClearKeys::of(&details()));
+        draft["all"][2]["where"][0]["prop"] = json!("channel");
+
+        let lines = table.restore(&mut draft);
+
+        assert_eq!(lines, ["placeholder_moved at /all/2/where/0/value"]);
+    }
+
+    fn personal_numbers() -> Value {
+        json!({"v": 1, "all": [
+            {"trait": "salary", "op": "between", "value": [90000, 120000]},
+            {"trait": "salary", "op": "gt", "value": 1.5},
+            {"trait": "vip", "op": "eq", "value": true},
+            {"trait": "plan", "op": "eq", "value": "pro"},
+            {"event": "order",
+             "where": [{"prop": "coupon", "op": "eq", "value": 7}],
+             "agg": {"fn": "sum", "prop": "coupon", "op": "gte", "value": 500}},
+            {"event": "order", "agg": {"fn": "count", "op": "gte", "value": 2}},
+            {"event": "order", "agg": {"fn": "sum", "prop": "total", "op": "gte", "value": 500}}
+        ]})
+    }
+
+    #[test]
+    fn numbers_and_booleans_on_personal_owners_are_masked_and_restored_with_their_type() {
+        let saved = personal_numbers();
+        let (masked, table) = mask(&saved, &ClearKeys::of(&details()));
+
+        let text = masked.to_string();
+        for hidden in ["90000", "120000", "1.5", "true", "500", "\"value\":7"] {
+            assert!(!text.contains(hidden), "{hidden} in {text}");
+        }
+        assert_eq!(masked.pointer("/all/0/value/0"), Some(&json!("(kept:1)")));
+        assert_eq!(masked.pointer("/all/0/value/1"), Some(&json!("(kept:2)")));
+        // A clear string stays, and a plain count has nothing to mask.
+        assert_eq!(masked.pointer("/all/3/value"), Some(&json!("pro")));
+        assert_eq!(masked.pointer("/all/5/agg/value"), Some(&json!(2)));
+        // The restore gives back the typed JSON values, before anything validates them.
+        let mut draft = masked;
+        let lines = table.restore(&mut draft);
+        assert_eq!(lines, Vec::<String>::new());
+        assert_eq!(draft, saved);
+        assert_eq!(draft.pointer("/all/0/value/0"), Some(&json!(90000)));
+        assert_eq!(draft.pointer("/all/2/value"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn a_clear_numeric_property_is_not_masked() {
+        let mut details = details();
+        details.events[0].properties.push(PropertyDetail {
+            name: "total".into(),
+            property_type: PropertyType::Number,
+            pii: false,
+        });
+        let (masked, _) = mask(&personal_numbers(), &ClearKeys::of(&details));
+
+        assert_eq!(masked.pointer("/all/6/agg/value"), Some(&json!(500)));
+        assert_eq!(masked.pointer("/all/4/agg/value"), Some(&json!("(kept:6)")));
+    }
+
+    #[test]
+    fn every_node_kind_of_the_ast_is_walked_and_only_value_carrying_ones_have_literals() {
+        let samples: [(&str, Value, usize); 9] = [
+            (
+                "all",
+                json!({"all": [{"trait": "t", "op": "eq", "value": "a"}]}),
+                1,
+            ),
+            (
+                "any",
+                json!({"any": [{"trait": "t", "op": "eq", "value": "a"}]}),
+                1,
+            ),
+            (
+                "not",
+                json!({"not": {"trait": "t", "op": "eq", "value": "a"}}),
+                1,
+            ),
+            (
+                "trait",
+                json!({"trait": "t", "op": "in", "value": ["a", 2, false]}),
+                3,
+            ),
+            (
+                "event",
+                json!({"event": "e", "where": [{"prop": "p", "op": "eq", "value": 1}],
+                    "agg": {"fn": "max", "prop": "p", "op": "gt", "value": 2.5},
+                    "window": {"last": "P7D"}}),
+                2,
+            ),
+            (
+                "list",
+                json!({"list": "0190d0f2-0000-7000-8000-0000000000a2"}),
+                0,
+            ),
+            (
+                "segment",
+                json!({"segment": "0190d0f2-0000-7000-8000-0000000000a2"}),
+                0,
+            ),
+            (
+                "consent",
+                json!({"consent": {"channel": "email", "topic": "news", "status": "subscribed"}}),
+                0,
+            ),
+            ("identifier", json!({"identifier": "email"}), 0),
+        ];
+        // A new node kind in the AST has to be added here, and so decided on, before this passes.
+        let kinds: Vec<&str> = samples.iter().map(|(kind, _, _)| *kind).collect();
+        assert_eq!(kinds, zirv_flow_core::segment::NODE_KEYS);
+        for (kind, node, expected) in &samples {
+            assert_eq!(literal_slots(node).len(), *expected, "{kind}");
+            let (masked, table) = mask(node, &ClearKeys::default());
+            assert_eq!(table.entries.len(), *expected, "{kind}");
+            assert_eq!(
+                masked.to_string().contains("(kept:"),
+                *expected > 0,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explanation_restore_does_not_replace_a_literal_that_reads_like_a_placeholder() {
+        // The first literal is the text of the second placeholder.
+        let saved = json!({"v": 1, "all": [
+            {"trait": "city", "op": "eq", "value": "(kept:2)"},
+            {"trait": "city", "op": "eq", "value": "Odense"}
+        ]});
+        let (_, table) = mask(&saved, &ClearKeys::default());
+
+        let text = table.restore_text("(kept:1) and (kept:2), (kept:3) and (kept:");
+
+        assert_eq!(text, "(kept:2) and Odense, (kept:3) and (kept:");
     }
 
     #[test]
