@@ -15,6 +15,10 @@ use utoipa::ToSchema;
 pub(crate) const MAPPING_KEYS: &[(&str, &str)] =
     &[("/columns", "column"), ("/event/properties", "property")];
 
+/// A segment definition has no list of rules: its arrays are conditions, where a position is the
+/// condition, so every array is compared whole.
+pub(crate) const SEGMENT_KEYS: &[(&str, &str)] = &[];
+
 /// The arrays of a manifest that are lists of rules, as `(path, key field)`.
 pub(crate) const MANIFEST_KEYS: &[(&str, &str)] = &[
     ("/streams", "name"),

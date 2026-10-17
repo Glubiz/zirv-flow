@@ -29,21 +29,27 @@ use zirv_flow_ai::{
     BoxFuture, ChatResponse, RepairError, RepairOutcome, ToolError, ToolOutput, Verdict,
 };
 use zirv_flow_connectors::manifest;
-use zirv_flow_core::UserId;
 use zirv_flow_core::mapping::Mapping;
 use zirv_flow_core::token::sha256;
-use zirv_flow_store::{AiDraft, DraftKind, DraftStatus, NewAiDraft, PgConnection, Source, Stream};
+use zirv_flow_core::{UserId, WorkspaceId};
+use zirv_flow_store::{
+    AiDraft, CatalogDetails, DraftKind, DraftStatus, NewAiDraft, PgConnection, Segment,
+    SegmentVersion, Source, Stream,
+};
 
-use super::diff::{self, Change, MANIFEST_KEYS, MAPPING_KEYS};
+use super::diff::{self, Change, MANIFEST_KEYS, MAPPING_KEYS, SEGMENT_KEYS};
 use super::dispatch::{DispatchError, Dispatcher};
 use super::prompt::{self, ManifestContext, render_manifest_context};
+use super::segment_context::{self, Placeholders};
+use super::tools::draft_segment::check_definition;
 use super::tools::{self, DraftTarget, ToolContext};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, Problem, SegmentIssueProblem};
+use crate::segments::catalog_of;
 use crate::sources::{
     MappingIssue, PreviewBody, SampleBody, check_sample, is_push, keeps_connection,
     mapping_check_of, preview_mapping, problems, sample_manifest, saved_mapping_body,
@@ -66,6 +72,7 @@ const DRAFT_DAYS: i64 = 7;
 pub(crate) enum DraftKindBody {
     Mapping,
     Manifest,
+    Segment,
 }
 
 impl DraftKindBody {
@@ -73,6 +80,7 @@ impl DraftKindBody {
         match self {
             Self::Mapping => DraftKind::Mapping,
             Self::Manifest => DraftKind::Manifest,
+            Self::Segment => DraftKind::Segment,
         }
     }
 }
@@ -89,6 +97,9 @@ pub(crate) struct DraftRequest {
     /// The stream whose mapping is drafted. Required for a mapping, refused for a manifest.
     #[serde(default)]
     stream: Option<String>,
+    /// For a segment: the segment being edited; absent for a new one. Refused for the other kinds.
+    #[serde(default)]
+    segment_id: Option<Uuid>,
     /// What the user wants, 1 to 2000 characters. It is sent as written: do not paste personal
     /// data into it.
     prompt: String,
@@ -110,6 +121,9 @@ fn check_request(request: &DraftRequest) -> Result<(), ApiError> {
     let prompt = request.prompt.trim().chars().count();
     if prompt == 0 || request.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(invalid("prompt", "must be 1 to 2000 characters"));
+    }
+    if request.segment_id.is_some() && request.kind != DraftKindBody::Segment {
+        return Err(invalid("segment_id", "belongs to a segment only"));
     }
     match request.kind {
         DraftKindBody::Mapping => {
@@ -141,8 +155,39 @@ fn check_request(request: &DraftRequest) -> Result<(), ApiError> {
                 return Err(invalid("documentation", "must be at most 32 KiB"));
             }
         }
+        DraftKindBody::Segment => {
+            if request.source_id.is_some() {
+                return Err(invalid(
+                    "source_id",
+                    "belongs to a mapping or manifest only",
+                ));
+            }
+            if request.stream.is_some() {
+                return Err(invalid("stream", "belongs to a mapping only"));
+            }
+            if request.documentation.is_some() {
+                return Err(invalid("documentation", "belongs to a manifest only"));
+            }
+            if request.sample.is_some() {
+                return Err(ApiError::unprocessable(
+                    "sample: only a webhook stream takes a sample payload",
+                )
+                .with_code("sample_not_supported"));
+            }
+        }
     }
     Ok(())
+}
+
+/// What a run puts back into the model's answer before it is checked: the values it was not shown.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum Restore {
+    #[default]
+    Nothing,
+    /// The saved manifest, whose static header and query values were masked.
+    Manifest(Value),
+    /// The literals of a saved segment definition that were masked.
+    Segment(Placeholders),
 }
 
 /// One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -159,6 +204,16 @@ pub(crate) struct DraftIssue {
 }
 
 impl DraftIssue {
+    /// The stable code of the problem.
+    pub(crate) fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Where the problem is, when it is not on the whole draft.
+    pub(crate) fn at(&self) -> Option<&str> {
+        self.at.as_deref()
+    }
+
     /// From a tool's feedback line: `code (column "x")`, `code at /pointer` or `code`.
     pub(crate) fn from_line(line: &str) -> Self {
         let (code, at) = if let Some((code, rest)) = line.split_once(" (column \"") {
@@ -270,6 +325,7 @@ pub(crate) struct AcceptedDraftBody {
     kind: DraftKindBody,
     source_id: Option<Uuid>,
     stream: Option<String>,
+    segment_id: Option<Uuid>,
     #[schema(value_type = Object)]
     content: Value,
 }
@@ -278,6 +334,7 @@ fn kind_body(kind: DraftKind) -> DraftKindBody {
     match kind {
         DraftKind::Mapping => DraftKindBody::Mapping,
         DraftKind::Manifest => DraftKindBody::Manifest,
+        DraftKind::Segment => DraftKindBody::Segment,
     }
 }
 
@@ -286,6 +343,7 @@ pub(crate) fn tool_name(kind: DraftKind) -> &'static str {
     match kind {
         DraftKind::Mapping => "draft_mapping",
         DraftKind::Manifest => "draft_manifest",
+        DraftKind::Segment => "draft_segment",
     }
 }
 
@@ -310,10 +368,13 @@ pub(crate) fn expected_call<'r>(response: &'r ChatResponse, want: &str) -> Optio
 /// A manifest draft gets the saved header and query values back first, wherever it kept the
 /// placeholder the model was shown in their place, so the validator, the diff and the stored
 /// draft all see the real manifest.
+///
+/// A segment draft gets the literals it was shown as placeholders back the same way, and a
+/// placeholder that is not in the node it was sent in is feedback.
 async fn validate_turn(
     context: &ToolContext,
     kind: DraftKind,
-    saved: Option<&Value>,
+    restore: &Restore,
     response: &ChatResponse,
 ) -> Verdict<Value, DraftIssue, ApiError> {
     let want = tool_name(kind);
@@ -325,8 +386,14 @@ async fn validate_turn(
         return feedback();
     };
     let mut restored = arguments.clone();
-    if let (Some(saved), Some(draft)) = (saved, restored.get_mut("manifest")) {
+    if let (Restore::Manifest(saved), Some(draft)) = (restore, restored.get_mut("manifest")) {
         prompt::restore_kept(draft, saved);
+    }
+    if let (Restore::Segment(table), Some(draft)) = (restore, restored.get_mut("definition")) {
+        let left = table.restore(draft);
+        if !left.is_empty() {
+            return Verdict::Invalid(DraftIssue::from_lines(&left));
+        }
     }
     if let Some(draft) = restored.get("manifest") {
         let left = prompt::leftover_placeholders(draft);
@@ -346,11 +413,11 @@ async fn validate_turn(
 fn turn<'a>(
     context: Arc<ToolContext>,
     kind: DraftKind,
-    saved: Arc<Option<Value>>,
+    restore: Arc<Restore>,
     response: &'a ChatResponse,
 ) -> BoxFuture<'a, Verdict<Value, DraftIssue, ApiError>> {
     // The future owns the context: it may not borrow what lives shorter than the response.
-    Box::pin(async move { validate_turn(&context, kind, saved.as_ref().as_ref(), response).await })
+    Box::pin(async move { validate_turn(&context, kind, &restore, response).await })
 }
 
 /// The SHA-256 of a saved artifact's JSON.
@@ -363,6 +430,7 @@ fn saved_artifact(
     kind: DraftKind,
     stream: Option<&Stream>,
     source: Option<&Source>,
+    version: Option<&SegmentVersion>,
 ) -> Option<Value> {
     match kind {
         DraftKind::Mapping => stream
@@ -371,6 +439,7 @@ fn saved_artifact(
         DraftKind::Manifest => source
             .filter(|source| source.kind == "http")
             .and_then(|source| source.config.get("manifest").cloned()),
+        DraftKind::Segment => version.map(|version| version.definition.clone()),
     }
 }
 
@@ -378,6 +447,7 @@ fn keys(kind: DraftKind) -> &'static [(&'static str, &'static str)] {
     match kind {
         DraftKind::Mapping => MAPPING_KEYS,
         DraftKind::Manifest => MANIFEST_KEYS,
+        DraftKind::Segment => SEGMENT_KEYS,
     }
 }
 
@@ -534,6 +604,13 @@ pub(crate) async fn create(
         }
         _ => (None, None),
     };
+    // The segment being edited, within the workspace; a new segment has none.
+    let segment = match (kind, request.segment_id) {
+        (DraftKind::Segment, Some(segment_id)) => {
+            Some(current_segment(&state, workspace.id, segment_id).await?)
+        }
+        _ => None,
+    };
     let sample = match (&source, &request.sample) {
         (Some(source), sample) if kind == DraftKind::Mapping => {
             match (is_push(&source.kind), sample) {
@@ -562,6 +639,9 @@ pub(crate) async fn create(
             stream: request.stream.clone().unwrap_or_default(),
         },
         DraftKind::Manifest => DraftTarget::Manifest,
+        DraftKind::Segment => DraftTarget::Segment {
+            segment_id: request.segment_id,
+        },
     };
     let context = Arc::new(ToolContext {
         state: state.clone(),
@@ -572,8 +652,27 @@ pub(crate) async fn create(
         sample,
     });
 
-    // What the model may know, read by the server through the registered tool.
+    let saved = saved_artifact(
+        kind,
+        stream.as_ref(),
+        source.as_ref(),
+        segment.as_ref().map(|(_, version)| version),
+    );
+    // What the model may know, read by the server: through the registered tool for a source, from
+    // the workspace's catalog for a segment.
+    let mut placeholders = Placeholders::default();
     let known = match (kind, request.source_id) {
+        (DraftKind::Segment, _) => {
+            let details = segment_details(&state, workspace.id).await?;
+            let (parts, table) = segment_context::draft_context(
+                &details,
+                request.segment_id,
+                saved.as_ref(),
+                context.privacy,
+            );
+            placeholders = table;
+            parts
+        }
         (DraftKind::Manifest, None) => render_manifest_context(&ManifestContext::default()),
         (_, Some(source_id)) => {
             let reader = tools::find("read_source").ok_or_else(ApiError::internal)?;
@@ -605,9 +704,12 @@ pub(crate) async fn create(
     let id = Uuid::now_v7();
     let dispatcher = dispatcher.for_draft(id);
     let owned = Arc::clone(&context);
-    // Only a manifest has placeholders to restore.
-    let saved = saved_artifact(kind, stream.as_ref(), source.as_ref());
-    let restorable = Arc::new(saved.clone().filter(|_| kind == DraftKind::Manifest));
+    // A manifest and a segment have values they were not shown to put back.
+    let restorable = Arc::new(match (kind, &saved) {
+        (DraftKind::Manifest, Some(saved)) => Restore::Manifest(saved.clone()),
+        (DraftKind::Segment, _) => Restore::Segment(placeholders),
+        _ => Restore::Nothing,
+    });
     let outcome = zirv_flow_ai::repair(
         state.ai.config.max_repair_attempts,
         &chat,
@@ -619,6 +721,7 @@ pub(crate) async fn create(
     let now = zirv_flow_store::database_now(&state.pool).await?;
     let expires_at = now + Duration::days(DRAFT_DAYS);
     let (source_id, stream_name) = (request.source_id, request.stream.as_deref());
+    let segment_id = request.segment_id;
     let body = match outcome {
         Ok(RepairOutcome::Valid(content, attempts)) => {
             let changes = diff::changes(saved.as_ref(), &content, keys(kind));
@@ -632,6 +735,7 @@ pub(crate) async fn create(
                     kind,
                     source_id,
                     stream_name,
+                    segment_id,
                     status: DraftStatus::Valid,
                     content: Some(&content),
                     base_digest: saved.as_ref().map(digest),
@@ -640,11 +744,13 @@ pub(crate) async fn create(
             )
             .await?;
             zirv_flow_store::commit(tx).await?;
-            let dry_run = match (&stream, source_id) {
-                (Some(stream), Some(source_id)) => {
-                    dry_run_mapping(&context, source_id, stream, &content).await
+            // A segment has no dry run on the server: the builder shows the live count of the draft.
+            let dry_run = match (kind, &stream, source_id) {
+                (DraftKind::Segment, _, _) => None,
+                (_, Some(stream), Some(source_id)) => {
+                    Some(dry_run_mapping(&context, source_id, stream, &content).await)
                 }
-                _ => dry_run_manifest(&context, source.as_ref(), &content).await,
+                _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
             };
             run_outcome(kind, "valid");
             DraftBody {
@@ -655,7 +761,7 @@ pub(crate) async fn create(
                 content: Some(content),
                 issues: Vec::new(),
                 changes,
-                dry_run: Some(dry_run),
+                dry_run,
             }
         }
         Ok(RepairOutcome::Exhausted(issues, attempts)) => {
@@ -669,6 +775,7 @@ pub(crate) async fn create(
                     kind,
                     source_id,
                     stream_name,
+                    segment_id,
                     status: DraftStatus::Invalid,
                     content: None,
                     base_digest: None,
@@ -713,6 +820,9 @@ async fn recheck(
     draft: &AiDraft,
     content: &Value,
 ) -> Result<(), ApiError> {
+    if draft.kind == DraftKind::Segment {
+        return recheck_segment(tx, draft, content).await;
+    }
     let Some(source_id) = draft.source_id else {
         // A manifest draft for a source not created yet has no saved version to lock or compare.
         return recheck_manifest(content);
@@ -735,8 +845,10 @@ async fn recheck(
                 .ok_or_else(ApiError::not_found)?;
             (source, None)
         }
+        // A segment draft was handled above.
+        DraftKind::Segment => return Err(ApiError::internal()),
     };
-    let saved = saved_artifact(draft.kind, stream.as_ref(), Some(&source));
+    let saved = saved_artifact(draft.kind, stream.as_ref(), Some(&source), None);
     if saved.as_ref().map(digest) != draft.base_digest {
         return Err(ApiError::ai_draft_outdated());
     }
@@ -752,6 +864,109 @@ async fn recheck(
                 .map_err(|issue: MappingIssue| ApiError::from(issue))
         }
         DraftKind::Manifest => recheck_manifest(content),
+        DraftKind::Segment => Err(ApiError::internal()),
+    }
+}
+
+/// The segment a draft is for as it is saved now, and the workspace's catalog: read under the lock a
+/// definition save takes first, so a save that commits after this read waits for the transaction
+/// and a draft is never accepted over a version it did not see. The draft is outdated when the
+/// current version is not the one it was made from, and refused with the issues when it no longer
+/// passes the rules a save applies, such as a trait archived since. It writes nothing.
+async fn recheck_segment(
+    tx: &mut PgConnection,
+    draft: &AiDraft,
+    content: &Value,
+) -> Result<(), ApiError> {
+    let workspace = draft.workspace_id;
+    zirv_flow_store::lock_segments(tx, workspace).await?;
+    let saved = match draft.segment_id {
+        Some(segment_id) => Some(current_definition(tx, workspace, segment_id).await?),
+        None => None,
+    };
+    if saved.as_ref().map(digest) != draft.base_digest {
+        return Err(ApiError::ai_draft_outdated());
+    }
+    let catalog = catalog_of(zirv_flow_store::segment_catalog(tx, workspace).await?);
+    let now = zirv_flow_store::database_now(&mut *tx).await?;
+    check_definition(content, &catalog, draft.segment_id, now)
+        .map(|_| ())
+        .map_err(|issues| {
+            ApiError::ai_draft_invalid_issues(
+                issues
+                    .into_iter()
+                    .map(|issue| SegmentIssueProblem {
+                        pointer: issue.pointer,
+                        code: issue.code.to_owned(),
+                    })
+                    .collect(),
+            )
+        })
+}
+
+/// The definition of a segment's current version. A segment that is gone or archived is refused
+/// as a save would refuse it.
+async fn current_definition(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    segment_id: Uuid,
+) -> Result<Value, ApiError> {
+    let (_, version) = current_version(connection, workspace, segment_id).await?;
+    Ok(version.definition)
+}
+
+/// A segment of the workspace and its current version.
+async fn current_version(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    segment_id: Uuid,
+) -> Result<(Segment, SegmentVersion), ApiError> {
+    let segment = zirv_flow_store::find_segment(&mut *connection, workspace, segment_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if segment.archived_at.is_some() {
+        return Err(ApiError::segment_archived());
+    }
+    let version = zirv_flow_store::find_segment_version(
+        &mut *connection,
+        workspace,
+        segment_id,
+        segment.current_version,
+    )
+    .await?
+    .ok_or_else(ApiError::internal)?;
+    Ok((segment, version))
+}
+
+/// The segment being edited and its current version, for a draft run.
+async fn current_segment(
+    state: &AppState,
+    workspace: WorkspaceId,
+    segment_id: Uuid,
+) -> Result<(Segment, SegmentVersion), ApiError> {
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    current_version(&mut tx, workspace, segment_id).await
+}
+
+/// What the model may be told about the workspace's model of the world.
+pub(crate) async fn segment_details(
+    state: &AppState,
+    workspace: WorkspaceId,
+) -> Result<CatalogDetails, ApiError> {
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    Ok(zirv_flow_store::segment_catalog_details(&mut tx, workspace).await?)
+}
+
+/// What the audit trail records of an accepted draft: its kind and where it points, never its
+/// content.
+fn audit_summary(draft: &AiDraft) -> Value {
+    match draft.kind {
+        DraftKind::Segment => json!({"kind": draft.kind.as_str(), "segment_id": draft.segment_id}),
+        DraftKind::Mapping | DraftKind::Manifest => json!({
+            "kind": draft.kind.as_str(),
+            "source_id": draft.source_id,
+            "stream": draft.stream_name,
+        }),
     }
 }
 
@@ -834,11 +1049,7 @@ pub(crate) async fn accept(
         Some(workspace.id),
         "ai.draft.accepted",
         Some(("ai_draft", id)),
-        json!({
-            "kind": draft.kind.as_str(),
-            "source_id": draft.source_id,
-            "stream": draft.stream_name,
-        }),
+        audit_summary(&draft),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -849,6 +1060,7 @@ pub(crate) async fn accept(
         kind: kind_body(draft.kind),
         source_id: draft.source_id,
         stream: draft.stream_name,
+        segment_id: draft.segment_id,
         content,
     }))
 }

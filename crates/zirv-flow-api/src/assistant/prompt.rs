@@ -13,6 +13,8 @@ use zirv_flow_ai::{AiError, ChatRequest, Content, Privacy, RequestBuilder, ToolS
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::DraftKind;
 
+use super::segment_context::{SEGMENT_INSTRUCTIONS, SEGMENT_REFERENCE};
+
 /// The most output tokens a draft may take, for both kinds.
 pub(crate) const MAX_OUTPUT_TOKENS: u32 = 4096;
 /// The most fields of a stream the context lists.
@@ -285,7 +287,7 @@ fn json_type(value: &Value) -> &'static str {
 }
 
 /// How many entries were left out of a capped list.
-fn omitted(note: &mut Vec<String>, what: &str, total: usize, cap: usize) {
+pub(crate) fn omitted(note: &mut Vec<String>, what: &str, total: usize, cap: usize) {
     if total > cap {
         note.push(format!(
             "{} {what} were left out ({total} in all).",
@@ -402,6 +404,9 @@ pub(crate) fn build_request(
         DraftKind::Manifest => builder
             .system(Content::Instruction(MANIFEST_INSTRUCTIONS.into()))?
             .system(Content::Instruction(MANIFEST_REFERENCE.into()))?,
+        DraftKind::Segment => builder
+            .system(Content::Instruction(SEGMENT_INSTRUCTIONS.into()))?
+            .system(Content::Instruction(SEGMENT_REFERENCE.into()))?,
     };
     let mut message = context;
     message.push(Content::Schema(format!("The request:\n{prompt}")));

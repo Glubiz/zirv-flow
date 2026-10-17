@@ -10,7 +10,7 @@ use zirv_flow_core::consent::Channel;
 use zirv_flow_core::events::{PropertyType, SchemaProperty};
 use zirv_flow_core::people::TraitType;
 
-use crate::{StoreError, list_topics, list_trait_definitions};
+use crate::{StoreError, list_lists, list_segments, list_topics, list_trait_definitions};
 
 /// What a workspace defines now: traits that are not archived, the properties of each event
 /// schema's current version, list ids, the ids of segments that are not archived and the
@@ -36,6 +36,19 @@ pub async fn segment_catalog(
     read_catalog(connection, workspace)
         .await
         .map_err(StoreError::into_bounded)
+}
+
+/// The catalog and the database clock, read on one connection of `pool` that is released when the
+/// call returns. For a check that writes nothing and so needs no transaction of its own: the
+/// assistant's `draft_segment` tool validates a draft with it.
+pub async fn read_segment_catalog(
+    pool: &sqlx::PgPool,
+    workspace: WorkspaceId,
+) -> Result<(CatalogSnapshot, time::OffsetDateTime), StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    let snapshot = segment_catalog(&mut connection, workspace).await?;
+    let now = crate::database_now(&mut *connection).await?;
+    Ok((snapshot, now))
 }
 
 async fn read_catalog(
@@ -95,6 +108,108 @@ async fn read_catalog(
             .insert(topic.key, topic.id);
     }
     Ok(snapshot)
+}
+
+/// A trait of the registry as the assistant is told about it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraitDetail {
+    pub key: String,
+    pub trait_type: TraitType,
+    pub description: String,
+    /// Declared personal data. A trait that is not declared non-personal counts as personal.
+    pub pii: bool,
+}
+
+/// A property of an event's current schema version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PropertyDetail {
+    pub name: String,
+    pub property_type: PropertyType,
+    pub pii: bool,
+}
+
+/// An event name with the properties of its current schema version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDetail {
+    pub name: String,
+    pub properties: Vec<PropertyDetail>,
+}
+
+/// A consent topic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopicDetail {
+    pub channel: Channel,
+    pub key: String,
+    pub name: String,
+}
+
+/// The names and descriptions behind [`CatalogSnapshot`], in a stable order, for telling the
+/// assistant what a definition may refer to. It holds definitions of the workspace's model and no
+/// value of any person, event or list member.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CatalogDetails {
+    pub traits: Vec<TraitDetail>,
+    pub events: Vec<EventDetail>,
+    pub lists: Vec<(Uuid, String)>,
+    pub segments: Vec<(Uuid, String)>,
+    pub topics: Vec<TopicDetail>,
+}
+
+/// Reads the details on `connection`, with the same filters as [`segment_catalog`]: traits that
+/// are not archived, the current version of each event schema, and segments that are not
+/// archived.
+pub async fn segment_catalog_details(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<CatalogDetails, StoreError> {
+    let mut details = CatalogDetails::default();
+    for definition in list_trait_definitions(&mut *connection, workspace).await? {
+        if !definition.archived {
+            details.traits.push(TraitDetail {
+                key: definition.key,
+                trait_type: definition.trait_type,
+                description: definition.description,
+                pii: definition.pii,
+            });
+        }
+    }
+    details.traits.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let schemas: Vec<(String, Json<Vec<SchemaProperty>>)> = sqlx::query_as(
+        "SELECT s.name, v.properties FROM event_schemas s \n         JOIN event_schema_versions v ON v.workspace_id = s.workspace_id \n                                     AND v.name = s.name AND v.version = s.current_version \n         WHERE s.workspace_id = $1 ORDER BY s.name",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    for (name, Json(properties)) in schemas {
+        details.events.push(EventDetail {
+            name,
+            properties: properties
+                .into_iter()
+                .map(|property| PropertyDetail {
+                    name: property.name,
+                    property_type: property.property_type,
+                    pii: property.pii,
+                })
+                .collect(),
+        });
+    }
+
+    for list in list_lists(&mut *connection, workspace).await? {
+        details.lists.push((list.id, list.name));
+    }
+    for segment in list_segments(&mut *connection, workspace, false).await? {
+        details.segments.push((segment.id, segment.name));
+    }
+    for topic in list_topics(&mut *connection, workspace, false).await? {
+        details.topics.push(TopicDetail {
+            channel: topic.channel,
+            key: topic.key,
+            name: topic.name,
+        });
+    }
+    Ok(details)
 }
 
 #[cfg(test)]
@@ -208,5 +323,71 @@ mod tests {
         );
         assert_eq!(snapshot.topics[&Channel::Email]["news"], topic.id);
         assert!(snapshot.segments.is_empty());
+        let (read, now) = read_segment_catalog(&pool, one).await.unwrap();
+        assert_eq!(read.traits, snapshot.traits);
+        assert!(now.year() >= 2026);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_details_name_what_the_snapshot_holds_and_nothing_of_another_workspace(
+        pool: PgPool,
+    ) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let mut personal = new_trait("city");
+        personal.pii = true;
+        personal.description = "Where they live".into();
+        create_trait_definition(&pool, one, &personal)
+            .await
+            .unwrap();
+        create_trait_definition(&pool, one, &new_trait("age"))
+            .await
+            .unwrap();
+        create_trait_definition(&pool, two, &new_trait("other"))
+            .await
+            .unwrap();
+        let list = create_list(&pool, one, "VIPs", "", None).await.unwrap();
+        create_list(&pool, two, "Theirs", "", None).await.unwrap();
+        create_event_schema(
+            &pool,
+            one,
+            &NewEventSchema {
+                name: "order".into(),
+                mode: EventMode::Warn,
+                description: String::new(),
+                properties: serde_json::from_str(
+                    r#"[{"name": "total", "type": "number"},
+                        {"name": "coupon", "type": "string", "pii": true}]"#,
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        publish_schema_draft(&mut connection, one, "order", None)
+            .await
+            .unwrap();
+
+        let details = segment_catalog_details(&mut connection, one).await.unwrap();
+
+        let keys: Vec<(&str, bool)> = details
+            .traits
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.pii))
+            .collect();
+        assert_eq!(keys, [("age", false), ("city", true)]);
+        assert_eq!(details.traits[1].description, "Where they live");
+        assert_eq!(details.lists, [(list.id, "VIPs".to_owned())]);
+        assert_eq!(details.events.len(), 1);
+        assert_eq!(details.events[0].name, "order");
+        let coupon = details.events[0]
+            .properties
+            .iter()
+            .find(|property| property.name == "coupon")
+            .unwrap();
+        assert!(coupon.pii);
+        assert!(details.segments.is_empty() && details.topics.is_empty());
     }
 }

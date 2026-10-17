@@ -1,9 +1,11 @@
 //! The assistant's tools (architecture 5.3, 13.2): the only things a model can ask the product to
-//! do. There are three, and the registry below is the only list of them:
+//! do. There are five, and the registry below is the only list of them:
 //!
 //! - `read_source` (read): what the model may know about a source's stream or manifest;
 //! - `draft_mapping` (draft): checks a mapping with the validator a stream save uses;
 //! - `draft_manifest` (draft): checks a manifest with the validator a source save uses.
+//! - `draft_segment` (draft): checks a segment definition with the rules a builder save applies;
+//! - `explain_segment` (read): checks an explanation of a saved segment against its definition.
 //!
 //! A tool never writes. It is told who is asking and in which workspace, and it authorizes that
 //! user again on every call; the model cannot name a target, only fill in the artifact. A new
@@ -11,6 +13,8 @@
 
 pub(crate) mod draft_manifest;
 pub(crate) mod draft_mapping;
+pub(crate) mod draft_segment;
+pub(crate) mod explain_segment;
 pub(crate) mod read_source;
 
 use serde_json::Value;
@@ -29,6 +33,10 @@ pub(crate) enum DraftTarget {
     Mapping { source_id: Uuid, stream: String },
     /// An `http` source's manifest. Whether it is saved yet only matters to the dry run.
     Manifest,
+    /// A segment definition. The segment is the one being edited, or none for a new one.
+    Segment { segment_id: Option<Uuid> },
+    /// The saved definition of a segment version, which an explanation is checked against.
+    Explain { definition: Value },
 }
 
 /// The caller of a tool: the signed-in user and the workspace, taken from the authorized request.
@@ -51,6 +59,8 @@ pub(crate) fn registry() -> Vec<Tool> {
         Box::new(read_source::ReadSource),
         Box::new(draft_mapping::DraftMapping),
         Box::new(draft_manifest::DraftManifest),
+        Box::new(draft_segment::DraftSegment),
+        Box::new(explain_segment::ExplainSegment),
     ]
 }
 
@@ -105,7 +115,16 @@ mod tests {
         let tools = registry();
 
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-        assert_eq!(names, ["read_source", "draft_mapping", "draft_manifest"]);
+        assert_eq!(
+            names,
+            [
+                "read_source",
+                "draft_mapping",
+                "draft_manifest",
+                "draft_segment",
+                "explain_segment"
+            ]
+        );
         assert_eq!(names.iter().collect::<HashSet<_>>().len(), names.len());
         for name in &names {
             for forbidden in [
@@ -135,7 +154,7 @@ mod tests {
             })
             .map(|tool| tool.name())
             .collect();
-        assert_eq!(reads, ["read_source"]);
+        assert_eq!(reads, ["read_source", "explain_segment"]);
         for tool in &tools {
             let spec = tool.spec().unwrap();
             assert_eq!(spec.name, tool.name());
@@ -157,6 +176,8 @@ mod tests {
             include_str!("read_source.rs"),
             include_str!("draft_mapping.rs"),
             include_str!("draft_manifest.rs"),
+            include_str!("draft_segment.rs"),
+            include_str!("explain_segment.rs"),
         ];
         for source in sources {
             // The tests of a module may name what it must not do.

@@ -15,7 +15,10 @@ mod reevaluate;
 mod refresh;
 mod schedule;
 
-pub use catalog::{CatalogSnapshot, segment_catalog};
+pub use catalog::{
+    CatalogDetails, CatalogSnapshot, EventDetail, PropertyDetail, TopicDetail, TraitDetail,
+    read_segment_catalog, segment_catalog, segment_catalog_details,
+};
 pub use crud::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, Segment, SegmentError,
     SegmentPatch, SegmentVersion, archive_segment, create_segment, find_segment,
