@@ -1,4 +1,4 @@
-import { OP_LABELS, AGG_LABELS } from "./operators";
+import { AGG_LABELS, OP_LABELS, type Op } from "./operators";
 import type { Node } from "./ast";
 
 export interface Names {
@@ -6,12 +6,17 @@ export interface Names {
   segments: ReadonlyMap<string, string>;
 }
 
-function valueText(value: unknown): string {
+export function valueText(value: unknown): string {
   if (value === undefined || value === null) return "";
   if (Array.isArray(value)) return (value as unknown[]).map(valueText).join(", ");
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
+}
+
+function comparison(op: Op, value: unknown): string {
+  const text = valueText(value);
+  return `${OP_LABELS[op]}${text === "" ? "" : ` ${text}`}`;
 }
 
 /** What a condition says, in words, for a reader who did not build it. */
@@ -20,8 +25,7 @@ export function describeNode(node: Node, names: Names): string {
   if ("any" in node) return "At least one of these is true";
   if ("not" in node) return "This is not true";
   if ("trait" in node) {
-    const value = valueText(node.value);
-    return `${node.trait} ${OP_LABELS[node.op]}${value === "" ? "" : ` ${value}`}`;
+    return `${node.trait} ${comparison(node.op, node.value)}`;
   }
   if ("event" in node) {
     const parts = [`Has the event ${node.event}`];
@@ -34,13 +38,13 @@ export function describeNode(node: Node, names: Names): string {
     const filters = node.where ?? [];
     if (filters.length > 0) {
       parts.push(
-        `where ${filters.map((filter) => `${filter.prop} ${OP_LABELS[filter.op]}${valueText(filter.value) === "" ? "" : ` ${valueText(filter.value)}`}`).join(" and ")}`,
+        `where ${filters.map((filter) => `${filter.prop} ${comparison(filter.op, filter.value)}`).join(" and ")}`,
       );
     }
     if (node.agg) {
       const agg = node.agg;
       parts.push(
-        `and ${AGG_LABELS[agg.fn].toLowerCase()}${agg.prop ? ` ${agg.prop}` : ""} ${OP_LABELS[agg.op]}${valueText(agg.value) === "" ? "" : ` ${valueText(agg.value)}`}`,
+        `and ${AGG_LABELS[agg.fn].toLowerCase()}${agg.prop ? ` ${agg.prop}` : ""} ${comparison(agg.op, agg.value)}`,
       );
     }
     return parts.join(" ");

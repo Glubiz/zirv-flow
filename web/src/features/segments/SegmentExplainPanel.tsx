@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, ErrorState, formatDateTime, HiddenValue, LoadingState, Panel, SelectField, shortId } from "../../ui";
 import { fromDefinition, getAt, place, type Node } from "./ast";
-import { describeNode, type Names } from "./describe";
+import { describeNode, valueText, type Names } from "./describe";
 
 type Explain = components["schemas"]["ExplainBody"];
 type ExplainNode = components["schemas"]["ExplainNodeBody"];
@@ -28,13 +28,6 @@ const KIND_WORDS: Record<string, string> = {
   consent: "Consent",
   identifier: "Identifier",
 };
-
-function valueText(value: unknown): string {
-  if (Array.isArray(value)) return (value as unknown[]).map(valueText).join(", ");
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value);
-}
 
 function ObservedValue({ observed }: { observed: Observed }) {
   if (observed.masked) {
