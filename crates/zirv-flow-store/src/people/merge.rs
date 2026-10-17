@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute, record_decision};
+use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
 use crate::consent;
 use crate::lists::{lock_lists_for_merge, move_on_merge};
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
@@ -58,6 +59,8 @@ pub(super) async fn merge_people(
     losers: &[Uuid],
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
+    // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
+    let slots = lock_and_read_writer_slots(connection, workspace).await?;
     lock_lists_for_merge(connection, workspace, losers).await?;
     for &loser in losers {
         let mut identity_ids: Vec<Uuid> = sqlx::query_scalar(
@@ -91,17 +94,19 @@ pub(super) async fn merge_people(
             .await
             .map_err(StoreError::query)?;
         // The loser keeps no traits: reads follow merged_into to the survivor's.
-        sqlx::query(
-            "UPDATE people SET merged_into = $3, traits = '{}'::jsonb, \
-                trait_sources = '{}'::jsonb, updated_at = now() \
+        let reset = format!(
+            "UPDATE people SET merged_into = $3, traits = '{{}}'::jsonb, \
+                trait_sources = '{{}}'::jsonb, updated_at = now(){} \
              WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(loser)
-        .bind(survivor)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+            slot_nulls_sql(&slots)
+        );
+        sqlx::query(sqlx::AssertSqlSafe(reset))
+            .bind(workspace.as_uuid())
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
         sqlx::query(
             "UPDATE people SET merged_into = $3 WHERE workspace_id = $1 AND merged_into = $2",
         )

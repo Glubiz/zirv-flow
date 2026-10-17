@@ -21,6 +21,7 @@ use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
 use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
+use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
 use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
@@ -86,6 +87,8 @@ pub(crate) async fn apply_profile_records(
     workspace: WorkspaceId,
     records: &[ProfileRecord],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
+    // First statement of a trait writer, before any row lock; see `slots` for the order.
+    lock_slots_shared(connection, workspace).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         outcomes.push(apply_profile_record(connection, workspace, record).await?);
@@ -101,6 +104,7 @@ pub(crate) async fn apply_profile_records_singly(
     workspace: WorkspaceId,
     records: &[ProfileRecord],
 ) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
+    lock_slots_shared(connection, workspace).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
@@ -166,6 +170,7 @@ pub(crate) async fn remove_contribution_in(
     record_key: &str,
     trace: &TraceContext,
 ) -> Result<Option<RemovedRecord>, StoreError> {
+    lock_slots_shared(connection, workspace).await?;
     // The record is locked first, then its person: the order the drain's existing-record path
     // uses. With the record locked a merge cannot move it, so the owner cannot change.
     let record: Option<(Uuid, Uuid)> = sqlx::query_as(
@@ -914,17 +919,26 @@ pub(super) async fn recompute(
         }
     }
     if values_changed || sources_changed {
-        sqlx::query(
-            "UPDATE people SET traits = $3, trait_sources = $4, updated_at = now() \
+        // The writer lock comes in a statement of its own, before the read of the assignments,
+        // and the slots are written by the statement that writes `traits`.
+        let slots = lock_and_read_writer_slots(connection, workspace).await?;
+        let sql = format!(
+            "UPDATE people SET traits = $3, trait_sources = $4, updated_at = now(){} \
              WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(person_id)
-        .bind(Value::Object(traits))
-        .bind(Value::Object(sources))
-        .execute(connection)
-        .await
-        .map_err(StoreError::query)?;
+            slot_assignments_sql(&slots, "$3::jsonb", 5)
+        );
+        let mut update = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(workspace.as_uuid())
+            .bind(person_id)
+            .bind(Value::Object(traits))
+            .bind(Value::Object(sources));
+        for (key, _) in &slots {
+            update = update.bind(key.as_str());
+        }
+        update
+            .execute(connection)
+            .await
+            .map_err(StoreError::query)?;
     }
     Ok(values_changed)
 }

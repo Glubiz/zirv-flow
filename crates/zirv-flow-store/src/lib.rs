@@ -115,6 +115,11 @@ pub use lists::{
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
+    Assigned, Retired, SLOT_BATCH, SLOT_LOCK_CLASS, SlotAssignment, SlotError, SlotStep,
+    assign_trait_slot, backfill_slot_batch, clear_slot_batch, finish_backfill, free_trait_slot,
+    ready_trait_slots, retire_trait_slot, trait_slot_assignments, trait_slot_of,
+};
+pub use people::{
     ConflictResolution, DroppedTrait, IdentityConflict, IdentityGroup, NewTraitDefinition, Person,
     PersonSearch, Profile, ProfileMerge, ProfileOutcome, ProfileRecord, ProfileTrait,
     RECOMPUTE_BATCH, REWRITE_BATCH, REWRITE_JOB_KIND, ResolveError, SearchError, SearchHit,
