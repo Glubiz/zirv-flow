@@ -12039,4 +12039,98 @@ email,b@example.com,
         );
         assert_eq!(reply.body["code"], "explain_timeout");
     }
+
+    /// An explain whose first read of `table` is held by a lock, with a 100 ms limit.
+    async fn explain_timeout_on(pool: PgPool, table: &str) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_segment_preview_timeout(std::time::Duration::from_millis(100)),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let id = segment_id(&router, &owner, &ws, "Pros", plan_is("pro")).await;
+        let person = explain_person(&pool, &ws, "a@example.com", json!({"plan": "pro"})).await;
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+        drop(blocker);
+
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{table}: {:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "explain_timeout", "{table}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explain_stalled_reading_the_segment_is_a_503_with_its_own_code(pool: PgPool) {
+        explain_timeout_on(pool, "segments").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explain_stalled_reading_the_version_is_a_503_with_its_own_code(pool: PgPool) {
+        explain_timeout_on(pool, "segment_versions").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_window_inside_the_loaded_span_decides_even_when_the_name_is_capped(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_order(&pool, &ws).await;
+        let definition = json!({"v": 1, "all": [
+            {"event": "order", "window": {"last": "P1D"},
+             "agg": {"fn": "count", "op": "gte", "value": 1}},
+            {"event": "order", "window": {"last": "P365D"},
+             "agg": {"fn": "count", "op": "gte", "value": 1}},
+        ]});
+        let id = segment_id(&router, &owner, &ws, "Recent", definition.clone()).await;
+        let person = explain_person(&pool, &ws, "busy@example.com", json!({})).await;
+        let cap = i32::try_from(zirv_flow_store::EXPLAIN_EVENT_CAP).unwrap();
+        // Seeded from a day ago; move them two days back, past the one-day window.
+        seed_events(&pool, &ws, &person, "order", cap + 1, 1.0).await;
+        sqlx::query("UPDATE events SET occurred_at = occurred_at - interval '1 day'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh_compiled(&pool, &ws, &id, &definition).await;
+
+        let reply = explain_as(
+            &router,
+            Auth::Session(&owner),
+            &explain_uri(&ws, &person, &id),
+        )
+        .await;
+
+        // The refresh sees no order in the last day and says fail; so does explain.
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["member"], false);
+        assert_eq!(reply.body["outcome"], "fail");
+        let leaves = &reply.body["tree"]["children"];
+        assert_eq!(leaves[0]["outcome"], "fail");
+        assert_eq!(leaves[0]["observed"]["count"], 0);
+        assert_eq!(leaves[1]["outcome"], "unknown");
+        assert_eq!(leaves[1]["reason"], "capped");
+    }
 }

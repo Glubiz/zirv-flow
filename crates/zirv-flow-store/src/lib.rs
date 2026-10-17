@@ -291,7 +291,7 @@ impl StoreError {
     /// Reclassifies a query cancelled at its statement timeout (SQLSTATE 57014) as a timeout.
     /// For the errors of a bounded read that goes through helpers which report plain query
     /// failures; any other error is returned as it was.
-    pub(crate) fn into_bounded(self) -> Self {
+    pub fn into_bounded(self) -> Self {
         let cancelled = matches!(self.kind, StoreErrorKind::Query)
             && self
                 .source
