@@ -5,6 +5,7 @@ import { EmptyState, ErrorState, formatDateTime, HiddenValue, kindLabel, Loading
 import { ConsentPanel } from "../consent";
 import { PersonListsPanel } from "../lists";
 import { useWorkspaceAccess } from "../members";
+import { SegmentExplainPanel } from "../segments";
 import { Timeline } from "./Timeline";
 import { typeLabel } from "./TraitDialog";
 
@@ -70,6 +71,7 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
         <div className="stack">
           <ConsentPanel workspaceId={workspaceId} personId={data.id} canWrite={canWrite} />
           <PersonListsPanel workspaceId={workspaceId} personId={data.id} />
+          <SegmentExplainPanel workspaceId={workspaceId} personId={data.id} />
         </div>
       </div>
       <Timeline workspaceId={workspaceId} personId={data.id} />

@@ -1,17 +1,14 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE } from "../test/mockApi";
 import { AppRoutes } from "./App";
 
 function renderApp(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
-    </MemoryRouter>,
-  );
+  const router = createMemoryRouter([{ path: "*", element: <AppRoutes /> }], { initialEntries: [path] });
+  return render(<RouterProvider router={router} />);
 }
 
 describe("first run", () => {
@@ -207,11 +204,11 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(14);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(15);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Lists", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "API keys", "Traces"]) {
+    for (const name of ["Members", "Fields", "Lists", "Segments", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "API keys", "Traces"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");

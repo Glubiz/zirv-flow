@@ -5,6 +5,12 @@ export interface FieldError {
   reason: string;
 }
 
+/** One problem with a segment definition: a JSON pointer into it and a fixed code, never a value. */
+export interface DefinitionIssue {
+  pointer: string;
+  code: string;
+}
+
 export interface ProblemDetails {
   title: string;
   detail: string;
@@ -15,6 +21,8 @@ export interface ProblemDetails {
   code?: string | null;
   /** The invalid fields, when the failure lists them. */
   errors?: FieldError[];
+  /** What is wrong with a segment definition (`segment_invalid`). */
+  issues?: DefinitionIssue[];
 }
 
 export class ApiError extends Error {
@@ -25,6 +33,7 @@ export class ApiError extends Error {
   readonly requestId: string | null;
   readonly code: string | null;
   readonly errors: FieldError[];
+  readonly issues: DefinitionIssue[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -36,6 +45,7 @@ export class ApiError extends Error {
     this.requestId = problem.requestId;
     this.code = problem.code ?? null;
     this.errors = problem.errors ?? [];
+    this.issues = problem.issues ?? [];
   }
 }
 
@@ -57,6 +67,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       requestId: text(body["request_id"]),
       code: text(body["code"]),
       errors: fieldErrors(body["errors"]),
+      issues: definitionIssues(body["issues"]),
     });
   }
   return new ApiError({
@@ -93,5 +104,14 @@ function fieldErrors(value: unknown): FieldError[] {
     return typeof index === "number" && typeof field === "string" && typeof reason === "string"
       ? [{ index, field, reason }]
       : [];
+  });
+}
+
+function definitionIssues(value: unknown): DefinitionIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { pointer, code } = entry;
+    return typeof pointer === "string" && typeof code === "string" ? [{ pointer, code }] : [];
   });
 }
