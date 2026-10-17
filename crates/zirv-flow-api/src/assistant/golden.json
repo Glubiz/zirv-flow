@@ -225,6 +225,143 @@
           }]
         }}
       ]
+    },
+    {
+      "name": "segment-nordic-buyers",
+      "kind": "segment",
+      "prompt": "People in Denmark, Sweden or Norway who placed at least two orders of 50 or more in the last 90 days, who are not on the VIP list and who are subscribed to the newsletter.",
+      "traits": [
+        {"key": "country", "type": "string", "description": "Two-letter country code"},
+        {"key": "plan", "type": "string", "description": "Subscription plan"}
+      ],
+      "events": [
+        {"name": "order_placed", "properties": [
+          {"name": "total", "type": "number"},
+          {"name": "currency", "type": "string"}
+        ]}
+      ],
+      "lists": [{"id": "0190d0f2-0000-7000-8000-0000000000a2", "name": "VIP"}],
+      "topics": [{"channel": "email", "key": "newsletter", "name": "Newsletter"}],
+      "expect": [
+        {"path": "/all/0/trait", "equals": "country"},
+        {"path": "/all/0/value", "contains": "DK"},
+        {"path": "/all/1/event", "equals": "order_placed"},
+        {"path": "/all/1/where/0/prop", "equals": "total"},
+        {"path": "/all/1/agg/fn", "equals": "count"},
+        {"path": "/all/1/window/last", "equals": "P90D"},
+        {"path": "/all/2/not/list", "equals": "0190d0f2-0000-7000-8000-0000000000a2"},
+        {"path": "/all/3/consent/topic", "equals": "newsletter"}
+      ],
+      "replay": [
+        {"definition": {"v": 1, "all": [
+          {"trait": "country", "op": "in", "value": ["DK", "SE", "NO"]},
+          {"event": "order_placed", "where": [{"prop": "total", "op": "gte", "value": 50}],
+           "agg": {"fn": "count", "op": "gte", "value": 2}, "window": {"last": "P90D"}},
+          {"not": {"list": "0190d0f2-0000-7000-8000-0000000000a2"}},
+          {"consent": {"channel": "email", "topic": "newsletter", "status": "subscribed"}}
+        ]}}
+      ]
+    },
+    {
+      "name": "segment-repairs-an-unknown-trait",
+      "kind": "segment",
+      "prompt": "Customers in Sweden.",
+      "traits": [
+        {"key": "country", "type": "string", "description": "Two-letter country code"},
+        {"key": "plan", "type": "string", "description": "Subscription plan"}
+      ],
+      "expect": [
+        {"path": "/trait", "equals": "country"},
+        {"path": "/value", "equals": "SE"}
+      ],
+      "replay": [
+        {"definition": {"v": 1, "trait": "nation", "op": "eq", "value": "SE"}},
+        {"definition": {"v": 1, "trait": "country", "op": "eq", "value": "SE"}}
+      ]
+    },
+    {
+      "name": "segment-keeps-a-literal-it-was-not-shown",
+      "kind": "segment",
+      "prompt": "Keep the cities as they are, and require the pro plan instead of the free plan.",
+      "traits": [
+        {"key": "city", "type": "string", "description": "City of residence", "pii": true},
+        {"key": "plan", "type": "string", "description": "Subscription plan"}
+      ],
+      "definition": {"v": 1, "all": [
+        {"trait": "city", "op": "in", "value": ["Aarhus", "Odense"]},
+        {"trait": "plan", "op": "eq", "value": "free"}
+      ]},
+      "expect": [
+        {"path": "/all/0/value", "contains": "Aarhus"},
+        {"path": "/all/0/value", "contains": "Odense"},
+        {"path": "/all/1/value", "equals": "pro"}
+      ],
+      "replay": [
+        {"definition": {"v": 1, "all": [
+          {"trait": "city", "op": "in", "value": ["(kept:1)", "(kept:2)"]},
+          {"trait": "plan", "op": "eq", "value": "pro"}
+        ]}}
+      ]
+    },
+    {
+      "name": "segment-removes-a-condition-next-to-a-masked-literal",
+      "kind": "segment",
+      "prompt": "Drop the country condition and keep the city one as it is.",
+      "traits": [
+        {"key": "country", "type": "string", "description": "Country code", "pii": true},
+        {"key": "city", "type": "string", "description": "City of residence", "pii": true}
+      ],
+      "definition": {"v": 1, "all": [
+        {"trait": "country", "op": "eq", "value": "DK"},
+        {"trait": "city", "op": "eq", "value": "Aarhus"}
+      ]},
+      "expect": [
+        {"path": "/all/0/trait", "equals": "city"},
+        {"path": "/all/0/value", "equals": "Aarhus"},
+        {"path": "/all/1", "absent": true}
+      ],
+      "replay": [
+        {"definition": {"v": 1, "all": [
+          {"trait": "city", "op": "eq", "value": "(kept:2)"}
+        ]}}
+      ]
+    },
+    {
+      "name": "explain-nordic-buyers",
+      "kind": "explain",
+      "prompt": "Explain the segment.",
+      "traits": [
+        {"key": "country", "type": "string", "description": "Two-letter country code"}
+      ],
+      "events": [
+        {"name": "order_placed", "properties": [{"name": "total", "type": "number"}]}
+      ],
+      "lists": [{"id": "0190d0f2-0000-7000-8000-0000000000a2", "name": "VIP"}],
+      "topics": [{"channel": "email", "key": "newsletter", "name": "Newsletter"}],
+      "definition": {"v": 1, "all": [
+        {"trait": "country", "op": "in", "value": ["DK", "SE", "NO"]},
+        {"event": "order_placed", "where": [{"prop": "total", "op": "gte", "value": 50}],
+         "agg": {"fn": "count", "op": "gte", "value": 2}, "window": {"last": "P90D"}},
+        {"not": {"list": "0190d0f2-0000-7000-8000-0000000000a2"}},
+        {"consent": {"channel": "email", "topic": "newsletter", "status": "subscribed"}}
+      ]},
+      "expect": [
+        {"path": "/summary", "contains": "Nordic"},
+        {"path": "/nodes/*/pointer", "equals": "/all/0"},
+        {"path": "/nodes/*/pointer", "equals": "/all/1"},
+        {"path": "/nodes/*/pointer", "equals": "/all/2/not"},
+        {"path": "/nodes/*/pointer", "equals": "/all/3"},
+        {"path": "/nodes/*/text", "contains": "VIP"}
+      ],
+      "replay": [
+        {"summary": "Nordic customers who ordered recently, are not VIPs and receive the newsletter.",
+         "nodes": [
+           {"pointer": "/all/0", "text": "The country is Denmark, Sweden or Norway."},
+           {"pointer": "/all/1", "text": "They placed at least two orders of 50 or more in the last 90 days."},
+           {"pointer": "/all/2/not", "text": "They are not on the VIP list."},
+           {"pointer": "/all/3", "text": "They are subscribed to the newsletter by email."}
+         ]}
+      ]
     }
   ]
 }

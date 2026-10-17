@@ -1,9 +1,22 @@
 import { AGG_LABELS, OP_LABELS, type Op } from "./operators";
 import type { Node } from "./ast";
 
+interface Named {
+  id: string;
+  name: string;
+}
+
 export interface Names {
   lists: ReadonlyMap<string, string>;
   segments: ReadonlyMap<string, string>;
+}
+
+/** The names of the lists and segments a definition refers to; a list not loaded yet names nothing. */
+export function namesOf(lists: readonly Named[] = [], segments: readonly Named[] = []): Names {
+  return {
+    lists: new Map(lists.map((list) => [list.id, list.name])),
+    segments: new Map(segments.map((segment) => [segment.id, segment.name])),
+  };
 }
 
 export function valueText(value: unknown): string {

@@ -489,6 +489,31 @@ impl ApiError {
         }
     }
 
+    /// A segment draft that no longer passes the rules a save applies: every issue with its
+    /// pointer and code, never a value.
+    pub(crate) fn ai_draft_invalid_issues(issues: Vec<SegmentIssueProblem>) -> Self {
+        Self {
+            segment: Some(Box::new(SegmentExtra {
+                issues: Some(issues),
+                cycle: None,
+            })),
+            ..Self::ai_draft_invalid()
+        }
+    }
+
+    /// An explanation that did not pass its checks within the repair attempts: the issue codes
+    /// of the last attempt.
+    pub(crate) fn ai_explain_failed(issues: Vec<SegmentIssueProblem>) -> Self {
+        Self {
+            code: Some("ai_explain_failed"),
+            segment: Some(Box::new(SegmentExtra {
+                issues: Some(issues),
+                cycle: None,
+            })),
+            ..Self::unprocessable("the assistant could not explain this segment; try again")
+        }
+    }
+
     /// The saved mapping or manifest changed after the draft was made.
     pub(crate) fn ai_draft_outdated() -> Self {
         Self {
@@ -673,6 +698,16 @@ mod tests {
             ),
             (
                 ApiError::ai_draft_invalid(),
+                StatusCode::CONFLICT,
+                "ai_draft_invalid",
+            ),
+            (
+                ApiError::ai_explain_failed(Vec::new()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ai_explain_failed",
+            ),
+            (
+                ApiError::ai_draft_invalid_issues(Vec::new()),
                 StatusCode::CONFLICT,
                 "ai_draft_invalid",
             ),

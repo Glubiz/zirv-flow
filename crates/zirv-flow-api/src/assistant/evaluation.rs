@@ -17,15 +17,21 @@ use std::sync::Mutex;
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_ai::{
     AiError, BoxFuture, ChatRequest, ChatResponse, Privacy, RepairError, RepairOutcome, Sender,
     Verdict,
 };
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::consent::Channel;
+use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::mapping::{Header, TraitState};
 use zirv_flow_core::people::TraitType;
-use zirv_flow_store::DraftKind;
+use zirv_flow_segments::Catalog;
+use zirv_flow_store::{
+    CatalogDetails, DraftKind, EventDetail, PropertyDetail, TopicDetail, TraitDetail,
+};
 
 use super::dispatch::{DispatchError, Dispatcher};
 use super::drafts::{DraftIssue, expected_call, tool_name, wrong_answer};
@@ -33,7 +39,8 @@ use super::prompt::{
     ManifestContext, StreamContext, TraitInfo, build_request, render_manifest_context,
     render_stream_context,
 };
-use super::tools::{self, draft_manifest, draft_mapping};
+use super::segment_context::{self, Placeholders};
+use super::tools::{self, draft_manifest, draft_mapping, draft_segment, explain_segment};
 use crate::AppState;
 use crate::problem::ApiError;
 use crate::sources::MappingCheck;
@@ -51,13 +58,37 @@ struct Corpus {
 enum CaseKind {
     Mapping,
     Manifest,
+    Segment,
+    /// An explanation of a saved segment: the case holds its definition, and the properties are
+    /// checked on the explanation.
+    Explain,
 }
 
 impl CaseKind {
-    fn store(self) -> DraftKind {
+    /// The kind of draft the case produces; an explanation is not a draft.
+    fn draft(self) -> Option<DraftKind> {
         match self {
-            Self::Mapping => DraftKind::Mapping,
-            Self::Manifest => DraftKind::Manifest,
+            Self::Mapping => Some(DraftKind::Mapping),
+            Self::Manifest => Some(DraftKind::Manifest),
+            Self::Segment => Some(DraftKind::Segment),
+            Self::Explain => None,
+        }
+    }
+
+    /// The one tool the case offers the model.
+    fn tool(self) -> &'static str {
+        match self.draft() {
+            Some(kind) => tool_name(kind),
+            None => "explain_segment",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mapping => "mapping",
+            Self::Manifest => "manifest",
+            Self::Segment => "segment",
+            Self::Explain => "explain",
         }
     }
 }
@@ -78,11 +109,57 @@ struct GoldenTrait {
     trait_type: TraitType,
     #[serde(default)]
     description: String,
+    /// Declared personal data; a segment case masks literals compared against it.
+    #[serde(default)]
+    pii: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GoldenList {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenProperty {
+    name: String,
+    #[serde(rename = "type")]
+    property_type: PropertyType,
+    #[serde(default)]
+    pii: bool,
+}
+
+/// An event name of the catalog a segment case is checked against.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenEvent {
+    name: String,
+    #[serde(default)]
+    properties: Vec<GoldenProperty>,
+}
+
+/// A consent topic of the catalog.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenTopic {
+    /// `email`.
+    channel: String,
+    key: String,
+    name: String,
+}
+
+impl GoldenTopic {
+    fn channel(&self) -> Option<Channel> {
+        self.channel.parse().ok()
+    }
+}
+
+/// Another segment a definition may refer to.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenSegment {
     id: Uuid,
     name: String,
 }
@@ -182,6 +259,17 @@ pub(crate) struct GoldenCase {
     traits: Vec<GoldenTrait>,
     #[serde(default)]
     lists: Vec<GoldenList>,
+    /// The events and their properties, for a segment or an explanation.
+    #[serde(default)]
+    events: Vec<GoldenEvent>,
+    #[serde(default)]
+    topics: Vec<GoldenTopic>,
+    /// The other segments of the workspace.
+    #[serde(default)]
+    segments: Vec<GoldenSegment>,
+    /// The saved definition: what an explanation explains, and what a segment draft starts from.
+    #[serde(default)]
+    definition: Option<Value>,
     expect: Vec<Expect>,
     /// What a good model answered, as the arguments of its tool call, in order. CI answers with
     /// these; an operator's run does not use them.
@@ -215,6 +303,90 @@ impl GoldenCase {
                 .map(|list| (list.id, list.name.clone()))
                 .collect(),
             samples: Vec::new(),
+        }
+    }
+
+    /// The catalog a segment draft is checked against, built from the case alone.
+    fn catalog(&self) -> Catalog {
+        let mut catalog = Catalog::default();
+        for entry in &self.traits {
+            catalog.traits.insert(entry.key.clone(), entry.trait_type);
+        }
+        for event in &self.events {
+            catalog.events.insert(
+                event.name.clone(),
+                event
+                    .properties
+                    .iter()
+                    .map(|property| (property.name.clone(), property.property_type))
+                    .collect(),
+            );
+        }
+        catalog.lists = self.lists.iter().map(|list| list.id).collect();
+        catalog.segments = self.segments.iter().map(|segment| segment.id).collect();
+        for (index, topic) in self.topics.iter().enumerate() {
+            let Some(channel) = topic.channel() else {
+                continue;
+            };
+            catalog
+                .topics
+                .entry(channel)
+                .or_default()
+                .insert(topic.key.clone(), Uuid::from_u128(index as u128 + 1));
+        }
+        catalog
+    }
+
+    /// What the model is told about the workspace, built from the case alone.
+    fn details(&self) -> CatalogDetails {
+        CatalogDetails {
+            traits: self
+                .traits
+                .iter()
+                .map(|entry| TraitDetail {
+                    key: entry.key.clone(),
+                    trait_type: entry.trait_type,
+                    description: entry.description.clone(),
+                    pii: entry.pii,
+                })
+                .collect(),
+            events: self
+                .events
+                .iter()
+                .map(|event| EventDetail {
+                    name: event.name.clone(),
+                    properties: event
+                        .properties
+                        .iter()
+                        .map(|property| PropertyDetail {
+                            name: property.name.clone(),
+                            property_type: property.property_type,
+                            pii: property.pii,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            lists: self
+                .lists
+                .iter()
+                .map(|list| (list.id, list.name.clone()))
+                .collect(),
+            segments: self
+                .segments
+                .iter()
+                .map(|segment| (segment.id, segment.name.clone()))
+                .collect(),
+            topics: self
+                .topics
+                .iter()
+                .filter_map(|topic| {
+                    Some(TopicDetail {
+                        channel: topic.channel()?,
+                        key: topic.key.clone(),
+                        name: topic.name.clone(),
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -328,24 +500,131 @@ impl Sender for Metered<'_> {
     }
 }
 
-/// Grades one answer with the pure validators of the draft tools.
+/// What a case's answers are graded against, built from the case alone.
+enum Grader {
+    Mapping(MappingCheck),
+    Manifest,
+    Segment {
+        catalog: Catalog,
+        placeholders: Placeholders,
+    },
+    Explain {
+        definition: Value,
+    },
+}
+
+/// Grades one answer with the pure validators of the tools.
 fn grade(
     case: &GoldenCase,
-    check: Option<&MappingCheck>,
+    grader: &Grader,
     response: &ChatResponse,
 ) -> Verdict<Value, DraftIssue, ()> {
-    let want = tool_name(case.kind.store());
+    let want = case.kind.tool();
     let Some(arguments) = expected_call(response, want) else {
         return Verdict::Invalid(vec![wrong_answer(want)]);
     };
-    let checked = match (case.kind, check) {
-        (CaseKind::Mapping, Some(check)) => draft_mapping::check_draft(check, arguments),
-        (CaseKind::Manifest, _) => draft_manifest::check_draft(arguments),
-        (CaseKind::Mapping, None) => Err(tools::arguments_invalid_lines()),
+    let checked = match grader {
+        Grader::Mapping(check) => draft_mapping::check_draft(check, arguments),
+        Grader::Manifest => draft_manifest::check_draft(arguments),
+        Grader::Segment {
+            catalog,
+            placeholders,
+        } => {
+            // As a draft run does: the literals the model was not shown come back first.
+            let mut restored = arguments.clone();
+            let left = restored
+                .get_mut("definition")
+                .map(|definition| placeholders.restore(definition))
+                .unwrap_or_default();
+            if left.is_empty() {
+                draft_segment::check_draft(&restored, catalog, None, OffsetDateTime::now_utc())
+            } else {
+                Err(left)
+            }
+        }
+        Grader::Explain { definition } => explain_segment::check_explanation(arguments, definition),
     };
     match checked {
         Ok(draft) => Verdict::Valid(draft),
         Err(lines) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
+    }
+}
+
+/// The grader and the request of a case, as a run builds them.
+fn prepare(case: &GoldenCase) -> Result<(Grader, ChatRequest), String> {
+    let spec = tools::find(case.kind.tool())
+        .ok_or_else(|| "the tool is not registered".to_owned())?
+        .spec()
+        .map_err(|error| error.to_string())?;
+    let privacy = Privacy::SchemaOnly;
+    let invalid = |error: AiError| error.to_string();
+    match case.kind {
+        CaseKind::Mapping => {
+            let check = case.mapping_check().map_err(|reason| reason.to_string())?;
+            let context = render_stream_context(&case.stream_context(), privacy);
+            let request = build_request(
+                DraftKind::Mapping,
+                privacy,
+                context,
+                &case.prompt,
+                case.documentation.as_deref(),
+                spec,
+            )
+            .map_err(invalid)?;
+            Ok((Grader::Mapping(check), request))
+        }
+        CaseKind::Manifest => {
+            let context = render_manifest_context(&ManifestContext::default());
+            let request = build_request(
+                DraftKind::Manifest,
+                privacy,
+                context,
+                &case.prompt,
+                case.documentation.as_deref(),
+                spec,
+            )
+            .map_err(invalid)?;
+            Ok((Grader::Manifest, request))
+        }
+        CaseKind::Segment => {
+            let (context, placeholders) = segment_context::draft_context(
+                &case.details(),
+                None,
+                case.definition.as_ref(),
+                privacy,
+            );
+            let request = build_request(
+                DraftKind::Segment,
+                privacy,
+                context,
+                &case.prompt,
+                None,
+                spec,
+            )
+            .map_err(invalid)?;
+            Ok((
+                Grader::Segment {
+                    catalog: case.catalog(),
+                    placeholders,
+                },
+                request,
+            ))
+        }
+        CaseKind::Explain => {
+            let definition = case
+                .definition
+                .clone()
+                .ok_or_else(|| "an explain case needs a definition".to_owned())?;
+            let (context, _) = segment_context::explain_context(
+                &case.details(),
+                Uuid::nil(),
+                &definition,
+                privacy,
+            );
+            let request =
+                segment_context::build_explain_request(privacy, context, spec).map_err(invalid)?;
+            Ok((Grader::Explain { definition }, request))
+        }
     }
 }
 
@@ -358,7 +637,7 @@ pub(crate) async fn evaluate_case(
 ) -> CaseReport {
     let mut report = CaseReport {
         name: case.name.clone(),
-        kind: case.kind.store().as_str(),
+        kind: case.kind.as_str(),
         valid: false,
         attempts: 0,
         passed: Vec::new(),
@@ -369,37 +648,8 @@ pub(crate) async fn evaluate_case(
         model: None,
         error: None,
     };
-    let kind = case.kind.store();
-    let check = match case.kind {
-        CaseKind::Mapping => match case.mapping_check() {
-            Ok(check) => Some(check),
-            Err(reason) => {
-                report.error = Some(format!("case_invalid: {reason}"));
-                return report;
-            }
-        },
-        CaseKind::Manifest => None,
-    };
-    let context = match case.kind {
-        CaseKind::Mapping => render_stream_context(&case.stream_context(), Privacy::SchemaOnly),
-        CaseKind::Manifest => render_manifest_context(&ManifestContext::default()),
-    };
-    let request = tools::find(tool_name(kind))
-        .ok_or_else(|| "the draft tool is not registered".to_owned())
-        .and_then(|tool| tool.spec().map_err(|error| error.to_string()))
-        .and_then(|spec| {
-            build_request(
-                kind,
-                Privacy::SchemaOnly,
-                context,
-                &case.prompt,
-                case.documentation.as_deref(),
-                spec,
-            )
-            .map_err(|error| error.to_string())
-        });
-    let request = match request {
-        Ok(request) => request,
+    let (grader, request) = match prepare(case) {
+        Ok(prepared) => prepared,
         Err(reason) => {
             report.error = Some(format!("case_invalid: {reason}"));
             return report;
@@ -411,7 +661,7 @@ pub(crate) async fn evaluate_case(
         seen: Mutex::default(),
     };
     let outcome = zirv_flow_ai::repair(max_repairs, &request, &metered, |response| {
-        let verdict = grade(case, check.as_ref(), response);
+        let verdict = grade(case, &grader, response);
         Box::pin(async move { verdict })
     })
     .await;
@@ -490,7 +740,7 @@ mod tests {
     /// Runs a case on the fake provider, which answers with the case's replay.
     async fn replayed(case: &GoldenCase) -> (CaseReport, FakeProvider) {
         let fake = FakeProvider::new();
-        let tool = tool_name(case.kind.store());
+        let tool = case.kind.tool();
         for arguments in &case.replay {
             fake.push(Ok(tool_call_response(tool, arguments.clone(), 100, 50)));
         }
@@ -538,12 +788,11 @@ mod tests {
                 case.name
             );
         }
-        let kinds: Vec<&str> = cases
-            .iter()
-            .map(|case| case.kind.store().as_str())
-            .collect();
+        let kinds: Vec<&str> = cases.iter().map(|case| case.kind.as_str()).collect();
         assert!(kinds.iter().filter(|kind| **kind == "mapping").count() >= 2);
         assert!(kinds.iter().filter(|kind| **kind == "manifest").count() >= 2);
+        assert!(kinds.iter().filter(|kind| **kind == "segment").count() >= 2);
+        assert!(kinds.contains(&"explain"));
     }
 
     #[tokio::test]
@@ -557,6 +806,7 @@ mod tests {
         }
         assert!(repairing.contains(&CaseKind::Mapping));
         assert!(repairing.contains(&CaseKind::Manifest));
+        assert!(repairing.contains(&CaseKind::Segment));
     }
 
     #[tokio::test]
@@ -650,6 +900,9 @@ mod tests {
         for case in corpus().unwrap() {
             assert!(!case.expect.is_empty(), "{}", case.name);
             assert!(!case.replay.is_empty(), "{}", case.name);
+            for topic in &case.topics {
+                assert!(topic.channel().is_some(), "{} {}", case.name, topic.channel);
+            }
             for expect in &case.expect {
                 let operations = usize::from(expect.equals.is_some())
                     + usize::from(expect.contains.is_some())
