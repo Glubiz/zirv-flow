@@ -1,0 +1,31 @@
+# Image override for the M4 segment benchmarks (issue #127): run the CD-published image of a
+# release instead of building one, so a build never competes with the measurements for CPU.
+# Layer it last, after docker-compose.yml, compose.bench.yaml and compose.tiers.yaml (stack.sh
+# does this):
+#
+#   BENCH_IMAGE_TAG=0.55.0 docker compose -p zirv-flow-m4bench -f docker-compose.yml \
+#     -f scripts/bench/compose.bench.yaml -f scripts/bench/compose.tiers.yaml \
+#     -f scripts/bench/m4/compose.m4.yaml up -d --no-build --wait
+#
+# The image must be pulled first (`docker pull ghcr.io/glubiz/zirv-flow:<tag>`): pull_policy is
+# `never`, so a missing tag fails instead of falling back to `latest` or to a build. Local use only.
+services:
+  zirv-flow-key:
+    image: ghcr.io/glubiz/zirv-flow:${BENCH_IMAGE_TAG:-0.55.0}
+    build: !reset null
+    pull_policy: never
+
+  zirv-flow:
+    image: ghcr.io/glubiz/zirv-flow:${BENCH_IMAGE_TAG:-0.55.0}
+    build: !reset null
+    pull_policy: never
+
+  zirv-flow-worker:
+    image: ghcr.io/glubiz/zirv-flow:${BENCH_IMAGE_TAG:-0.55.0}
+    build: !reset null
+    pull_policy: never
+
+  zirv-flow-scheduler:
+    image: ghcr.io/glubiz/zirv-flow:${BENCH_IMAGE_TAG:-0.55.0}
+    build: !reset null
+    pull_policy: never
