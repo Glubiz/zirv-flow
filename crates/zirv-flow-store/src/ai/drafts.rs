@@ -20,6 +20,8 @@ pub const DRAFT_PURGE_BATCH: i64 = 1000;
 pub enum DraftKind {
     Mapping,
     Manifest,
+    /// A segment definition. It names a segment (or none, for a new one) and no source.
+    Segment,
 }
 
 impl DraftKind {
@@ -27,6 +29,7 @@ impl DraftKind {
         match self {
             Self::Mapping => "mapping",
             Self::Manifest => "manifest",
+            Self::Segment => "segment",
         }
     }
 
@@ -34,6 +37,7 @@ impl DraftKind {
         match text {
             "mapping" => Some(Self::Mapping),
             "manifest" => Some(Self::Manifest),
+            "segment" => Some(Self::Segment),
             _ => None,
         }
     }
@@ -78,6 +82,8 @@ pub struct NewAiDraft<'a> {
     pub kind: DraftKind,
     pub source_id: Option<Uuid>,
     pub stream_name: Option<&'a str>,
+    /// The segment a segment draft would change; none for a new segment and for other kinds.
+    pub segment_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<&'a Value>,
     /// SHA-256 of the saved artifact the draft was compared with.
@@ -93,6 +99,7 @@ pub struct AiDraft {
     pub kind: DraftKind,
     pub source_id: Option<Uuid>,
     pub stream_name: Option<String>,
+    pub segment_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<Value>,
     pub base_digest: Option<[u8; 32]>,
@@ -109,6 +116,7 @@ struct Row {
     kind: String,
     source_id: Option<Uuid>,
     stream_name: Option<String>,
+    segment_id: Option<Uuid>,
     status: String,
     content: Option<Value>,
     base_digest: Option<Vec<u8>>,
@@ -129,6 +137,7 @@ impl TryFrom<Row> for AiDraft {
             kind: DraftKind::parse(&row.kind).ok_or_else(corrupt)?,
             source_id: row.source_id,
             stream_name: row.stream_name,
+            segment_id: row.segment_id,
             status: DraftStatus::parse(&row.status).ok_or_else(corrupt)?,
             content: row.content,
             base_digest: row
@@ -142,8 +151,8 @@ impl TryFrom<Row> for AiDraft {
     }
 }
 
-const COLUMNS: &str = "id, workspace_id, user_id, kind, source_id, stream_name, status, content, \
-    base_digest, created_at, accepted_at, expires_at";
+const COLUMNS: &str = "id, workspace_id, user_id, kind, source_id, stream_name, \
+    segment_id, status, content, base_digest, created_at, accepted_at, expires_at";
 
 /// Stores a draft. The table's checks refuse an invalid draft with content, a valid one without,
 /// and a mapping without its source and stream.
@@ -152,9 +161,9 @@ pub async fn insert_ai_draft(
     new: &NewAiDraft<'_>,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO ai_drafts (id, workspace_id, user_id, kind, source_id, stream_name, status, \
-            content, base_digest, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO ai_drafts (id, workspace_id, user_id, kind, source_id, stream_name, \
+            segment_id, status, content, base_digest, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(new.id)
     .bind(new.workspace_id.as_uuid())
@@ -162,6 +171,7 @@ pub async fn insert_ai_draft(
     .bind(new.kind.as_str())
     .bind(new.source_id)
     .bind(new.stream_name)
+    .bind(new.segment_id)
     .bind(new.status.as_str())
     .bind(new.content)
     .bind(new.base_digest.as_ref().map(<[u8; 32]>::as_slice))
@@ -248,7 +258,10 @@ mod tests {
     use zirv_flow_core::{Email, Slug, WorkspaceName};
 
     use super::*;
-    use crate::{NewSource, create_source, create_user, create_workspace, delete_source};
+    use crate::{
+        NewSegment, NewSegmentVersion, NewSource, create_segment, create_source, create_user,
+        create_workspace, delete_source, lock_segments,
+    };
 
     async fn workspace(pool: &PgPool, name: &str) -> WorkspaceId {
         let name_parsed = WorkspaceName::parse(name).unwrap();
@@ -302,6 +315,7 @@ mod tests {
             kind: DraftKind::Mapping,
             source_id: Some(source_id),
             stream_name: Some("contacts"),
+            segment_id: None,
             status: if content.is_some() {
                 DraftStatus::Valid
             } else {
@@ -320,7 +334,7 @@ mod tests {
 
     #[test]
     fn kinds_and_statuses_round_trip_through_text() {
-        for kind in [DraftKind::Mapping, DraftKind::Manifest] {
+        for kind in [DraftKind::Mapping, DraftKind::Manifest, DraftKind::Segment] {
             assert_eq!(DraftKind::parse(kind.as_str()), Some(kind));
         }
         for status in [
@@ -534,5 +548,173 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count().await, 0);
+    }
+
+    async fn segment(pool: &PgPool, ws: WorkspaceId, name: &str) -> Uuid {
+        let mut tx = crate::begin(pool).await.unwrap();
+        lock_segments(&mut tx, ws).await.unwrap();
+        let new = NewSegment {
+            id: Uuid::now_v7(),
+            name: name.into(),
+            description: String::new(),
+            cadence_minutes: 60,
+        };
+        let version = NewSegmentVersion {
+            definition: json!({"v": 1}),
+            normalized: json!({"v": 1}),
+            deps: json!({"segments": []}),
+            time_sensitive: false,
+        };
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t"));
+        let (segment, _) = create_segment(&mut tx, ws, &new, &version, None, &trace)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        segment.id
+    }
+
+    fn segment_draft<'a>(
+        ws: WorkspaceId,
+        user: UserId,
+        segment_id: Option<Uuid>,
+        content: &'a Value,
+        expires_at: OffsetDateTime,
+    ) -> NewAiDraft<'a> {
+        NewAiDraft {
+            id: Uuid::now_v7(),
+            workspace_id: ws,
+            user_id: user,
+            kind: DraftKind::Segment,
+            source_id: None,
+            stream_name: None,
+            segment_id,
+            status: DraftStatus::Valid,
+            content: Some(content),
+            base_digest: Some([3; 32]),
+            expires_at,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_draft_is_stored_for_a_segment_or_a_new_one(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let saved = segment(&pool, one, "Buyers").await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let content = json!({"v": 1, "trait": "plan", "op": "exists"});
+        let later = now + Duration::days(7);
+        let existing = segment_draft(one, ada, Some(saved), &content, later);
+        let new = segment_draft(one, ada, None, &content, later);
+        insert(&pool, &existing).await;
+        insert(&pool, &new).await;
+
+        let found = find_ai_draft(&pool, one, ada, existing.id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.kind, DraftKind::Segment);
+        assert_eq!(found.segment_id, Some(saved));
+        assert_eq!((found.source_id, found.stream_name), (None, None));
+        assert_eq!(found.content.as_ref(), Some(&content));
+        let fresh = find_ai_draft(&pool, one, ada, new.id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.segment_id, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_rules_keep_mapping_and_manifest_drafts_valid_and_refuse_mixed_targets(
+        pool: PgPool,
+    ) {
+        let one = workspace(&pool, "one").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let source_id = source(&pool, one).await;
+        let saved = segment(&pool, one, "Buyers").await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let later = now + Duration::days(7);
+        let content = json!({});
+        let mut connection = pool.acquire().await.unwrap();
+
+        // The two older kinds keep their rules.
+        insert_ai_draft(
+            &mut connection,
+            &mapping(one, ada, source_id, Some(&content), later),
+        )
+        .await
+        .unwrap();
+        let manifest = NewAiDraft {
+            kind: DraftKind::Manifest,
+            stream_name: None,
+            ..mapping(one, ada, source_id, Some(&content), later)
+        };
+        insert_ai_draft(&mut connection, &manifest).await.unwrap();
+        let unsourced_mapping = NewAiDraft {
+            source_id: None,
+            ..mapping(one, ada, source_id, Some(&content), later)
+        };
+        assert!(
+            insert_ai_draft(&mut connection, &unsourced_mapping)
+                .await
+                .is_err()
+        );
+        let streamed_manifest = NewAiDraft {
+            kind: DraftKind::Manifest,
+            ..mapping(one, ada, source_id, Some(&content), later)
+        };
+        assert!(
+            insert_ai_draft(&mut connection, &streamed_manifest)
+                .await
+                .is_err()
+        );
+        // Only a segment draft names a segment, and it names no source or stream.
+        let mapped_segment = NewAiDraft {
+            segment_id: Some(saved),
+            ..mapping(one, ada, source_id, Some(&content), later)
+        };
+        assert!(
+            insert_ai_draft(&mut connection, &mapped_segment)
+                .await
+                .is_err()
+        );
+        let sourced_segment = NewAiDraft {
+            source_id: Some(source_id),
+            ..segment_draft(one, ada, None, &content, later)
+        };
+        assert!(
+            insert_ai_draft(&mut connection, &sourced_segment)
+                .await
+                .is_err()
+        );
+        let streamed_segment = NewAiDraft {
+            stream_name: Some("contacts"),
+            ..segment_draft(one, ada, None, &content, later)
+        };
+        assert!(
+            insert_ai_draft(&mut connection, &streamed_segment)
+                .await
+                .is_err()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_draft_names_a_segment_of_its_own_workspace(pool: PgPool) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let ada = user(&pool, "ada@example.com").await;
+        let foreign = segment(&pool, two, "Elsewhere").await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let content = json!({});
+        let mut connection = pool.acquire().await.unwrap();
+
+        let refused = insert_ai_draft(
+            &mut connection,
+            &segment_draft(one, ada, Some(foreign), &content, now + Duration::days(7)),
+        )
+        .await;
+
+        assert!(refused.is_err());
     }
 }
