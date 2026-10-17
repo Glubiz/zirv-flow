@@ -901,6 +901,48 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_leaves_no_planted_value_in_a_slot_column(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        // `plan` is "pro" for the survivor; promote it to a slot and fill the column.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let assigned = crate::assign_trait_slot(&mut tx, ws, "plan").await.unwrap();
+        crate::commit(tx).await.unwrap();
+        let crate::Assigned::New(slot) = assigned else {
+            panic!("not assigned");
+        };
+        loop {
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let step = crate::backfill_slot_batch(&mut tx, ws, "plan", slot, None)
+                .await
+                .unwrap();
+            crate::commit(tx).await.unwrap();
+            if step == crate::SlotStep::Finish {
+                break;
+            }
+        }
+        let planted = |pool: &PgPool| {
+            let sql = format!(
+                "SELECT count(*) FROM people WHERE workspace_id = $1 AND {} = 'pro'",
+                slot.as_str()
+            );
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+                    .bind(ws.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(planted(&pool).await, 1, "the survivor holds the marker");
+
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+
+        assert_eq!(planted(&pool).await, 0, "the marker left with the row");
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_pending_row_cannot_recreate_the_person_and_the_new_person_stays_suppressed(
         pool: PgPool,
     ) {
