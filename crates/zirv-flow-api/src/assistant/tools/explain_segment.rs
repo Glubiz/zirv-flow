@@ -7,7 +7,7 @@
 //! model. The model gets the definition with its personal literals masked, so the texts it writes
 //! carry placeholders; the caller puts the literals back for the admin who owns the segment.
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
@@ -65,13 +65,8 @@ pub(crate) fn check_explanation(
     schema.validate_value(arguments)?;
     let explained: ExplainArgs =
         serde_json::from_value(arguments.clone()).map_err(|_| arguments_invalid_lines())?;
-    let known: HashMap<String, bool> = nodes(definition)
-        .into_iter()
-        .map(|node| {
-            let leaf = node.is_leaf();
-            (node.pointer, leaf)
-        })
-        .collect();
+    let all = nodes(definition);
+    let known: HashSet<&str> = all.iter().map(|node| node.pointer.as_str()).collect();
 
     let mut issues = Vec::new();
     let summary = explained.summary.trim();
@@ -89,7 +84,7 @@ pub(crate) fn check_explanation(
     let mut texts = Vec::new();
     for (index, entry) in explained.nodes.iter().enumerate().take(known.len()) {
         let at = |field: &str| format!("/nodes/{index}/{field}");
-        if !known.contains_key(&entry.pointer) {
+        if !known.contains(entry.pointer.as_str()) {
             issues.push(line("unknown_pointer", &at("pointer")));
         } else if !cited.insert(entry.pointer.as_str()) {
             issues.push(line("duplicate_pointer", &at("pointer")));
@@ -105,7 +100,7 @@ pub(crate) fn check_explanation(
         texts.push(json!({"pointer": entry.pointer, "text": text}));
     }
     // The leaves in document order, so the feedback reads in the order of the definition.
-    for node in nodes(definition) {
+    for node in &all {
         if node.is_leaf() && !cited.contains(node.pointer.as_str()) {
             issues.push(line("leaf_not_explained", &node.pointer));
         }

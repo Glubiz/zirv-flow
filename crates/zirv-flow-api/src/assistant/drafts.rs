@@ -881,7 +881,12 @@ async fn recheck_segment(
     let workspace = draft.workspace_id;
     zirv_flow_store::lock_segments(tx, workspace).await?;
     let saved = match draft.segment_id {
-        Some(segment_id) => Some(current_definition(tx, workspace, segment_id).await?),
+        Some(segment_id) => Some(
+            current_version(tx, workspace, segment_id)
+                .await?
+                .1
+                .definition,
+        ),
         None => None,
     };
     if saved.as_ref().map(digest) != draft.base_digest {
@@ -904,18 +909,8 @@ async fn recheck_segment(
         })
 }
 
-/// The definition of a segment's current version. A segment that is gone or archived is refused
-/// as a save would refuse it.
-async fn current_definition(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    segment_id: Uuid,
-) -> Result<Value, ApiError> {
-    let (_, version) = current_version(connection, workspace, segment_id).await?;
-    Ok(version.definition)
-}
-
-/// A segment of the workspace and its current version.
+/// A segment of the workspace and its current version. A segment that is gone or archived is
+/// refused as a save would refuse it.
 async fn current_version(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

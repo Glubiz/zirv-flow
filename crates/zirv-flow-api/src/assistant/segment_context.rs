@@ -540,17 +540,14 @@ pub(crate) fn draft_context(
     saved: Option<&Value>,
     privacy: Privacy,
 ) -> (Vec<Content>, Placeholders) {
-    let mut parts = vec![render_catalog(details, own)];
-    let mut table = Placeholders::default();
-    match saved {
-        Some(definition) => {
-            let (content, placeholders) = render_saved(definition, details, privacy);
-            parts.push(content);
-            table = placeholders;
-        }
-        None => parts.push(Content::Schema("No definition is saved yet.\n".to_owned())),
-    }
-    (parts, table)
+    let (saved, table) = match saved {
+        Some(definition) => render_saved(definition, details, privacy),
+        None => (
+            Content::Schema("No definition is saved yet.\n".to_owned()),
+            Placeholders::default(),
+        ),
+    };
+    (vec![render_catalog(details, own), saved], table)
 }
 
 /// The context of an explanation: the catalog, so a trait or list can be named, and the saved

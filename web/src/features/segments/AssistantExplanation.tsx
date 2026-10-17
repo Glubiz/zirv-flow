@@ -2,7 +2,7 @@ import { client, unwrap, useResource, type components } from "../../api";
 import { Button, ErrorState, LoadingState, Panel } from "../../ui";
 import { failureText } from "../assistant";
 import { fromDefinition, getAt, place, type Definition } from "./ast";
-import { describeNode, type Names } from "./describe";
+import { describeNode, namesOf, type Names } from "./describe";
 
 type Explained = components["schemas"]["AiExplainBody"];
 
@@ -38,22 +38,19 @@ export function AssistantExplanation({ workspaceId, segmentId, definition, onClo
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/segments", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
-  const names: Names = {
-    lists: new Map(lists.status === "ready" ? lists.data.map((list) => [list.id, list.name]) : []),
-    segments: new Map(segments.status === "ready" ? segments.data.map((segment) => [segment.id, segment.name]) : []),
-  };
+  const names = namesOf(lists.status === "ready" ? lists.data : undefined, segments.status === "ready" ? segments.data : undefined);
 
   return (
     <Panel title="Explanation by the assistant">
       <div className="stack">
         <div aria-live="polite">
-        {explained.status === "loading" ? (
-          <LoadingState label="Asking the assistant to explain this segment. This can take a minute." />
-        ) : explained.status === "error" ? (
-          <ErrorState {...failureText(explained.error)} onRetry={explained.reload} />
-        ) : (
-          <Explanation explained={explained.data} definition={definition} names={names} />
-        )}
+          {explained.status === "loading" ? (
+            <LoadingState label="Asking the assistant to explain this segment. This can take a minute." />
+          ) : explained.status === "error" ? (
+            <ErrorState {...failureText(explained.error)} onRetry={explained.reload} />
+          ) : (
+            <Explanation explained={explained.data} definition={definition} names={names} />
+          )}
         </div>
         <div className="row">
           <Button onClick={onClose}>Close</Button>
