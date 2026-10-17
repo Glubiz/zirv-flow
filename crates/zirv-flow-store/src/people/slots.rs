@@ -835,4 +835,51 @@ mod db_tests {
         assert_eq!(merged, 1);
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0);
     }
+
+    /// Staged interleaving of the window the lock closes: a writer reads the assignments before
+    /// the assignment commits and writes after the backfill would have finished. With the shared
+    /// lock the assignment waits for the writer; without it the slot is left stale.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_writer_that_read_the_assignments_before_they_committed_cannot_leave_a_stale_slot(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        apply(&pool, ws, &[record(1, json!({"plan": "old"}), START)]).await;
+
+        // The writer takes the lock and reads the assignments: none yet.
+        let mut writer = begin(&pool).await.unwrap();
+        let slots = lock_and_read_writer_slots(&mut writer, ws).await.unwrap();
+        assert!(slots.is_empty());
+
+        let assigner = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let Assigned::New(slot) = assign(&pool, ws, "plan").await else {
+                    panic!("not assigned");
+                };
+                backfill(&pool, ws, "plan", slot).await;
+                slot
+            })
+        };
+        // Long enough for an unordered assignment and backfill to finish.
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+
+        // The writer now changes the trait, writing the slots it saw (none).
+        let sql = format!(
+            "UPDATE people SET traits = $1{} WHERE workspace_id = $2",
+            slot_assignments_sql(&slots, "$1::jsonb", 3)
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(json!({"plan": "new"}))
+            .bind(ws.as_uuid())
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        commit(writer).await.unwrap();
+
+        let slot = assigner.await.unwrap();
+        assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0);
+    }
 }
