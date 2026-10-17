@@ -929,6 +929,15 @@ mod db_tests {
         assert_eq!(mismatches(&pool, ws, "plan", slot).await, 0);
     }
 
+    /// Makes PostgreSQL wait 10 s before it looks for a lock cycle, so a cycle costs about 10 s
+    /// and the test's 5 s bound holds on a slow server.
+    async fn slow_deadlock_detection(tx: &mut sqlx::PgConnection) {
+        sqlx::query("SET LOCAL deadlock_timeout = '10s'")
+            .execute(tx)
+            .await
+            .unwrap();
+    }
+
     async fn person_of_record(pool: &PgPool, ws: WorkspaceId, person: usize) -> Uuid {
         sqlx::query_scalar(
             "SELECT person_id FROM source_records WHERE workspace_id = $1 AND record_key = $2",
@@ -1127,6 +1136,7 @@ mod db_tests {
         };
 
         let mut holder = begin(&pool).await.unwrap();
+        slow_deadlock_detection(&mut holder).await;
         sqlx::query("SELECT 1 FROM people WHERE id = $1 FOR UPDATE")
             .bind(low_person)
             .execute(&mut *holder)
@@ -1138,6 +1148,7 @@ mod db_tests {
             let pool = pool.clone();
             tokio::spawn(async move {
                 let mut tx = begin(&pool).await.unwrap();
+                slow_deadlock_detection(&mut tx).await;
                 let step = backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None).await;
                 commit(tx).await.unwrap();
                 step
@@ -1148,6 +1159,7 @@ mod db_tests {
             let pool = pool.clone();
             tokio::spawn(async move {
                 let mut tx = begin(&pool).await.unwrap();
+                slow_deadlock_detection(&mut tx).await;
                 let retired = retire_trait_slot(&mut tx, ws, "plan").await;
                 commit(tx).await.unwrap();
                 retired
@@ -1164,6 +1176,7 @@ mod db_tests {
                     START + Duration::hours(1),
                 );
                 let mut tx = begin(&pool).await.unwrap();
+                slow_deadlock_detection(&mut tx).await;
                 let outcome = crate::people::apply_profile_record(&mut tx, ws, &later).await;
                 commit(tx).await.unwrap();
                 outcome
@@ -1174,16 +1187,18 @@ mod db_tests {
 
         let all = async { (batch.await, retire_task.await, writer.await) };
         let (batch, retired, writer) =
-            tokio::time::timeout(std::time::Duration::from_secs(20), all)
+            tokio::time::timeout(std::time::Duration::from_secs(30), all)
                 .await
                 .expect("the three requests finish");
         assert!(batch.unwrap().is_ok(), "the batch finished");
         assert!(retired.unwrap().is_ok(), "the retire finished");
         assert!(writer.unwrap().is_ok(), "the writer finished");
-        // PostgreSQL resolves a cycle on its own, but only after `deadlock_timeout` (1 s) by
-        // reordering the lock queue. With the lock first there is no cycle, measured from the writer.
+        // PostgreSQL resolves a cycle on its own, but only after `deadlock_timeout`, which every
+        // staged transaction sets to 10 s, by reordering the lock queue. With the lock first there
+        // is no cycle, so the time from the writer's start stays far below that.
+        println!("queued-exclusive scenario: {:?}", released.elapsed());
         assert!(
-            released.elapsed() < std::time::Duration::from_millis(900),
+            released.elapsed() < std::time::Duration::from_secs(5),
             "the requests waited on a lock cycle: {:?}",
             released.elapsed()
         );
