@@ -333,13 +333,15 @@ pub enum SlotStep {
 }
 
 /// After a short backfill batch: is any person left after the cursor?
-const BACKFILL_PROBE: &str = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \n                                AND ($2::uuid IS NULL OR id > $2))";
+const BACKFILL_PROBE: &str = "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 \
+                              AND ($2::uuid IS NULL OR id > $2))";
 
 /// After a short clear batch: does any person still hold a value in the slot? The cursor is
 /// always null; the probe only needs the parameter to exist.
 fn clear_probe(slot: SlotColumn) -> String {
     format!(
-        "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND {} IS NOT NULL \n         AND $2::uuid IS NULL)",
+        "SELECT EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND {} IS NOT NULL \
+         AND $2::uuid IS NULL)",
         slot.as_str()
     )
 }
@@ -458,7 +460,6 @@ pub async fn clear_slot_batch(
         .fetch_all(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    // The cursor is always null here; the probe only needs the parameter to exist.
     batch_step(connection, &clear_probe(slot), workspace, ids.len(), None).await
 }
 
