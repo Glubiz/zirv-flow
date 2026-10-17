@@ -1154,6 +1154,7 @@ mod db_tests {
             })
         };
         wait().await;
+        let released = std::time::Instant::now();
         let writer = {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -1168,7 +1169,7 @@ mod db_tests {
                 outcome
             })
         };
-        wait().await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         commit(holder).await.unwrap();
 
         let all = async { (batch.await, retire_task.await, writer.await) };
@@ -1179,6 +1180,13 @@ mod db_tests {
         assert!(batch.unwrap().is_ok(), "the batch finished");
         assert!(retired.unwrap().is_ok(), "the retire finished");
         assert!(writer.unwrap().is_ok(), "the writer finished");
+        // PostgreSQL resolves a cycle on its own, but only after `deadlock_timeout` (1 s) by
+        // reordering the lock queue. With the lock first there is no cycle, measured from the writer.
+        assert!(
+            released.elapsed() < std::time::Duration::from_millis(900),
+            "the requests waited on a lock cycle: {:?}",
+            released.elapsed()
+        );
     }
 
     #[sqlx::test]
