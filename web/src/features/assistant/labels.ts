@@ -6,6 +6,9 @@ export type DraftChange = components["schemas"]["Change"];
 export type DryRun = components["schemas"]["DryRunBody"];
 export type DraftIssue = components["schemas"]["DraftIssue"];
 
+/** What a draft is of. */
+export type DraftKindName = "mapping" | "manifest" | "segment";
+
 /** What a validator code means, in a sentence. The wording of the mapping and manifest editors, kept in step by hand. */
 const ISSUE_TEXT: Record<string, string> = {
   arguments_invalid: "The answer was not in the shape the draft needs.",
@@ -57,9 +60,41 @@ const ISSUE_TEXT: Record<string, string> = {
   duplicate_header: "Two fields of the sample have the same name.",
 };
 
+/** What a segment validator code means, in a sentence. The wording of the segment builder. */
+const SEGMENT_ISSUE_TEXT: Record<string, string> = {
+  arguments_invalid: "The answer was not in the shape the draft needs.",
+  required: "A required setting is missing here.",
+  malformed: "This part of the definition is not in the shape a segment definition has.",
+  unsupported_version: "Only version 1 of the definition is supported.",
+  unknown_key: "This key does not exist in a segment definition.",
+  unknown_trait: "The definition uses a field that does not exist in this workspace.",
+  unknown_event: "The definition uses an event that does not exist in this workspace.",
+  unknown_property: "The definition uses a property that the event does not have.",
+  unknown_list: "The definition uses a list that does not exist in this workspace.",
+  unknown_segment: "The definition uses a segment that does not exist, or is archived.",
+  unknown_topic: "The definition uses a consent topic that does not exist.",
+  invalid_identifier_kind: "The definition uses an identifier kind that does not exist.",
+  operator_not_allowed: "This comparison cannot be used with this kind of value.",
+  value_type_mismatch: "This value is the wrong kind for what it is compared with.",
+  value_missing: "This comparison needs a value.",
+  value_not_allowed: "This comparison takes no value, or the value is not allowed here.",
+  aggregate_not_allowed: "This calculation cannot be used here.",
+  invalid_duration: "This is not a valid length of time.",
+  window_too_long: "This time window is longer than allowed.",
+  invalid_range: "This range is not valid.",
+  too_deep: "The definition is nested too deeply.",
+  too_many_nodes: "The definition has too many conditions.",
+  too_many_values: "This list has too many values.",
+  value_too_long: "This value is too long.",
+  segment_cycle: "A segment cannot be in its own definition.",
+  placeholder_moved: "A value the assistant is not shown was moved to another condition.",
+  placeholder_invented: "The answer used a value the assistant was never given.",
+};
+
 /** A problem of a draft as a sentence, with the place it concerns when there is one. */
-export function issueSentence(issue: DraftIssue): string {
-  const text = ISSUE_TEXT[issue.code] ?? "The answer broke a rule that the draft must follow.";
+export function issueSentence(issue: DraftIssue, kind: DraftKindName = "mapping"): string {
+  const table = kind === "segment" ? SEGMENT_ISSUE_TEXT : ISSUE_TEXT;
+  const text = table[issue.code] ?? "The answer broke a rule that the draft must follow.";
   return issue.at ? `${text} (${issue.at})` : text;
 }
 
@@ -98,11 +133,26 @@ export function failureText(error: unknown): Failure {
       case "ai_draft_outdated":
         return { traceId, title: "The saved version changed", detail: "Someone saved a change after this draft was made. Draft again." };
       case "ai_draft_invalid":
-        return { traceId, title: "This draft cannot be accepted", detail: "It did not pass validation." };
+        return {
+          traceId,
+          title: "This draft cannot be accepted",
+          detail:
+            error.issues.length > 0
+              ? `It no longer passes the rules for saving. ${error.issues
+                  .map((issue) => issueSentence({ code: issue.code, at: issue.pointer === "" ? null : issue.pointer }, "segment"))
+                  .join(" ")}`
+              : "It did not pass validation.",
+        };
+      case "ai_explain_failed":
+        return {
+          traceId,
+          title: "The assistant could not explain this segment",
+          detail: "Its answers did not pass the checks after several tries. Try again.",
+        };
       default:
     }
     if (error.status === 404) {
-      return { traceId, title: "Not found", detail: "The source, the stream or the draft is gone, or you cannot see it." };
+      return { traceId, title: "Not found", detail: "The source, the stream, the segment or the draft is gone, or you cannot see it." };
     }
     return { traceId, title: error.title, detail: error.detail };
   }

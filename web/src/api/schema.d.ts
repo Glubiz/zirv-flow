@@ -1575,6 +1575,31 @@ export interface paths {
         patch: operations["update_segment"];
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/segments/{id}/ai/explain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Explains a saved version of a segment in plain language: a summary and a sentence for every
+         *     condition, each named by its JSON pointer. The model's answer is checked (every pointer must
+         *     be a node, every condition cited once, plain text with a length cap) and, when it fails,
+         *     asked again at most `ai.max_repair_attempts` times. Nothing is stored. Workspace admins who
+         *     are signed in; an API key is refused. Every attempt is a gated model call that counts against
+         *     the budget and the rate limit, and with the assistant off nothing is read or sent. The model
+         *     is not told any trait or event value, count, sample or member.
+         */
+        post: operations["explain_segment_with_ai"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/segments/{id}/archive": {
         parameters: {
             query?: never;
@@ -2293,6 +2318,8 @@ export interface components {
             id: string;
             kind: components["schemas"]["DraftKindBody"];
             /** Format: uuid */
+            segment_id?: string | null;
+            /** Format: uuid */
             source_id?: string | null;
             stream?: string | null;
         };
@@ -2347,6 +2374,33 @@ export interface components {
             provider_id: string;
             /** Format: uuid */
             user_id?: string | null;
+        };
+        /** @description The explanation of one segment version. */
+        AiExplainBody: {
+            /** @description One entry for every condition of the definition, and for some compositions. */
+            nodes: components["schemas"]["AiExplainedNode"][];
+            /** @description Who the segment holds, in plain text. */
+            summary: string;
+            /**
+             * Format: int32
+             * @description The version that was explained.
+             */
+            version: number;
+        };
+        /** @description Which version to explain. */
+        AiExplainRequest: {
+            /**
+             * Format: int32
+             * @description The version of the segment to explain; the current one when absent.
+             */
+            version?: number | null;
+        };
+        /** @description What the model said about one node of the definition. */
+        AiExplainedNode: {
+            /** @description The JSON pointer of the node in the version's definition; empty for the root. */
+            pointer: string;
+            /** @description Plain text. Show it as text, never as markup. */
+            text: string;
         };
         AiModelsBody: {
             /**
@@ -3137,7 +3191,7 @@ export interface components {
          * @description What a draft is of.
          * @enum {string}
          */
-        DraftKindBody: "mapping" | "manifest";
+        DraftKindBody: "mapping" | "manifest" | "segment";
         /** @description What to draft. */
         DraftRequest: {
             /**
@@ -3159,6 +3213,11 @@ export interface components {
             sample?: {
                 [key: string]: unknown;
             }[] | null;
+            /**
+             * Format: uuid
+             * @description For a segment: the segment being edited; absent for a new one. Refused for the other kinds.
+             */
+            segment_id?: string | null;
             /**
              * Format: uuid
              * @description The source. Required for a mapping. For a manifest it is the `http` source being edited;
@@ -11849,6 +11908,116 @@ export interface operations {
             };
             /** @description An invalid field, no field at all, a definition that does not validate (`segment_invalid`, with `issues`), or a definition that closes a reference cycle (`segment_cycle`, with `cycle`) */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explain_segment_with_ai: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["AiExplainRequest"];
+            };
+        };
+        responses: {
+            /** @description The explanation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiExplainBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, segment or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The assistant is off (`ai_disabled`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model's explanation did not pass its checks within the repair attempts (`ai_explain_failed`, with the issue codes), or the body is not a version */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many AI calls (`ai_rate_limited`); try again in a minute */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model provider failed (`ai_provider_error`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the provider key */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
