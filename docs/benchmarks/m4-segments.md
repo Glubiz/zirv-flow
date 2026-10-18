@@ -17,13 +17,16 @@ hardware, and the re-check on reference hardware does not apply to it until the 
 
 ## 1. Summary
 
-**Current state (0.57.0, section 6).** The preview and refresh targets are met: trait-only preview p95
-1.06 s, aggregate preview p95 4.68 s, property-filtered aggregate preview p95 1.20 s (no 503s), full
-refresh median 45.7 s trait-only and 14.5 s with an aggregate, and all three API counts equal the
-hand-written SQL. **OQ-2 is decided: no rollup for v1.** Two things still miss: event to
-`segment.entered` is p95 278.5 s against 60 s (a regression from 0.38 s on 0.56.0, caused by the plan of
-the batch diff, section 4.3 follow-up D), and an aggregate preview right after an app restart took
-15.1 s (a cold-cache caveat, section 6.4). The rest of this section is the first run on 0.56.0.
+**Current state (0.57.1, sections 6 and 6.6).** Every section 19 target measured here is met, apart from
+D4.1 on `jsonb`, which was not re-run. Trait-only preview p95 1.06 s, aggregate preview p95 4.68 s,
+property-filtered aggregate preview p95 1.20 s (no 503s), full refresh median 45.7 s trait-only and
+14.5 s with an aggregate, event to `segment.entered` p95 4.05 s (target 60 s; p99 12.6 s, max 16.5 s,
+17,475 entries), and all three API counts equal the hand-written SQL. **OQ-2 is decided: no rollup for
+v1.** The 0.57.0 image missed D4.7 (p95 278.5 s): #143's per-execution custom plan of the
+`segment.reevaluate` batch statement estimated 1 row for a segment missing from the `segment_members`
+statistics and scanned every open row of the segment per batch person; #149 fixed it in 0.57.1. One caveat
+stays: an aggregate preview right after an app restart took 15.1 s (a cold-cache observation, section
+6.4). The rest of this section is the first run on 0.56.0.
 
 As shipped means the 0.56.0 image with no change of settings. "Custom plan" is the same stack with
 `ALTER DATABASE ... SET plan_cache_mode = force_custom_plan` (section 4.1), kept only as evidence of
@@ -191,18 +194,18 @@ returns only if the warm-cache preview misses 15 s.
 
 ### 4.2 Missed targets
 
-On 0.57.0 (section 6): the preview misses of 0.56.0 are closed. What misses now:
+On 0.57.1 (sections 6 and 6.6) the misses of 0.56.0 and 0.57.0 are closed:
 
-| Miss | Gap | Cause | What closes it |
+| Miss | Gap | Cause | Closed by |
 |---|---|---|---|
-| Event to `segment.entered` | p95 278.5 s against 60 s (0.38 s on 0.56.0); 46,107 entries, p50 140.5 s, max 284.7 s; the ingest API p99 was 299 ms against 60 ms | code-caused: the batch diff of `segment.reevaluate` plans a nested loop over all open members (planner estimates the 8 batch members as 1 row), so a batch of 23 people costs 0.4 to 0.7 s and the single serial job per segment falls behind 2,000 events/s | follow-up D below |
-| Aggregate preview on a cold cache | 15.1 s (count statement 13.6 s) right after an app restart, against 15 s | I/O-bound plan: the grouped set reads every event of the window and the planner under-estimates the groups 3.3 times | none needed for v1; re-check at M8 on reference hardware |
+| Trait-only preview on `jsonb` and on slots (0.56.0) | 5.57 s and 6.14 s against 3 s | generic plan of the persistent prepared statement; no `ANALYZE` after a backfill | #143 (1.06 s on 0.57.x) |
+| Aggregate previews (0.56.0) | 38.7 s and 97.5 s uncapped; 503 at 10 s | correlated subquery per person | #144 (4.68 s and 1.20 s) |
+| 10 s limit against the 15 s target (0.56.0) | 503 even at 10 to 15 s | design inconsistency | #142 |
+| Event to `segment.entered` (0.57.0) | p95 278.5 s against 60 s | #143's custom plan of the batch statement, with the incremental segment missing from the `segment_members` statistics (follow-up D) | #149 (p95 4.05 s on 0.57.1) |
 
-On 0.56.0 the misses were the trait-only preview (generic plan, no `ANALYZE` after a backfill; closed by #143),
-the aggregate previews (correlated subquery; closed by #144) and the 10 s limit against the 15 s target
-(closed by #142). What stays provisional under D1 (hardware pending M8) is the figures above. Section
-19's fallbacks (name-level dirty filtering, `database.read_url`, rollups) are not needed for the
-previews.
+What stays open: D4.1 on `jsonb` was not re-run, an aggregate preview on a cold cache can sit at the 15 s
+target (section 6.4), and everything remains provisional under D1 (hardware pending M8). Section 19's
+fallbacks (name-level dirty filtering, `database.read_url`, rollups) are not needed.
 
 ### 4.3 Follow-up issues
 
@@ -237,20 +240,21 @@ Meeting 15 s alone still leaves 503s for previews between 10 and 15 s. Ruling 92
 fixed 20 s, a margin above the target, with no config key, and say so in 8.2; the section 19 targets
 stay.
 
-**D (draft, to file). Incremental re-evaluation of an aggregate segment falls behind at 2,000 events/s after the grouped-set compile (#144)**
+**D (#149). The incremental re-evaluation batch statement gets a bad custom plan for a segment missing from the statistics**
 
-At 10 M people / 52 M events with an aggregate segment of 150,000 members, 2,000 track events/s for
-600 s over 1,000,000 people gave event to `segment.entered` p95 278.5 s (p50 140.5 s, max 284.7 s;
-46,107 entries) against 60 s (0.38 s on 0.56.0). The `target` CTE of the batch statement is cheap
-(1.8 ms for a batch of 23 people, an index scan per partition restricted by `person_id = ANY(batch)`),
-but the diff around it is not: the planner estimates the target at 1 row (actual 8) and runs the
-`entering` and `leaving` anti joins as a nested loop over `segment_members_open_idx`, reading 94,233
-index entries per loop and 197,562 buffers (`EXPLAIN` in `data/m4/0.57.0/incremental-batch.explain.txt`,
-390 ms for 23 people). Batches are serialized by the segment's advisory lock, so the throughput of one
-segment is below the arrival rate and the backlog grows. Not verified: whether the 0.56.0 shape had the same
-diff plan with a better estimate. Fix options to compare: a
-`MATERIALIZED` target with a probe of `segment_members` by `(segment_id, person_id)`, or a
-join that probes `segment_members` by the batch people instead of a scan. Re-measure with `measure.sh incremental`.
+On 0.57.0 at 10 M people with an aggregate segment of about 150,000 members, 2,000 track events/s for
+600 s gave event to `segment.entered` p95 278.5 s (p50 140.5 s, max 284.7 s; 46,107 entries) against
+60 s (0.38 s on 0.56.0). The cause is verified, and it is not the aggregate compile of #144: #143 made the
+`segment.reevaluate` batch statement `.persistent(false)`, so each batch is planned with the segment id as a
+literal. A new segment is missing from the statistics of `segment_members` (8.7 M rows, 19 most common
+values summing to 1.0, and the autoanalyze threshold of about 871 k changes not reached), so the planner
+estimates 1 row and scans every open row of the segment for each batch person. For the same 23-person batch
+the custom plan took 563 ms and the generic plan 0.57 ms, probing `(segment_id, person_id)`; a `LATERAL ...
+LIMIT 1` rewrite did not help (273 ms). Batches are serialized by the segment's lock, so one segment's
+throughput fell below the arrival rate and the backlog grew. 0.56.0 was fast because its persistent
+statements switched to the generic plan after five executions. Fix (#149, ruling d30289c3):
+`apply_reevaluation` runs the batch statement under `SET LOCAL plan_cache_mode = force_generic_plan` and
+resets it right after. Shipped in 0.57.1: p95 4.05 s (section 6.6).
 
 ## 5. Reproduce
 
@@ -299,7 +303,7 @@ phase, so D4.1 on `jsonb` is not re-measured (the 0.56.0 figure stands for the j
 | Preview, property-filtered aggregate, p95 < 15 s (D4.5) | 20 of 20 503; 97.5 s uncapped | p50 1.14 s, p95 1.20 s, 0 non-200 | HIT |
 | Full refresh, trait-only, < 2 min (D4.6) | median 77.6 s | median 45.7 s (53.4, 43.8, 45.1, 45.7, 49.7); manual 6.0 s | HIT |
 | Full refresh with an aggregate, < 10 min (D4.6) | median 57.6 s | median 14.5 s (19.7, 14.5, 14.1, 14.2, 14.5); manual 8.2 s | HIT |
-| Event to `segment.entered`, p95 < 60 s (D4.7) | p95 0.382 s | p95 278.5 s (p50 140.5, p99 282.9, max 284.7; 46,107 entries) | MISS, code-caused (follow-up D) |
+| Event to `segment.entered`, p95 < 60 s (D4.7) | p95 0.382 s | 0.57.0: p95 278.5 s (46,107 entries), MISS. 0.57.1: p50 0.043 s, p95 4.05 s, p99 12.6 s, max 16.5 s (17,475 entries), section 6.6 | HIT on 0.57.1 |
 
 The incremental run was the same as before: 2,000 events/s for 600 s (1,200,000 accepted, 0 late, 0 429), an
 aggregate segment of 149,976 members before and 196,083 after, 0 exits, nothing pending after the drain.
@@ -346,10 +350,45 @@ an hour of builds had evicted the cache, is consistent with this and not reprodu
 
 ### 6.5 What still misses
 
-- **Event to `segment.entered`: p95 278.5 s against 60 s, gap 4.6 times.** Code-caused; the diagnosis and the
-  follow-up draft are in section 4.3 D. The batch-diff plan for one 23-person batch is in
-  `data/m4/0.57.0/incremental-batch.explain.txt`.
-- The ingest API p99 rose from 60 ms to 299 ms during the same run (not judged here, and
-  its cause was not investigated).
+- **Event to `segment.entered`** missed on 0.57.0 (p95 278.5 s against 60 s) and is met on 0.57.1 (p95 4.05 s, section 6.6); the cause and the
+  fix (#149) are in section 4.3 D. The generic plan of a 23-person batch is in
+  `data/m4/0.57.1/incremental-batch.explain.txt` (the 0.57.0 custom plan: `data/m4/0.57.0/`).
+- The ingest API p99 (loadgen, from schedule) was 60 ms on 0.56.0, 299 ms on 0.57.0 (during the backlog),  and is 638.8 ms on 0.57.1 (p50 4.0 ms, p95 131.6 ms) with the backlog gone; a 0.57.1 run whose entries had  all happened before (seed 1) gave 464.9 ms. So the rise is not the backlog; the database is larger (about  55 M events) and the host was hot. Not investigated, and not judged against a target here.
 - D4.1 on `jsonb` was not re-measured (6.1).
 - Everything remains provisional under D1 until the M8 hardware run.
+
+### 6.6 Incremental on 0.57.1 (after #149)
+
+Image `ghcr.io/glubiz/zirv-flow:0.57.1`, digest
+`sha256:4ac6d44b751051b8c816f317565d11a2599736d3d5a8c6f13b8c4f9c764ad927`, the same stack, volumes and 10 M
+seed, only the `incremental` phase (data in [`data/m4/0.57.1/`](data/m4/0.57.1/)).
+
+A first run with the default loadgen seed produced no entries at all: the seed fixes the items and the people
+they go to, so after two earlier runs on the same pool every person who could enter already had (that run is
+kept as `incremental-seed1-no-entries.json`). `measure.sh` now takes `M4_INC_SEED`; the result below is
+`M4_INC_SEED=2`, which sends different items to the same 1,000,000 people.
+
+| | 0.56.0 | 0.57.0 | 0.57.1 |
+|---|---|---|---|
+| Entries caused by events | 22,084 | 46,107 | 17,475 (2 exits) |
+| p50 | 0.044 s | 140.5 s | 0.043 s |
+| p95 (target 60 s) | 0.382 s | 278.5 s | **4.05 s** |
+| p99 | 9.7 s | 282.9 s | 12.6 s |
+| max | 13.3 s | 284.7 s | 16.5 s |
+
+2,000 events/s for 600 s: 1,200,000 accepted, 0 late; the segment went from 195,547 to 213,020 members and
+nothing was pending after the drain. Ingest p99 638.8 ms (p50 4.0 ms, p95 131.6 ms), see 6.5.
+
+**Statistics state.** After the run the incremental segment is not in `pg_stats.most_common_vals` for
+`segment_members.segment_id` (24 listed values). `segment_members` was last auto-analyzed at 15:24:45 UTC, before
+the segment was created at 15:37:52, with 213,024 changes since the last analyze (`n_live_tup` 9,116,705) and
+no manual analyze. So the statistics were stale for this segment during the whole run, as on 0.57.0, and the
+fast result comes from the plan, not from the statistics.
+
+**Plan.** For a 23-person batch of the incremental segment, run once in a rolled-back transaction under
+`SET LOCAL plan_cache_mode = force_generic_plan` (as `apply_reevaluation` does; `PREPARE` and `EXPLAIN EXECUTE`,
+because `EXPLAIN` of a bound statement is always a custom plan): execution 2.8 ms, planning 5.7 ms. Both
+segment membership probes use `segment_members_open_idx` with `Index Cond: (segment_id = $8) AND (person_id = t.id)`
+and `(segment_id = $8) AND (person_id = ANY ($7))`, 23 rows. On 0.57.0 the same statement took 390 ms
+because the custom plan scanned about 94,000 open rows of the segment per batch person
+(`data/m4/0.57.1/incremental-batch.explain.txt`, `data/m4/0.57.0/incremental-batch.explain.txt`).

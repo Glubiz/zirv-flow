@@ -1971,16 +1971,17 @@ are not a v1 sign-off; the targets are re-checked on reference hardware before 1
 
 **As measured (M4).** The segment rows were measured at 10 million people and 50 million events on a
 development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU) in
-[docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md), first on image 0.56.0 and again on 0.57.0
-after #142 to #144. On 0.57.0: trait-only preview p95 1.06 s on slots (3 s), aggregate preview p95
-4.68 s and property-filtered aggregate preview p95 1.20 s (15 s, no 503s), full refresh median 45.7 s
-trait-only (2 min) and 14.5 s with an aggregate (10 min). OQ-2 is decided (21.1): no rollup for v1.
-Still missed: event to `segment.entered` (p95 278 s against 60 s, a plan problem in the batch diff
-that #144 exposed, section 4.3, follow-up D, of the benchmark document), and an aggregate preview on a cold cache
-(about 15 s right after an app restart). On 0.56.0 the previews had missed because the persistent
-prepared statement fell back to a generic plan after five executions, a slot backfill left no
-statistics, and an aggregate was a correlated subquery per person (38.7 s and 97.5 s uncapped; 503 at
-the 10 s limit, which also contradicted the 15 s target). The figures are not a v1 sign-off.
+[docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md), on images 0.56.0, 0.57.0 and 0.57.1 (after
+#142 to #144 and #149). On 0.57.1 every target measured is met: trait-only preview p95 1.06 s on slots (3 s),
+aggregate preview p95 4.68 s and property-filtered aggregate preview p95 1.20 s (15 s, no 503s), full refresh
+median 45.7 s trait-only (2 min) and 14.5 s with an aggregate (10 min), and event to `segment.entered` p95
+4.05 s (60 s). OQ-2 is decided (21.1): no rollup for v1. The 0.57.0 image had missed the last one (p95
+278.5 s) because #143's per-execution custom plan of the re-evaluation batch statement estimated one row for
+a segment missing from the `segment_members` statistics; #149 fixed it by forcing the generic plan. On 0.56.0
+the previews had missed because the persistent prepared statement fell back to a generic plan after five
+executions, a slot backfill left no statistics, and an aggregate was a correlated subquery per person (38.7 s
+and 97.5 s uncapped; 503 at the 10 s limit, which also contradicted the 15 s target). An aggregate preview on
+a cold cache can take about 15 s. D4.1 on `jsonb` was not re-run. The figures are not a v1 sign-off.
 
 ## 20. Key decisions
 
@@ -2090,15 +2091,13 @@ they were ruled as their capabilities were added to the plan.
   set over `events` (workspace, name, window, property filters, `GROUP BY person_id
   HAVING agg op N`) semi-joined to `people` (#144), and the incremental path
   restricts that set to the batch's people. Decided by the D5 rule of the M4
-  benchmark (#127) on 0.57.0 at 10 million people and 50 million events: the
+  benchmark (#127) on 0.57.0 and 0.57.1 at 10 million people and 50 million events: the
   90-day aggregate preview is p95 4.68 s and the property-filtered sum p95
   1.20 s, both under 15 s with no 503s, and a full aggregate refresh takes a
   median 14.5 s against 10 min (38.7 s, 97.5 s and 57.6 s before). The grouped
   set reads every event of the window, so a preview of a large aggregate is
   I/O-bound: measured 8.7 s to 15 s on a cold cache, which is the thin margin to
-  watch at M8. The same run showed the incremental path missing its target (p95
-  278 s against 60 s) on a plan problem in the batch diff, not on the aggregate
-  (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
+watch at M8. The incremental path meets its target on 0.57.1 (event to  `segment.entered` p95 4.05 s against 60 s) after #149; the miss on 0.57.0 (278 s) was  a custom plan of the re-evaluation batch statement, not the aggregate compile  (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
   M8 on reference hardware misses the preview target with a warm cache. See
   [docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md).
 
