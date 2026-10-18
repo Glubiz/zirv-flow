@@ -29,6 +29,15 @@ pub fn step(
     input: StepInput,
     ctx: &dyn StepContext,
 ) -> Result<Transition, EngineError> {
+    // A timer or event for an older state is stale, whatever the version has grown to.
+    let stale_version = match &input {
+        StepInput::TimerDue { wake_version } => Some(*wake_version),
+        StepInput::EventArrived { event } => Some(event.wake_version),
+        _ => None,
+    };
+    if stale_version.is_some_and(|wake_version| wake_version != state.state_version) {
+        return Ok(stale(state));
+    }
     let version = state
         .state_version
         .checked_add(1)
@@ -48,10 +57,7 @@ pub fn step(
             run.require(Status::Active, "start")?;
             run.advance(state.node.clone())
         }
-        StepInput::TimerDue { wake_version } => {
-            if wake_version != state.state_version {
-                return Ok(run.stale());
-            }
+        StepInput::TimerDue { .. } => {
             run.require(Status::Waiting, "a timer")?;
             let port = match &run.node(&state.node)?.kind {
                 NodeKind::WaitDuration { .. } | NodeKind::WaitUntilTime { .. } => PORT_NEXT,
@@ -64,9 +70,6 @@ pub fn step(
             run.leave(&state.node, port)
         }
         StepInput::EventArrived { event } => {
-            if event.wake_version != state.state_version {
-                return Ok(run.stale());
-            }
             run.require(Status::Waiting, "an event")?;
             let node = run.node(&state.node)?;
             if !matches!(node.kind, NodeKind::WaitUntilEvent { .. }) {
@@ -82,7 +85,7 @@ pub fn step(
             run.leave(&state.node, PORT_EVENT)
         }
         StepInput::ConditionsEvaluated { node, results } => {
-            run.require(Status::Active, "condition results")?;
+            run.require(Status::AwaitingConditions, "condition results")?;
             if node != state.node {
                 return Err(EngineError::InputMismatch(format!(
                     "the enrollment is at `{}`, not `{node}`",
@@ -121,6 +124,19 @@ pub fn step(
                 run.advance(state.node.clone())
             }
         }
+    }
+}
+
+/// No-op: the state as it was, nothing to commit.
+fn stale(state: &EnrollmentState) -> Transition {
+    Transition {
+        state: state.clone(),
+        visited: Vec::new(),
+        effects: Vec::new(),
+        wake: None,
+        waits: Vec::new(),
+        outcome: Outcome::Stale,
+        zone_fallback: None,
     }
 }
 
@@ -171,19 +187,6 @@ impl Run<'_> {
 
     fn id(&self) -> Uuid {
         self.state.enrollment_id
-    }
-
-    /// No-op: the state as it was, nothing to commit.
-    fn stale(self) -> Transition {
-        Transition {
-            state: self.state.clone(),
-            visited: Vec::new(),
-            effects: Vec::new(),
-            wake: None,
-            waits: Vec::new(),
-            outcome: Outcome::Stale,
-            zone_fallback: None,
-        }
     }
 
     fn clear_wait(&mut self) {
@@ -363,10 +366,13 @@ impl Run<'_> {
                 }
                 Outcome::Waiting
             }
-            Halt::Yield(conditions) => Outcome::NeedsConditions {
-                node: node.to_owned(),
-                conditions,
-            },
+            Halt::Yield(conditions) => {
+                state.status = Status::AwaitingConditions;
+                Outcome::NeedsConditions {
+                    node: node.to_owned(),
+                    conditions,
+                }
+            }
             Halt::End(outcome) => {
                 state.status = if outcome == Outcome::Completed {
                     Status::Completed
@@ -740,7 +746,7 @@ mod tests {
             }
         );
         assert_eq!(yielded.state.node, "branch");
-        assert_eq!(yielded.state.status, Status::Active);
+        assert_eq!(yielded.state.status, Status::AwaitingConditions);
         assert_eq!(yielded.state.state_version, 1);
         assert_eq!(yielded.effects.len(), 1);
         assert!(yielded.wake.is_none());
@@ -1161,13 +1167,16 @@ mod tests {
             attempt(&slept, StepInput::Resume { skip: false }),
             EngineError::InvalidState(_)
         ));
-        // Condition results for a node the enrollment is not at, or for a non-branch.
+        // Condition results for a node the enrollment is not at, or for a non-branch, once it
+        // has yielded (the status is AwaitingConditions, not Active, since the branch fix).
+        let mut yielded = state.clone();
+        yielded.status = Status::AwaitingConditions;
         assert!(matches!(
-            attempt(&state, evaluated("end", vec![])),
+            attempt(&yielded, evaluated("end", vec![])),
             EngineError::InputMismatch(_)
         ));
         assert!(matches!(
-            attempt(&state, evaluated("wait", vec![])),
+            attempt(&yielded, evaluated("wait", vec![])),
             EngineError::InputMismatch(_)
         ));
         // An event for a wait that is a timer.
@@ -1182,6 +1191,77 @@ mod tests {
             attempt(&worn, StepInput::Start),
             EngineError::InvalidState(_)
         ));
+    }
+
+    #[test]
+    fn condition_results_need_a_branch_that_yielded() {
+        let g = graph(
+            vec![
+                (
+                    "branch",
+                    NodeKind::Branch {
+                        conditions: vec![condition()],
+                    },
+                ),
+                ("end", NodeKind::Exit {}),
+            ],
+            &[("branch", "case_0", "end"), ("branch", "else", "end")],
+        );
+        // A new enrollment sits at the branch but has not yielded: results are refused.
+        let fresh = start(&g);
+        assert!(matches!(
+            step(&g, &fresh, evaluated("branch", vec![true]), &ctx()),
+            Err(EngineError::InvalidState(_))
+        ));
+        // Once it yielded, they are accepted, and Start is refused.
+        let yielded = run(&g, &fresh, StepInput::Start).state;
+        assert_eq!(yielded.status, Status::AwaitingConditions);
+        assert!(matches!(
+            step(&g, &yielded, StepInput::Start, &ctx()),
+            Err(EngineError::InvalidState(_))
+        ));
+        assert_eq!(
+            run(&g, &yielded, evaluated("branch", vec![true])).outcome,
+            Outcome::Completed
+        );
+        let wire = serde_json::to_value(&yielded).unwrap();
+        assert_eq!(wire["status"], "awaiting_conditions");
+    }
+
+    #[test]
+    fn a_stale_input_is_stale_even_at_the_last_version() {
+        let g = event_graph();
+        let mut slept = run(&g, &start(&g), StepInput::Start).state;
+        slept.state_version = u64::MAX;
+        for input in [StepInput::TimerDue { wake_version: 1 }, arrived("order", 1)] {
+            let transition = run(&g, &slept, input);
+            assert_eq!(transition.outcome, Outcome::Stale);
+            assert_eq!(transition.state, slept);
+        }
+        // A current input would need version + 1, which does not exist.
+        assert!(matches!(
+            step(
+                &g,
+                &slept,
+                StepInput::TimerDue {
+                    wake_version: u64::MAX
+                },
+                &ctx()
+            ),
+            Err(EngineError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn a_timer_before_wake_at_is_accepted_because_the_queue_owns_the_time() {
+        let g = event_graph();
+        let slept = run(&g, &start(&g), StepInput::Start);
+        let wake_at = slept.state.wake_at.unwrap();
+        // The context clock is well before wake_at; the engine does not compare them.
+        assert!(ctx().now() < wake_at);
+        let woken = run(&g, &slept.state, StepInput::TimerDue { wake_version: 1 });
+        assert_eq!(visited(&woken), ["late"]);
+        assert_eq!(woken.outcome, Outcome::Completed);
     }
 
     #[test]

@@ -14,8 +14,10 @@ use crate::error::EngineError;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// Ready to run its node: new, or yielded at a branch.
+    /// Ready to run its node: new.
     Active,
+    /// Yielded at a branch, waiting for the caller's condition results.
+    AwaitingConditions,
     /// Asleep at a wait node until `wake_at` or, for `wait.until_event`, its event.
     Waiting,
     /// Reached an exit node.
