@@ -36,6 +36,8 @@
 #   M4_INC_SECONDS     loadgen duration, default 600 (use 60 for a smoke run)
 #   M4_INC_POOL        loadgen --people, default 100000; it must not exceed seed.sh's
 #                      SEED_LG_POOL, the people that have a `bench-u-N` identity
+#   M4_INC_SEED        loadgen --seed, default 1; pass a new one when the pool already ran, since the same seed
+#                      sends the same items to the same people and nobody new can enter the segment
 #   LOADGEN            the loadgen binary, default <repo>/target/release/loadgen
 #                      (cargo build --release -p zirv-flow-loadgen)
 #   M4_DRAIN_TIMEOUT   seconds to wait for the marks to drain after loadgen, default 900
@@ -54,6 +56,7 @@ refresh_runs="${M4_REFRESH_RUNS:-5}"
 inc_rate="${M4_INC_RATE:-2000}"
 inc_seconds="${M4_INC_SECONDS:-600}"
 inc_pool="${M4_INC_POOL:-100000}"
+inc_seed="${M4_INC_SEED:-1}"
 loadgen="${LOADGEN:-$root/target/release/loadgen}"
 drain_timeout="${M4_DRAIN_TIMEOUT:-900}"
 ws="$(state_get M4_WS)"
@@ -290,7 +293,7 @@ phase_incremental() {
   log "incremental: segment $seg refreshed ($before); loadgen $inc_rate/s for $inc_seconds s over $inc_pool people"
   since="$(pg -At -c "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
   "$loadgen" --url "$api_base" --key-file "$M4_STATE/loadgen.key" --mode track --rate "$inc_rate" \
-    --duration "$inc_seconds" --people "$inc_pool" --run-id "m4-$(date -u +%H%M%S)" \
+    --duration "$inc_seconds" --people "$inc_pool" --seed "$inc_seed" --run-id "m4-$(date -u +%H%M%S)" \
     --out "$M4_OUT/incremental-loadgen.json" >&2
   log "incremental: loadgen done; waiting for the inbox and the marks to drain"
   deadline=$(( $(date +%s) + drain_timeout ))
