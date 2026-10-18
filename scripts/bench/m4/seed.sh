@@ -52,25 +52,45 @@ days="${SEED_DAYS:-365}"
 chunk="${SEED_CHUNK:-1000000}"
 case "$people$events$pool$days$chunk" in *[!0-9]* | "") die "the SEED_* values must be positive integers" ;; esac
 
+steps=" ${SEED_STEPS:-load vacuum-people vacuum-identities vacuum-events manifest} "
+has() { case "$steps" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+if has load; then
 existing="$(pg -At -c "SELECT count(*) FROM people WHERE workspace_id = '$ws'")"
 [ "$existing" = 0 ] || die "workspace $ws already has $existing people; reset the stack volumes to re-seed"
+fi
 traits="$(pg -At -c "SELECT count(*) FROM trait_definitions WHERE workspace_id = '$ws'")"
 [ "$traits" = 20 ] || die "expected the 20 trait definitions of setup.sh, found $traits"
 
-seed_at="$(date -u +%FT%TZ)"
-log "seeding $people people and $events events into workspace $ws (seed_at $seed_at)"
-start="$(date +%s)"
-pg -v "ws=$ws" -v "people=$people" -v "events=$events" -v "lg_pool=$pool" -v "days=$days" \
-  -v "seed_at=$seed_at" -v "chunk=$chunk" -f - <"$m4_dir/seed.sql" >&2
-log "rows written in $(( $(date +%s) - start )) s; vacuuming"
-start="$(date +%s)"
-pg -c "VACUUM (ANALYZE) people" -c "VACUUM (ANALYZE) identities" -c "VACUUM (ANALYZE) events" >&2
-log "VACUUM (ANALYZE) done in $(( $(date +%s) - start )) s"
+# SEED_STEPS (default: all) splits a long seed into commands that each stay under an hour:
+# (PARALLEL 0: a parallel vacuum with maintenance_work_mem=1GB needs more /dev/shm than the 1gb the stack gives.)
+#   load  vacuum-people  vacuum-identities  vacuum-events  manifest
+# After the load, the later steps need SEED_AT (the seed_at the load logged) and, for the
+# manifest, SEED_DURATION_S (the load's duration, recorded in seed.json).
+if has load; then
+  seed_at="$(date -u +%FT%TZ)"
+  log "seeding $people people and $events events into workspace $ws (seed_at $seed_at)"
+  start="$(date +%s)"
+  pg -v "ws=$ws" -v "people=$people" -v "events=$events" -v "lg_pool=$pool" -v "days=$days" \
+    -v "seed_at=$seed_at" -v "chunk=$chunk" -f - <"$m4_dir/seed.sql" >&2
+  SEED_DURATION_S=$(( $(date +%s) - start ))
+  log "rows written in $SEED_DURATION_S s"
+else
+  seed_at="${SEED_AT:?set SEED_AT to the seed_at of the load}"
+fi
+for table in people identities events; do
+  if has "vacuum-$table"; then
+    start="$(date +%s)"
+    pg -c "VACUUM (ANALYZE, PARALLEL 0) $table" >&2
+    log "VACUUM (ANALYZE, PARALLEL 0) $table done in $(( $(date +%s) - start )) s"
+  fi
+done
+has manifest || exit 0
 
-pg -At -v "ws=$ws" -v "seed_at=$seed_at" -v "days=$days" -v "chunk=$chunk" -f - >"$M4_OUT/seed.json" <<'SQL'
+pg -At -v "ws=$ws" -v "seed_at=$seed_at" -v "days=$days" -v "duration_s=${SEED_DURATION_S:-null}" -f - >"$M4_OUT/seed.json" <<'SQL'
 SELECT json_build_object(
     'workspace', :'ws',
     'seed_at', :'seed_at',
+    'load_duration_s', :duration_s,
     'days', :days,
     'setseed', 0.42,
     'postgres', current_setting('server_version'),
