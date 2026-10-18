@@ -1,0 +1,4 @@
+{"v":1,"all":[
+  {"trait":"plan","op":"eq","value":"pro"},
+  {"event":"bench_order_placed","window":{"last":"P90D"},"agg":{"fn":"count","op":"gte","value":2}}
+]}

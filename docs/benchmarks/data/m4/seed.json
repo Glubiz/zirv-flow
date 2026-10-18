@@ -1,0 +1,31 @@
+{
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "seed_at": "2026-10-18T04:52:13Z",
+  "load_duration_s": 3600,
+  "days": 365,
+  "setseed": 0.42,
+  "postgres": "16.15 (Debian 16.15-1.pgdg13+2)",
+  "rows": {
+    "people": 10000000,
+    "identities": 1000000,
+    "events": 50000000,
+    "events_default_partition": 0,
+    "events_by_name": {
+      "bench_item_added": 9999113,
+      "bench_order_placed": 12494756,
+      "bench_page_viewed": 20004843,
+      "bench_plan_changed": 2503341,
+      "bench_support_opened": 4997947
+    }
+  },
+  "bytes": {
+    "people_table": 10242867200,
+    "people_indexes": 2472927232,
+    "identities_table": 117096448,
+    "identities_indexes": 222191616,
+    "events_table": 10077184000,
+    "events_indexes": 12057444352,
+    "people_gin_index": 1423376384
+  },
+  "load_duration_note": "start 04:52:13Z; the background command was killed at the 1 h cap (05:52Z) with all 50,000,000 events committed, so the load took at most 3600 s; VACUUM (ANALYZE, PARALLEL 0) and this manifest ran as separate commands afterwards; postgres was recreated with 8gb shm before the measurements"
+}

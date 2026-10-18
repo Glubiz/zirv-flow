@@ -1,0 +1,5 @@
+{"v":1,"all":[
+  {"event":"bench_order_placed","window":{"last":"P90D"},
+   "where":[{"prop":"category","op":"eq","value":"books"}],
+   "agg":{"fn":"sum","prop":"amount","op":"gt","value":150.005}}
+]}

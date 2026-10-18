@@ -1,0 +1,190 @@
+{
+  "phase": "preview-jsonb",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T06:00:37Z",
+  "definition_name": "trait_only",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "trait": "age",
+        "op": "between",
+        "value": [
+          25,
+          45
+        ]
+      },
+      {
+        "trait": "marketing_opt_in",
+        "op": "eq",
+        "value": true
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 200,
+    "seconds": 1.694225
+  },
+  "samples": [
+    {
+      "status": 200,
+      "seconds": 1.653496,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:05.726481Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.725390,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:07.461459Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.671628,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:09.276612Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.645227,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:11.03757Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.673466,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:12.762809Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.708382,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:14.524088Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.521686,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:16.321276Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.577982,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:21.93332Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.558441,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:23.594184Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.549332,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:29.234272Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.572160,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:34.870754Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.546782,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:40.529629Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.483585,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:46.163829Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.603385,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:51.733639Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.491770,
+      "count": 677521,
+      "compiled_at": "2026-10-18T05:59:57.424992Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.568006,
+      "count": 677521,
+      "compiled_at": "2026-10-18T06:00:03.018194Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.565981,
+      "count": 677521,
+      "compiled_at": "2026-10-18T06:00:08.676176Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.536855,
+      "count": 677521,
+      "compiled_at": "2026-10-18T06:00:14.330767Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.527808,
+      "count": 677521,
+      "compiled_at": "2026-10-18T06:00:19.951379Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.568978,
+      "count": 677521,
+      "compiled_at": "2026-10-18T06:00:25.572528Z",
+      "code": null
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 1.577982,
+    "max": 5.603385,
+    "p50": 5.524747,
+    "p95": 5.572160
+  },
+  "non_200": 0,
+  "count": [
+    677521
+  ],
+  "mirror_count_at_last_compiled_at": 677521,
+  "target_p95_s": 3,
+  "explain_indexes": []
+}

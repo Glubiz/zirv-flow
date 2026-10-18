@@ -233,3 +233,28 @@ the deployment-shaped figure is the same 500-insert transaction timed with `pgbe
 `scripts/bench/ab.sh <on|off> <n> <zirv-flow-binary> <loadgen-binary>` is the decision-log A/B:
 native release builds (the `off` one built as in section 6), unconstrained, against the tier PostgreSQL;
 it preloads a backlog with no worker, then times the drain to empty. Run each side at least twice.
+
+## 9. Segment benchmarks (M4, issue #127)
+
+`scripts/bench/m4/` measures segment preview, the trait slots, full refresh and the incremental
+event-to-entry latency (architecture 8.2, 19 and 21). It uses the published image, never a local
+build, in its own compose project `zirv-flow-m4bench` (so `zirv-flow-bench` and its volumes are
+never touched), PostgreSQL on the tiers default cpuset and the app at tier M. Each script has a
+header with its purpose, environment and usage.
+
+```sh
+docker pull ghcr.io/glubiz/zirv-flow:0.55.0                 # BENCH_IMAGE_TAG; pull_policy is never
+cargo build --release -p zirv-flow-loadgen                  # for the incremental phase
+scripts/bench/m4/stack.sh up                                # stack, owner, stack facts
+scripts/bench/m4/setup.sh                                   # workspace, 20 traits, 5 event schemas, ingest key (API)
+SEED_PEOPLE=10000000 SEED_EVENTS=50000000 scripts/bench/m4/seed.sh   # defaults 100000 / 500000
+scripts/bench/m4/measure.sh all                             # or one phase: verify, preview-jsonb, index, ...
+scripts/bench/m4/stack.sh stop                              # keep the volumes
+```
+
+Credentials and state (the generated owner password, the session headers, the loadgen key) live
+in an untracked directory (`M4_STATE`) and are never printed. Results go to `M4_OUT` as raw JSON
+and EXPLAIN plans. `measure.sh verify` checks each preview count against a hand-written SQL count
+over the seeded rows. The seed writes the rows the app writes (checked against an identify and a
+track sent through the API); it does not write the source-record ledger, decisions, event
+deduplication rows or event message ids, which no segment query reads.

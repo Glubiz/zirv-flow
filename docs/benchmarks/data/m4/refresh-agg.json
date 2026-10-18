@@ -1,0 +1,123 @@
+{
+  "phase": "refresh-agg",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:51:32Z",
+  "definition_name": "agg90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "agg": {
+          "fn": "count",
+          "op": "gte",
+          "value": 2
+        }
+      }
+    ]
+  },
+  "runs": [
+    {
+      "run": 1,
+      "segment": "01a14df6-6b78-723a-8edc-7a1caa2e0429",
+      "members": {
+        "member_count": 128244,
+        "computed_version": 1
+      },
+      "first_refresh": {
+        "queue_s": 2.069,
+        "run_s": 68.137,
+        "total_s": 70.206
+      },
+      "manual_refresh": {
+        "queue_s": 2.051,
+        "run_s": 42.923,
+        "total_s": 44.974
+      }
+    },
+    {
+      "run": 2,
+      "segment": "01a14df8-3911-7545-87b7-11485193be63",
+      "members": {
+        "member_count": 128241,
+        "computed_version": 1
+      },
+      "first_refresh": {
+        "queue_s": 1.982,
+        "run_s": 55.403,
+        "total_s": 57.385
+      },
+      "manual_refresh": {
+        "queue_s": 1.900,
+        "run_s": 43.005,
+        "total_s": 44.905
+      }
+    },
+    {
+      "run": 3,
+      "segment": "01a14df9-d3a4-72b7-bfbb-808d0052d76e",
+      "members": {
+        "member_count": 128237,
+        "computed_version": 1
+      },
+      "first_refresh": {
+        "queue_s": 2.076,
+        "run_s": 55.492,
+        "total_s": 57.567
+      },
+      "manual_refresh": {
+        "queue_s": 2.027,
+        "run_s": 42.979,
+        "total_s": 45.005
+      }
+    },
+    {
+      "run": 4,
+      "segment": "01a14dfb-6fc2-76ea-abcd-b922325247d9",
+      "members": {
+        "member_count": 128232,
+        "computed_version": 1
+      },
+      "first_refresh": {
+        "queue_s": 2.192,
+        "run_s": 48.511,
+        "total_s": 50.703
+      },
+      "manual_refresh": {
+        "queue_s": 1.907,
+        "run_s": 43.884,
+        "total_s": 45.791
+      }
+    },
+    {
+      "run": 5,
+      "segment": "01a14dfc-f415-761e-9424-27831c2def45",
+      "members": {
+        "member_count": 128231,
+        "computed_version": 1
+      },
+      "first_refresh": {
+        "queue_s": 1.990,
+        "run_s": 56.304,
+        "total_s": 58.293
+      },
+      "manual_refresh": {
+        "queue_s": 1.938,
+        "run_s": 44.025,
+        "total_s": 45.963
+      }
+    }
+  ],
+  "median_first_refresh_total_s": 57.567,
+  "median_manual_refresh_total_s": 45.005,
+  "target_s": 600,
+  "note": "queue_s and run_s are only as fine as the 0.3 s poll (run_s is 0 when no poll caught the job running); total_s is the figure. first_refresh is the save-triggered initial refresh of a new segment (every member enters); manual_refresh is POST .../refresh on it, a full recompute that diffs against the open rows"
+}

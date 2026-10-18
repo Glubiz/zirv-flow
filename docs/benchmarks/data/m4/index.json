@@ -1,0 +1,26 @@
+{
+  "phase": "index",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T06:54:31Z",
+  "people": 10000000,
+  "backfills": [
+    {
+      "trait": "plan",
+      "seconds_to_ready": 1002.776
+    },
+    {
+      "trait": "age",
+      "seconds_to_ready": 1089.628
+    },
+    {
+      "trait": "marketing_opt_in",
+      "seconds_to_ready": 1133.702
+    }
+  ],
+  "slots": {
+    "age": "trait_n1",
+    "marketing_opt_in": "trait_b1",
+    "plan": "trait_s1"
+  },
+  "note": "client clock from the POST to the first poll that reports ready (0.5 s poll)"
+}

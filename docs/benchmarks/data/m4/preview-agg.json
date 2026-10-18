@@ -1,0 +1,192 @@
+{
+  "phase": "preview-agg",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:16:07Z",
+  "definition_name": "agg90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "agg": {
+          "fn": "count",
+          "op": "gte",
+          "value": 2
+        }
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 503,
+    "seconds": 10.003507
+  },
+  "samples": [
+    {
+      "status": 503,
+      "seconds": 10.005724,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004115,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003414,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003753,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003337,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003894,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005304,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003227,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003539,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004815,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003319,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004085,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004623,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003527,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003552,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005223,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003385,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004080,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005833,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003568,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 10.003227,
+    "max": 10.005833,
+    "p50": 10.0038235,
+    "p95": 10.005724
+  },
+  "non_200": 20,
+  "count": [],
+  "mirror_count_at_last_compiled_at": 128283,
+  "target_p95_s": 15,
+  "explain_indexes": [
+    "events_y2026m07_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m10_workspace_id_person_id_occurred_at_idx",
+    "people_trait_s1_idx"
+  ]
+}

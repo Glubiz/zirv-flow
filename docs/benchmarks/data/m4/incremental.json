@@ -1,0 +1,75 @@
+{
+  "phase": "incremental",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T08:02:49Z",
+  "segment": "01a14dfe-d31e-736e-8bf2-0d81b3799c4d",
+  "since": "2026-10-18T07:52:41.440126Z",
+  "definition_name": "agg90",
+  "loadgen": {
+    "rate_per_s": 2000,
+    "seconds": 600,
+    "people": 1000000,
+    "total": {
+      "name": "total",
+      "target_rate": 2000,
+      "planned_duration_s": 600.0,
+      "elapsed_s": 600.0085297,
+      "requests": 1199999,
+      "items_offered": 1199999,
+      "items_accepted": 1199999,
+      "achieved_rate": 1999.969901427886,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 1199999,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 1199999,
+        "p50_ms": 3.801,
+        "p95_ms": 8.034,
+        "p99_ms": 60.354,
+        "max_ms": 1103.803
+      },
+      "service_latency": {
+        "count": 1199999,
+        "p50_ms": 2.926,
+        "p95_ms": 6.268,
+        "p99_ms": 57.662,
+        "max_ms": 1089.636
+      },
+      "dispatch_lag": {
+        "count": 1199999,
+        "p50_ms": 0.799,
+        "p95_ms": 2.359,
+        "p99_ms": 4.272,
+        "max_ms": 16.232
+      },
+      "late_dispatch": 0,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  },
+  "members_before": {
+    "member_count": 128230,
+    "computed_version": 1
+  },
+  "members_after": {
+    "member_count": 150313,
+    "computed_version": 1
+  },
+  "pending_after_wait": 0,
+  "latency_s": {
+    "entries_caused_by_events": 22084,
+    "p50_s": 0.044,
+    "p95_s": 0.382,
+    "p99_s": 9.745,
+    "max_s": 13.277,
+    "entries_total": 22084,
+    "exits_total": 1
+  },
+  "target_p95_s": 60,
+  "note": "recorded_at of the segment.entered decision minus the causing event received_at; recorded_at is the start of the re-evaluating transaction (slight under-estimate)"
+}

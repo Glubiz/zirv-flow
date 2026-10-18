@@ -1,0 +1,190 @@
+{
+  "phase": "preview-slots",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:11:04Z",
+  "definition_name": "trait_only",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "trait": "age",
+        "op": "between",
+        "value": [
+          25,
+          45
+        ]
+      },
+      {
+        "trait": "marketing_opt_in",
+        "op": "eq",
+        "value": true
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 200,
+    "seconds": 6.008032
+  },
+  "samples": [
+    {
+      "status": 200,
+      "seconds": 6.037782,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:08:56.915711Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.061805,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:03.04447Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.052420,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:09.222505Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.120138,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:15.357414Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.060144,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:21.554259Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.940082,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:27.689994Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.154621,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:33.71231Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.964398,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:39.95185Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.036190,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:46.017635Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.039359,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:52.136973Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.957918,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:09:58.273641Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.136932,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:04.31099Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.944774,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:10.538409Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.044030,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:16.599942Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.935369,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:22.735008Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.040437,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:28.75571Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.093481,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:34.889451Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.000035,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:41.072499Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.957848,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:47.155866Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 6.059871,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:10:53.211309Z",
+      "code": null
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 5.935369,
+    "max": 6.154621,
+    "p50": 6.039898,
+    "p95": 6.136932
+  },
+  "non_200": 0,
+  "count": [
+    677521
+  ],
+  "mirror_count_at_last_compiled_at": 677521,
+  "target_p95_s": 3,
+  "explain_indexes": []
+}
