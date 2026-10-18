@@ -304,6 +304,15 @@ pub async fn apply_reevaluation(
 ) -> Result<RefreshOutcome, StoreError> {
     let statement = refresh_statement(apply.members, Scope::Batch);
     let batch = apply.batch;
+    // A custom plan for a segment that is missing from the `segment_members` statistics (new, or
+    // not yet analyzed) estimates one row for its id, so the diff scans every open row of the
+    // segment for each batch person. The generic plan probes `segment_members_open_idx` by
+    // (segment_id, person_id) instead. The setting is local to the caller's transaction and is
+    // restored right after, so its other statements keep custom plans.
+    sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let counts = bind_all(
         sqlx::query_scalar::<_, Vec<i64>>(sqlx::AssertSqlSafe(statement)),
         apply.workspace,
@@ -323,6 +332,10 @@ pub async fn apply_reevaluation(
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    sqlx::query("SET LOCAL plan_cache_mode = DEFAULT")
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let outcome = RefreshOutcome {
         entered: counts[0],
         exited: counts[1],
@@ -755,5 +768,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// Opens `count` people of the plan and a row for each in `segment`.
+    async fn fill(pool: &PgPool, ws: WorkspaceId, segment: Uuid, count: i32) {
+        sqlx::query(
+            "WITH made AS ( \
+                 INSERT INTO people (id, workspace_id, traits) \
+                 SELECT gen_random_uuid(), $1, '{\"plan\": \"pro\"}' FROM generate_series(1, $3) \
+                 RETURNING id) \
+             INSERT INTO segment_members \
+                 (workspace_id, segment_id, person_id, version, entered_at, entered_trace_id, \
+                  entered_cause) \
+             SELECT $1, $2, id, 1, now(), gen_random_uuid(), 'initial' FROM made",
+        )
+        .bind(ws.as_uuid())
+        .bind(segment)
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_diff_of_a_segment_missing_from_the_statistics_probes_by_person(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let known = segment(&pool, ws, "Known", 60).await;
+        fill(&pool, ws, known.id, 300).await;
+        sqlx::query("ANALYZE segment_members")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The statistics know only the first segment when this one fills.
+        let fresh = segment(&pool, ws, "Fresh", 60).await;
+        fill(&pool, ws, fresh.id, 20_000).await;
+        let people: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT person_id FROM segment_members WHERE segment_id = $1 LIMIT 3",
+        )
+        .bind(fresh.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let trace = TraceContext::root(Cause::api("req"));
+        let dirty_people: Vec<DirtyPerson> = people.iter().map(|p| dirty(*p, &trace)).collect();
+        let batch = DirtyBatch::new(&dirty_people, &trace);
+
+        let mut tx = begin(&pool).await.unwrap();
+        lock_segment_refresh(&mut tx, fresh.id).await.unwrap();
+        let read = "SELECT COALESCE(sum(seq_tup_read + idx_tup_fetch), 0)::bigint \
+                    FROM pg_stat_xact_user_tables WHERE relname = 'segment_members'";
+        let before: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
+        let outcome = apply_reevaluation(
+            &mut tx,
+            &ReevaluateApply {
+                workspace: ws,
+                segment: fresh.id,
+                version: 1,
+                members: &pro_batch("pro"),
+                now: NOW,
+                batch: &batch,
+                job: (Uuid::new_v4(), 1),
+            },
+        )
+        .await
+        .unwrap();
+        let after: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
+        let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RefreshOutcome {
+                entered: 0,
+                exited: 0
+            }
+        );
+        // The rows read follow the batch, not the segment's 20 000 open rows.
+        assert!(after - before < 100, "read {} rows", after - before);
+        // The setting does not leak into the rest of the transaction.
+        assert_eq!(mode, "auto");
     }
 }
