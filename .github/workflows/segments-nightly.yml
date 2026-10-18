@@ -12,7 +12,6 @@ on:
       seed:
         description: 'Seed to reproduce a failure (a u64); empty picks a random one'
         required: false
-        default: ''
       cases:
         description: 'Number of cases'
         required: false
