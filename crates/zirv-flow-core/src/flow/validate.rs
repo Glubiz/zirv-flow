@@ -7,9 +7,7 @@ use chrono::{NaiveDateTime, NaiveTime};
 use hashbrown::{HashMap, HashSet};
 use serde_json::Value;
 
-use super::graph::{
-    Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, NodeKind, TraitChange, UntilTime,
-};
+use super::graph::{Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, NodeKind, UntilTime};
 use super::issue::{Issue, code};
 use super::settings::{ExitCriterion, FlowSettings, Goal, Reentry, Trigger};
 use crate::schedule;
@@ -195,8 +193,7 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
                 }
             }
         }
-        NodeKind::ActionUpdateTrait { key, change } => {
-            let _: &TraitChange = change;
+        NodeKind::ActionUpdateTrait { key, .. } => {
             if !valid_key(key) {
                 out.push(issue(id, code::INVALID_TRAIT_KEY).at("/key"));
             }
@@ -406,7 +403,7 @@ fn peel(count: usize, edges: &[(usize, usize)], alive: &mut [bool]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::graph::{Arm, ListChange, Weekday};
+    use crate::flow::graph::{Arm, ListChange, TraitChange, Weekday};
     use crate::flow::settings::{Audience, SegmentChange};
     use proptest::prelude::*;
     use proptest::test_runner::{Config, RngSeed};
