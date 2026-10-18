@@ -9,6 +9,7 @@ pub mod code {
     // The graph document.
     pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
     pub const TOO_MANY_NODES: &str = "too_many_nodes";
+    pub const TOO_MANY_EDGES: &str = "too_many_edges";
     pub const INVALID_ID: &str = "invalid_id";
     pub const DUPLICATE_NODE_ID: &str = "duplicate_node_id";
     pub const DUPLICATE_EDGE_ID: &str = "duplicate_edge_id";
@@ -37,6 +38,7 @@ pub mod code {
     pub const WEIGHTS_NOT_100: &str = "weights_not_100";
     pub const INVALID_URL: &str = "invalid_url";
     pub const INVALID_TRAIT_KEY: &str = "invalid_trait_key";
+    pub const INVALID_TRAIT_VALUE: &str = "invalid_trait_value";
     pub const TOO_MANY_TRAIT_KEYS: &str = "too_many_trait_keys";
     // Settings.
     pub const INVALID_CRON: &str = "invalid_cron";
@@ -47,9 +49,10 @@ pub mod code {
         "leaves_segment_without_segment_trigger";
 
     /// Every code.
-    pub const ALL: [&str; 33] = [
+    pub const ALL: [&str; 35] = [
         UNSUPPORTED_VERSION,
         TOO_MANY_NODES,
+        TOO_MANY_EDGES,
         INVALID_ID,
         DUPLICATE_NODE_ID,
         DUPLICATE_EDGE_ID,
@@ -75,6 +78,7 @@ pub mod code {
         WEIGHTS_NOT_100,
         INVALID_URL,
         INVALID_TRAIT_KEY,
+        INVALID_TRAIT_VALUE,
         TOO_MANY_TRAIT_KEYS,
         INVALID_CRON,
         INVALID_TIMEZONE,

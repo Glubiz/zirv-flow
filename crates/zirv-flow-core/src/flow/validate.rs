@@ -6,8 +6,11 @@
 use chrono::{NaiveDateTime, NaiveTime};
 use hashbrown::{HashMap, HashSet};
 use serde_json::Value;
+use url::Url;
 
-use super::graph::{Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, NodeKind, UntilTime};
+use super::graph::{
+    Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, NodeKind, TraitChange, UntilTime,
+};
 use super::issue::{Issue, code};
 use super::settings::{ExitCriterion, FlowSettings, Goal, Reentry, Trigger};
 use crate::schedule;
@@ -29,11 +32,18 @@ pub const MAX_TRAIT_KEYS: usize = 20;
 const MAX_KEY_CHARS: usize = 200;
 const MAX_NAME_CHARS: usize = 200;
 const MAX_URL_CHARS: usize = 2048;
+/// The most edges in one graph: every port of the most ports 200 nodes can have.
+pub const MAX_EDGES: usize = MAX_NODES * (MAX_CONDITIONS + 1);
+/// The most issues returned, as in the segment parser; the rest are dropped.
+pub const MAX_ISSUES: usize = 200;
+/// The longest string in a trait value set by a flow.
+const MAX_VALUE_STRING_CHARS: usize = 1000;
 
 /// Validates the graph and the settings together, collecting every issue.
 pub fn validate(graph: &FlowGraph, settings: &FlowSettings) -> Vec<Issue> {
     let mut issues = validate_graph(graph);
     issues.extend(validate_settings(settings));
+    issues.truncate(MAX_ISSUES);
     issues
 }
 
@@ -43,15 +53,22 @@ pub fn validate_graph(graph: &FlowGraph) -> Vec<Issue> {
     if graph.v != GRAPH_VERSION {
         return vec![Issue::general(code::UNSUPPORTED_VERSION)];
     }
+    // The limits come first: nothing below runs on a graph that exceeds them.
     if graph.nodes.len() > MAX_NODES {
         issues.push(Issue::general(code::TOO_MANY_NODES));
+    }
+    if graph.edges.len() > MAX_EDGES {
+        issues.push(Issue::general(code::TOO_MANY_EDGES));
+    }
+    if !issues.is_empty() {
+        return issues;
     }
 
     // The first node of an id owns it; a later one is a duplicate.
     let mut index_of: HashMap<&str, usize> = HashMap::new();
     for (index, node) in graph.nodes.iter().enumerate() {
         if !valid_id(&node.id) {
-            issues.push(Issue::node(code::INVALID_ID, &node.id));
+            issues.push(Issue::general(code::INVALID_ID).at(format!("/nodes/{index}/id")));
         }
         if index_of.contains_key(node.id.as_str()) {
             issues.push(Issue::node(code::DUPLICATE_NODE_ID, &node.id));
@@ -62,7 +79,8 @@ pub fn validate_graph(graph: &FlowGraph) -> Vec<Issue> {
     }
 
     let resolved = check_edges(graph, &index_of, &mut issues);
-    check_shape(graph, &resolved, &mut issues);
+    check_shape(graph, &index_of, &resolved, &mut issues);
+    issues.truncate(MAX_ISSUES);
     issues
 }
 
@@ -79,7 +97,7 @@ pub fn validate_settings(settings: &FlowSettings) -> Vec<Issue> {
                 issues.push(Issue::general(code::INVALID_TIMEZONE).at("/trigger/timezone"));
             }
         }
-        Trigger::Segment { .. } | Trigger::Manual | Trigger::Api => {}
+        Trigger::Segment { .. } | Trigger::Manual {} | Trigger::Api {} => {}
     }
     if let Reentry::Always {
         min_interval_seconds,
@@ -97,20 +115,21 @@ pub fn validate_settings(settings: &FlowSettings) -> Vec<Issue> {
     for (index, criterion) in settings.exit_criteria.iter().enumerate() {
         let at = format!("/exit_criteria/{index}");
         match criterion {
-            ExitCriterion::LeavesSegment => {
+            ExitCriterion::LeavesSegment {} => {
                 if !matches!(settings.trigger, Trigger::Segment { .. }) {
                     issues
                         .push(Issue::general(code::LEAVES_SEGMENT_WITHOUT_SEGMENT_TRIGGER).at(at));
                 }
             }
             ExitCriterion::Event(event) => check_event(event, None, &at, &mut issues),
-            ExitCriterion::GoalReached => {
+            ExitCriterion::GoalReached {} => {
                 if settings.goal.is_none() {
                     issues.push(Issue::general(code::GOAL_CRITERION_WITHOUT_GOAL).at(at));
                 }
             }
         }
     }
+    issues.truncate(MAX_ISSUES);
     issues
 }
 
@@ -138,8 +157,17 @@ fn check_event(event: &EventMatch, node: Option<&str>, base: &str, out: &mut Vec
     }
     if let Err(problems) = event.to_condition() {
         for problem in problems {
-            out.push(issue(node, code::INVALID_FILTER).at(format!("{base}{}", problem.pointer)));
+            let pointer = filters_pointer(&problem.pointer);
+            out.push(issue(node, code::INVALID_FILTER).at(format!("{base}{pointer}")));
         }
+    }
+}
+
+/// The segment parser calls the filters `where`; on the flow wire the field is `filters`.
+fn filters_pointer(pointer: &str) -> String {
+    match pointer.strip_prefix("/where") {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("/filters{rest}"),
+        _ => pointer.to_owned(),
     }
 }
 
@@ -169,7 +197,7 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
             if arms.len() > MAX_ARMS {
                 out.push(issue(id, code::TOO_MANY_ARMS).at("/arms"));
             }
-            for (index, arm) in arms.iter().enumerate() {
+            for (index, arm) in arms.iter().enumerate().take(MAX_ARMS) {
                 if arm.weight == 0 {
                     out.push(issue(id, code::INVALID_WEIGHT).at(format!("/arms/{index}/weight")));
                 }
@@ -187,23 +215,68 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
                 out.push(issue(id, code::TOO_MANY_TRAIT_KEYS).at("/trait_keys"));
             }
             let mut seen = HashSet::new();
-            for (index, key) in trait_keys.iter().enumerate() {
+            for (index, key) in trait_keys.iter().enumerate().take(MAX_TRAIT_KEYS) {
                 if !valid_key(key) || !seen.insert(key.as_str()) {
                     out.push(issue(id, code::INVALID_TRAIT_KEY).at(format!("/trait_keys/{index}")));
                 }
             }
         }
-        NodeKind::ActionUpdateTrait { key, .. } => {
+        NodeKind::ActionUpdateTrait { key, change } => {
             if !valid_key(key) {
                 out.push(issue(id, code::INVALID_TRAIT_KEY).at("/key"));
             }
+            match change {
+                TraitChange::Set { value } if !valid_value(value) => {
+                    out.push(issue(id, code::INVALID_TRAIT_VALUE).at("/change/value"));
+                }
+                TraitChange::Increment { by } if !by.is_finite() => {
+                    out.push(issue(id, code::INVALID_TRAIT_VALUE).at("/change/by"));
+                }
+                _ => {}
+            }
         }
-        NodeKind::ActionList { .. } | NodeKind::Goal { .. } | NodeKind::Exit => {}
+        NodeKind::ActionList { .. } | NodeKind::Goal { .. } | NodeKind::Exit {} => {}
     }
 }
 
 fn valid_key(key: &str) -> bool {
     !key.trim().is_empty() && key.chars().count() <= MAX_KEY_CHARS
+}
+
+/// A trait value a flow sets: within the segment AST's depth and node limits, with bounded strings
+/// and keys. Walks iteratively and stops at the first breach, so the work is bounded too.
+fn valid_value(value: &Value) -> bool {
+    let mut nodes = 0;
+    let mut pending = vec![(value, 1)];
+    while let Some((value, depth)) = pending.pop() {
+        nodes += 1;
+        if nodes > segment::MAX_NODES || depth > segment::MAX_DEPTH {
+            return false;
+        }
+        match value {
+            Value::String(text) => {
+                if text.chars().take(MAX_VALUE_STRING_CHARS + 1).count() > MAX_VALUE_STRING_CHARS {
+                    return false;
+                }
+            }
+            Value::Array(items) => {
+                if items.len() > segment::MAX_NODES {
+                    return false;
+                }
+                pending.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            Value::Object(map) => {
+                if map.len() > segment::MAX_NODES
+                    || map.keys().any(|key| key.chars().count() > MAX_KEY_CHARS)
+                {
+                    return false;
+                }
+                pending.extend(map.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// An absolute `http` or `https` URL with a host. The egress policy decides what it may reach.
@@ -216,13 +289,30 @@ fn valid_url(url: &str) -> bool {
     url.chars().count() <= MAX_URL_CHARS
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
         && rest.is_some_and(|rest| !rest.is_empty() && !rest.starts_with(['/', '?', '#', ':']))
+        && Url::parse(url).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some_and(|host| !host.is_empty())
+        })
+}
+
+/// Whether `text` has exactly the shape of `pattern`, where `9` stands for one ASCII digit and any
+/// other character for itself.
+fn shaped(text: &str, pattern: &str) -> bool {
+    text.len() == pattern.len()
+        && text.bytes().zip(pattern.bytes()).all(|(got, want)| {
+            if want == b'9' {
+                got.is_ascii_digit()
+            } else {
+                got == want
+            }
+        })
 }
 
 fn check_until_time(when: &UntilTime, node: &str, out: &mut Vec<Issue>) {
     let id = Some(node);
     match when {
         UntilTime::TimeOfDay { time, weekdays } => {
-            if time.len() != 5 || NaiveTime::parse_from_str(time, "%H:%M").is_err() {
+            if !shaped(time, "99:99") || NaiveTime::parse_from_str(time, "%H:%M").is_err() {
                 out.push(issue(id, code::INVALID_TIME).at("/when/time"));
             }
             let unique: HashSet<_> = weekdays.iter().collect();
@@ -231,7 +321,11 @@ fn check_until_time(when: &UntilTime, node: &str, out: &mut Vec<Issue>) {
             }
         }
         UntilTime::DateTime { at } => {
-            if NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S").is_err() {
+            // chrono reads second 60 as a leap second; a flow wait has none.
+            if !shaped(at, "9999-99-99T99:99:99")
+                || at.ends_with(":60")
+                || NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S").is_err()
+            {
                 out.push(issue(id, code::INVALID_TIME).at("/when/at"));
             }
         }
@@ -246,7 +340,7 @@ fn check_branch(conditions: &[Value], node: &str, out: &mut Vec<Issue>) {
     if conditions.len() > MAX_CONDITIONS {
         out.push(issue(id, code::TOO_MANY_CONDITIONS).at("/conditions"));
     }
-    for (index, condition) in conditions.iter().enumerate() {
+    for (index, condition) in conditions.iter().enumerate().take(MAX_CONDITIONS) {
         let base = format!("/conditions/{index}");
         let Some(map) = condition.as_object() else {
             out.push(issue(id, code::INVALID_CONDITION).at(base));
@@ -278,10 +372,10 @@ fn check_edges(
     let mut edge_ids: HashSet<&str> = HashSet::new();
     let mut wired: HashSet<(usize, &str)> = HashSet::new();
     let mut joined = Vec::new();
-    for edge in &graph.edges {
+    for (position, edge) in graph.edges.iter().enumerate() {
         check_edge(edge, index_of, graph, &mut wired, out);
         if !valid_id(&edge.id) {
-            out.push(Issue::edge(code::INVALID_ID, &edge.id));
+            out.push(Issue::general(code::INVALID_ID).at(format!("/edges/{position}/id")));
         }
         if !edge_ids.insert(&edge.id) {
             out.push(Issue::edge(code::DUPLICATE_EDGE_ID, &edge.id));
@@ -294,7 +388,8 @@ fn check_edges(
         }
     }
     for (index, node) in graph.nodes.iter().enumerate() {
-        if index_of.get(node.id.as_str()) != Some(&index) {
+        // An oversized node is refused for its size; its ports are not listed.
+        if index_of.get(node.id.as_str()) != Some(&index) || oversized(&node.kind) {
             continue;
         }
         for port in node.kind.ports() {
@@ -304,6 +399,15 @@ fn check_edges(
         }
     }
     joined
+}
+
+/// A branch or split with more ports than the limits allow.
+fn oversized(kind: &NodeKind) -> bool {
+    match kind {
+        NodeKind::Branch { conditions } => conditions.len() > MAX_CONDITIONS,
+        NodeKind::SplitRandom { arms } => arms.len() > MAX_ARMS,
+        _ => false,
+    }
 }
 
 fn check_edge<'a>(
@@ -320,23 +424,32 @@ fn check_edge<'a>(
         out.push(Issue::edge(code::UNKNOWN_NODE, &edge.id).at("/from"));
         return;
     };
-    if !graph.nodes[from].kind.ports().contains(&edge.port) {
+    if !graph.nodes[from].kind.has_port(&edge.port) {
         out.push(Issue::edge(code::UNKNOWN_PORT, &edge.id).at("/port"));
     } else if !wired.insert((from, &edge.port)) {
         out.push(Issue::edge(code::PORT_WIRED_TWICE, &edge.id).at("/port"));
     }
 }
 
-/// One entry, no cycle, and every node reachable from it.
-fn check_shape(graph: &FlowGraph, edges: &[(usize, usize)], out: &mut Vec<Issue>) {
+/// One entry, no cycle, and every node reachable from it. A repeated node id is already
+/// refused; its later nodes take no part in the shape.
+fn check_shape(
+    graph: &FlowGraph,
+    index_of: &HashMap<&str, usize>,
+    edges: &[(usize, usize)],
+    out: &mut Vec<Issue>,
+) {
     let count = graph.nodes.len();
+    let first = |node: usize| index_of.get(graph.nodes[node].id.as_str()) == Some(&node);
     let mut incoming = vec![0_usize; count];
     let mut next: Vec<Vec<usize>> = vec![Vec::new(); count];
     for &(from, to) in edges {
         incoming[to] += 1;
         next[from].push(to);
     }
-    let roots: Vec<usize> = (0..count).filter(|&node| incoming[node] == 0).collect();
+    let roots: Vec<usize> = (0..count)
+        .filter(|&node| first(node) && incoming[node] == 0)
+        .collect();
     match roots.len() {
         0 => out.push(Issue::general(code::NO_ENTRY)),
         1 => {}
@@ -347,13 +460,7 @@ fn check_shape(graph: &FlowGraph, edges: &[(usize, usize)], out: &mut Vec<Issue>
         }
     }
 
-    // Peel the nodes that no cycle can pass through: first those that nothing loops back into,
-    // then those that lead nowhere. What is left lies on a cycle.
-    let mut alive = vec![true; count];
-    peel(count, edges, &mut alive);
-    let flipped: Vec<(usize, usize)> = edges.iter().map(|&(from, to)| (to, from)).collect();
-    peel(count, &flipped, &mut alive);
-    for (node, _) in alive.iter().enumerate().filter(|(_, alive)| **alive) {
+    for (node, _) in on_cycle(&next).iter().enumerate().filter(|(_, on)| **on) {
         out.push(Issue::node(code::CYCLE, &graph.nodes[node].id));
     }
 
@@ -370,34 +477,77 @@ fn check_shape(graph: &FlowGraph, edges: &[(usize, usize)], out: &mut Vec<Issue>
             }
         }
     }
-    for (node, _) in seen.iter().enumerate().filter(|(_, seen)| !**seen) {
+    for (node, _) in seen
+        .iter()
+        .enumerate()
+        .filter(|(node, seen)| first(*node) && !**seen)
+    {
         out.push(Issue::node(code::UNREACHABLE, &graph.nodes[node].id));
     }
 }
 
-/// Removes, among the `alive` nodes, every node that has no incoming edge from an alive node,
-/// repeatedly.
-fn peel(count: usize, edges: &[(usize, usize)], alive: &mut [bool]) {
-    let mut degree = vec![0_usize; count];
-    let mut next: Vec<Vec<usize>> = vec![Vec::new(); count];
-    for &(from, to) in edges {
-        if alive[from] && alive[to] {
-            degree[to] += 1;
-            next[from].push(to);
+/// Which nodes lie on a cycle: those in a strongly connected component of more than one node, or
+/// with an edge to themselves. Tarjan's algorithm with an explicit stack, so no recursion.
+fn on_cycle(next: &[Vec<usize>]) -> Vec<bool> {
+    const UNVISITED: usize = usize::MAX;
+    let count = next.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0_usize; count];
+    let mut open = vec![false; count];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut found = vec![false; count];
+    let mut clock = 0;
+    for start in 0..count {
+        if order[start] != UNVISITED {
+            continue;
         }
-    }
-    let mut stack: Vec<usize> = (0..count)
-        .filter(|&node| alive[node] && degree[node] == 0)
-        .collect();
-    while let Some(node) = stack.pop() {
-        alive[node] = false;
-        for &to in &next[node] {
-            degree[to] -= 1;
-            if degree[to] == 0 {
-                stack.push(to);
+        order[start] = clock;
+        low[start] = clock;
+        clock += 1;
+        stack.push(start);
+        open[start] = true;
+        // Each frame is a node and how many of its edges are done.
+        let mut frames = vec![(start, 0_usize)];
+        while let Some(&(node, done)) = frames.last() {
+            if let Some(&to) = next[node].get(done) {
+                if let Some(frame) = frames.last_mut() {
+                    frame.1 += 1;
+                }
+                if order[to] == UNVISITED {
+                    order[to] = clock;
+                    low[to] = clock;
+                    clock += 1;
+                    stack.push(to);
+                    open[to] = true;
+                    frames.push((to, 0));
+                } else if open[to] {
+                    low[node] = low[node].min(order[to]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] != order[node] {
+                continue;
+            }
+            let mut members = Vec::new();
+            while let Some(member) = stack.pop() {
+                open[member] = false;
+                members.push(member);
+                if member == node {
+                    break;
+                }
+            }
+            if members.len() > 1 || next[node].contains(&node) {
+                for member in members {
+                    found[member] = true;
+                }
             }
         }
     }
+    found
 }
 
 #[cfg(test)]
@@ -441,7 +591,7 @@ mod tests {
     /// `a` (a wait) leads to `z` (an exit).
     fn minimal() -> FlowGraph {
         graph(
-            vec![node("a", wait(60)), node("z", NodeKind::Exit)],
+            vec![node("a", wait(60)), node("z", NodeKind::Exit {})],
             vec![edge("e1", "a", "next", "z")],
         )
     }
@@ -456,7 +606,7 @@ mod tests {
             vec![
                 node("a", wait(60)),
                 node("m", kind),
-                node("z", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
             ],
             edges,
         )
@@ -472,7 +622,7 @@ mod tests {
     fn settings(trigger: Trigger) -> FlowSettings {
         FlowSettings {
             trigger,
-            reentry: Reentry::Once,
+            reentry: Reentry::Once {},
             goal: None,
             exit_on_goal: false,
             exit_criteria: Vec::new(),
@@ -511,8 +661,8 @@ mod tests {
     #[test]
     fn the_minimal_graph_and_settings_are_valid() {
         assert_eq!(validate_graph(&minimal()), []);
-        assert_eq!(validate_settings(&settings(Trigger::Manual)), []);
-        assert_eq!(validate(&minimal(), &settings(Trigger::Api)), []);
+        assert_eq!(validate_settings(&settings(Trigger::Manual {})), []);
+        assert_eq!(validate(&minimal(), &settings(Trigger::Api {})), []);
     }
 
     #[test]
@@ -572,7 +722,7 @@ mod tests {
             }
             nodes.push(node(&id, kind));
         }
-        nodes.push(node("exit", NodeKind::Exit));
+        nodes.push(node("exit", NodeKind::Exit {}));
         let valid = graph(nodes, edges);
         assert_eq!(validate_graph(&valid), []);
     }
@@ -589,7 +739,7 @@ mod tests {
         let mut nodes: Vec<FlowNode> = (0..MAX_NODES)
             .map(|index| node(&format!("n{index}"), wait(60)))
             .collect();
-        nodes.push(node("z", NodeKind::Exit));
+        nodes.push(node("z", NodeKind::Exit {}));
         let mut edges: Vec<Edge> = (1..MAX_NODES)
             .map(|index| {
                 edge(
@@ -629,24 +779,34 @@ mod tests {
         bad.edges[0].from = "bad id".into();
         bad.edges[0].id = String::new();
         let issues = validate_graph(&bad);
-        has(&issues, code::INVALID_ID, Some("bad id"), None);
-        has(&issues, code::INVALID_ID, None, Some(""));
+        let invalid: Vec<Option<&str>> = issues
+            .iter()
+            .filter(|i| i.code == code::INVALID_ID)
+            .map(|i| i.at.as_deref())
+            .collect();
+        assert_eq!(invalid, [Some("/nodes/0/id"), Some("/edges/0/id")]);
         assert_eq!(issues.len(), 2, "{issues:?}");
+        // The bad id is pointed at, never echoed.
         bad.nodes[0].id = "x".repeat(MAX_ID_CHARS + 1);
-        has(
-            &validate_graph(&bad),
-            code::INVALID_ID,
-            Some(&"x".repeat(MAX_ID_CHARS + 1)),
-            None,
+        bad.edges[0].from = bad.nodes[0].id.clone();
+        bad.edges[0].id = "e1".into();
+        let issues = validate_graph(&bad);
+        let invalid = Issue::general(code::INVALID_ID).at("/nodes/0/id");
+        assert!(issues.contains(&invalid), "{issues:?}");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| { i.code == code::INVALID_ID && (i.node.is_some() || i.edge.is_some()) })
         );
     }
 
     #[test]
     fn a_duplicate_node_id_is_refused() {
         let mut bad = minimal();
-        bad.nodes.push(node("z", NodeKind::Exit));
+        bad.nodes.push(node("z", NodeKind::Exit {}));
         let issues = validate_graph(&bad);
-        has(&issues, code::DUPLICATE_NODE_ID, Some("z"), None);
+        // The repeated node takes no part in the shape: no second entry, no unreachable node.
+        only(&issues, code::DUPLICATE_NODE_ID, Some("z"), None);
     }
 
     #[test]
@@ -655,7 +815,7 @@ mod tests {
             vec![
                 node("a", wait(60)),
                 node("b", wait(60)),
-                node("z", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
             ],
             vec![edge("e1", "a", "next", "b"), edge("e1", "b", "next", "z")],
         );
@@ -675,7 +835,7 @@ mod tests {
         );
         only(&validate_graph(&to), code::UNKNOWN_NODE, None, Some("e1"));
         let from = graph(
-            vec![node("z", NodeKind::Exit)],
+            vec![node("z", NodeKind::Exit {})],
             vec![edge("e1", "ghost", "next", "z")],
         );
         only(&validate_graph(&from), code::UNKNOWN_NODE, None, Some("e1"));
@@ -686,14 +846,14 @@ mod tests {
         let bad = graph(
             vec![
                 node("a", wait(60)),
-                node("z", NodeKind::Exit),
-                node("y", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
+                node("y", NodeKind::Exit {}),
             ],
             vec![edge("e1", "a", "next", "z"), edge("e2", "z", "next", "y")],
         );
         only(&validate_graph(&bad), code::UNKNOWN_PORT, None, Some("e2"));
         let misnamed = graph(
-            vec![node("a", wait(60)), node("z", NodeKind::Exit)],
+            vec![node("a", wait(60)), node("z", NodeKind::Exit {})],
             vec![edge("e1", "a", "else", "z")],
         );
         let issues = validate_graph(&misnamed);
@@ -706,8 +866,8 @@ mod tests {
         let bad = graph(
             vec![
                 node("a", wait(60)),
-                node("z", NodeKind::Exit),
-                node("y", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
+                node("y", NodeKind::Exit {}),
             ],
             vec![edge("e1", "a", "next", "z"), edge("e2", "a", "next", "y")],
         );
@@ -730,7 +890,7 @@ mod tests {
                         timeout_seconds: 60,
                     },
                 ),
-                node("z", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
             ],
             vec![edge("e1", "w", "event", "z")],
         );
@@ -755,7 +915,7 @@ mod tests {
             vec![
                 node("a", wait(60)),
                 node("b", wait(60)),
-                node("z", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
             ],
             vec![edge("e1", "a", "next", "z"), edge("e2", "b", "next", "z")],
         );
@@ -777,7 +937,7 @@ mod tests {
                         timeout_seconds: 60,
                     },
                 ),
-                node("z", NodeKind::Exit),
+                node("z", NodeKind::Exit {}),
             ],
             vec![
                 edge("e1", "s", "next", "w"),
@@ -786,6 +946,52 @@ mod tests {
             ],
         );
         only(&validate_graph(&bad), code::CYCLE, Some("w"), None);
+    }
+
+    #[test]
+    fn a_node_between_two_cycles_is_not_named() {
+        // s -> p <-> q -> m -> r <-> t -> z: m lies on a path between the cycles, not on one.
+        let branch = |id: &str| {
+            node(
+                id,
+                NodeKind::Branch {
+                    conditions: vec![json!({"identifier": "email"})],
+                },
+            )
+        };
+        let bad = graph(
+            vec![
+                node("s", wait(60)),
+                branch("p"),
+                node("q", wait(60)),
+                node("m", wait(60)),
+                branch("r"),
+                node("t", wait(60)),
+                node("z", NodeKind::Exit {}),
+            ],
+            vec![
+                edge("e1", "s", "next", "p"),
+                edge("e2", "p", "case_0", "q"),
+                edge("e3", "q", "next", "p"),
+                edge("e4", "p", "else", "m"),
+                edge("e5", "m", "next", "r"),
+                edge("e6", "r", "case_0", "t"),
+                edge("e7", "t", "next", "r"),
+                edge("e8", "r", "else", "z"),
+            ],
+        );
+        let named: Vec<&str> = validate_graph(&bad)
+            .iter()
+            .filter(|i| i.code == code::CYCLE)
+            .filter_map(|i| i.node.as_deref())
+            .map(|id| {
+                ["p", "q", "r", "t"]
+                    .into_iter()
+                    .find(|n| *n == id)
+                    .unwrap_or("?")
+            })
+            .collect();
+        assert_eq!(named, ["p", "q", "r", "t"]);
     }
 
     #[test]
@@ -841,6 +1047,20 @@ mod tests {
             },
             UntilTime::DateTime {
                 at: "2030-01-01T00:00:00Z".into(),
+            },
+            UntilTime::DateTime {
+                at: "2030-12-31T23:59:60".into(),
+            },
+            UntilTime::DateTime {
+                at: "2030-1-1T00:00:00".into(),
+            },
+            UntilTime::TimeOfDay {
+                time: "+9:30".into(),
+                weekdays: vec![],
+            },
+            UntilTime::TimeOfDay {
+                time: "09-30".into(),
+                weekdays: vec![],
             },
         ] {
             let kind = NodeKind::WaitUntilTime { when };
@@ -904,7 +1124,7 @@ mod tests {
         let issues = validate_graph(&around(kind));
         has(&issues, code::INVALID_FILTER, Some("m"), None);
         assert!(
-            issues[0].at.as_deref().unwrap().starts_with("/where/0"),
+            issues[0].at.as_deref().unwrap().starts_with("/filters/0"),
             "{issues:?}"
         );
     }
@@ -1029,6 +1249,9 @@ mod tests {
         for url in [
             "ftp://example.com",
             "https://",
+            "https://@",
+            "https://user@",
+            "https://user:pw@/x",
             "https:///x",
             "https://a b",
             "example.com",
@@ -1070,7 +1293,7 @@ mod tests {
         }
         let kind = NodeKind::ActionUpdateTrait {
             key: " ".into(),
-            change: TraitChange::Unset,
+            change: TraitChange::Unset {},
         };
         only(
             &validate_graph(&around(kind)),
@@ -1078,6 +1301,101 @@ mod tests {
             Some("m"),
             None,
         );
+    }
+
+    #[test]
+    fn a_trait_value_is_bounded_and_an_increment_is_finite() {
+        let deep = (0..segment::MAX_DEPTH + 1).fold(json!(1), |inner, _| json!([inner]));
+        let wide = Value::Array(vec![json!(0); segment::MAX_NODES + 1]);
+        let long = Value::String("x".repeat(MAX_VALUE_STRING_CHARS + 1));
+        for value in [deep, wide, long] {
+            let kind = NodeKind::ActionUpdateTrait {
+                key: "k".into(),
+                change: TraitChange::Set { value },
+            };
+            let issues = validate_graph(&around(kind));
+            only(&issues, code::INVALID_TRAIT_VALUE, Some("m"), None);
+            assert_eq!(issues[0].at.as_deref(), Some("/change/value"));
+        }
+        let fine =
+            json!({"list": [1, "two", {"three": null}], "ok": "x".repeat(MAX_VALUE_STRING_CHARS)});
+        let kind = NodeKind::ActionUpdateTrait {
+            key: "k".into(),
+            change: TraitChange::Set { value: fine },
+        };
+        assert_eq!(validate_graph(&around(kind)), []);
+        for by in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let kind = NodeKind::ActionUpdateTrait {
+                key: "k".into(),
+                change: TraitChange::Increment { by },
+            };
+            let issues = validate_graph(&around(kind));
+            only(&issues, code::INVALID_TRAIT_VALUE, Some("m"), None);
+            assert_eq!(issues[0].at.as_deref(), Some("/change/by"));
+        }
+    }
+
+    #[test]
+    fn a_graph_over_the_edge_limit_is_refused_before_anything_else() {
+        let mut bad = minimal();
+        bad.edges = (0..=MAX_EDGES)
+            .map(|index| edge(&format!("e{index}"), "a", "next", "z"))
+            .collect();
+        assert_eq!(validate_graph(&bad), [Issue::general(code::TOO_MANY_EDGES)]);
+    }
+
+    #[test]
+    fn a_huge_branch_or_split_yields_bounded_output() {
+        let huge = 1_000_000;
+        let kinds = [
+            NodeKind::Branch {
+                conditions: vec![json!({"identifier": "email"}); huge],
+            },
+            NodeKind::SplitRandom {
+                arms: vec![Arm { weight: 1 }; huge],
+            },
+        ];
+        for kind in kinds {
+            let big = graph(
+                vec![node("a", wait(60)), node("m", kind)],
+                vec![edge("in", "a", "next", "m")],
+            );
+            let issues = validate_graph(&big);
+            assert!(issues.len() <= MAX_ISSUES, "{}", issues.len());
+            assert!(issues.iter().all(|i| i.code != code::PORT_NOT_WIRED));
+            assert!(
+                issues
+                    .iter()
+                    .any(|i| i.code == code::TOO_MANY_CONDITIONS || i.code == code::TOO_MANY_ARMS)
+            );
+            // An edge from a port just past the list is unknown, found without listing ports.
+            let mut stray = big.clone();
+            stray.edges.push(edge("far", "m", "case_1000000", "a"));
+            stray.edges.push(edge("far2", "m", "arm_1000000", "a"));
+            let unknown = validate_graph(&stray)
+                .iter()
+                .filter(|i| i.code == code::UNKNOWN_PORT)
+                .count();
+            assert_eq!(unknown, 2);
+        }
+        // Many conditions inside the limits of nodes and edges: the issue list is capped.
+        let nodes: Vec<FlowNode> = (0..MAX_NODES)
+            .map(|index| node(&format!("n{index}"), wait(60)))
+            .collect();
+        let capped = validate_graph(&graph(nodes, vec![]));
+        assert_eq!(capped.len(), MAX_ISSUES);
+    }
+
+    #[test]
+    fn the_combined_validation_is_capped_too() {
+        let nodes: Vec<FlowNode> = (0..MAX_NODES)
+            .map(|index| node(&format!("n{index}"), wait(60)))
+            .collect();
+        let mut flow = settings(Trigger::Manual {});
+        flow.exit_criteria = vec![ExitCriterion::GoalReached {}; 500];
+        let issues = validate(&graph(nodes, vec![]), &flow);
+        assert_eq!(issues.len(), MAX_ISSUES);
+        assert_eq!(validate_settings(&flow).len(), MAX_ISSUES);
     }
 
     #[test]
@@ -1102,7 +1420,7 @@ mod tests {
         let trigger = Trigger::Schedule {
             cron: "not a cron".into(),
             timezone: "UTC".into(),
-            audience: Audience::Everyone,
+            audience: Audience::Everyone {},
         };
         only(
             &validate_settings(&settings(trigger)),
@@ -1117,7 +1435,7 @@ mod tests {
         let trigger = Trigger::Schedule {
             cron: "0 9 * * 1".into(),
             timezone: "Mars/Base".into(),
-            audience: Audience::Everyone,
+            audience: Audience::Everyone {},
         };
         only(
             &validate_settings(&settings(trigger)),
@@ -1128,7 +1446,7 @@ mod tests {
         let good = Trigger::Schedule {
             cron: "0 9 * * 1".into(),
             timezone: "Europe/Copenhagen".into(),
-            audience: Audience::Everyone,
+            audience: Audience::Everyone {},
         };
         assert_eq!(validate_settings(&settings(good)), []);
     }
@@ -1144,10 +1462,13 @@ mod tests {
         flow.exit_criteria = vec![ExitCriterion::Event(bad)];
         let issues = validate_settings(&flow);
         let at: Vec<&str> = issues.iter().filter_map(|i| i.at.as_deref()).collect();
-        assert!(at.iter().any(|p| p.starts_with("/trigger/where")), "{at:?}");
-        assert!(at.iter().any(|p| p.starts_with("/goal/where")), "{at:?}");
         assert!(
-            at.iter().any(|p| p.starts_with("/exit_criteria/0/where")),
+            at.iter().any(|p| p.starts_with("/trigger/filters")),
+            "{at:?}"
+        );
+        assert!(at.iter().any(|p| p.starts_with("/goal/filters")), "{at:?}");
+        assert!(
+            at.iter().any(|p| p.starts_with("/exit_criteria/0/filters")),
             "{at:?}"
         );
         assert!(issues.iter().all(|i| i.code == code::INVALID_FILTER));
@@ -1155,7 +1476,7 @@ mod tests {
 
     #[test]
     fn a_reentry_interval_above_the_maximum_is_refused() {
-        let mut flow = settings(Trigger::Manual);
+        let mut flow = settings(Trigger::Manual {});
         flow.reentry = Reentry::Always {
             min_interval_seconds: MAX_DURATION_SECONDS + 1,
         };
@@ -1173,7 +1494,7 @@ mod tests {
 
     #[test]
     fn exit_on_goal_needs_a_goal() {
-        let mut flow = settings(Trigger::Manual);
+        let mut flow = settings(Trigger::Manual {});
         flow.exit_on_goal = true;
         only(
             &validate_settings(&flow),
@@ -1189,8 +1510,8 @@ mod tests {
 
     #[test]
     fn a_goal_criterion_needs_a_goal() {
-        let mut flow = settings(Trigger::Manual);
-        flow.exit_criteria = vec![ExitCriterion::GoalReached];
+        let mut flow = settings(Trigger::Manual {});
+        flow.exit_criteria = vec![ExitCriterion::GoalReached {}];
         only(
             &validate_settings(&flow),
             code::GOAL_CRITERION_WITHOUT_GOAL,
@@ -1201,8 +1522,8 @@ mod tests {
 
     #[test]
     fn leaving_the_segment_needs_a_segment_trigger() {
-        let mut flow = settings(Trigger::Manual);
-        flow.exit_criteria = vec![ExitCriterion::LeavesSegment];
+        let mut flow = settings(Trigger::Manual {});
+        flow.exit_criteria = vec![ExitCriterion::LeavesSegment {}];
         only(
             &validate_settings(&flow),
             code::LEAVES_SEGMENT_WITHOUT_SEGMENT_TRIGGER,
@@ -1257,7 +1578,7 @@ mod tests {
         };
         for (index, &(kind, pick)) in choices.iter().enumerate() {
             let id = format!("n{index}");
-            let kind = match kind % 5 {
+            let kind = match kind % 6 {
                 0 => wait(60),
                 1 => NodeKind::WaitUntilEvent {
                     event: event_match(),
@@ -1269,6 +1590,8 @@ mod tests {
                 3 => NodeKind::SplitRandom {
                     arms: vec![Arm { weight: 40 }, Arm { weight: 60 }],
                 },
+                // A goal that does not end the enrollment has one port, like any mid-graph node.
+                4 => NodeKind::Goal { exit: false },
                 _ => NodeKind::ActionList {
                     list_id: Uuid::nil(),
                     change: ListChange::Add,
@@ -1281,7 +1604,7 @@ mod tests {
             open.extend(kind.ports().into_iter().map(|port| (id.clone(), port)));
             nodes.push(node(&id, kind));
         }
-        nodes.push(node("exit", NodeKind::Exit));
+        nodes.push(node("exit", NodeKind::Exit {}));
         for from in open {
             connect(&mut edges, from, "exit");
         }

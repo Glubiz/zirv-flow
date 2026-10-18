@@ -43,16 +43,27 @@ pub fn arm_port(index: usize) -> String {
     format!("arm_{index}")
 }
 
+/// `<prefix><i>` with `i` canonical (no sign, no leading zero) and below `len`.
+fn indexed_port(port: &str, prefix: &str, len: usize) -> bool {
+    port.strip_prefix(prefix)
+        .and_then(|digits| Some((digits, digits.parse::<usize>().ok()?)))
+        .is_some_and(|(digits, index)| index < len && index.to_string() == digits)
+}
+
 /// A flow graph: `{"v": 1, "nodes": [...], "edges": [...]}`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowGraph {
     pub v: u64,
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<Edge>,
 }
 
-/// One node: a stable id and its kind, flattened (`{"id": "n1", "type": "exit"}`).
+/// One node: a stable id and its kind, flattened (`{"id": "n1", "type": "exit"}`). Unknown keys are
+/// refused; `flatten` rules `deny_unknown_fields` out here, so [`TryFrom<Value>`] strips the id and
+/// checks the keys of `wait.until_event` (the one kind that flattens too) by hand.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(try_from = "Value")]
 pub struct FlowNode {
     pub id: String,
     #[serde(flatten)]
@@ -61,6 +72,7 @@ pub struct FlowNode {
 
 /// One edge: the output port `port` of node `from` leads to node `to`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edge {
     pub id: String,
     pub from: String,
@@ -70,7 +82,7 @@ pub struct Edge {
 
 /// What a node does.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum NodeKind {
     /// Waits a fixed time.
     #[serde(rename = "wait.duration")]
@@ -110,8 +122,33 @@ pub enum NodeKind {
         exit: bool,
     },
     #[serde(rename = "exit")]
-    Exit,
+    Exit {},
 }
+
+impl TryFrom<Value> for FlowNode {
+    type Error = String;
+
+    fn try_from(value: Value) -> Result<Self, String> {
+        let Value::Object(mut map) = value else {
+            return Err("a node must be an object".to_owned());
+        };
+        let Some(Value::String(id)) = map.remove("id") else {
+            return Err("a node needs a string `id`".to_owned());
+        };
+        if map.get("type").and_then(Value::as_str) == Some("wait.until_event")
+            && let Some(key) = map
+                .keys()
+                .find(|key| !UNTIL_EVENT_KEYS.contains(&key.as_str()))
+        {
+            return Err(format!("unknown field `{key}` in a wait.until_event node"));
+        }
+        let kind = serde_json::from_value(Value::Object(map)).map_err(|error| error.to_string())?;
+        Ok(Self { id, kind })
+    }
+}
+
+/// The keys of a `wait.until_event` node besides its id.
+const UNTIL_EVENT_KEYS: [&str; 4] = ["type", "event", "filters", "timeout_seconds"];
 
 impl NodeKind {
     /// The `type` on the wire; one of [`NODE_TYPES`].
@@ -126,7 +163,7 @@ impl NodeKind {
             Self::ActionUpdateTrait { .. } => "action.update_trait",
             Self::ActionList { .. } => "action.list",
             Self::Goal { .. } => "goal",
-            Self::Exit => "exit",
+            Self::Exit {} => "exit",
         }
     }
 
@@ -145,7 +182,19 @@ impl NodeKind {
                 .chain([PORT_ELSE.to_owned()])
                 .collect(),
             Self::SplitRandom { arms } => (0..arms.len()).map(arm_port).collect(),
-            Self::Goal { exit: true } | Self::Exit => Vec::new(),
+            Self::Goal { exit: true } | Self::Exit {} => Vec::new(),
+        }
+    }
+
+    /// Whether `port` is one of [`Self::ports`], without building the list (a branch may carry
+    /// any number of conditions until the validator refuses it).
+    pub fn has_port(&self, port: &str) -> bool {
+        match self {
+            Self::Branch { conditions } => {
+                port == PORT_ELSE || indexed_port(port, "case_", conditions.len())
+            }
+            Self::SplitRandom { arms } => indexed_port(port, "arm_", arms.len()),
+            _ => self.ports().iter().any(|own| own == port),
         }
     }
 }
@@ -153,6 +202,7 @@ impl NodeKind {
 /// An event name with property filters, the filter nodes of the segment AST in wire form
 /// (`{"prop": "total", "op": "gt", "value": 100}`).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventMatch {
     #[serde(rename = "event")]
     pub name: String,
@@ -176,7 +226,7 @@ impl EventMatch {
 
 /// `wait.until_time`: local to the person's time zone, else the workspace's.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", deny_unknown_fields)]
 pub enum UntilTime {
     /// The next `HH:MM`, on any of `weekdays` (every day when empty).
     #[serde(rename = "time_of_day")]
@@ -204,17 +254,18 @@ pub enum Weekday {
 
 /// One arm of a `split.random`; the weights of all arms sum to 100.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Arm {
     pub weight: u32,
 }
 
 /// `action.update_trait`: the flow's own contribution to a trait.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TraitChange {
     Set { value: Value },
     Increment { by: f64 },
-    Unset,
+    Unset {},
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -287,7 +338,7 @@ mod tests {
             },
             NodeKind::ActionUpdateTrait {
                 key: "plan".into(),
-                change: TraitChange::Unset,
+                change: TraitChange::Unset {},
             },
             NodeKind::ActionList {
                 list_id: Uuid::nil(),
@@ -299,7 +350,7 @@ mod tests {
             },
             NodeKind::Goal { exit: false },
             NodeKind::Goal { exit: true },
-            NodeKind::Exit,
+            NodeKind::Exit {},
         ]
     }
 
@@ -370,7 +421,7 @@ mod tests {
         assert_eq!(kinds[5].ports(), ["arm_0", "arm_1"]);
         assert_eq!(NodeKind::Goal { exit: false }.ports(), ["next"]);
         assert!(NodeKind::Goal { exit: true }.ports().is_empty());
-        assert!(NodeKind::Exit.ports().is_empty());
+        assert!(NodeKind::Exit {}.ports().is_empty());
     }
 
     #[test]
@@ -383,5 +434,72 @@ mod tests {
             filters: vec![json!({"prop": "total", "op": "nope"})],
         };
         assert!(bad.to_condition().is_err());
+    }
+
+    fn parse_node(node: Value) -> Result<FlowGraph, serde_json::Error> {
+        FlowGraph::from_value(json!({"v": 1, "nodes": [node], "edges": []}))
+    }
+
+    #[test]
+    fn an_unknown_key_is_a_parse_error_at_every_level() {
+        let nodes = [
+            json!({"id": "a", "type": "wait.duration", "seconds": 60, "secondds": 1}),
+            json!({"id": "a", "type": "exit", "extra": 1}),
+            json!({"id": "a", "type": "goal", "exit": true, "extra": 1}),
+            json!({"id": "a", "type": "wait.until_event", "event": "e", "timeout_seconds": 5,
+                   "extra": 1}),
+            json!({"id": "a", "type": "branch", "conditions": [], "extra": 1}),
+            json!({"id": "a", "type": "split.random", "arms": [{"weight": 1, "extra": 1}]}),
+            json!({"id": "a", "type": "wait.until_time",
+                   "when": {"kind": "time_of_day", "time": "09:00", "extra": 1}}),
+            json!({"id": "a", "type": "action.update_trait", "key": "k",
+                   "change": {"op": "unset", "extra": 1}}),
+            json!({"id": "a", "type": "action.update_trait", "key": "k",
+                   "change": {"op": "increment", "by": 1, "extra": 1}}),
+        ];
+        for node in nodes {
+            assert!(parse_node(node.clone()).is_err(), "{node}");
+        }
+        let edge = json!({"id": "e", "from": "a", "port": "next", "to": "b", "extra": 1});
+        assert!(
+            FlowGraph::from_value(json!({"v": 1, "nodes": [], "edges": [edge]})).is_err(),
+            "edge"
+        );
+        assert!(
+            FlowGraph::from_value(json!({"v": 1, "nodes": [], "edges": [], "extra": 1})).is_err(),
+            "graph"
+        );
+        // The documented shapes still parse.
+        assert!(parse_node(json!({"id": "a", "type": "wait.duration", "seconds": 60})).is_ok());
+        assert!(parse_node(json!({"id": "a", "type": "exit"})).is_ok());
+        assert!(
+            parse_node(json!({"id": "a", "type": "wait.until_event", "event": "e",
+                              "filters": [], "timeout_seconds": 5}))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_node_needs_an_object_with_a_string_id() {
+        assert!(parse_node(json!(5)).is_err());
+        assert!(parse_node(json!({"type": "exit"})).is_err());
+        assert!(parse_node(json!({"id": 3, "type": "exit"})).is_err());
+    }
+
+    #[test]
+    fn has_port_agrees_with_ports() {
+        for kind in every_kind() {
+            let ports = kind.ports();
+            for port in &ports {
+                assert!(kind.has_port(port), "{port}");
+            }
+            for port in ["", "case_", "case_-1", "case_01", "case_+0", "arm_9", "x"] {
+                assert_eq!(
+                    kind.has_port(port),
+                    ports.iter().any(|p| p == port),
+                    "{port}"
+                );
+            }
+        }
     }
 }

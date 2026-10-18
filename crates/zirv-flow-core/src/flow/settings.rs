@@ -11,7 +11,7 @@ pub const TRIGGER_TYPES: [&str; 5] = ["segment", "event", "schedule", "manual", 
 
 /// How a person comes into the flow.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Trigger {
     /// Entering or leaving a segment. `enroll_current` also enrolls the members at publish.
     Segment {
@@ -29,9 +29,9 @@ pub enum Trigger {
         audience: Audience,
     },
     /// An operator enrolls people by hand.
-    Manual,
+    Manual {},
     /// `POST .../flows/{id}/enrollments`.
-    Api,
+    Api {},
 }
 
 impl Trigger {
@@ -41,8 +41,8 @@ impl Trigger {
             Self::Segment { .. } => "segment",
             Self::Event(_) => "event",
             Self::Schedule { .. } => "schedule",
-            Self::Manual => "manual",
-            Self::Api => "api",
+            Self::Manual {} => "manual",
+            Self::Api {} => "api",
         }
     }
 }
@@ -56,20 +56,20 @@ pub enum SegmentChange {
 
 /// Who a schedule trigger enrolls.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Audience {
-    Everyone,
+    Everyone {},
     Segment { segment_id: Uuid },
 }
 
 /// Whether a person may enter again.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reentry {
     /// Never again after the first entry.
-    Once,
+    Once {},
     /// Again once the active enrollment has ended.
-    OnceAtATime,
+    OnceAtATime {},
     /// Again, no sooner than `min_interval_seconds` after the last entry (0 for no wait).
     Always {
         #[serde(default)]
@@ -79,7 +79,7 @@ pub enum Reentry {
 
 /// A conversion: an event with the filters of an event trigger, or entry into a segment.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Goal {
     Event(EventMatch),
     Segment { segment_id: Uuid },
@@ -87,17 +87,18 @@ pub enum Goal {
 
 /// A reason to end an active enrollment.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExitCriterion {
     /// The person leaves the trigger segment (a segment trigger only).
-    LeavesSegment,
+    LeavesSegment {},
     /// The event occurs.
     Event(EventMatch),
     /// The flow's goal is reached (needs a goal).
-    GoalReached,
+    GoalReached {},
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowSettings {
     pub trigger: Trigger,
     pub reentry: Reentry,
@@ -139,7 +140,7 @@ mod tests {
             Trigger::Schedule {
                 cron: "0 9 * * 1".into(),
                 timezone: "Europe/Copenhagen".into(),
-                audience: Audience::Everyone,
+                audience: Audience::Everyone {},
             },
             Trigger::Schedule {
                 cron: "0 9 * * 1".into(),
@@ -148,8 +149,8 @@ mod tests {
                     segment_id: Uuid::nil(),
                 },
             },
-            Trigger::Manual,
-            Trigger::Api,
+            Trigger::Manual {},
+            Trigger::Api {},
         ];
         let names: Vec<&str> = triggers.iter().map(Trigger::type_name).collect();
         for name in TRIGGER_TYPES {
@@ -165,16 +166,16 @@ mod tests {
     #[test]
     fn every_setting_round_trips_and_optional_ones_may_be_omitted() {
         let full = FlowSettings {
-            trigger: Trigger::Api,
+            trigger: Trigger::Api {},
             reentry: Reentry::Always {
                 min_interval_seconds: 86_400,
             },
             goal: Some(Goal::Event(event())),
             exit_on_goal: true,
             exit_criteria: vec![
-                ExitCriterion::LeavesSegment,
+                ExitCriterion::LeavesSegment {},
                 ExitCriterion::Event(event()),
-                ExitCriterion::GoalReached,
+                ExitCriterion::GoalReached {},
             ],
         };
         let wire = serde_json::to_value(&full).unwrap();
@@ -196,18 +197,45 @@ mod tests {
             json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
         )
         .unwrap();
-        assert_eq!(minimal.reentry, Reentry::Once);
+        assert_eq!(minimal.reentry, Reentry::Once {});
         assert!(
             minimal.goal.is_none() && !minimal.exit_on_goal && minimal.exit_criteria.is_empty()
         );
         for reentry in [
-            Reentry::OnceAtATime,
+            Reentry::OnceAtATime {},
             Reentry::Always {
                 min_interval_seconds: 0,
             },
         ] {
             let wire = serde_json::to_value(reentry).unwrap();
             assert_eq!(serde_json::from_value::<Reentry>(wire).unwrap(), reentry);
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_is_a_parse_error_at_every_level() {
+        let bad = [
+            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}, "extra": 1}),
+            json!({"trigger": {"type": "manual", "extra": 1}, "reentry": {"mode": "once"}}),
+            json!({"trigger": {"type": "api", "extra": 1}, "reentry": {"mode": "once"}}),
+            json!({"trigger": {"type": "manual"},
+                   "reentry": {"mode": "always", "min_interval": 86400}}),
+            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once", "extra": 1}}),
+            json!({"trigger": {"type": "event", "event": "e", "extra": 1},
+                   "reentry": {"mode": "once"}}),
+            json!({"trigger": {"type": "schedule", "cron": "* * * * *", "timezone": "UTC",
+                   "audience": {"type": "everyone", "extra": 1}},
+                   "reentry": {"mode": "once"}}),
+            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"},
+                   "goal": {"type": "event", "event": "e", "extra": 1}}),
+            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"},
+                   "exit_criteria": [{"type": "goal_reached", "extra": 1}]}),
+        ];
+        for wire in bad {
+            assert!(
+                serde_json::from_value::<FlowSettings>(wire.clone()).is_err(),
+                "{wire}"
+            );
         }
     }
 }
