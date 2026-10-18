@@ -261,9 +261,10 @@ the app shell composes features, not the reverse.
 - Reviews never loosen an allowlist, purity rule or import boundary merely to
   make a change pass. A boundary change requires an architecture decision.
 
-The engine evaluates branch conditions through an injected
-`ConditionEvaluator` (production: `segments` + `store`; simulation: the
-reference evaluator). The renderer never evaluates conditions itself: it lists
+The engine yields branch conditions to an injected `ConditionEvaluator`
+(production: compiled SQL from `segments`, run by `store` in the step transaction;
+test mode: the reference evaluator over a snapshot; simulation: a seeded test
+evaluator, 9.2 and 9.4). The renderer never evaluates conditions itself: it lists
 a template's block conditions, the handler evaluates them in one
 `ConditionEvaluator` call, and the results go into the render as plain inputs
 (section 11.4). CI builds `web/` before the release build; `build.rs` embeds `web/dist`, or a
@@ -712,8 +713,9 @@ connector delete or a reconciliation. Lists only add: a removed record's list me
 | Segment | `computed_at` plus the oldest input freshness of sources feeding its dependencies | "Data as of ..." on counts and membership |
 | Send decision | Segment and trait freshness at decision time | recorded on the message |
 
-Stale and failing sources are metrics and Sources-page badges (auto-pausing
-sends on stale inputs is OQ-14). The connector runtime, not each connector,
+Stale and failing sources are metrics and Sources-page badges. Flows do not pause
+on stale inputs; they record input freshness on external effects and warn (OQ-14,
+21.1). The connector runtime, not each connector,
 owns (ADR-004): auth (API key, basic, bearer, OAuth2 client credentials and
 authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
