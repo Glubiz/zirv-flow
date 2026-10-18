@@ -55,12 +55,12 @@ pub fn step(
             run.require(Status::Waiting, "a timer")?;
             let port = match &run.node(&state.node)?.kind {
                 NodeKind::WaitDuration { .. } | NodeKind::WaitUntilTime { .. } => PORT_NEXT,
-                NodeKind::WaitUntilEvent { .. } => PORT_TIMEOUT,
+                NodeKind::WaitUntilEvent { .. } => {
+                    run.clear_wait();
+                    PORT_TIMEOUT
+                }
                 other => return Err(not_a_wait(other)),
             };
-            if port == PORT_TIMEOUT {
-                run.clear_wait();
-            }
             run.leave(&state.node, port)
         }
         StepInput::EventArrived { event } => {
@@ -246,27 +246,19 @@ impl Run<'_> {
         let now = self.ctx.now();
         let next = || Ok(PORT_NEXT.to_owned());
         match &node.kind {
-            NodeKind::WaitDuration { seconds } => match after(now, *seconds) {
-                Some(at) => Err(Halt::Wait { at, awaiting: None }),
-                None => Err(Halt::Fail(Failure::OutOfRange)),
-            },
+            NodeKind::WaitDuration { seconds } => Err(wait(after(now, *seconds), None)),
             NodeKind::WaitUntilTime { when } => {
                 let zone = self.zone();
-                match until(when, now, zone) {
-                    Ok(at) => Err(Halt::Wait { at, awaiting: None }),
-                    Err(_) => Err(Halt::Fail(Failure::InvalidTime)),
-                }
+                Err(
+                    until(when, now, zone).map_or(Halt::Fail(Failure::InvalidTime), |at| {
+                        Halt::Wait { at, awaiting: None }
+                    }),
+                )
             }
             NodeKind::WaitUntilEvent {
                 event,
                 timeout_seconds,
-            } => match after(now, *timeout_seconds) {
-                Some(at) => Err(Halt::Wait {
-                    at,
-                    awaiting: Some(event.clone()),
-                }),
-                None => Err(Halt::Fail(Failure::OutOfRange)),
-            },
+            } => Err(wait(after(now, *timeout_seconds), Some(event.clone()))),
             NodeKind::Branch { conditions } => Err(Halt::Yield(conditions.clone())),
             NodeKind::SplitRandom { arms } => {
                 let total: u64 = arms.iter().map(|arm| u64::from(arm.weight)).sum();
@@ -401,6 +393,14 @@ impl Run<'_> {
             zone_fallback: self.zone_fallback,
         }
     }
+}
+
+/// A wait ending at `at`, or the out-of-range failure when the clock cannot hold it.
+fn wait(at: Option<DateTime<Utc>>, awaiting: Option<EventMatch>) -> Halt {
+    at.map_or(Halt::Fail(Failure::OutOfRange), |at| Halt::Wait {
+        at,
+        awaiting,
+    })
 }
 
 /// `now` plus `seconds`, or `None` when that does not fit the clock.
