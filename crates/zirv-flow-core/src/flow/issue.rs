@@ -47,9 +47,10 @@ pub mod code {
     pub const GOAL_CRITERION_WITHOUT_GOAL: &str = "goal_criterion_without_goal";
     pub const LEAVES_SEGMENT_WITHOUT_SEGMENT_TRIGGER: &str =
         "leaves_segment_without_segment_trigger";
+    pub const TOO_MANY_EXIT_CRITERIA: &str = "too_many_exit_criteria";
 
     /// Every code.
-    pub const ALL: [&str; 35] = [
+    pub const ALL: [&str; 36] = [
         UNSUPPORTED_VERSION,
         TOO_MANY_NODES,
         TOO_MANY_EDGES,
@@ -85,6 +86,7 @@ pub mod code {
         EXIT_ON_GOAL_WITHOUT_GOAL,
         GOAL_CRITERION_WITHOUT_GOAL,
         LEAVES_SEGMENT_WITHOUT_SEGMENT_TRIGGER,
+        TOO_MANY_EXIT_CRITERIA,
     ];
 }
 

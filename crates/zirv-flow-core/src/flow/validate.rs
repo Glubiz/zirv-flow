@@ -29,6 +29,8 @@ pub const MAX_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub const MAX_ID_CHARS: usize = 64;
 /// The most trait keys a webhook may send.
 pub const MAX_TRAIT_KEYS: usize = 20;
+/// The most exit criteria of one flow.
+pub const MAX_EXIT_CRITERIA: usize = 10;
 const MAX_KEY_CHARS: usize = 200;
 const MAX_NAME_CHARS: usize = 200;
 const MAX_URL_CHARS: usize = 2048;
@@ -112,7 +114,15 @@ pub fn validate_settings(settings: &FlowSettings) -> Vec<Issue> {
     if settings.exit_on_goal && settings.goal.is_none() {
         issues.push(Issue::general(code::EXIT_ON_GOAL_WITHOUT_GOAL).at("/exit_on_goal"));
     }
-    for (index, criterion) in settings.exit_criteria.iter().enumerate() {
+    if settings.exit_criteria.len() > MAX_EXIT_CRITERIA {
+        issues.push(Issue::general(code::TOO_MANY_EXIT_CRITERIA).at("/exit_criteria"));
+    }
+    for (index, criterion) in settings
+        .exit_criteria
+        .iter()
+        .enumerate()
+        .take(MAX_EXIT_CRITERIA)
+    {
         let at = format!("/exit_criteria/{index}");
         match criterion {
             ExitCriterion::LeavesSegment {} => {
@@ -202,8 +212,9 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
                     out.push(issue(id, code::INVALID_WEIGHT).at(format!("/arms/{index}/weight")));
                 }
             }
-            let total: u64 = arms.iter().map(|arm| u64::from(arm.weight)).sum();
-            if total != 100 {
+            if arms.len() <= MAX_ARMS
+                && arms.iter().map(|arm| u64::from(arm.weight)).sum::<u64>() != 100
+            {
                 out.push(issue(id, code::WEIGHTS_NOT_100).at("/arms"));
             }
         }
@@ -1363,6 +1374,8 @@ mod tests {
             let issues = validate_graph(&big);
             assert!(issues.len() <= MAX_ISSUES, "{}", issues.len());
             assert!(issues.iter().all(|i| i.code != code::PORT_NOT_WIRED));
+            // An oversized split is not summed: the arm limit is the only weight issue.
+            assert!(issues.iter().all(|i| i.code != code::WEIGHTS_NOT_100));
             assert!(
                 issues
                     .iter()
@@ -1395,7 +1408,26 @@ mod tests {
         flow.exit_criteria = vec![ExitCriterion::GoalReached {}; 500];
         let issues = validate(&graph(nodes, vec![]), &flow);
         assert_eq!(issues.len(), MAX_ISSUES);
-        assert_eq!(validate_settings(&flow).len(), MAX_ISSUES);
+        // Only the criteria within the limit are checked, so the settings alone stay small.
+        assert_eq!(validate_settings(&flow).len(), 1 + MAX_EXIT_CRITERIA);
+    }
+
+    #[test]
+    fn a_flow_has_at_most_the_limit_of_exit_criteria() {
+        let event = ExitCriterion::Event(EventMatch {
+            name: "order".into(),
+            filters: vec![],
+        });
+        let mut flow = settings(Trigger::Manual {});
+        flow.exit_criteria = vec![event.clone(); MAX_EXIT_CRITERIA];
+        assert_eq!(validate_settings(&flow), []);
+        flow.exit_criteria.push(event);
+        only(
+            &validate_settings(&flow),
+            code::TOO_MANY_EXIT_CRITERIA,
+            None,
+            None,
+        );
     }
 
     #[test]
