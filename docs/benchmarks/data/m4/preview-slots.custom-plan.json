@@ -1,0 +1,190 @@
+{
+  "phase": "preview-slots.custom-plan",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:24:00Z",
+  "definition_name": "trait_only",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "trait": "age",
+        "op": "between",
+        "value": [
+          25,
+          45
+        ]
+      },
+      {
+        "trait": "marketing_opt_in",
+        "op": "eq",
+        "value": true
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 200,
+    "seconds": 0.994395
+  },
+  "samples": [
+    {
+      "status": 200,
+      "seconds": 0.990341,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:34.35065Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.968735,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:35.425649Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.003341,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:36.476465Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.009910,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:37.554131Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.989768,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:38.651858Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.023950,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:39.743251Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.993971,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:40.856303Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.013109,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:41.935179Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.963379,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:43.03839Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.948537,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:44.09687Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.942439,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:45.132953Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.979988,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:46.161352Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.952451,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:47.256085Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.951180,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:48.305794Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.007533,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:49.348336Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.950552,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:50.446427Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.946332,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:51.469993Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.973812,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:52.504082Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.972106,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:53.566363Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 0.943469,
+      "count": 677521,
+      "compiled_at": "2026-10-18T07:23:54.625554Z",
+      "code": null
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 0.942439,
+    "max": 1.023950,
+    "p50": 0.972959,
+    "p95": 1.013109
+  },
+  "non_200": 0,
+  "count": [
+    677521
+  ],
+  "mirror_count_at_last_compiled_at": 677521,
+  "target_p95_s": 3,
+  "explain_indexes": []
+}

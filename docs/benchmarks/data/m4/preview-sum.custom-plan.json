@@ -1,0 +1,194 @@
+{
+  "phase": "preview-sum.custom-plan",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:35:39Z",
+  "definition_name": "sum_category90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "where": [
+          {
+            "prop": "category",
+            "op": "eq",
+            "value": "books"
+          }
+        ],
+        "agg": {
+          "fn": "sum",
+          "prop": "amount",
+          "op": "gt",
+          "value": 150.005
+        }
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 503,
+    "seconds": 10.004230
+  },
+  "samples": [
+    {
+      "status": 503,
+      "seconds": 10.005467,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003829,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003523,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005260,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003774,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004439,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004761,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003838,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004722,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005583,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003934,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004340,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.006049,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003622,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003693,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004505,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003890,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004816,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005395,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003937,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 10.003523,
+    "max": 10.006049,
+    "p50": 10.004389499999998,
+    "p95": 10.005583
+  },
+  "non_200": 20,
+  "count": [],
+  "mirror_count_at_last_compiled_at": 77453,
+  "target_p95_s": 15,
+  "explain_indexes": [
+    "events_y2026m07_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m10_workspace_id_person_id_occurred_at_idx"
+  ]
+}

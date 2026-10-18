@@ -1,0 +1,13 @@
+677521
+Limit  (cost=0.56..133.60 rows=20 width=16) (actual time=0.029..0.313 rows=20 loops=1)
+  Buffers: shared hit=230
+  ->  Index Scan using people_workspace_idx on people p  (cost=0.56..4484532.32 rows=674172 width=16) (actual time=0.028..0.311 rows=20 loops=1)
+        Index Cond: (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid)
+        Filter: ((merged_into IS NULL) AND (trait_s1 IS NOT NULL) AND (trait_n1 IS NOT NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_n1 >= '25'::double precision) AND (trait_n1 <= '45'::double precision) AND (trait_s1 = 'pro'::text))
+        Rows Removed by Filter: 205
+        Buffers: shared hit=230
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=50 read=3
+Planning Time: 0.218 ms
+Execution Time: 0.323 ms

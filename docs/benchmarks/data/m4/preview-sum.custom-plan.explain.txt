@@ -1,0 +1,40 @@
+Aggregate  (cost=339158571.15..339158571.16 rows=1 width=8) (actual time=97966.402..97966.403 rows=1 loops=1)
+  Buffers: shared hit=162331086 read=1623074
+  ->  Seq Scan on people p  (cost=0.00..339146294.60 rows=4910620 width=0) (actual time=149.019..97954.488 rows=77453 loops=1)
+        Filter: ((merged_into IS NULL) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND COALESCE(((SubPlan 1) > '150.005'::double precision), false))
+        Rows Removed by Filter: 9922547
+        Buffers: shared hit=162331086 read=1623074
+        SubPlan 1
+          ->  Aggregate  (cost=34.34..34.35 rows=1 width=8) (actual time=0.009..0.009 rows=1 loops=10000000)
+                Buffers: shared hit=162314778
+                ->  Append  (cost=0.56..34.24 rows=4 width=22) (actual time=0.009..0.009 rows=0 loops=10000000)
+                      Buffers: shared hit=162314778
+                      ->  Index Scan using events_y2026m07_workspace_id_person_id_occurred_at_idx on events_y2026m07 e_1  (cost=0.56..8.59 rows=1 width=22) (actual time=0.002..0.002 rows=0 loops=10000000)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:32:23.800354+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:32:23.800354+00'::timestamp with time zone))
+                            Filter: ((properties @> '{"category": "books"}'::jsonb) AND (name = 'bench_order_placed'::text))
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=41601246
+                      ->  Index Scan using events_y2026m08_workspace_id_person_id_occurred_at_idx on events_y2026m08 e_2  (cost=0.56..8.59 rows=1 width=22) (actual time=0.002..0.002 rows=0 loops=10000000)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:32:23.800354+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:32:23.800354+00'::timestamp with time zone))
+                            Filter: ((properties @> '{"category": "books"}'::jsonb) AND (name = 'bench_order_placed'::text))
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=44246077
+                      ->  Index Scan using events_y2026m09_workspace_id_person_id_occurred_at_idx on events_y2026m09 e_3  (cost=0.56..8.59 rows=1 width=23) (actual time=0.002..0.002 rows=0 loops=10000000)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:32:23.800354+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:32:23.800354+00'::timestamp with time zone))
+                            Filter: ((properties @> '{"category": "books"}'::jsonb) AND (name = 'bench_order_placed'::text))
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=44109426
+                      ->  Index Scan using events_y2026m10_workspace_id_person_id_occurred_at_idx on events_y2026m10 e_4  (cost=0.43..8.46 rows=1 width=23) (actual time=0.002..0.002 rows=0 loops=10000000)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:32:23.800354+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:32:23.800354+00'::timestamp with time zone))
+                            Filter: ((properties @> '{"category": "books"}'::jsonb) AND (name = 'bench_order_placed'::text))
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=32358029
+Settings: effective_cache_size = '16GB', plan_cache_mode = 'force_custom_plan'
+Planning:
+  Buffers: shared hit=1453 read=65
+Planning Time: 2.099 ms
+JIT:
+  Functions: 42
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 0.880 ms, Inlining 38.785 ms, Optimization 59.581 ms, Emission 42.919 ms, Total 142.166 ms
+Execution Time: 97976.045 ms

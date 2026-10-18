@@ -1,0 +1,41 @@
+Aggregate  (cost=114903740.76..114903740.77 rows=1 width=8) (actual time=38718.378..38718.380 rows=1 loops=1)
+  Buffers: shared hit=53008488 read=2436631
+  ->  Index Scan using people_trait_s1_idx on people p  (cost=0.56..114899667.00 rows=1629507 width=0) (actual time=102.374..38702.377 rows=128283 loops=1)
+        Index Cond: ((workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+        Filter: ((merged_into IS NULL) AND COALESCE(((SubPlan 1) >= '2'::double precision), false))
+        Rows Removed by Filter: 3205090
+        Buffers: shared hit=53008488 read=2436631
+        SubPlan 1
+          ->  Aggregate  (cost=34.24..34.25 rows=1 width=8) (actual time=0.010..0.010 rows=1 loops=3333373)
+                Buffers: shared hit=53008488 read=1095367
+                ->  Append  (cost=0.56..34.23 rows=4 width=0) (actual time=0.009..0.010 rows=0 loops=3333373)
+                      Buffers: shared hit=53008488 read=1095367
+                      ->  Index Scan using events_y2026m07_workspace_id_person_id_occurred_at_idx on events_y2026m07 e_1  (cost=0.56..8.58 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=3333373)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:14:49.599681+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:14:49.599681+00'::timestamp with time zone))
+                            Filter: (name = 'bench_order_placed'::text)
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=13540612 read=326524
+                      ->  Index Scan using events_y2026m08_workspace_id_person_id_occurred_at_idx on events_y2026m08 e_2  (cost=0.56..8.58 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=3333373)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:14:49.599681+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:14:49.599681+00'::timestamp with time zone))
+                            Filter: (name = 'bench_order_placed'::text)
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=14442892 read=305336
+                      ->  Index Scan using events_y2026m09_workspace_id_person_id_occurred_at_idx on events_y2026m09 e_3  (cost=0.56..8.58 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=3333373)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:14:49.599681+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:14:49.599681+00'::timestamp with time zone))
+                            Filter: (name = 'bench_order_placed'::text)
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=14406701 read=295549
+                      ->  Index Scan using events_y2026m10_workspace_id_person_id_occurred_at_idx on events_y2026m10 e_4  (cost=0.43..8.46 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=3333373)
+                            Index Cond: ((workspace_id = p.workspace_id) AND (person_id = p.id) AND (occurred_at > '2026-07-20 07:14:49.599681+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 07:14:49.599681+00'::timestamp with time zone))
+                            Filter: (name = 'bench_order_placed'::text)
+                            Rows Removed by Filter: 0
+                            Buffers: shared hit=10618283 read=167958
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=1374 read=132
+Planning Time: 2.735 ms
+JIT:
+  Functions: 40
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 0.873 ms, Inlining 33.885 ms, Optimization 35.538 ms, Emission 32.354 ms, Total 102.650 ms
+Execution Time: 38734.600 ms

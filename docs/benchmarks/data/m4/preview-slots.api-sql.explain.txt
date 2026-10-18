@@ -1,0 +1,27 @@
+677521
+677521
+677521
+677521
+677521
+Aggregate  (cost=92751.61..92751.62 rows=1 width=8) (actual time=5896.037..5896.037 rows=1 loops=1)
+  Buffers: shared hit=907497 read=2353500
+  ->  Index Scan using people_trait_n1_idx on people p  (cost=0.56..92733.21 rows=7362 width=0) (actual time=0.049..5857.823 rows=677521 loops=1)
+        Index Cond: ((workspace_id = $1) AND (trait_n1 >= $2) AND (trait_n1 <= $3))
+        Filter: ((merged_into IS NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_s1 IS NOT NULL) AND (trait_s1 = $4))
+        Rows Removed by Filter: 2708332
+        Buffers: shared hit=907497 read=2353500
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=27
+Planning Time: 0.200 ms
+Execution Time: 5896.055 ms
+Aggregate  (cost=92751.61..92751.62 rows=1 width=8) (actual time=6164.390..6164.391 rows=1 loops=1)
+  Buffers: shared hit=849359 read=2411638
+  ->  Index Scan using people_trait_n1_idx on people p  (cost=0.56..92733.21 rows=7362 width=0) (actual time=0.026..6125.670 rows=677521 loops=1)
+        Index Cond: ((workspace_id = $1) AND (trait_n1 >= $2) AND (trait_n1 <= $3))
+        Filter: ((merged_into IS NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_s1 IS NOT NULL) AND (trait_s1 = $4))
+        Rows Removed by Filter: 2708332
+        Buffers: shared hit=849359 read=2411638
+Settings: effective_cache_size = '16GB'
+Planning Time: 0.018 ms
+Execution Time: 6164.412 ms

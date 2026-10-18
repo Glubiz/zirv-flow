@@ -1,0 +1,13 @@
+677521
+Limit  (cost=0.56..119.11 rows=20 width=16) (actual time=0.038..0.367 rows=20 loops=1)
+  Buffers: shared hit=230
+  ->  Index Scan using people_workspace_idx on people p  (cost=0.56..4960184.40 rows=836776 width=16) (actual time=0.037..0.365 rows=20 loops=1)
+        Index Cond: (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid)
+        Filter: ((merged_into IS NULL) AND (traits @> '{"plan": "pro"}'::jsonb) AND (traits @> '{"marketing_opt_in": true}'::jsonb) AND COALESCE(((CASE WHEN (jsonb_typeof((traits -> 'age'::text)) = 'number'::text) THEN CASE WHEN (abs(((traits -> 'age'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((traits -> 'age'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END >= '25'::double precision) AND (CASE WHEN (jsonb_typeof((traits -> 'age'::text)) = 'number'::text) THEN CASE WHEN (abs(((traits -> 'age'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((traits -> 'age'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END <= '45'::double precision)), false))
+        Rows Removed by Filter: 205
+        Buffers: shared hit=230
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=35
+Planning Time: 0.238 ms
+Execution Time: 0.379 ms

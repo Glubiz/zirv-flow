@@ -1,0 +1,194 @@
+{
+  "phase": "preview-sum",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T07:23:02Z",
+  "definition_name": "sum_category90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "where": [
+          {
+            "prop": "category",
+            "op": "eq",
+            "value": "books"
+          }
+        ],
+        "agg": {
+          "fn": "sum",
+          "prop": "amount",
+          "op": "gt",
+          "value": 150.005
+        }
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 503,
+    "seconds": 10.004530
+  },
+  "samples": [
+    {
+      "status": 503,
+      "seconds": 10.003416,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004642,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003103,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003328,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005210,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003801,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003756,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.005619,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003182,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003355,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003557,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003807,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004721,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003157,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003357,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004780,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003148,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003699,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.004470,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    },
+    {
+      "status": 503,
+      "seconds": 10.003232,
+      "count": null,
+      "compiled_at": null,
+      "code": "segment_preview_timeout"
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 10.003103,
+    "max": 10.005619,
+    "p50": 10.003627999999999,
+    "p95": 10.005210
+  },
+  "non_200": 20,
+  "count": [],
+  "mirror_count_at_last_compiled_at": 77464,
+  "target_p95_s": 15,
+  "explain_indexes": [
+    "events_y2026m07_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m10_workspace_id_person_id_occurred_at_idx"
+  ]
+}

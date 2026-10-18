@@ -1,0 +1,3 @@
+trait_s1|0|4
+trait_n1|0|63
+trait_b1|0|2
