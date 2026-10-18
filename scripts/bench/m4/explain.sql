@@ -6,7 +6,7 @@
 -- plan. Run through psql with these variables:
 --   ws        the workspace id
 --   variant   trait_jsonb | trait_slots | agg90 | sum90
---   mode      explain | count
+--   mode      explain | explain_sample (the sample statement) | count
 --   hi        (optional) the window end, an ISO instant; default now(). The preview's
 --             `compiled_at` makes the mirror see the same 90 days the app did.
 --   slot_plan, slot_age, slot_opt   (trait_slots; optional for agg90) the ready slot columns of
@@ -57,7 +57,13 @@ SELECT :'variant' = 'trait_jsonb' AS v_tj, :'variant' = 'trait_slots' AS v_ts,
   \quit 3
 \endif
 
-\if :do_explain
+SELECT :'mode' = 'explain_sample' AS do_sample \gset
+\if :do_sample
+  -- The second statement of a preview: the first 20 members by id (sample_sql in compile.rs).
+  EXPLAIN (ANALYZE, BUFFERS, SETTINGS)
+  SELECT p.id FROM people p WHERE p.workspace_id = :'ws' AND p.merged_into IS NULL AND (:pred)
+  ORDER BY p.id LIMIT 20;
+\elif :do_explain
   EXPLAIN (ANALYZE, BUFFERS, SETTINGS)
   SELECT count(*) FROM people p WHERE p.workspace_id = :'ws' AND p.merged_into IS NULL AND (:pred);
 \else

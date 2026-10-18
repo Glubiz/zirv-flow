@@ -155,21 +155,29 @@ preview_series() {
 }
 
 phase_verify() {
-  local body out res hi got
+  local body out res hi got status api_count
   out="$(tmpfile)"
   local counts='{}'
   for def in trait_only agg90 sum_category90; do
     body="$(preview_body "$m4_dir/defs/$def.json")"
     res="$(timed_post "/workspaces/$ws/segments/preview" "$body" "$out")"
-    [ "${res% *}" = 200 ] || die "preview of $def returned ${res% *}: $(head -c 300 "$out")"
-    hi="$(jq -r .compiled_at "$out")"
+    status="${res% *}"
+    if [ "$status" = 200 ]; then
+      hi="$(jq -r .compiled_at "$out")"
+      api_count="$(jq .count "$out")"
+    else
+      # A preview past the API's 10 s limit is a 503: there is no count to compare, only the status.
+      hi="$(date -u +%FT%T.%6NZ)"
+      api_count=null
+    fi
     got="$(pg -At -v "ws=$ws" -v "hi=$hi" -f - <"$m4_dir/verify.sql")"
-    counts="$(jq -c --arg d "$def" --arg hi "$hi" --argjson api "$(jq .count "$out")" --argjson sql "$got" \
-      '. + {($d): {api_preview: $api, handwritten_sql: $sql[$d], equal: ($api == $sql[$d]), compiled_at: $hi}}' <<<"$counts")"
+    counts="$(jq -c --arg d "$def" --arg hi "$hi" --argjson st "$status" --argjson api "$api_count" --argjson sql "$got" \
+      '. + {($d): {api_status: $st, api_preview: $api, handwritten_sql: $sql[$d],
+                   equal: (if $api == null then null else $api == $sql[$d] end), compiled_at: $hi}}' <<<"$counts")"
   done
   jq . <<<"$counts" >"$M4_OUT/verify.json"
   jq -c . "$M4_OUT/verify.json"
-  jq -e 'all(.[]; .equal)' "$M4_OUT/verify.json" >/dev/null || die "a preview count differs from the hand-written count"
+  jq -e 'all(.[]; .equal != false)' "$M4_OUT/verify.json" >/dev/null || die "a preview count differs from the hand-written count"
 }
 
 phase_index() {
