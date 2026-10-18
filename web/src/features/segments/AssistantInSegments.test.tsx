@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router";
@@ -39,6 +40,13 @@ function aiSettings(enabled: boolean) {
 }
 
 const DRAFTED = { v: 1, all: [{ trait: "city", op: "eq", value: "Odense" }] };
+const DRAFTED_COUNT = 17;
+const SAVED_COUNT = 41;
+
+/** The headline count, which the page splits across two elements. */
+function count(text: string) {
+  return (_: string, element: Element | null) => element?.classList.contains("live-count") === true && element.textContent === text;
+}
 
 function drafted(overrides: Record<string, unknown> = {}) {
   return {
@@ -143,6 +151,10 @@ describe("drafting a segment", () => {
   it("drafts for this segment, previews the draft with the live count and loads it as unsaved on accept", async () => {
     const calls = mockApi({
       ...base(),
+      [`POST ${WS}/segments/preview`]: async (request) => {
+        const { definition } = (await request.clone().json()) as { definition: unknown };
+        return json(previewBody(isDeepStrictEqual(definition, DRAFTED) ? DRAFTED_COUNT : SAVED_COUNT));
+      },
       [DRAFT]: () => json(drafted()),
       [ACCEPT]: () => json({ id: "d1", kind: "segment", segment_id: SEGMENT_ID, source_id: null, stream: null, content: DRAFTED }),
     });
@@ -163,6 +175,9 @@ describe("drafting a segment", () => {
     // The draft is counted with the builder's own preview request.
     expect(screen.getByRole("heading", { name: "Preview" })).toBeInTheDocument();
     await waitFor(() => expect(previewed(calls)).toContainEqual(DRAFTED));
+    // The count shown beside the draft is the draft's own, not the saved definition's.
+    const draftPreview = screen.getByRole("heading", { name: "Preview" }).nextElementSibling as HTMLElement;
+    expect(await within(draftPreview).findByText(count(`${DRAFTED_COUNT} people match`))).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Accept" }));
 
