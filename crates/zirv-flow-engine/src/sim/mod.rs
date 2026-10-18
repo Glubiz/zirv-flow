@@ -183,20 +183,25 @@ pub(super) fn simulate(config: &Config) -> Report {
     run::run(config)
 }
 
-fn parse_number<T: std::str::FromStr>(text: Option<&str>) -> Option<T> {
-    text.and_then(|text| text.trim().parse().ok())
+/// The number in a variable, or `None` when it is unset or blank. Any other value panics: a run
+/// that silently fell back would claim to reproduce a seed it never ran.
+fn parse_number<T: std::str::FromStr>(var: &str, text: Option<&str>) -> Option<T> {
+    let text = text.map(str::trim).filter(|text| !text.is_empty())?;
+    let number = text.parse();
+    Some(number.unwrap_or_else(|_| panic!("{var} must be a number that fits, not {text:?}")))
 }
 
 /// The seeds to run: the one in [`SEED_VAR`], else the fixed ones.
 pub(super) fn seeds(text: Option<&str>) -> Vec<u64> {
-    parse_number(text).map_or_else(|| FIXED_SEEDS.to_vec(), |seed| vec![seed])
+    parse_number(SEED_VAR, text).map_or_else(|| FIXED_SEEDS.to_vec(), |seed| vec![seed])
 }
 
 /// The population: [`ENROLLMENTS_VAR`], else a modest default.
 pub(super) fn enrollments(text: Option<&str>) -> usize {
-    parse_number(text)
-        .filter(|count| *count > 0)
-        .unwrap_or(DEFAULT_ENROLLMENTS)
+    parse_number(ENROLLMENTS_VAR, text).map_or(DEFAULT_ENROLLMENTS, |count| {
+        assert!(count > 0, "{ENROLLMENTS_VAR} must be positive");
+        count
+    })
 }
 
 #[cfg(test)]
@@ -217,11 +222,29 @@ mod tests {
     #[test]
     fn the_environment_overrides_parse() {
         assert_eq!(seeds(None), FIXED_SEEDS.to_vec());
+        assert_eq!(seeds(Some(" ")), FIXED_SEEDS.to_vec());
         assert_eq!(seeds(Some(" 42 ")), vec![42]);
-        assert_eq!(seeds(Some("not a number")), FIXED_SEEDS.to_vec());
+        assert_eq!(seeds(Some("0")), vec![0]);
         assert_eq!(enrollments(None), DEFAULT_ENROLLMENTS);
         assert_eq!(enrollments(Some("5000")), 5000);
-        assert_eq!(enrollments(Some("0")), DEFAULT_ENROLLMENTS);
+    }
+
+    /// A value the run cannot use stops it rather than running something else under its name.
+    #[test]
+    fn an_unusable_override_stops_the_run() {
+        for (parse, text) in [
+            (seeds_len as fn(Option<&str>) -> usize, "not a number"),
+            (seeds_len, "99999999999999999999"),
+            (enrollments, "0"),
+            (enrollments, "-5"),
+        ] {
+            let outcome = std::panic::catch_unwind(|| parse(Some(text)));
+            assert!(outcome.is_err(), "{text:?} was accepted");
+        }
+    }
+
+    fn seeds_len(text: Option<&str>) -> usize {
+        seeds(text).len()
     }
 
     /// The main check: the fixed seeds in CI, or the seed and size from the environment (the
@@ -312,7 +335,7 @@ mod tests {
         assert!(simulate(&config).has(Invariant::InternalEffectsOnce));
         config.races = true;
         config.crash = CrashMode::Never;
-        assert!(simulate(&config).violation_count > 0);
+        assert!(simulate(&config).has(Invariant::InternalEffectsOnce));
     }
 
     #[test]
