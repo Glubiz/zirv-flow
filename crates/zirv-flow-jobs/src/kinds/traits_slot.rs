@@ -42,7 +42,10 @@ impl JobKind for TraitsSlotBackfill {
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let work = parse(ctx, &payload)?;
         if work.analyze {
-            analyze(ctx, &work).await;
+            // The slot is already `ready`, so a failure only logs: autovacuum catches up later.
+            if let Err(error) = analyze_slot_column(ctx.conn(), work.slot).await {
+                warn!(slot = work.slot.as_str(), %error, "could not analyze a ready trait slot");
+            }
             return Ok(());
         }
         if work.finish {
@@ -106,51 +109,40 @@ async fn follow_up(
     work: &Work,
     step: SlotStep,
 ) -> Result<(), JobError> {
-    let mut payload = json!({
-        "workspace_id": work.workspace,
-        "key": work.key,
-        "slot": work.slot.as_str(),
-        "generation": work.generation,
-    });
     match step {
-        SlotStep::Stale => return Ok(()),
-        SlotStep::More(cursor) => {
-            payload["after"] = json!(cursor);
-        }
-        SlotStep::Finish => {
-            payload["finish"] = json!(true);
-        }
+        SlotStep::Stale => Ok(()),
+        SlotStep::More(cursor) => enqueue_next(ctx, kind, work, "after", json!(cursor)).await,
+        SlotStep::Finish => enqueue_next(ctx, kind, work, "finish", json!(true)).await,
     }
-    let mut next = NewJob::new(kind, ctx.trace().clone());
-    next.workspace_id = Some(work.workspace);
-    next.payload = payload;
-    ctx.enqueue(&next).await?;
-    Ok(())
 }
 
 /// Queues the statistics refresh of a slot that has just become `ready`. It is a job of its own so
 /// that it runs after the transaction that set `ready` (holding the exclusive slot lock) has
 /// committed: the job commits with that transaction.
 async fn enqueue_analyze(ctx: &mut JobContext<'_>, work: &Work) -> Result<(), JobError> {
-    let mut next = NewJob::new(TraitsSlotBackfill::KIND, ctx.trace().clone());
-    next.workspace_id = Some(work.workspace);
-    next.payload = json!({
+    enqueue_next(ctx, TraitsSlotBackfill::KIND, work, "analyze", json!(true)).await
+}
+
+/// Enqueues the next job of the same assignment, with one extra payload field.
+async fn enqueue_next(
+    ctx: &mut JobContext<'_>,
+    kind: &'static str,
+    work: &Work,
+    field: &str,
+    value: Value,
+) -> Result<(), JobError> {
+    let mut payload = json!({
         "workspace_id": work.workspace,
         "key": work.key,
         "slot": work.slot.as_str(),
         "generation": work.generation,
-        "analyze": true,
     });
+    payload[field] = value;
+    let mut next = NewJob::new(kind, ctx.trace().clone());
+    next.workspace_id = Some(work.workspace);
+    next.payload = payload;
     ctx.enqueue(&next).await?;
     Ok(())
-}
-
-/// Refreshes the planner statistics of the slot column. The slot is already `ready`, so a
-/// failure only logs: autovacuum catches up later, and the backfill is never retried for it.
-async fn analyze(ctx: &mut JobContext<'_>, work: &Work) {
-    if let Err(error) = analyze_slot_column(ctx.conn(), work.slot).await {
-        warn!(slot = work.slot.as_str(), %error, "could not analyze a ready trait slot");
-    }
 }
 
 fn parse(ctx: &JobContext<'_>, payload: &Value) -> Result<Work, JobError> {
