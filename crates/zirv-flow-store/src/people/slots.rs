@@ -17,7 +17,7 @@
 
 use std::fmt::Write as _;
 
-use sqlx::PgConnection;
+use sqlx::{Connection as _, PgConnection};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::people::{SlotColumn, SlotKind, SlotState};
@@ -434,6 +434,29 @@ pub async fn finish_backfill(
     .await
     .map_err(StoreError::query)?;
     Ok(done.rows_affected() == 1)
+}
+
+/// Refreshes the planner's statistics of one slot column. A backfill leaves the new column
+/// without any (the planner then estimates one row for a whole workspace), and autovacuum
+/// only catches up later. Call it after the transaction that set the slot `ready` has
+/// committed: that one holds the exclusive slot lock, and `ANALYZE` takes seconds at millions
+/// of people. The column name is the fixed [`SlotColumn`] name, never user input.
+///
+/// A failure leaves the connection usable: the statement runs under a savepoint, so a caller
+/// inside a transaction (the job's) still commits.
+pub async fn analyze_slot_column(
+    connection: &mut PgConnection,
+    slot: SlotColumn,
+) -> Result<(), StoreError> {
+    let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ANALYZE people ({})",
+        slot.as_str()
+    )))
+    .execute(&mut *savepoint)
+    .await
+    .map_err(StoreError::query)?;
+    savepoint.commit().await.map_err(StoreError::query)
 }
 
 /// NULLs the slot column of up to [`SLOT_BATCH`] people of a `retiring` slot. A cleared row

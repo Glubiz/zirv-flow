@@ -1,6 +1,6 @@
 //! Segment preview (architecture 8.3 and 7.5): the count and a sample of the people an unsaved
 //! definition matches, and how old the data behind them is. It runs on the primary, in one
-//! read-only snapshot under a 10 second statement timeout.
+//! read-only snapshot under a fixed 20 second statement timeout.
 
 use axum::Json;
 use axum::extract::{Path, State};

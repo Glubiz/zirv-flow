@@ -177,7 +177,7 @@ impl AppState {
         self
     }
 
-    /// How long a segment preview may run; 10 seconds by default.
+    /// How long a segment preview may run; a test may shorten the fixed 20 seconds.
     pub fn with_segment_preview_timeout(mut self, timeout: Duration) -> Self {
         self.segment_preview_timeout = timeout;
         self

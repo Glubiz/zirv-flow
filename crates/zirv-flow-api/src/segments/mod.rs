@@ -16,8 +16,9 @@ use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
 
 pub(crate) use schema::SegmentSchemas;
 
-/// How long a preview may run before PostgreSQL cancels it (architecture 8.3).
-pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a preview may run before PostgreSQL cancels it (architecture 8.3). It is fixed, with no
+/// setting, and sits above the 15 s target of an aggregate preview (architecture 19).
+pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The compiler's catalog and trait storage from the store's snapshot. Only slots in state
 /// `ready` are in the storage, and they come from the same snapshot as the catalog.

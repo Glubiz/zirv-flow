@@ -309,6 +309,7 @@ pub async fn apply_reevaluation(
         apply.workspace,
         &apply.members.params,
     )
+    .persistent(false)
     .bind(&batch.people)
     .bind(apply.segment)
     .bind(apply.version)

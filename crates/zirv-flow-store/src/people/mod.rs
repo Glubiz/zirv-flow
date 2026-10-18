@@ -46,8 +46,9 @@ pub(crate) use search::strongest_identifiers;
 pub use search::{PersonSearch, SearchError, SearchHit, SearchPage, TraitOp, search_people};
 pub use slots::{
     Assigned, Retired, SLOT_BATCH, SLOT_LOCK_CLASS, SlotAssignment, SlotError, SlotStep,
-    assign_trait_slot, backfill_slot_batch, clear_slot_batch, finish_backfill, free_trait_slot,
-    hold_trait_slots, ready_trait_slots, retire_trait_slot, trait_slot_assignments, trait_slot_of,
+    analyze_slot_column, assign_trait_slot, backfill_slot_batch, clear_slot_batch, finish_backfill,
+    free_trait_slot, hold_trait_slots, ready_trait_slots, retire_trait_slot,
+    trait_slot_assignments, trait_slot_of,
 };
 pub(crate) use timeline::person_group;
 pub use timeline::{

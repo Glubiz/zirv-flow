@@ -6,13 +6,19 @@
 //! same trace. The last batch enqueues a run with `finish: true`, which takes the exclusive slot
 //! lock as its first statement (holding no row locks) and moves the slot to `ready` (backfill)
 //! or frees it (clear). A job whose assignment has since changed does nothing.
+//!
+//! A finish that made the slot `ready` also enqueues a run with `analyze: true`. It runs after the
+//! finish has committed and refreshes the planner statistics of the new column, which the backfill
+//! leaves empty. A failed `ANALYZE` only logs a warning: the slot stays `ready`.
 
 use serde_json::{Value, json};
+use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::people::SlotColumn;
 use zirv_flow_store::{
-    NewJob, SlotStep, backfill_slot_batch, clear_slot_batch, finish_backfill, free_trait_slot,
+    NewJob, SlotStep, analyze_slot_column, backfill_slot_batch, clear_slot_batch, finish_backfill,
+    free_trait_slot,
 };
 
 use crate::{JobContext, JobError, JobKind};
@@ -27,6 +33,7 @@ struct Work {
     generation: i64,
     after: Option<Uuid>,
     finish: bool,
+    analyze: bool,
 }
 
 impl JobKind for TraitsSlotBackfill {
@@ -34,8 +41,15 @@ impl JobKind for TraitsSlotBackfill {
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let work = parse(ctx, &payload)?;
+        if work.analyze {
+            // The slot is already `ready`, so a failure only logs: autovacuum catches up later.
+            if let Err(error) = analyze_slot_column(ctx.conn(), work.slot).await {
+                warn!(slot = work.slot.as_str(), %error, "could not analyze a ready trait slot");
+            }
+            return Ok(());
+        }
         if work.finish {
-            finish_backfill(
+            let ready = finish_backfill(
                 ctx.conn(),
                 work.workspace,
                 &work.key,
@@ -43,6 +57,9 @@ impl JobKind for TraitsSlotBackfill {
                 work.generation,
             )
             .await?;
+            if ready {
+                enqueue_analyze(ctx, &work).await?;
+            }
             return Ok(());
         }
         let step = backfill_slot_batch(
@@ -92,21 +109,35 @@ async fn follow_up(
     work: &Work,
     step: SlotStep,
 ) -> Result<(), JobError> {
+    match step {
+        SlotStep::Stale => Ok(()),
+        SlotStep::More(cursor) => enqueue_next(ctx, kind, work, "after", json!(cursor)).await,
+        SlotStep::Finish => enqueue_next(ctx, kind, work, "finish", json!(true)).await,
+    }
+}
+
+/// Queues the statistics refresh of a slot that has just become `ready`. It is a job of its own so
+/// that it runs after the transaction that set `ready` (holding the exclusive slot lock) has
+/// committed: the job commits with that transaction.
+async fn enqueue_analyze(ctx: &mut JobContext<'_>, work: &Work) -> Result<(), JobError> {
+    enqueue_next(ctx, TraitsSlotBackfill::KIND, work, "analyze", json!(true)).await
+}
+
+/// Enqueues the next job of the same assignment, with one extra payload field.
+async fn enqueue_next(
+    ctx: &mut JobContext<'_>,
+    kind: &'static str,
+    work: &Work,
+    field: &str,
+    value: Value,
+) -> Result<(), JobError> {
     let mut payload = json!({
         "workspace_id": work.workspace,
         "key": work.key,
         "slot": work.slot.as_str(),
         "generation": work.generation,
     });
-    match step {
-        SlotStep::Stale => return Ok(()),
-        SlotStep::More(cursor) => {
-            payload["after"] = json!(cursor);
-        }
-        SlotStep::Finish => {
-            payload["finish"] = json!(true);
-        }
-    }
+    payload[field] = value;
     let mut next = NewJob::new(kind, ctx.trace().clone());
     next.workspace_id = Some(work.workspace);
     next.payload = payload;
@@ -155,6 +186,7 @@ fn parse_payload(payload: &Value) -> Result<Work, JobError> {
         ),
     };
     let finish = payload.get("finish").and_then(Value::as_bool) == Some(true);
+    let analyze = payload.get("analyze").and_then(Value::as_bool) == Some(true);
     Ok(Work {
         workspace,
         key,
@@ -162,6 +194,7 @@ fn parse_payload(payload: &Value) -> Result<Work, JobError> {
         generation,
         after,
         finish,
+        analyze,
     })
 }
 
@@ -210,5 +243,115 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    async fn run_next(pool: &sqlx::PgPool) {
+        let claimed = zirv_flow_store::claim_job(
+            pool,
+            "w",
+            &[TraitsSlotBackfill::KIND],
+            std::time::Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("a queued slot job");
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed);
+        TraitsSlotBackfill
+            .run(&mut ctx, claimed.payload.clone())
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+    }
+
+    async fn slot_stats(pool: &sqlx::PgPool, slot: SlotColumn) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stats WHERE schemaname = current_schema() \
+             AND tablename = 'people' AND attname = $1",
+        )
+        .bind(slot.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slot_that_becomes_ready_gets_statistics_from_a_job_after_the_finish(
+        pool: sqlx::PgPool,
+    ) {
+        use zirv_flow_core::people::{Precedence, TraitType};
+        use zirv_flow_core::{Slug, WorkspaceName};
+        use zirv_flow_store::{Assigned, NewTraitDefinition};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("ours").unwrap();
+        let slug = Slug::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        zirv_flow_store::create_trait_definition(
+            &pool,
+            ws,
+            &NewTraitDefinition {
+                key: "plan".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, $3)")
+                .bind(Uuid::now_v7())
+                .bind(ws.as_uuid())
+                .bind(json!({"plan": "pro"}))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+        let Ok(Assigned::New(slot, generation)) =
+            zirv_flow_store::assign_trait_slot(&mut connection, ws, "plan").await
+        else {
+            panic!("not assigned");
+        };
+        drop(connection);
+        let mut first = NewJob::new(
+            TraitsSlotBackfill::KIND,
+            zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        );
+        first.workspace_id = Some(ws);
+        first.payload = json!({
+            "workspace_id": ws,
+            "key": "plan",
+            "slot": slot.as_str(),
+            "generation": generation,
+        });
+        zirv_flow_store::enqueue(&pool, &first).await.unwrap();
+
+        // The batch, then the finish, which queues the statistics refresh.
+        run_next(&pool).await;
+        run_next(&pool).await;
+        let state: String = sqlx::query_scalar(
+            "SELECT slot_state FROM trait_definitions WHERE workspace_id = $1 AND key = 'plan'",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "ready");
+        assert_eq!(slot_stats(&pool, slot).await, 0, "not before the finish");
+
+        run_next(&pool).await;
+
+        assert_eq!(slot_stats(&pool, slot).await, 1);
     }
 }
