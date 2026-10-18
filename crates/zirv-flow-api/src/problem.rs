@@ -86,10 +86,12 @@ pub struct ItemProblem {
 
 /// The fields only a segment problem carries.#[derive(Debug)]struct SegmentExtra {    issues: Option<Vec<SegmentIssueProblem>>,    cycle: Option<Vec<SegmentRefProblem>>,}
 /// The fields only a segment problem carries.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SegmentExtra {
     issues: Option<Vec<SegmentIssueProblem>>,
     cycle: Option<Vec<SegmentRefProblem>>,
+    /// The issues of a flow (`flow_invalid`); it shares the box so the error stays small.
+    flow_issues: Option<Vec<FlowIssueProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -102,8 +104,6 @@ pub(crate) struct ApiError {
     code: Option<&'static str>,
     /// The extra fields of a segment problem, boxed to keep the error small.
     segment: Option<Box<SegmentExtra>>,
-    /// The issues of a flow that does not validate.
-    flow_issues: Option<Vec<FlowIssueProblem>>,
 }
 
 impl ApiError {
@@ -115,7 +115,6 @@ impl ApiError {
             retry_after: None,
             code: None,
             segment: None,
-            flow_issues: None,
         }
     }
 
@@ -371,6 +370,7 @@ impl ApiError {
             segment: Some(Box::new(SegmentExtra {
                 issues: Some(issues),
                 cycle: None,
+                ..SegmentExtra::default()
             })),
             ..Self::unprocessable("the segment definition is not valid")
         }
@@ -394,6 +394,7 @@ impl ApiError {
         self.segment = Some(Box::new(SegmentExtra {
             issues: None,
             cycle: Some(cycle),
+            ..SegmentExtra::default()
         }));
         self
     }
@@ -414,7 +415,10 @@ impl ApiError {
     pub(crate) fn flow_invalid(issues: Vec<FlowIssueProblem>) -> Self {
         Self {
             code: Some("flow_invalid"),
-            flow_issues: Some(issues),
+            segment: Some(Box::new(SegmentExtra {
+                flow_issues: Some(issues),
+                ..SegmentExtra::default()
+            })),
             ..Self::unprocessable("the flow is not valid")
         }
     }
@@ -553,6 +557,7 @@ impl ApiError {
             segment: Some(Box::new(SegmentExtra {
                 issues: Some(issues),
                 cycle: None,
+                ..SegmentExtra::default()
             })),
             ..Self::ai_draft_invalid()
         }
@@ -566,6 +571,7 @@ impl ApiError {
             segment: Some(Box::new(SegmentExtra {
                 issues: Some(issues),
                 cycle: None,
+                ..SegmentExtra::default()
             })),
             ..Self::unprocessable("the assistant could not explain this segment; try again")
         }
@@ -664,7 +670,10 @@ impl IntoResponse for ApiError {
             code: self.code.map(str::to_owned),
             issues: self.segment.as_mut().and_then(|extra| extra.issues.take()),
             cycle: self.segment.as_mut().and_then(|extra| extra.cycle.take()),
-            flow_issues: self.flow_issues,
+            flow_issues: self
+                .segment
+                .as_mut()
+                .and_then(|extra| extra.flow_issues.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
