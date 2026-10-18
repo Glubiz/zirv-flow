@@ -363,6 +363,7 @@ pub async fn apply_refresh(
         apply.workspace,
         &apply.members.params,
     )
+    .persistent(false)
     .bind(apply.segment)
     .bind(apply.version)
     .bind(apply.now)
@@ -617,6 +618,45 @@ mod tests {
         .unwrap()
         .into_iter()
         .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_leaves_no_prepared_statement_on_its_connection(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        person(&pool, ws, "ada@example.com", "pro").await;
+        let job = job_trace();
+        let cause = MembershipCause::Initial;
+        let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
+        let mut tx = begin(&pool).await.unwrap();
+        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+        apply_refresh(
+            &mut tx,
+            &RefreshApply {
+                workspace: ws,
+                segment: seg.id,
+                version: 1,
+                members: &plan_query("pro"),
+                now: NOW,
+                cause,
+                trace: &trace,
+                job: (Uuid::new_v4(), 1),
+                job_trace: &job,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The refresh statement is compiled per segment, so it must be planned on every run.
+        let kept: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE '%FROM people p%'",
+        )
+        .persistent(false)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert!(kept.is_empty(), "kept prepared statements: {kept:?}");
     }
 
     #[sqlx::test]

@@ -110,6 +110,7 @@ pub async fn run_segment_preview(
         workspace,
         &count.params,
     )
+    .persistent(false)
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::bounded)?;
@@ -118,6 +119,7 @@ pub async fn run_segment_preview(
         workspace,
         &sample.params,
     )
+    .persistent(false)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::bounded)?;
@@ -239,6 +241,37 @@ mod tests {
             rows[0].display.as_ref().map(|(kind, _)| kind.as_str()),
             Some("email")
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_leaves_no_prepared_statement_on_its_connection(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        person(&pool, ws, "a@example.com", "pro").await;
+        let predicate = "p.traits ->> 'plan' = $2::text";
+        let params = vec![SqlParam::Text("pro".into())];
+        let count = query(predicate, "", params.clone());
+        let mut sample_params = params;
+        sample_params.push(SqlParam::Int(1));
+        let sample = query(predicate, " ORDER BY p.id LIMIT $3::bigint", sample_params);
+        let mut tx = begin_segment_snapshot(&pool, Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        run_segment_preview(&mut tx, ws, &count, &sample)
+            .await
+            .unwrap();
+
+        // A persistent sqlx statement is a named prepared statement that the server keeps, and
+        // after a few executions it plans without the bound values. Neither query may stay.
+        let kept: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE '%FROM people p%'",
+        )
+        .persistent(false)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert!(kept.is_empty(), "kept prepared statements: {kept:?}");
     }
 
     #[sqlx::test]
