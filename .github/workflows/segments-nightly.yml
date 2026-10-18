@@ -67,3 +67,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
+      # One seed for both PostgreSQL versions would hide a version-specific disagreement
+      # behind the same data, so each job draws its own and prints it.
+      - name: Choose The Seed
+        env:
+          INPUT_SEED: ${{ github.event.inputs.seed }}
+          INPUT_CASES: ${{ github.event.inputs.cases }}
+        run: |
+          seed="${INPUT_SEED:-}"
+          if [ -z "$seed" ]; then
+            seed="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
+          fi
+          cases="${INPUT_CASES:-2000}"
+          case "$seed$cases" in
+            *[!0-9]*) echo "the seed and the case count must be numbers" >&2; exit 1 ;;
+          esac
+          echo "ZIRV_FLOW_PROPTEST_SEED=$seed" >> "$GITHUB_ENV"
+          echo "ZIRV_FLOW_PROPTEST_CASES=$cases" >> "$GITHUB_ENV"
+          echo "PostgreSQL ${{ matrix.pg }}: seed $seed, $cases cases"
+
