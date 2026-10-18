@@ -1,0 +1,48 @@
+-- (same statement as preview-slots: the three traits are slot-backed, so this phase no longer reads jsonb)
+-- The statement the 0.57.0 API runs for the trait-only definition (logged with log_min_duration_statement=0, values from the log, unnamed statement = per-execution plan), EXPLAIN (ANALYZE, BUFFERS, SETTINGS) via psql \bind.
+-- Run 1 follows the capture call directly after an app restart and the incremental phase; run 2 is the immediate repeat.
+-- Mirrors in preview-slots.explain.txt are the pre-#144 hand-written statement and are not shipped, so this file is the plan.
+-- run 1
+Finalize Aggregate  (cost=1724484.05..1724484.06 rows=1 width=8) (actual time=3885.285..3916.167 rows=1 loops=1)
+  Buffers: shared hit=127068 read=1512314
+  ->  Gather  (cost=1724483.83..1724484.04 rows=2 width=8) (actual time=3885.148..3916.149 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=127068 read=1512314
+        ->  Partial Aggregate  (cost=1723483.83..1723483.84 rows=1 width=8) (actual time=3876.494..3876.494 rows=1 loops=3)
+              Buffers: shared hit=127068 read=1512314
+              ->  Parallel Seq Scan on people p  (cost=0.00..1722781.46 rows=280949 width=0) (actual time=72.385..3864.576 rows=225840 loops=3)
+                    Filter: ((merged_into IS NULL) AND (trait_n1 IS NOT NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_s1 IS NOT NULL) AND (trait_n1 >= '25'::double precision) AND (trait_n1 <= '45'::double precision) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+                    Rows Removed by Filter: 3107493
+                    Buffers: shared hit=127068 read=1512314
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=745 read=11
+Planning Time: 3.223 ms
+JIT:
+  Functions: 14
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 0.993 ms, Inlining 97.350 ms, Optimization 71.069 ms, Emission 47.319 ms, Total 216.731 ms
+Execution Time: 3934.172 ms
+-- run 2
+Finalize Aggregate  (cost=1724484.05..1724484.06 rows=1 width=8) (actual time=1422.942..1444.203 rows=1 loops=1)
+  Buffers: shared hit=129391 read=1509991
+  ->  Gather  (cost=1724483.83..1724484.04 rows=2 width=8) (actual time=1422.744..1444.185 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=129391 read=1509991
+        ->  Partial Aggregate  (cost=1723483.83..1723483.84 rows=1 width=8) (actual time=1413.456..1413.457 rows=1 loops=3)
+              Buffers: shared hit=129391 read=1509991
+              ->  Parallel Seq Scan on people p  (cost=0.00..1722781.46 rows=280949 width=0) (actual time=86.941..1398.838 rows=225840 loops=3)
+                    Filter: ((merged_into IS NULL) AND (trait_n1 IS NOT NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_s1 IS NOT NULL) AND (trait_n1 >= '25'::double precision) AND (trait_n1 <= '45'::double precision) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+                    Rows Removed by Filter: 3107493
+                    Buffers: shared hit=129391 read=1509991
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=756
+Planning Time: 1.403 ms
+JIT:
+  Functions: 14
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 1.422 ms, Inlining 115.951 ms, Optimization 86.408 ms, Emission 58.338 ms, Total 262.119 ms
+Execution Time: 1457.242 ms

@@ -1,0 +1,196 @@
+{
+  "phase": "preview-sum",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T10:32:18Z",
+  "definition_name": "sum_category90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "where": [
+          {
+            "prop": "category",
+            "op": "eq",
+            "value": "books"
+          }
+        ],
+        "agg": {
+          "fn": "sum",
+          "prop": "amount",
+          "op": "gt",
+          "value": 150.005
+        }
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 200,
+    "seconds": 2.788967
+  },
+  "samples": [
+    {
+      "status": 200,
+      "seconds": 1.276276,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:48.727215Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.140765,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:50.105094Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.140073,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:51.332535Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.131284,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:52.556223Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.140834,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:53.774364Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.198026,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:55.00201Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.145045,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:56.29717Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.141610,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:57.533782Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.183479,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:27:58.785164Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.137408,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:00.077943Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.204448,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:01.309737Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.130674,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:02.589116Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.134556,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:03.803553Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.196145,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:05.021716Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.142433,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:06.309003Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.142585,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:07.542244Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.174096,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:08.820824Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.139774,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:10.093457Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.149010,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:11.334036Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 1.141784,
+      "count": 77358,
+      "compiled_at": "2026-10-18T10:28:12.566332Z",
+      "code": null
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 1.130674,
+    "max": 1.276276,
+    "p50": 1.1421085,
+    "p95": 1.204448
+  },
+  "non_200": 0,
+  "count": [
+    77358
+  ],
+  "mirror_count_at_last_compiled_at": 77358,
+  "target_p95_s": 15,
+  "explain_indexes": [
+    "events_y2026m07_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m10_workspace_id_person_id_occurred_at_idx"
+  ]
+}

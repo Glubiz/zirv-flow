@@ -1,0 +1,111 @@
+-- The statement the 0.57.0 API runs for the property-filtered sum (D4.5) (logged with log_min_duration_statement=0, values from the log, unnamed statement = per-execution plan), EXPLAIN (ANALYZE, BUFFERS, SETTINGS) via psql \bind.
+-- Run 1 follows the capture call directly after an app restart and the incremental phase; run 2 is the immediate repeat.
+-- Mirrors in preview-sum.explain.txt are the pre-#144 hand-written statement and are not shipped, so this file is the plan.
+-- run 1
+Aggregate  (cost=1016664.90..1016664.91 rows=1 width=8) (actual time=2415.148..2427.675 rows=1 loops=1)
+  Buffers: shared hit=316968 read=813993, temp read=3871 written=3881
+  ->  Nested Loop  (cost=989650.37..1016657.82 rows=2830 width=0) (actual time=1575.869..2422.087 rows=77331 loops=1)
+        Buffers: shared hit=316968 read=813993, temp read=3871 written=3881
+        ->  Finalize GroupAggregate  (cost=989649.81..992580.42 rows=2830 width=16) (actual time=1575.809..1791.622 rows=77331 loops=1)
+              Group Key: e.person_id
+              Filter: (sum(CASE WHEN (jsonb_typeof((e.properties -> 'amount'::text)) = 'number'::text) THEN CASE WHEN (abs(((e.properties -> 'amount'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((e.properties -> 'amount'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END) > '150.005'::double precision)
+              Rows Removed by Filter: 224610
+              Buffers: shared hit=75 read=744231, temp read=3871 written=3881
+              ->  Gather Merge  (cost=989649.81..992389.40 rows=16980 width=24) (actual time=1575.786..1747.205 rows=304889 loops=1)
+                    Workers Planned: 2
+                    Workers Launched: 2
+                    Buffers: shared hit=75 read=744231, temp read=3871 written=3881
+                    ->  Partial GroupAggregate  (cost=988649.79..989429.46 rows=8490 width=24) (actual time=1565.668..1644.591 rows=101630 loops=3)
+                          Group Key: e.person_id
+                          Buffers: shared hit=75 read=744231, temp read=3871 written=3881
+                          ->  Sort  (cost=988649.79..988707.69 rows=23159 width=48) (actual time=1565.625..1576.089 rows=102209 loops=3)
+                                Sort Key: e.person_id
+                                Sort Method: external merge  Disk: 12448kB
+                                Buffers: shared hit=75 read=744231, temp read=3871 written=3881
+                                Worker 0:  Sort Method: external merge  Disk: 5928kB
+                                Worker 1:  Sort Method: external merge  Disk: 12592kB
+                                ->  Parallel Append  (cost=0.00..986970.85 rows=23159 width=48) (actual time=125.145..1540.947 rows=102209 loops=3)
+                                      Buffers: shared hit=1 read=744231
+                                      ->  Parallel Seq Scan on events_y2026m10 e_4  (cost=0.00..558794.91 rows=3408 width=102) (actual time=157.283..632.931 rows=19557 loops=3)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4404020
+                                            Buffers: shared hit=1 read=434311
+                                      ->  Parallel Seq Scan on events_y2026m08 e_2  (cost=0.00..144240.39 rows=9862 width=38) (actual time=117.297..1043.210 rows=105558 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4140528
+                                            Buffers: shared read=104425
+                                      ->  Parallel Seq Scan on events_y2026m07 e_1  (cost=0.00..144216.67 rows=2542 width=39) (actual time=0.091..311.288 rows=19779 loops=2)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 2102890
+                                            Buffers: shared read=104419
+                                      ->  Parallel Seq Scan on events_y2026m09 e_3  (cost=0.00..139603.08 rows=7347 width=38) (actual time=140.721..1038.655 rows=102838 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4006597
+                                            Buffers: shared read=101076
+        ->  Index Scan using people_pkey on people p  (cost=0.56..8.51 rows=1 width=16) (actual time=0.008..0.008 rows=1 loops=77331)
+              Index Cond: (id = e.person_id)
+              Filter: ((merged_into IS NULL) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid))
+              Buffers: shared hit=316893 read=69762
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=1464 read=106
+Planning Time: 12.478 ms
+JIT:
+  Functions: 75
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 3.459 ms, Inlining 121.942 ms, Optimization 150.967 ms, Emission 102.504 ms, Total 378.872 ms
+Execution Time: 2449.635 ms
+-- run 2
+Aggregate  (cost=1016664.90..1016664.91 rows=1 width=8) (actual time=1474.590..1500.225 rows=1 loops=1)
+  Buffers: shared hit=696746 read=434215, temp read=3872 written=3882
+  ->  Nested Loop  (cost=989650.37..1016657.82 rows=2830 width=0) (actual time=1154.656..1496.871 rows=77331 loops=1)
+        Buffers: shared hit=696746 read=434215, temp read=3872 written=3882
+        ->  Finalize GroupAggregate  (cost=989649.81..992580.42 rows=2830 width=16) (actual time=1154.630..1330.601 rows=77331 loops=1)
+              Group Key: e.person_id
+              Filter: (sum(CASE WHEN (jsonb_typeof((e.properties -> 'amount'::text)) = 'number'::text) THEN CASE WHEN (abs(((e.properties -> 'amount'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((e.properties -> 'amount'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END) > '150.005'::double precision)
+              Rows Removed by Filter: 224610
+              Buffers: shared hit=310091 read=434215, temp read=3872 written=3882
+              ->  Gather Merge  (cost=989649.81..992389.40 rows=16980 width=24) (actual time=1154.619..1300.049 rows=304918 loops=1)
+                    Workers Planned: 2
+                    Workers Launched: 2
+                    Buffers: shared hit=310091 read=434215, temp read=3872 written=3882
+                    ->  Partial GroupAggregate  (cost=988649.79..989429.46 rows=8490 width=24) (actual time=1143.259..1211.302 rows=101639 loops=3)
+                          Group Key: e.person_id
+                          Buffers: shared hit=310091 read=434215, temp read=3872 written=3882
+                          ->  Sort  (cost=988649.79..988707.69 rows=23159 width=48) (actual time=1143.225..1151.964 rows=102209 loops=3)
+                                Sort Key: e.person_id
+                                Sort Method: external merge  Disk: 12592kB
+                                Buffers: shared hit=310091 read=434215, temp read=3872 written=3882
+                                Worker 0:  Sort Method: external merge  Disk: 12456kB
+                                Worker 1:  Sort Method: external merge  Disk: 5928kB
+                                ->  Parallel Append  (cost=0.00..986970.85 rows=23159 width=48) (actual time=122.931..1120.791 rows=102209 loops=3)
+                                      Buffers: shared hit=310017 read=434215
+                                      ->  Parallel Seq Scan on events_y2026m10 e_4  (cost=0.00..558794.91 rows=3408 width=102) (actual time=272.917..609.222 rows=19557 loops=3)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4404020
+                                            Buffers: shared hit=97 read=434215
+                                      ->  Parallel Seq Scan on events_y2026m08 e_2  (cost=0.00..144240.39 rows=9862 width=38) (actual time=121.079..580.361 rows=105558 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4140528
+                                            Buffers: shared hit=104425
+                                      ->  Parallel Seq Scan on events_y2026m07 e_1  (cost=0.00..144216.67 rows=2542 width=39) (actual time=0.049..186.439 rows=19779 loops=2)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 2102890
+                                            Buffers: shared hit=104419
+                                      ->  Parallel Seq Scan on events_y2026m09 e_3  (cost=0.00..139603.08 rows=7347 width=38) (actual time=131.646..566.631 rows=102838 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:55:13.253507+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:55:13.253507+00'::timestamp with time zone) AND (properties @> '{"category": "books"}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4006597
+                                            Buffers: shared hit=101076
+        ->  Index Scan using people_pkey on people p  (cost=0.56..8.51 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=77331)
+              Index Cond: (id = e.person_id)
+              Filter: ((merged_into IS NULL) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid))
+              Buffers: shared hit=386655
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=1562 read=8
+Planning Time: 3.053 ms
+JIT:
+  Functions: 75
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 3.819 ms, Inlining 119.416 ms, Optimization 151.201 ms, Emission 98.218 ms, Total 372.653 ms
+Execution Time: 1512.696 ms

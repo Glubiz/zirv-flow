@@ -1,0 +1,146 @@
+-- EXPLAIN (ANALYZE, BUFFERS) of the segment.reevaluate batch statement of 0.57.1 (aggregate segment 01a14fa8-..., 23 people, rolled back).
+-- SET LOCAL plan_cache_mode = force_generic_plan, as apply_reevaluation (#149) does; run as PREPARE + EXPLAIN EXECUTE, since EXPLAIN of a bound statement is always a custom plan.
+-- Statement text from the 0.57.0 log; values rebuilt for this segment and 23 of its members.
+Result  (cost=736.28..736.30 rows=1 width=32) (actual time=2.471..2.479 rows=1 loops=1)
+  Buffers: shared hit=1048
+  CTE batch
+    ->  Function Scan on b  (cost=0.01..0.11 rows=10 width=96) (actual time=0.015..0.017 rows=23 loops=1)
+  CTE target
+    ->  Nested Loop  (cost=646.56..660.22 rows=1 width=16) (actual time=1.699..1.975 rows=23 loops=1)
+          Buffers: shared hit=736
+          ->  GroupAggregate  (cost=646.00..646.27 rows=1 width=16) (actual time=1.671..1.682 rows=23 loops=1)
+                Group Key: e.person_id
+                Filter: ((count(*))::double precision >= $5)
+                Buffers: shared hit=621
+                ->  Sort  (cost=646.00..646.07 rows=28 width=16) (actual time=1.667..1.670 rows=57 loops=1)
+                      Sort Key: e.person_id
+                      Sort Method: quicksort  Memory: 26kB
+                      Buffers: shared hit=621
+                      ->  Append  (cost=0.00..645.33 rows=28 width=16) (actual time=0.068..1.649 rows=57 loops=1)
+                            Buffers: shared hit=618
+                            Subplans Removed: 24
+                            ->  Index Scan using events_y2026m07_workspace_id_person_id_occurred_at_idx on events_y2026m07 e_1  (cost=0.56..49.74 rows=1 width=16) (actual time=0.067..0.271 rows=5 loops=1)
+                                  Index Cond: ((workspace_id = $1) AND (person_id = ANY ($7)) AND (occurred_at > $3) AND (occurred_at <= $4))
+                                  Filter: (name = $2)
+                                  Rows Removed by Filter: 3
+                                  Buffers: shared hit=103
+                            ->  Index Scan using events_y2026m08_workspace_id_person_id_occurred_at_idx on events_y2026m08 e_2  (cost=0.56..49.74 rows=1 width=16) (actual time=0.048..0.260 rows=7 loops=1)
+                                  Index Cond: ((workspace_id = $1) AND (person_id = ANY ($7)) AND (occurred_at > $3) AND (occurred_at <= $4))
+                                  Filter: (name = $2)
+                                  Rows Removed by Filter: 8
+                                  Buffers: shared hit=107
+                            ->  Index Scan using events_y2026m09_workspace_id_person_id_occurred_at_idx on events_y2026m09 e_3  (cost=0.56..49.71 rows=1 width=16) (actual time=0.023..0.255 rows=8 loops=1)
+                                  Index Cond: ((workspace_id = $1) AND (person_id = ANY ($7)) AND (occurred_at > $3) AND (occurred_at <= $4))
+                                  Filter: (name = $2)
+                                  Rows Removed by Filter: 8
+                                  Buffers: shared hit=108
+                            ->  Index Scan using events_y2026m10_workspace_id_person_id_occurred_at_idx on events_y2026m10 e_4  (cost=0.56..49.76 rows=1 width=16) (actual time=0.032..0.856 rows=37 loops=1)
+                                  Index Cond: ((workspace_id = $1) AND (person_id = ANY ($7)) AND (occurred_at > $3) AND (occurred_at <= $4))
+                                  Filter: (name = $2)
+                                  Rows Removed by Filter: 171
+                                  Buffers: shared hit=300
+          ->  Index Scan using people_workspace_idx on people p  (cost=0.56..8.60 rows=1 width=16) (actual time=0.012..0.012 rows=1 loops=23)
+                Index Cond: ((workspace_id = $1) AND (id = e.person_id))
+                Filter: ((merged_into IS NULL) AND (trait_s1 IS NOT NULL) AND (trait_s1 = $6) AND (id = ANY ($7)))
+                Buffers: shared hit=115
+  CTE inserted
+    ->  Insert on segment_members  (cost=0.56..8.94 rows=1 width=176) (actual time=2.214..2.214 rows=0 loops=1)
+          Buffers: shared hit=851
+          ->  Nested Loop  (cost=0.56..8.94 rows=1 width=176) (actual time=2.212..2.213 rows=0 loops=1)
+                Join Filter: (t.id = r.person_id)
+                Buffers: shared hit=851
+                ->  Nested Loop Anti Join  (cost=0.56..8.61 rows=1 width=16) (actual time=2.212..2.212 rows=0 loops=1)
+                      Buffers: shared hit=851
+                      ->  CTE Scan on target t  (cost=0.00..0.02 rows=1 width=16) (actual time=1.699..1.977 rows=23 loops=1)
+                            Buffers: shared hit=736
+                      ->  Index Scan using segment_members_open_idx on segment_members m  (cost=0.56..8.58 rows=1 width=16) (actual time=0.010..0.010 rows=1 loops=23)
+                            Index Cond: ((segment_id = $8) AND (person_id = t.id))
+                            Filter: (workspace_id = $1)
+                            Buffers: shared hit=115
+                ->  CTE Scan on batch r  (cost=0.00..0.20 rows=10 width=32) (never executed)
+  CTE closed
+    ->  Update on segment_members m_1  (cost=1.32..65.60 rows=1 width=168) (actual time=0.178..0.179 rows=0 loops=1)
+          Buffers: shared hit=197
+          ->  Nested Loop Anti Join  (cost=1.32..65.60 rows=1 width=168) (actual time=0.177..0.178 rows=0 loops=1)
+                Join Filter: (t_1.id = m_2.person_id)
+                Rows Removed by Join Filter: 253
+                Buffers: shared hit=197
+                ->  Nested Loop  (cost=1.32..65.57 rows=1 width=100) (actual time=0.076..0.143 rows=23 loops=1)
+                      Buffers: shared hit=197
+                      ->  Hash Join  (cost=0.89..57.12 rows=1 width=102) (actual time=0.066..0.104 rows=23 loops=1)
+                            Hash Cond: (m_2.person_id = r_1.person_id)
+                            Buffers: shared hit=105
+                            ->  Index Scan using segment_members_open_idx on segment_members m_2  (cost=0.56..56.76 rows=5 width=30) (actual time=0.009..0.044 rows=23 loops=1)
+                                  Index Cond: ((segment_id = $8) AND (person_id = ANY ($7)))
+                                  Filter: ((exited_at IS NULL) AND (workspace_id = $1))
+                                  Buffers: shared hit=105
+                            ->  Hash  (cost=0.20..0.20 rows=10 width=88) (actual time=0.045..0.046 rows=23 loops=1)
+                                  Buckets: 1024  Batches: 1  Memory Usage: 12kB
+                                  ->  CTE Scan on batch r_1  (cost=0.00..0.20 rows=10 width=88) (actual time=0.032..0.039 rows=23 loops=1)
+                      ->  Index Scan using segment_members_pkey on segment_members m_1  (cost=0.43..8.45 rows=1 width=14) (actual time=0.001..0.001 rows=1 loops=23)
+                            Index Cond: (id = m_2.id)
+                            Filter: (exited_at IS NULL)
+                            Buffers: shared hit=92
+                ->  CTE Scan on target t_1  (cost=0.00..0.02 rows=1 width=56) (actual time=0.000..0.001 rows=12 loops=23)
+  CTE entered_events
+    ->  Insert on events  (cost=0.03..0.30 rows=1 width=324) (actual time=0.039..0.039 rows=0 loops=1)
+          ->  Subquery Scan on "*SELECT*"  (cost=0.03..0.30 rows=1 width=324) (actual time=0.038..0.039 rows=0 loops=1)
+                ->  Hash Join  (cost=0.03..0.29 rows=1 width=208) (actual time=0.038..0.038 rows=0 loops=1)
+                      Hash Cond: (r_2.person_id = i.person_id)
+                      ->  CTE Scan on batch r_2  (cost=0.00..0.20 rows=10 width=32) (actual time=0.000..0.000 rows=1 loops=1)
+                      ->  Hash  (cost=0.02..0.02 rows=1 width=16) (actual time=0.000..0.001 rows=0 loops=1)
+                            Buckets: 1024  Batches: 1  Memory Usage: 8kB
+                            ->  CTE Scan on inserted i  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+  CTE entered_decisions
+    ->  Insert on decision_records  (cost=0.03..0.31 rows=1 width=268) (actual time=0.008..0.009 rows=0 loops=1)
+          ->  Subquery Scan on "*SELECT*_1"  (cost=0.03..0.31 rows=1 width=268) (actual time=0.008..0.008 rows=0 loops=1)
+                ->  Hash Join  (cost=0.03..0.30 rows=1 width=260) (actual time=0.007..0.008 rows=0 loops=1)
+                      Hash Cond: (r_3.person_id = i_1.person_id)
+                      ->  CTE Scan on batch r_3  (cost=0.00..0.20 rows=10 width=96) (actual time=0.000..0.000 rows=1 loops=1)
+                      ->  Hash  (cost=0.02..0.02 rows=1 width=16) (actual time=0.001..0.001 rows=0 loops=1)
+                            Buckets: 1024  Batches: 1  Memory Usage: 8kB
+                            ->  CTE Scan on inserted i_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+  CTE exited_events
+    ->  Insert on events events_1  (cost=0.03..0.30 rows=1 width=324) (actual time=0.009..0.010 rows=0 loops=1)
+          ->  Subquery Scan on "*SELECT*_2"  (cost=0.03..0.30 rows=1 width=324) (actual time=0.009..0.009 rows=0 loops=1)
+                ->  Hash Join  (cost=0.03..0.29 rows=1 width=208) (actual time=0.008..0.008 rows=0 loops=1)
+                      Hash Cond: (r_4.person_id = i_2.person_id)
+                      ->  CTE Scan on batch r_4  (cost=0.00..0.20 rows=10 width=32) (actual time=0.000..0.000 rows=1 loops=1)
+                      ->  Hash  (cost=0.02..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+                            Buckets: 1024  Batches: 1  Memory Usage: 8kB
+                            ->  CTE Scan on closed i_2  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+  CTE exited_decisions
+    ->  Insert on decision_records decision_records_1  (cost=0.03..0.31 rows=1 width=268) (actual time=0.012..0.012 rows=0 loops=1)
+          ->  Subquery Scan on "*SELECT*_3"  (cost=0.03..0.31 rows=1 width=268) (actual time=0.011..0.011 rows=0 loops=1)
+                ->  Hash Join  (cost=0.03..0.30 rows=1 width=260) (actual time=0.011..0.011 rows=0 loops=1)
+                      Hash Cond: (r_5.person_id = i_3.person_id)
+                      ->  CTE Scan on batch r_5  (cost=0.00..0.20 rows=10 width=96) (actual time=0.000..0.000 rows=1 loops=1)
+                      ->  Hash  (cost=0.02..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+                            Buckets: 1024  Batches: 1  Memory Usage: 8kB
+                            ->  CTE Scan on closed i_3  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=1)
+  InitPlan 9 (returns $17)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=2.216..2.216 rows=1 loops=1)
+          Buffers: shared hit=851
+          ->  CTE Scan on inserted  (cost=0.00..0.02 rows=1 width=0) (actual time=2.215..2.215 rows=0 loops=1)
+                Buffers: shared hit=851
+  InitPlan 10 (returns $18)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=0.179..0.180 rows=1 loops=1)
+          Buffers: shared hit=197
+          ->  CTE Scan on closed  (cost=0.00..0.02 rows=1 width=0) (actual time=0.178..0.178 rows=0 loops=1)
+                Buffers: shared hit=197
+  InitPlan 11 (returns $19)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=0.040..0.040 rows=1 loops=1)
+          ->  CTE Scan on entered_events  (cost=0.00..0.02 rows=1 width=0) (actual time=0.039..0.039 rows=0 loops=1)
+  InitPlan 12 (returns $20)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=0.010..0.011 rows=1 loops=1)
+          ->  CTE Scan on exited_events  (cost=0.00..0.02 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+  InitPlan 13 (returns $21)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=0.009..0.009 rows=1 loops=1)
+          ->  CTE Scan on entered_decisions  (cost=0.00..0.02 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+  InitPlan 14 (returns $22)
+    ->  Aggregate  (cost=0.02..0.03 rows=1 width=8) (actual time=0.013..0.013 rows=1 loops=1)
+          ->  CTE Scan on exited_decisions  (cost=0.00..0.02 rows=1 width=0) (actual time=0.012..0.012 rows=0 loops=1)
+Planning:
+  Buffers: shared hit=4657 read=2
+Planning Time: 5.701 ms
+Execution Time: 2.843 ms

@@ -1,0 +1,75 @@
+{
+  "phase": "incremental",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T15:48:03Z",
+  "segment": "01a14fa8-c60d-728e-b3a6-659e0540a9fc",
+  "since": "2026-10-18T15:37:54.021981Z",
+  "definition_name": "agg90",
+  "loadgen": {
+    "rate_per_s": 2000,
+    "seconds": 600,
+    "people": 1000000,
+    "total": {
+      "name": "total",
+      "target_rate": 2000,
+      "planned_duration_s": 600.0,
+      "elapsed_s": 600.0212323,
+      "requests": 1200000,
+      "items_offered": 1200000,
+      "items_accepted": 1200000,
+      "achieved_rate": 1999.9292281710814,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 1200000,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 1200000,
+        "p50_ms": 3.963,
+        "p95_ms": 131.562,
+        "p99_ms": 638.783,
+        "max_ms": 1660.521
+      },
+      "service_latency": {
+        "count": 1200000,
+        "p50_ms": 3.016,
+        "p95_ms": 129.807,
+        "p99_ms": 635.32,
+        "max_ms": 1653.299
+      },
+      "dispatch_lag": {
+        "count": 1200000,
+        "p50_ms": 0.819,
+        "p95_ms": 2.768,
+        "p99_ms": 7.551,
+        "max_ms": 23.264
+      },
+      "late_dispatch": 0,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  },
+  "members_before": {
+    "member_count": 195547,
+    "computed_version": 1
+  },
+  "members_after": {
+    "member_count": 213020,
+    "computed_version": 1
+  },
+  "pending_after_wait": 0,
+  "latency_s": {
+    "entries_caused_by_events": 17475,
+    "p50_s": 0.043,
+    "p95_s": 4.048,
+    "p99_s": 12.602,
+    "max_s": 16.466,
+    "entries_total": 17475,
+    "exits_total": 2
+  },
+  "target_p95_s": 60,
+  "note": "recorded_at of the segment.entered decision minus the causing event received_at; recorded_at is the start of the re-evaluating transaction (slight under-estimate)"
+}

@@ -1,0 +1,4 @@
+Measured right after the seed-2 incremental run, 0.57.1, segment 01a14fa8-c60d-728e-b3a6-659e0540a9fc.
+segment_members.segment_id: incremental segment in pg_stats.most_common_vals = false (24 MCVs listed)
+pg_stat_user_tables segment_members: last_autoanalyze 2026-10-18 15:24:45+00 (before the segment was created at 15:37:52),
+  last_analyze null, n_mod_since_analyze 213024, n_live_tup 9116705

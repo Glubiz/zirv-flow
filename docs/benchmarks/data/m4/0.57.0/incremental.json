@@ -1,0 +1,75 @@
+{
+  "phase": "incremental",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T10:54:31Z",
+  "segment": "01a14e98-4943-709d-ac22-23bd9c973581",
+  "since": "2026-10-18T10:39:41.327730Z",
+  "definition_name": "agg90",
+  "loadgen": {
+    "rate_per_s": 2000,
+    "seconds": 600,
+    "people": 1000000,
+    "total": {
+      "name": "total",
+      "target_rate": 2000,
+      "planned_duration_s": 600.0,
+      "elapsed_s": 600.0142198,
+      "requests": 1200000,
+      "items_offered": 1200000,
+      "items_accepted": 1200000,
+      "achieved_rate": 1999.9526017899884,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 1200000,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 1200000,
+        "p50_ms": 3.836,
+        "p95_ms": 33.846,
+        "p99_ms": 299.453,
+        "max_ms": 1239.966
+      },
+      "service_latency": {
+        "count": 1200000,
+        "p50_ms": 3.082,
+        "p95_ms": 32.269,
+        "p99_ms": 296.095,
+        "max_ms": 1238.179
+      },
+      "dispatch_lag": {
+        "count": 1200000,
+        "p50_ms": 0.668,
+        "p95_ms": 2.518,
+        "p99_ms": 6.336,
+        "max_ms": 16.904
+      },
+      "late_dispatch": 0,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  },
+  "members_before": {
+    "member_count": 149976,
+    "computed_version": 1
+  },
+  "members_after": {
+    "member_count": 196083,
+    "computed_version": 1
+  },
+  "pending_after_wait": 0,
+  "latency_s": {
+    "entries_caused_by_events": 46107,
+    "p50_s": 140.536,
+    "p95_s": 278.528,
+    "p99_s": 282.853,
+    "max_s": 284.657,
+    "entries_total": 46107,
+    "exits_total": 0
+  },
+  "target_p95_s": 60,
+  "note": "recorded_at of the segment.entered decision minus the causing event received_at; recorded_at is the start of the re-evaluating transaction (slight under-estimate)"
+}

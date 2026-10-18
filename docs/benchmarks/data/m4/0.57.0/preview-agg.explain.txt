@@ -1,0 +1,119 @@
+-- The statement the 0.57.0 API runs for the 90-day aggregate (D4.4) (logged with log_min_duration_statement=0, values from the log, unnamed statement = per-execution plan), EXPLAIN (ANALYZE, BUFFERS, SETTINGS) via psql \bind.
+-- Run 1 follows the capture call directly after an app restart and the incremental phase; run 2 is the immediate repeat.
+-- Mirrors in preview-agg.explain.txt are the pre-#144 hand-written statement and are not shipped, so this file is the plan.
+-- run 1
+Aggregate  (cost=2369457.59..2369457.60 rows=1 width=8) (actual time=9818.209..9859.299 rows=1 loops=1)
+  Buffers: shared hit=2832639 read=861532, temp read=44306 written=57525
+  ->  Nested Loop  (cost=1140818.96..2369310.65 rows=58777 width=0) (actual time=2405.811..9838.742 rows=196055 loops=1)
+        Buffers: shared hit=2832639 read=861532, temp read=44306 written=57525
+        ->  Finalize GroupAggregate  (cost=1140818.40..1277293.14 rows=176085 width=16) (actual time=2405.750..3559.230 rows=589985 loops=1)
+              Group Key: e.person_id
+              Filter: ((count(*))::double precision >= '2'::double precision)
+              Rows Removed by Filter: 2212065
+              Buffers: shared hit=313616 read=430630, temp read=44306 written=57525
+              ->  Gather Merge  (cost=1140818.40..1264086.74 rows=1056512 width=24) (actual time=2405.689..3093.459 rows=3250110 loops=1)
+                    Workers Planned: 2
+                    Workers Launched: 2
+                    Buffers: shared hit=313616 read=430630, temp read=44306 written=57525
+                    ->  Sort  (cost=1139818.37..1141139.01 rows=528256 width=24) (actual time=2281.891..2373.999 rows=1083370 loops=3)
+                          Sort Key: e.person_id
+                          Sort Method: external merge  Disk: 42616kB
+                          Buffers: shared hit=313616 read=430630, temp read=44306 written=57525
+                          Worker 0:  Sort Method: external merge  Disk: 22856kB
+                          Worker 1:  Sort Method: external merge  Disk: 42832kB
+                          ->  Partial HashAggregate  (cost=1059414.68..1078769.32 rows=528256 width=24) (actual time=1812.279..2056.940 rows=1083370 loops=3)
+                                Group Key: e.person_id
+                                Planned Partitions: 8  Batches: 41  Memory Usage: 8273kB  Disk Usage: 48336kB
+                                Buffers: shared hit=313602 read=430630, temp read=20103 written=33265
+                                Worker 0:  Batches: 9  Memory Usage: 8273kB  Disk Usage: 23952kB
+                                Worker 1:  Batches: 41  Memory Usage: 8273kB  Disk Usage: 48344kB
+                                ->  Parallel Append  (cost=0.00..967101.84 rows=1440981 width=16) (actual time=96.268..1565.516 rows=1183942 loops=3)
+                                      Buffers: shared hit=313602 read=430630
+                                      ->  Parallel Seq Scan on events_y2026m10 e_4  (cost=0.00..544963.47 rows=414390 width=16) (actual time=29.814..960.020 rows=355886 loops=3)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 4067691
+                                            Buffers: shared hit=3685 read=430627
+                                      ->  Parallel Seq Scan on events_y2026m08 e_2  (cost=0.00..139816.46 rows=438146 width=16) (actual time=86.145..611.131 rows=1060888 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 3185198
+                                            Buffers: shared hit=104424 read=1
+                                      ->  Parallel Seq Scan on events_y2026m07 e_1  (cost=0.00..139794.71 rows=166645 width=16) (actual time=0.038..219.648 rows=197872 loops=2)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 1924797
+                                            Buffers: shared hit=104419
+                                      ->  Parallel Seq Scan on events_y2026m09 e_3  (cost=0.00..135322.29 rows=421800 width=16) (actual time=116.691..607.509 rows=1027535 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 3081900
+                                            Buffers: shared hit=101074 read=2
+        ->  Index Scan using people_pkey on people p  (cost=0.56..6.20 rows=1 width=16) (actual time=0.010..0.010 rows=0 loops=589985)
+              Index Cond: (id = e.person_id)
+              Filter: ((merged_into IS NULL) AND (trait_s1 IS NOT NULL) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+              Rows Removed by Filter: 1
+              Buffers: shared hit=2519023 read=430902
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=1529
+Planning Time: 3.088 ms
+JIT:
+  Functions: 78
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 2.970 ms, Inlining 125.460 ms, Optimization 100.859 ms, Emission 90.114 ms, Total 319.403 ms
+Execution Time: 9877.532 ms
+-- run 2
+Aggregate  (cost=2369457.59..2369457.60 rows=1 width=8) (actual time=8634.629..8657.898 rows=1 loops=1)
+  Buffers: shared hit=2532329 read=1161842 written=1378, temp read=45512 written=58724
+  ->  Nested Loop  (cost=1140818.96..2369310.65 rows=58777 width=0) (actual time=2390.109..8636.228 rows=196055 loops=1)
+        Buffers: shared hit=2532329 read=1161842 written=1378, temp read=45512 written=58724
+        ->  Finalize GroupAggregate  (cost=1140818.40..1277293.14 rows=176085 width=16) (actual time=2390.051..3520.189 rows=589985 loops=1)
+              Group Key: e.person_id
+              Filter: ((count(*))::double precision >= '2'::double precision)
+              Rows Removed by Filter: 2212065
+              Buffers: shared hit=122 read=744124 written=525, temp read=45512 written=58724
+              ->  Gather Merge  (cost=1140818.40..1264086.74 rows=1056512 width=24) (actual time=2390.018..3036.009 rows=3111544 loops=1)
+                    Workers Planned: 2
+                    Workers Launched: 2
+                    Buffers: shared hit=122 read=744124 written=525, temp read=45512 written=58724
+                    ->  Sort  (cost=1139818.37..1141139.01 rows=528256 width=24) (actual time=2347.133..2427.477 rows=1037181 loops=3)
+                          Sort Key: e.person_id
+                          Sort Method: external merge  Disk: 36840kB
+                          Buffers: shared hit=122 read=744124 written=525, temp read=45512 written=58724
+                          Worker 0:  Sort Method: external merge  Disk: 37272kB
+                          Worker 1:  Sort Method: external merge  Disk: 29568kB
+                          ->  Partial HashAggregate  (cost=1059414.68..1078769.32 rows=528256 width=24) (actual time=1894.443..2117.402 rows=1037181 loops=3)
+                                Group Key: e.person_id
+                                Planned Partitions: 8  Batches: 41  Memory Usage: 8273kB  Disk Usage: 40144kB
+                                Buffers: shared hit=108 read=744124 written=525, temp read=19610 written=32768
+                                Worker 0:  Batches: 41  Memory Usage: 8273kB  Disk Usage: 40216kB
+                                Worker 1:  Batches: 41  Memory Usage: 8273kB  Disk Usage: 40240kB
+                                ->  Parallel Append  (cost=0.00..967101.84 rows=1440981 width=16) (actual time=104.684..1624.377 rows=1183942 loops=3)
+                                      Buffers: shared hit=108 read=744124 written=525
+                                      ->  Parallel Seq Scan on events_y2026m10 e_4  (cost=0.00..544963.47 rows=414390 width=16) (actual time=92.598..1279.611 rows=1067658 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 12203074
+                                            Buffers: shared hit=80 read=434232
+                                      ->  Parallel Seq Scan on events_y2026m08 e_2  (cost=0.00..139816.46 rows=438146 width=16) (actual time=92.225..1202.387 rows=1060888 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 3185198
+                                            Buffers: shared hit=11 read=104414
+                                      ->  Parallel Seq Scan on events_y2026m07 e_1  (cost=0.00..139794.71 rows=166645 width=16) (actual time=0.232..339.919 rows=131915 loops=3)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 1283198
+                                            Buffers: shared read=104419 written=525
+                                      ->  Parallel Seq Scan on events_y2026m09 e_3  (cost=0.00..135322.29 rows=421800 width=16) (actual time=129.224..1198.616 rows=1027535 loops=1)
+                                            Filter: ((occurred_at > '2026-07-20 10:54:57.400044+00'::timestamp with time zone) AND (occurred_at <= '2026-10-18 10:54:57.400044+00'::timestamp with time zone) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (name = 'bench_order_placed'::text))
+                                            Rows Removed by Filter: 3081900
+                                            Buffers: shared hit=17 read=101059
+        ->  Index Scan using people_pkey on people p  (cost=0.56..6.20 rows=1 width=16) (actual time=0.008..0.008 rows=0 loops=589985)
+              Index Cond: (id = e.person_id)
+              Filter: ((merged_into IS NULL) AND (trait_s1 IS NOT NULL) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+              Rows Removed by Filter: 1
+              Buffers: shared hit=2532207 read=417718 written=853
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=1475 read=54
+Planning Time: 13.618 ms
+JIT:
+  Functions: 78
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 4.590 ms, Inlining 141.880 ms, Optimization 107.014 ms, Emission 93.434 ms, Total 346.918 ms
+Execution Time: 8686.286 ms

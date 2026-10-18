@@ -1,0 +1,21 @@
+Finalize Aggregate  (cost=1922763.75..1922763.76 rows=1 width=8) (actual time=1816.727..1833.851 rows=1 loops=1)
+  Buffers: shared hit=139637 read=1499745
+  ->  Gather  (cost=1922763.54..1922763.75 rows=2 width=8) (actual time=1816.611..1833.842 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=139637 read=1499745
+        ->  Partial Aggregate  (cost=1921763.54..1921763.55 rows=1 width=8) (actual time=1808.201..1808.202 rows=1 loops=3)
+              Buffers: shared hit=139637 read=1499745
+              ->  Parallel Seq Scan on people p  (cost=0.00..1920855.17 rows=363346 width=0) (actual time=65.498..1796.599 rows=225840 loops=3)
+                    Filter: ((merged_into IS NULL) AND (traits @> '{"plan": "pro"}'::jsonb) AND (traits @> '{"marketing_opt_in": true}'::jsonb) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND COALESCE(((CASE WHEN (jsonb_typeof((traits -> 'age'::text)) = 'number'::text) THEN CASE WHEN (abs(((traits -> 'age'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((traits -> 'age'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END >= '25'::double precision) AND (CASE WHEN (jsonb_typeof((traits -> 'age'::text)) = 'number'::text) THEN CASE WHEN (abs(((traits -> 'age'::text))::numeric) <= '1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'::numeric) THEN ((traits -> 'age'::text))::double precision ELSE NULL::double precision END ELSE NULL::double precision END <= '45'::double precision)), false))
+                    Rows Removed by Filter: 3107493
+                    Buffers: shared hit=139637 read=1499745
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=757 read=7
+Planning Time: 1.029 ms
+JIT:
+  Functions: 14
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 1.222 ms, Inlining 112.433 ms, Optimization 54.989 ms, Emission 28.891 ms, Total 197.535 ms
+Execution Time: 1843.932 ms
