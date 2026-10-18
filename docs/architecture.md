@@ -982,7 +982,7 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 - Step idempotency key: `(enrollment_id, node_id)`, sufficient because graphs are acyclic and re-entry creates a new enrollment. It is stored on `step_executions` and passed to effect jobs and destinations.
 - A wait sets `wake_at` and enqueues `flow.step` with `run_at = wake_at`, unique key `wake:{enrollment_id}:{state_version}`. `wait.until_event` also writes `enrollment_waits(person_id, event_name, enrollment_id, timeout_at)`, which apply-batch checks on event insert.
 - Failed steps retry with backoff; then the enrollment is `failed` with the error visible, and an operator can retry or skip.
-- Enrollment states: `active`, `waiting` (timer or event), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
+- Enrollment states: `active`, `waiting` (timer or event), `awaiting_conditions` (yielded at a branch; transient, since the runtime evaluates the conditions and resumes in the same transaction), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
 
 ### 9.4 Enrollment rules and test mode
 
