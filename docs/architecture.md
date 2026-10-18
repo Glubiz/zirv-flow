@@ -1972,12 +1972,15 @@ are not a v1 sign-off; the targets are re-checked on reference hardware before 1
 **As measured (M4).** The segment rows were measured at 10 million people and 50 million events on a
 development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU) in
 [docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md), on images 0.56.0, 0.57.0 and 0.57.1 (after
-#142 to #144 and #149). On 0.57.1 every target measured is met: trait-only preview p95 1.06 s on slots (3 s),
+#142 to #144 and #149). Every segment target measured is met (previews and refreshes on 0.57.0, the
+incremental phase on 0.57.1): trait-only preview p95 1.06 s on slots (3 s),
 aggregate preview p95 4.68 s and property-filtered aggregate preview p95 1.20 s (15 s, no 503s), full refresh
 median 45.7 s trait-only (2 min) and 14.5 s with an aggregate (10 min), and event to `segment.entered` p95
 4.05 s (60 s). OQ-2 is decided (21.1): no rollup for v1. The 0.57.0 image had missed the last one (p95
 278.5 s) because #143's per-execution custom plan of the re-evaluation batch statement estimated one row for
-a segment missing from the `segment_members` statistics; #149 fixed it by forcing the generic plan. On 0.56.0
+a segment missing from the `segment_members` statistics; #149 fixed it by forcing the generic plan. The
+ingestion API row missed during the same incremental phase: p99 638.8 ms against 100 ms (60 ms on 0.56.0),
+with no ingest code changed and the cause not established (#151). On 0.56.0
 the previews had missed because the persistent prepared statement fell back to a generic plan after five
 executions, a slot backfill left no statistics, and an aggregate was a correlated subquery per person (38.7 s
 and 97.5 s uncapped; 503 at the 10 s limit, which also contradicted the 15 s target). An aggregate preview on

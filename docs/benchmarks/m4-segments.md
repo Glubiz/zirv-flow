@@ -17,14 +17,17 @@ hardware, and the re-check on reference hardware does not apply to it until the 
 
 ## 1. Summary
 
-**Current state (0.57.1, sections 6 and 6.6).** Every section 19 target measured here is met, apart from
-D4.1 on `jsonb`, which was not re-run. Trait-only preview p95 1.06 s, aggregate preview p95 4.68 s,
+**Current state (0.57.1, sections 6 and 6.6).** The previews and refreshes were measured on 0.57.0 and the
+incremental phase on 0.57.1, which changes only the re-evaluation batch statement. Every segment target of
+section 19 is met, apart from D4.1 on `jsonb`, which was not re-run. Trait-only preview p95 1.06 s, aggregate preview p95 4.68 s,
 property-filtered aggregate preview p95 1.20 s (no 503s), full refresh median 45.7 s trait-only and
 14.5 s with an aggregate, event to `segment.entered` p95 4.05 s (target 60 s; p99 12.6 s, max 16.5 s,
 17,475 entries), and all three API counts equal the hand-written SQL. **OQ-2 is decided: no rollup for
 v1.** The 0.57.0 image missed D4.7 (p95 278.5 s): #143's per-execution custom plan of the
 `segment.reevaluate` batch statement estimated 1 row for a segment missing from the `segment_members`
-statistics and scanned every open row of the segment per batch person; #149 fixed it in 0.57.1. One caveat
+statistics and scanned every open row of the segment per batch person; #149 fixed it in 0.57.1. **One
+section 19 target missed:** the ingestion API p99 (an M2 row, 100 ms) was 638.8 ms during the incremental
+phase, against 60 ms on 0.56.0, and the cause is not established (section 6.5, #151). One caveat
 stays: an aggregate preview right after an app restart took 15.1 s (a cold-cache observation, section
 6.4). The rest of this section is the first run on 0.56.0.
 
@@ -198,13 +201,14 @@ On 0.57.1 (sections 6 and 6.6) the misses of 0.56.0 and 0.57.0 are closed:
 
 | Miss | Gap | Cause | Closed by |
 |---|---|---|---|
-| Trait-only preview on `jsonb` and on slots (0.56.0) | 5.57 s and 6.14 s against 3 s | generic plan of the persistent prepared statement; no `ANALYZE` after a backfill | #143 (1.06 s on 0.57.x) |
+| Trait-only preview on `jsonb` and on slots (0.56.0) | 5.57 s and 6.14 s against 3 s | generic plan of the persistent prepared statement; no `ANALYZE` after a backfill | #143 (slots: 1.06 s on 0.57.0; `jsonb` not re-run) |
 | Aggregate previews (0.56.0) | 38.7 s and 97.5 s uncapped; 503 at 10 s | correlated subquery per person | #144 (4.68 s and 1.20 s) |
 | 10 s limit against the 15 s target (0.56.0) | 503 even at 10 to 15 s | design inconsistency | #142 |
 | Event to `segment.entered` (0.57.0) | p95 278.5 s against 60 s | #143's custom plan of the batch statement, with the incremental segment missing from the `segment_members` statistics (follow-up D) | #149 (p95 4.05 s on 0.57.1) |
 
-What stays open: D4.1 on `jsonb` was not re-run, an aggregate preview on a cold cache can sit at the 15 s
-target (section 6.4), and everything remains provisional under D1 (hardware pending M8). Section 19's
+What stays open: the ingestion API p99 missed 100 ms during the incremental phase (638.8 ms; cause not
+established, section 6.5, #151), D4.1 on `jsonb` was not re-run, an aggregate preview on a cold cache can sit
+at the 15 s target (section 6.4), and everything remains provisional under D1 (hardware pending M8). Section 19's
 fallbacks (name-level dirty filtering, `database.read_url`, rollups) are not needed.
 
 ### 4.3 Follow-up issues
@@ -353,7 +357,13 @@ an hour of builds had evicted the cache, is consistent with this and not reprodu
 - **Event to `segment.entered`** missed on 0.57.0 (p95 278.5 s against 60 s) and is met on 0.57.1 (p95 4.05 s, section 6.6); the cause and the
   fix (#149) are in section 4.3 D. The generic plan of a 23-person batch is in
   `data/m4/0.57.1/incremental-batch.explain.txt` (the 0.57.0 custom plan: `data/m4/0.57.0/`).
-- The ingest API p99 (loadgen, from schedule) was 60 ms on 0.56.0, 299 ms on 0.57.0 (during the backlog),  and is 638.8 ms on 0.57.1 (p50 4.0 ms, p95 131.6 ms) with the backlog gone; a 0.57.1 run whose entries had  all happened before (seed 1) gave 464.9 ms. So the rise is not the backlog; the database is larger (about  55 M events) and the host was hot. Not investigated, and not judged against a target here.
+- **Ingestion API p99: missed** (section 19, an M2 row: p99 < 100 ms at the sustained rate). At 2,000 events/s
+  it was 60 ms on 0.56.0, 299 ms on 0.57.0 (during the backlog), 464.9 ms on a 0.57.1 run with no membership
+  changes (seed 1) and 638.8 ms on the 0.57.1 run of 6.6 (p50 4.0 ms, p95 131.6 ms). The time is spent on the
+  server (`service_latency` p99 635.3 ms; loadgen dispatch lag p99 7.6 ms). No ingest, inbox or drain code
+  changed between 0.56.0 and 0.57.1, and every run used the same database, which gains a segment and 1.2
+  million events per run. The cause is not established; #151 tracks an A/B of 0.56.0 against 0.57.1 on the
+  same database.
 - D4.1 on `jsonb` was not re-measured (6.1).
 - Everything remains provisional under D1 until the M8 hardware run.
 
@@ -377,7 +387,8 @@ kept as `incremental-seed1-no-entries.json`). `measure.sh` now takes `M4_INC_SEE
 | max | 13.3 s | 284.7 s | 16.5 s |
 
 2,000 events/s for 600 s: 1,200,000 accepted, 0 late; the segment went from 195,547 to 213,020 members and
-nothing was pending after the drain. Ingest p99 638.8 ms (p50 4.0 ms, p95 131.6 ms), see 6.5.
+nothing was pending after the drain. Ingestion API p99 638.8 ms against 100 ms, a miss (p50 4.0 ms, p95
+131.6 ms; section 6.5, #151).
 
 **Statistics state.** After the run the incremental segment is not in `pg_stats.most_common_vals` for
 `segment_members.segment_id` (24 listed values). `segment_members` was last auto-analyzed at 15:24:45 UTC, before
