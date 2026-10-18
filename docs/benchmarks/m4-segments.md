@@ -1,13 +1,16 @@
 # M4 segment benchmark
 
 Issue #127: architecture section 19 targets for segment preview, full refresh and incremental
-re-evaluation at 10 million people and 50 million events, and the data for OQ-2. Measured twice with
+re-evaluation at 10 million people and 50 million events, and the data for OQ-2. Measured with
 published images: `ghcr.io/glubiz/zirv-flow:0.56.0` (main after #126), digest
-`sha256:0b429e9f3dee4b652076429773539c10a39fc47121003c31f54cdb575039b7cd`, and
+`sha256:0b429e9f3dee4b652076429773539c10a39fc47121003c31f54cdb575039b7cd`,
 `ghcr.io/glubiz/zirv-flow:0.57.0` (after #142 to #144), digest
-`sha256:d99a14927195f59f547d771a9574e191d775d2c03741cf6617462d92bf37c65a` (section 6). The smoke run of the
+`sha256:d99a14927195f59f547d771a9574e191d775d2c03741cf6617462d92bf37c65a` (section 6), and, for the
+incremental phase only, `ghcr.io/glubiz/zirv-flow:0.57.1` (after #149), digest
+`sha256:4ac6d44b751051b8c816f317565d11a2599736d3d5a8c6f13b8c4f9c764ad927` (section 6.6). The smoke run of the
 scripts used 0.55.0 and is not a result. Raw JSON and plans are in
-[`data/m4/`](data/m4/) (0.56.0) and [`data/m4/0.57.0/`](data/m4/0.57.0/); the scripts are in
+[`data/m4/`](data/m4/) (0.56.0), [`data/m4/0.57.0/`](data/m4/0.57.0/) and
+[`data/m4/0.57.1/`](data/m4/0.57.1/); the scripts are in
 `scripts/bench/m4/` (runbook: `scripts/bench/README.md` section 9).
 
 **This is a development machine, not reference hardware.** Every figure is one host with Docker
@@ -250,8 +253,9 @@ On 0.57.0 at 10 M people with an aggregate segment of about 150,000 members, 2,0
 600 s gave event to `segment.entered` p95 278.5 s (p50 140.5 s, max 284.7 s; 46,107 entries) against
 60 s (0.38 s on 0.56.0). The cause is verified, and it is not the aggregate compile of #144: #143 made the
 `segment.reevaluate` batch statement `.persistent(false)`, so each batch is planned with the segment id as a
-literal. A new segment is missing from the statistics of `segment_members` (8.7 M rows, 19 most common
-values summing to 1.0, and the autoanalyze threshold of about 871 k changes not reached), so the planner
+literal. A new segment is missing from the statistics of `segment_members` (on the 0.57.0 database, read
+while diagnosing and recorded in #149: 8.7 M rows, 19 most common values summing to 1.0, and the autoanalyze
+threshold of about 871 k changes not reached; the 0.57.1 state is in `data/m4/0.57.1/incremental-stats.txt`), so the planner
 estimates 1 row and scans every open row of the segment for each batch person. For the same 23-person batch on
 the same database, with the segment still missing from the statistics, the custom plan took 624 and 716 ms and
 the generic plan 0.89 and 0.83 ms, probing `(segment_id, person_id)`
