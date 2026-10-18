@@ -12,15 +12,11 @@ use uuid::Uuid;
 use zirv_flow_core::egress::{Decision, EgressPolicy};
 use zirv_flow_core::flow::{
     Audience, EventMatch, ExitCriterion, FlowGraph, FlowSettings, GRAPH_VERSION, Goal, Issue,
-    MAX_CONDITIONS, MAX_NODES, MAX_TRAIT_KEYS, NodeKind, Trigger, code as core_code, validate,
+    MAX_CONDITIONS, MAX_EXIT_CRITERIA, MAX_ISSUES, MAX_NODES, MAX_TRAIT_KEYS, NodeKind, Trigger,
+    code as core_code, validate,
 };
 use zirv_flow_core::segment::{self, code as segment_code};
 use zirv_flow_segments::{Catalog, TraitStorage, compile};
-
-/// The most exit criteria of one flow and the most issues returned, as `core::flow` has them: it
-/// checks no more criteria than this and keeps no more issues, and so does this module.
-const MAX_EXIT_CRITERIA: usize = 10;
-const MAX_ISSUES: usize = 200;
 
 /// The issue codes this module adds to the structural ones of `core::flow::code`.
 pub(crate) mod code {
