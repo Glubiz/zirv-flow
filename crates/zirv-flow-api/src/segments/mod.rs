@@ -16,7 +16,7 @@ use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
 
 pub(crate) use schema::SegmentSchemas;
 
-/// How long a preview may run before PostgreSQL cancels it (architecture 8.2). It is fixed, with no
+/// How long a preview may run before PostgreSQL cancels it (architecture 8.3). It is fixed, with no
 /// setting, and sits above the 15 s target of an aggregate preview (architecture 19).
 pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 

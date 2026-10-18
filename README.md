@@ -762,7 +762,7 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
   unless `?archived=true`.
 - **Preview.** `POST .../segments/preview` with `{definition, sample_size?}` (20 by default,
   100 at most) runs an unsaved definition on the primary and returns `{count, sample,
-  data_age, compiled_at}`. It reads in one read-only snapshot and stops at 10 seconds with 503
+  data_age, compiled_at}`. It reads in one read-only snapshot and stops at 20 seconds with 503
   `segment_preview_timeout`. Sample identifiers are masked like the people search. `data_age`
   is the oldest `last_success_at` of the enabled streams whose saved mapping writes a trait,
   event or list the definition reads (including through segments it references), with each
