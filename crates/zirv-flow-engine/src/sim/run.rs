@@ -207,7 +207,7 @@ impl Sim<'_> {
         } else {
             current
         };
-        let (expected, input) = match &job.kind {
+        let (expected, input) = match &mut job.kind {
             JobKind::Start => (0, StepInput::Start),
             JobKind::Wake { version } => (
                 *version,
@@ -215,18 +215,24 @@ impl Sim<'_> {
                     wake_version: *version,
                 },
             ),
-            JobKind::Event { name } => match self.db.waits.get(&(job.enrollment, name.clone())) {
-                None => return Prepared::Nothing,
-                Some(row) => (
-                    row.wake_version,
+            JobKind::Event { name, matched } => {
+                let version = match matched {
+                    Some(version) => *version,
+                    None => match self.db.waits.get(&(job.enrollment, name.clone())) {
+                        None => return Prepared::Nothing,
+                        Some(row) => *matched.insert(row.wake_version),
+                    },
+                };
+                (
+                    version,
                     StepInput::EventArrived {
                         event: ArrivedEvent {
                             name: name.clone(),
-                            wake_version: row.wake_version,
+                            wake_version: version,
                         },
                     },
-                ),
-            },
+                )
+            }
         };
         if state.state_version != expected {
             self.report.stats.stale += 1;
@@ -370,7 +376,10 @@ impl Sim<'_> {
         self.db.enqueue(
             Job {
                 enrollment,
-                kind: JobKind::Event { name: name.into() },
+                kind: JobKind::Event {
+                    name: name.into(),
+                    matched: None,
+                },
                 run_at: at,
                 tie: rng.next_u64(),
                 crashes: 0,

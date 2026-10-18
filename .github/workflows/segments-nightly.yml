@@ -101,9 +101,10 @@ jobs:
           --test-threads 2
 
   # The flow engine's deterministic simulation (architecture section 18, layer 1): a large
-  # population over 90 virtual days against the in-memory commit protocol, with crashes after
-  # every effect, under a random seed. It needs no database. CI runs the same test with fixed
-  # seeds and a modest population. A failure prints its seed and population in the log; rerun it
+  # population over 90 virtual days against the in-memory commit protocol, with random crashes
+  # inside and after each transaction, under a random seed. It needs no database. CI runs the same
+  # test with fixed seeds and a modest population, plus the sweep that crashes after every effect
+  # of every step. A failure prints its seed and population in the log; rerun it
   # with the workflow_dispatch inputs (the `seed` input is shared with the job above).
   flow-simulation:
     name: Flow Simulation

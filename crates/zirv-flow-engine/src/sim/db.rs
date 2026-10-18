@@ -25,8 +25,9 @@ pub(super) enum JobKind {
     Start,
     /// `flow.step` for the timer registered at `version`.
     Wake { version: u64 },
-    /// An event for the enrollment arrived.
-    Event { name: String },
+    /// An event for the enrollment arrived. `matched` is the version of the wait it matched on
+    /// arrival (the first claim); a redelivery keeps it, as the runtime's enqueued job does.
+    Event { name: String, matched: Option<u64> },
 }
 
 #[derive(Clone, Debug)]
