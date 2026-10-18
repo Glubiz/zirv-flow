@@ -1,0 +1,116 @@
+{
+  "definition": {
+    "all": [
+      {
+        "any": [
+          {
+            "agg": {
+              "fn": "count",
+              "op": "gte",
+              "value": 2
+            },
+            "event": "order"
+          },
+          {
+            "agg": {
+              "fn": "max",
+              "op": "gt",
+              "prop": "total",
+              "value": 100
+            },
+            "event": "order"
+          },
+          {
+            "op": "eq",
+            "trait": "vip",
+            "value": true
+          }
+        ]
+      },
+      {
+        "not": {
+          "agg": {
+            "fn": "sum",
+            "op": "gt",
+            "prop": "total",
+            "value": 50
+          },
+          "event": "order",
+          "window": {
+            "last": "P30D"
+          }
+        }
+      },
+      {
+        "not": {
+          "agg": {
+            "fn": "count",
+            "op": "gte",
+            "value": 1
+          },
+          "event": "order"
+        }
+      },
+      {
+        "not": {
+          "agg": {
+            "fn": "last_time",
+            "op": "within_last",
+            "value": "P7D"
+          },
+          "event": "order"
+        }
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 35,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": [
+      "vip"
+    ]
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "float": 2.0
+    },
+    {
+      "text": "total"
+    },
+    {
+      "float": 100.0
+    },
+    {
+      "jsonb": {
+        "vip": true
+      }
+    },
+    {
+      "float": 1.0
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-05-16T12:00:00Z"
+    },
+    {
+      "float": 50.0
+    }
+  ],
+  "sql": "SELECT p.id FROM people p LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id) a0 ON a0.person_id = p.id LEFT JOIN (SELECT e.person_id, max(CASE WHEN jsonb_typeof((e.properties -> $4::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $4::text))::numeric) <= 1e300 THEN ((e.properties -> $4::text))::float8 END END) AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id) a1 ON a1.person_id = p.id LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id) a2 ON a2.person_id = p.id LEFT JOIN (SELECT e.person_id, max(e.occurred_at) AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id) a3 ON a3.person_id = p.id LEFT JOIN (SELECT e.person_id, sum(CASE WHEN jsonb_typeof((e.properties -> $4::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $4::text))::numeric) <= 1e300 THEN ((e.properties -> $4::text))::float8 END END) AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text AND e.occurred_at > $10::timestamptz AND e.occurred_at <= $9::timestamptz GROUP BY e.person_id) a4 ON a4.person_id = p.id WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (((COALESCE((COALESCE(a0.v, 0::float8) >= $3::float8), false) OR COALESCE((a1.v > $5::float8), false) OR p.traits @> $6::jsonb) AND NOT (COALESCE((COALESCE(a2.v, 0::float8) >= $7::float8), false)) AND NOT (COALESCE((a3.v <@ tstzrange($8::timestamptz, $9::timestamptz, '(]')), false)) AND NOT (COALESCE((a4.v > $11::float8), false))))",
+  "time_sensitive": true
+}

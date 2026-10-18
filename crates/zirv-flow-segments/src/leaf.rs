@@ -3,7 +3,7 @@
 //! operator but `not_exists`, and `not_in`, `neq` and the rest do not count it as different.
 
 use serde_json::Value;
-use zirv_flow_core::segment::Op;
+use zirv_flow_core::segment::{AggFn, Aggregate, Op};
 
 use crate::operand::{self, number_of, numbers, strings};
 use crate::stored_time;
@@ -116,6 +116,18 @@ pub(crate) fn number(have: Option<f64>, op: Op, wanted: Option<&Value>) -> bool 
                 _ => false,
             }
         }
+    }
+}
+
+/// Whether an event aggregate over no events satisfies its own comparison. The same comparison
+/// decides membership, so the compiler and the evaluator cannot drift: a count of nothing is 0,
+/// and every other aggregate of nothing is no value, which is false.
+pub(crate) fn empty_aggregate_satisfies(agg: &Aggregate) -> bool {
+    let wanted = agg.value.as_ref();
+    match agg.func {
+        AggFn::Count => number(Some(0.0), agg.op, wanted),
+        AggFn::Sum | AggFn::Min | AggFn::Max | AggFn::Avg => number(None, agg.op, wanted),
+        AggFn::FirstTime | AggFn::LastTime => time(None, Kind::Timestamp, agg.op, wanted, 0),
     }
 }
 

@@ -40,6 +40,6 @@
       "float": 49.5
     }
   ],
-  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (COALESCE(((SELECT sum(CASE WHEN jsonb_typeof((e.properties -> $5::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $5::text))::numeric) <= 1e300 THEN ((e.properties -> $5::text))::float8 END END) / NULLIF(count(CASE WHEN jsonb_typeof((e.properties -> $5::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $5::text))::numeric) <= 1e300 THEN ((e.properties -> $5::text))::float8 END END), 0) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text AND e.occurred_at > $3::timestamptz AND e.occurred_at <= $4::timestamptz) > $6::float8), false))",
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (p.id IN (SELECT e.person_id FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text AND e.occurred_at > $3::timestamptz AND e.occurred_at <= $4::timestamptz GROUP BY e.person_id HAVING sum(CASE WHEN jsonb_typeof((e.properties -> $5::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $5::text))::numeric) <= 1e300 THEN ((e.properties -> $5::text))::float8 END END) / NULLIF(count(CASE WHEN jsonb_typeof((e.properties -> $5::text)) = 'number' THEN CASE WHEN abs(((e.properties -> $5::text))::numeric) <= 1e300 THEN ((e.properties -> $5::text))::float8 END END), 0) > $6::float8))",
   "time_sensitive": true
 }

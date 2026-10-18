@@ -11,19 +11,28 @@ use zirv_flow_core::consent::{Channel, ConsentStatus};
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::{SlotColumn, SlotKind, TraitType, number_sql, time_sql};
 use zirv_flow_core::segment::{
-    AggFn, ChangeClasses, ConsentCondition, EventCondition, Issue, Node, Op, TraitCondition,
-    Window, code,
+    AggFn, Aggregate, ChangeClasses, ConsentCondition, EventCondition, Issue, Node, Op,
+    TraitCondition, Window, code,
 };
 
 use crate::catalog::Catalog;
 use crate::deps::Deps;
+use crate::leaf::empty_aggregate_satisfies;
 use crate::operand::{absolute, number_of, numbers, strings, timestamp};
 use crate::query::Param;
 use crate::storage::{Storage, TraitStorage};
 use crate::time_value::parse_duration;
 use crate::validate::Kind;
 
+/// Where `CompiledSegment::query` renders the batch restriction inside a grouped event set. The
+/// marker becomes `AND e.person_id = ANY($n::uuid[])` for a batch query and nothing otherwise.
+/// The lowered text holds only fixed text, column names and placeholders, so no bound value or
+/// key can collide with it.
+pub(crate) const SCOPE: &str = "/*scope*/";
+
 pub(crate) struct Lowered {
+    /// The `LEFT JOIN` clauses of the aggregates that need a joined value.
+    pub joins: Vec<String>,
     pub predicate: String,
     pub params: Vec<Param>,
     pub deps: Deps,
@@ -45,12 +54,14 @@ pub(crate) fn lower(
         time_sensitive: false,
         issues: Vec::new(),
         explicit_ranges: false,
+        joins: Vec::new(),
     };
-    let predicate = lowerer.node(root);
+    let predicate = lowerer.node(root, true);
     lowerer.need(ChangeClasses::MERGE);
     if lowerer.issues.is_empty() {
         Ok(Lowered {
             predicate,
+            joins: lowerer.joins,
             params: lowerer.params,
             deps: lowerer.deps,
             time_sensitive: lowerer.time_sensitive,
@@ -93,6 +104,8 @@ struct Lowerer<'a> {
     issues: Vec<Issue>,
     /// Lower a time range as two comparisons, which a btree on a slot serves, rather than `<@`.
     explicit_ranges: bool,
+    /// The `LEFT JOIN` clauses of the aggregates that need a joined value, numbered by position.
+    joins: Vec<String>,
 }
 
 impl Lowerer<'_> {
@@ -129,15 +142,17 @@ impl Lowerer<'_> {
         self.bind(Param::Timestamp(value), "timestamptz")
     }
 
-    fn node(&mut self, node: &Node) -> String {
+    /// `positive` is whether the node is the root or reached from it only through `all` nodes, so
+    /// that its falsehood alone makes the person a non-member.
+    fn node(&mut self, node: &Node, positive: bool) -> String {
         match node {
             Node::All(children) if children.is_empty() => "true".to_owned(),
             Node::Any(children) if children.is_empty() => "false".to_owned(),
-            Node::All(children) => self.group(children, " AND "),
-            Node::Any(children) => self.group(children, " OR "),
-            Node::Not(child) => format!("NOT ({})", self.node(child)),
+            Node::All(children) => self.group(children, " AND ", positive),
+            Node::Any(children) => self.group(children, " OR ", false),
+            Node::Not(child) => format!("NOT ({})", self.node(child, false)),
             Node::Trait(condition) => self.trait_condition(condition),
-            Node::Event(condition) => self.event(condition),
+            Node::Event(condition) => self.event(condition, positive),
             Node::List(id) => {
                 self.deps.lists.insert(*id);
                 self.need(ChangeClasses::LISTS);
@@ -168,8 +183,11 @@ impl Lowerer<'_> {
         }
     }
 
-    fn group(&mut self, children: &[Node], joiner: &str) -> String {
-        let parts: Vec<String> = children.iter().map(|child| self.node(child)).collect();
+    fn group(&mut self, children: &[Node], joiner: &str, positive: bool) -> String {
+        let parts: Vec<String> = children
+            .iter()
+            .map(|child| self.node(child, positive))
+            .collect();
         format!("({})", parts.join(joiner))
     }
 
@@ -525,8 +543,8 @@ impl Lowerer<'_> {
 
     /// An event condition. With a `since_trait` window, a person whose trait is missing or
     /// invalid fails the whole condition, aggregate included.
-    fn event(&mut self, condition: &EventCondition) -> String {
-        let body = self.event_rows(condition);
+    fn event(&mut self, condition: &EventCondition, positive: bool) -> String {
+        let body = self.event_rows(condition, positive);
         let Some(Window::SinceTrait(key)) = &condition.window else {
             return body;
         };
@@ -538,19 +556,30 @@ impl Lowerer<'_> {
         format!("({since} IS NOT NULL AND {body})")
     }
 
-    fn event_rows(&mut self, condition: &EventCondition) -> String {
+    /// The rows of an event condition. A condition without an aggregate is an `EXISTS`, and so
+    /// is one with a `since_trait` window, whose bound reads the person's own trait. Any other
+    /// aggregate is one grouped set over `events` (architecture 8.2), as a semi-join when the
+    /// condition is a positive conjunct that no event-less person satisfies, and as a `LEFT JOIN`
+    /// otherwise.
+    fn event_rows(&mut self, condition: &EventCondition, positive: bool) -> String {
         let catalog = self.catalog;
         let Some(schema) = catalog.events.get(&condition.name) else {
             return self.fail(code::UNKNOWN_EVENT);
         };
         self.deps.events.insert(condition.name.clone());
         self.need(ChangeClasses::EVENTS);
+        let grouped =
+            condition.agg.is_some() && !matches!(condition.window, Some(Window::SinceTrait(_)));
         let name = self.text(&condition.name);
-        let mut filters = vec![
-            "e.workspace_id = p.workspace_id".to_owned(),
-            "e.person_id = p.id".to_owned(),
-            format!("e.name = {name}"),
-        ];
+        let mut filters = if grouped {
+            vec!["e.workspace_id = $1".to_owned()]
+        } else {
+            vec![
+                "e.workspace_id = p.workspace_id".to_owned(),
+                "e.person_id = p.id".to_owned(),
+            ]
+        };
+        filters.push(format!("e.name = {name}"));
         if let Some(window) = &condition.window {
             filters.push(self.window(window));
         }
@@ -567,18 +596,16 @@ impl Lowerer<'_> {
             );
             filters.push(leaf);
         }
-        let from = format!("FROM events e WHERE {}", filters.join(" AND "));
+        let scope = if grouped { SCOPE } else { "" };
+        let from = format!("FROM events e WHERE {}{scope}", filters.join(" AND "));
         let Some(agg) = &condition.agg else {
             return format!("EXISTS (SELECT 1 {from})");
         };
         if agg.op.is_relative() {
             self.time_sensitive = true;
         }
-        let comparison = match agg.func {
-            AggFn::Count => {
-                let expr = format!("(SELECT count(*)::float8 {from})");
-                self.number(&expr, agg.op, agg.value.as_ref())
-            }
+        let (aggregate, is_time) = match agg.func {
+            AggFn::Count => ("count(*)::float8".to_owned(), false),
             AggFn::Sum | AggFn::Min | AggFn::Max | AggFn::Avg => {
                 let Some(prop) = &agg.prop else {
                     return self.fail(code::AGGREGATE_NOT_ALLOWED);
@@ -594,8 +621,7 @@ impl Lowerer<'_> {
                 } else {
                     format!("{}({argument})", agg.func.as_str())
                 };
-                let expr = format!("(SELECT {aggregate} {from})");
-                self.number(&expr, agg.op, agg.value.as_ref())
+                (aggregate, false)
             }
             AggFn::FirstTime | AggFn::LastTime => {
                 let function = if agg.func == AggFn::FirstTime {
@@ -603,11 +629,44 @@ impl Lowerer<'_> {
                 } else {
                     "max"
                 };
-                let expr = format!("(SELECT {function}(e.occurred_at) {from})");
-                self.time(&expr, Kind::Timestamp, agg.op, agg.value.as_ref())
+                (format!("{function}(e.occurred_at)"), true)
             }
         };
+        if !grouped {
+            let expr = format!("(SELECT {aggregate} {from})");
+            let comparison = self.aggregate_comparison(agg, &expr, is_time);
+            return format!("COALESCE(({comparison}), false)");
+        }
+        if positive && !empty_aggregate_satisfies(agg) {
+            // A person without a matching event has no group and the empty aggregate fails the
+            // comparison, so the set of persons whose group passes is exactly the members.
+            let having = self.aggregate_comparison(agg, &aggregate, is_time);
+            return format!(
+                "p.id IN (SELECT e.person_id {from} GROUP BY e.person_id HAVING {having})"
+            );
+        }
+        let alias = format!("a{}", self.joins.len());
+        // A count of no events is 0 and any other aggregate of none is NULL, the value the
+        // correlated subquery gave.
+        let value = if agg.func == AggFn::Count {
+            format!("COALESCE({alias}.v, 0::float8)")
+        } else {
+            format!("{alias}.v")
+        };
+        let comparison = self.aggregate_comparison(agg, &value, is_time);
+        self.joins.push(format!(
+            "LEFT JOIN (SELECT e.person_id, {aggregate} AS v {from} GROUP BY e.person_id) {alias} \
+             ON {alias}.person_id = p.id"
+        ));
         format!("COALESCE(({comparison}), false)")
+    }
+
+    fn aggregate_comparison(&mut self, agg: &Aggregate, expr: &str, is_time: bool) -> String {
+        if is_time {
+            self.time(expr, Kind::Timestamp, agg.op, agg.value.as_ref())
+        } else {
+            self.number(expr, agg.op, agg.value.as_ref())
+        }
     }
 
     /// The bounds are bound as timestamps, so the planner can prune partitions.
@@ -695,6 +754,7 @@ mod tests {
             time_sensitive: false,
             issues: Vec::new(),
             explicit_ranges: false,
+            joins: Vec::new(),
         };
         assert_eq!(lowerer.text("a"), "$2::text");
         assert_eq!(lowerer.text("b"), "$3::text");

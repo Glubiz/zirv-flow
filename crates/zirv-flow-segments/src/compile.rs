@@ -7,7 +7,7 @@ use zirv_flow_core::segment::{Definition, Issue};
 
 use crate::catalog::Catalog;
 use crate::deps::Deps;
-use crate::lower::lower;
+use crate::lower::{SCOPE, lower};
 use crate::normalize::normalize;
 use crate::query::{Param, Query};
 use crate::storage::TraitStorage;
@@ -18,6 +18,7 @@ use crate::validate::validate;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledSegment {
     predicate: String,
+    joins: Vec<String>,
     params: Vec<Param>,
     pub deps: Deps,
     /// Whether membership can change as time passes with no new data.
@@ -36,6 +37,7 @@ pub fn compile(
     let lowered = lower(&normalized.root, catalog, storage, now)?;
     Ok(CompiledSegment {
         predicate: lowered.predicate,
+        joins: lowered.joins,
         params: lowered.params,
         deps: lowered.deps,
         time_sensitive: lowered.time_sensitive,
@@ -61,19 +63,28 @@ impl CompiledSegment {
         self.query("p.id", "")
     }
 
-    /// The members among a batch of people. The caller binds the batch last, as a `uuid[]`.
+    /// The members among a batch of people. The caller binds the batch last, as a `uuid[]`. The
+    /// batch also bounds every grouped event set, so it reads only its own people's events.
     pub fn batch_sql(&self) -> Query {
         let at = self.params.len() + 2;
-        self.query("p.id", &format!(" AND p.id = ANY(${at}::uuid[])"))
+        let scope = format!(" AND e.person_id = ANY(${at}::uuid[])");
+        self.scoped("p.id", &format!(" AND p.id = ANY(${at}::uuid[])"), &scope)
     }
 
     fn query(&self, select: &str, tail: &str) -> Query {
+        self.scoped(select, tail, "")
+    }
+
+    /// `scope` replaces the marker each grouped event set carries.
+    fn scoped(&self, select: &str, tail: &str, scope: &str) -> Query {
+        let joins: String = self.joins.iter().map(|join| format!(" {join}")).collect();
+        let sql = format!(
+            "SELECT {select} FROM people p{joins} WHERE p.workspace_id = $1 \
+             AND p.merged_into IS NULL AND ({}){tail}",
+            self.predicate
+        );
         Query {
-            sql: format!(
-                "SELECT {select} FROM people p WHERE p.workspace_id = $1 \
-                 AND p.merged_into IS NULL AND ({}){tail}",
-                self.predicate
-            ),
+            sql: sql.replace(SCOPE, scope),
             params: self.params.clone(),
         }
     }
@@ -773,5 +784,176 @@ mod tests {
                 );
             }
         }
+    }
+
+    const SEMI_JOIN: &str = "p.id IN (SELECT e.person_id FROM events e";
+
+    fn count(op: &str, value: i64) -> Value {
+        json!({"event": "order", "agg": {"fn": "count", "op": op, "value": value}})
+    }
+
+    #[test]
+    fn a_positive_conjunct_count_that_an_empty_set_fails_is_a_semi_join() {
+        for definition in [
+            count("gte", 2),
+            json!({"all": [count("gte", 2), {"trait": "vip", "op": "eq", "value": true}]}),
+            json!({"all": [{"all": [count("gt", 0)]}, {"list": LIST}]}),
+        ] {
+            let sql = sql_of(definition);
+            assert!(sql.contains(SEMI_JOIN), "{sql}");
+            assert!(
+                sql.contains("GROUP BY e.person_id HAVING count(*)::float8"),
+                "{sql}"
+            );
+            assert!(!sql.contains("LEFT JOIN"), "{sql}");
+            assert!(!sql.contains("e.person_id = p.id"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn an_aggregate_that_is_not_a_positive_conjunct_is_a_left_join() {
+        for definition in [
+            json!({"any": [count("gte", 2), {"list": LIST}]}),
+            json!({"not": count("gte", 2)}),
+            json!({"all": [{"list": LIST}, {"any": [{"not": count("gte", 2)}, {"list": LIST}]}]}),
+            count("lt", 2),
+            count("lte", 2),
+            count("eq", 0),
+        ] {
+            let sql = sql_of(definition.clone());
+            assert!(
+                sql.contains("LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e"),
+                "{definition}: {sql}"
+            );
+            assert!(sql.contains("COALESCE(a0.v, 0::float8)"), "{sql}");
+            assert!(!sql.contains(SEMI_JOIN), "{definition}: {sql}");
+        }
+    }
+
+    #[test]
+    fn a_non_count_aggregate_under_not_joins_its_bare_value() {
+        let sql = sql_of(json!({"not": {"event": "order",
+            "agg": {"fn": "sum", "prop": "total", "op": "gt", "value": 50}}}));
+        assert!(sql.contains("LEFT JOIN (SELECT e.person_id, sum("), "{sql}");
+        assert!(sql.contains("COALESCE((a0.v > $"), "{sql}");
+        assert!(!sql.contains("COALESCE(a0.v"), "{sql}");
+        assert!(!sql.contains(SEMI_JOIN), "{sql}");
+        // Positive, it is a semi-join: nothing summed is no value, which is false.
+        let sql = sql_of(json!({"event": "order",
+            "agg": {"fn": "sum", "prop": "total", "op": "gt", "value": 50}}));
+        assert!(sql.contains(SEMI_JOIN), "{sql}");
+    }
+
+    #[test]
+    fn the_empty_aggregate_is_judged_by_the_evaluators_comparison() {
+        // A count of nothing is 0; every other aggregate of nothing is no value.
+        for (op, value, empty_passes) in [
+            ("lt", 1, true),
+            ("lte", 0, true),
+            ("eq", 0, true),
+            ("neq", 3, true),
+            ("gte", 0, true),
+            ("gt", 0, false),
+            ("eq", 1, false),
+        ] {
+            let sql = sql_of(count(op, value));
+            assert_eq!(
+                sql.contains("LEFT JOIN"),
+                empty_passes,
+                "{op} {value}: {sql}"
+            );
+            assert_eq!(
+                sql.contains(SEMI_JOIN),
+                !empty_passes,
+                "{op} {value}: {sql}"
+            );
+        }
+        let sql = sql_of(
+            json!({"event": "order", "agg": {"fn": "min", "prop": "total",
+            "op": "lt", "value": 5}}),
+        );
+        assert!(sql.contains(SEMI_JOIN), "{sql}");
+    }
+
+    #[test]
+    fn a_batch_scopes_every_grouped_set_and_the_other_queries_do_not() {
+        let compiled = compiled(json!({"all": [
+            count("gte", 2),
+            {"not": count("gte", 5)},
+            {"any": [{"event": "order", "agg": {"fn": "max", "prop": "total", "op": "gt", "value": 9}},
+                     {"list": LIST}]},
+            {"event": "order"},
+        ]}));
+        let batch = compiled.batch_sql();
+        let at = batch.params.len() + 2;
+        let scope = format!("AND e.person_id = ANY(${at}::uuid[])");
+        let sets = batch.sql.matches("GROUP BY e.person_id").count();
+        assert_eq!(sets, 3, "{}", batch.sql);
+        assert_eq!(batch.sql.matches(&scope).count(), sets, "{}", batch.sql);
+        // Each scope sits inside its set, before the GROUP BY.
+        assert_eq!(
+            batch
+                .sql
+                .matches(&format!("{scope} GROUP BY e.person_id"))
+                .count(),
+            sets,
+            "{}",
+            batch.sql
+        );
+        assert!(
+            batch
+                .sql
+                .ends_with(&format!(" AND p.id = ANY(${at}::uuid[])"))
+        );
+        for query in [
+            compiled.count_sql(),
+            compiled.members_sql(),
+            compiled.sample_sql(5),
+        ] {
+            assert!(!query.sql.contains("ANY($"), "{}", query.sql);
+            assert!(!query.sql.contains("scope"), "{}", query.sql);
+        }
+    }
+
+    #[test]
+    fn only_a_since_trait_aggregate_still_reads_the_person_row() {
+        let aggregates = [
+            ("count", None),
+            ("sum", Some("total")),
+            ("min", Some("total")),
+            ("max", Some("total")),
+            ("avg", Some("total")),
+        ];
+        for (func, prop) in aggregates {
+            let mut agg = json!({"fn": func, "op": "gt", "value": 1});
+            if let Some(prop) = prop {
+                agg["prop"] = json!(prop);
+            }
+            let event = |window: Value| {
+                let mut event = json!({"event": "order", "agg": agg});
+                if !window.is_null() {
+                    event["window"] = window;
+                }
+                event
+            };
+            for window in [Value::Null, json!({"last": "P7D"})] {
+                for definition in [
+                    event(window.clone()),
+                    json!({"not": event(window.clone())}),
+                    json!({"any": [event(window.clone()), {"list": LIST}]}),
+                ] {
+                    let sql = sql_of(definition);
+                    assert!(!sql.contains("e.person_id = p.id"), "{func}: {sql}");
+                }
+            }
+            let sql = sql_of(event(json!({"since_trait": "signed_up"})));
+            assert!(sql.contains("e.person_id = p.id"), "{func}: {sql}");
+            assert!(!sql.contains("GROUP BY"), "{func}: {sql}");
+        }
+        // An event condition without an aggregate stays an EXISTS.
+        let sql = sql_of(json!({"event": "order"}));
+        assert!(
+            sql.contains("EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id")
+        );
     }
 }

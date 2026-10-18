@@ -1,0 +1,90 @@
+{
+  "definition": {
+    "all": [
+      {
+        "agg": {
+          "fn": "count",
+          "op": "eq",
+          "value": 0
+        },
+        "event": "order"
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "lte",
+          "value": 3
+        },
+        "event": "order",
+        "window": {
+          "last": "P90D"
+        }
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "not_in",
+          "value": [
+            1,
+            2
+          ]
+        },
+        "event": "order",
+        "window": {
+          "last": "P7D"
+        }
+      },
+      {
+        "agg": {
+          "fn": "count",
+          "op": "gt",
+          "value": 0
+        },
+        "event": "order",
+        "window": {
+          "last": "P7D"
+        }
+      }
+    ],
+    "v": 1
+  },
+  "deps": {
+    "classes": 34,
+    "consent": [],
+    "events": [
+      "order"
+    ],
+    "identifiers": [],
+    "lists": [],
+    "segments": [],
+    "traits": []
+  },
+  "params": [
+    {
+      "text": "order"
+    },
+    {
+      "float": 0.0
+    },
+    {
+      "timestamp": "2025-06-08T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-06-15T12:00:00Z"
+    },
+    {
+      "timestamp": "2025-03-17T12:00:00Z"
+    },
+    {
+      "float": 3.0
+    },
+    {
+      "float_array": [
+        1.0,
+        2.0
+      ]
+    }
+  ],
+  "sql": "SELECT p.id FROM people p LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id) a0 ON a0.person_id = p.id LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text AND e.occurred_at > $6::timestamptz AND e.occurred_at <= $5::timestamptz GROUP BY e.person_id) a1 ON a1.person_id = p.id LEFT JOIN (SELECT e.person_id, count(*)::float8 AS v FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text AND e.occurred_at > $4::timestamptz AND e.occurred_at <= $5::timestamptz GROUP BY e.person_id) a2 ON a2.person_id = p.id WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((COALESCE((COALESCE(a0.v, 0::float8) = $3::float8), false) AND p.id IN (SELECT e.person_id FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text AND e.occurred_at > $4::timestamptz AND e.occurred_at <= $5::timestamptz GROUP BY e.person_id HAVING count(*)::float8 > $3::float8) AND COALESCE((COALESCE(a1.v, 0::float8) <= $7::float8), false) AND COALESCE((COALESCE(a2.v, 0::float8) <> ALL($8::float8[])), false)))",
+  "time_sensitive": true
+}
