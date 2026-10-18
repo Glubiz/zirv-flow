@@ -227,14 +227,14 @@ per-person explanations and visible data age; membership changes become events.
 segments, federated sources.
 
 **Exit criteria.**
-- [ ] The golden suite covers every node type and operator. Property tests (fixed seeds in CI, random nightly) find no mismatch between compiled SQL and the reference evaluator.
-- [ ] An event that qualifies a person produces `segment.entered` within 60 s (p95) in an integration test with default configuration.
-- [ ] A time-window segment ("no order in 30 days") gains members as the injected clock advances, with no new data.
-- [ ] A segment reference cycle is rejected at save, with an error that names the cycle.
-- [ ] Explain shows, for one person, which conditions matched and the observed values.
-- [ ] An event- and a definition-driven membership change each retain their original trace id and the correct typed cause through `segment.entered`/`segment.exited`.
-- [ ] The fake provider's segment draft passes the same compiler as the builder, shows its diff and preview count, and enters only the selected segment's draft; segment explanation cites the AST nodes it describes.
-- [ ] Preview and full-refresh benchmarks at 10 million people are attached, measured against the section 19 targets.
+- [x] The golden suite covers every node type and operator. Property tests (fixed seeds in CI, random nightly) find no mismatch between compiled SQL and the reference evaluator.
+- [x] An event that qualifies a person produces `segment.entered` within 60 s (p95) in an integration test with default configuration.
+- [x] A time-window segment ("no order in 30 days") gains members as the injected clock advances, with no new data.
+- [x] A segment reference cycle is rejected at save, with an error that names the cycle.
+- [x] Explain shows, for one person, which conditions matched and the observed values.
+- [x] An event- and a definition-driven membership change each retain their original trace id and the correct typed cause through `segment.entered`/`segment.exited`.
+- [x] The fake provider's segment draft passes the same compiler as the builder, shows its diff and preview count, and enters only the selected segment's draft; segment explanation cites the AST nodes it describes.
+- [x] Preview and full-refresh benchmarks at 10 million people are attached, measured against the section 19 targets.
 
 **Dependencies.** M2 for segmentation; M3 for the assistant foundation.
 
