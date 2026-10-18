@@ -22,7 +22,8 @@ hardware, and the re-check on reference hardware does not apply to it until the 
 
 **Current state (0.57.1, sections 6 and 6.6).** The previews and refreshes were measured on 0.57.0 and the
 incremental phase on 0.57.1, which changes only the re-evaluation batch statement. Every segment target of
-section 19 is met, apart from D4.1 on `jsonb`, which was not re-run. Trait-only preview p95 1.06 s, aggregate preview p95 4.68 s,
+section 19 is met, apart from D4.1 on `jsonb`, which was not re-run; the one miss is the ingestion API row
+(an M2 target) below. Trait-only preview p95 1.06 s, aggregate preview p95 4.68 s,
 property-filtered aggregate preview p95 1.20 s (no 503s), full refresh median 45.7 s trait-only and
 14.5 s with an aggregate, event to `segment.entered` p95 4.05 s (target 60 s; p99 12.6 s, max 16.5 s,
 17,475 entries), and all three API counts equal the hand-written SQL. **OQ-2 is decided: no rollup for
