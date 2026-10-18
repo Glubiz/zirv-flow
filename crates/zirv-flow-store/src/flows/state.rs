@@ -76,6 +76,16 @@ impl FlowAction {
             Self::Archive => "archive",
         }
     }
+
+    /// The past participle, for a message such as "a draft flow cannot be paused".
+    pub const fn past(self) -> &'static str {
+        match self {
+            Self::Publish => "published",
+            Self::Pause => "paused",
+            Self::Resume => "resumed",
+            Self::Archive => "archived",
+        }
+    }
 }
 
 impl fmt::Display for FlowAction {
