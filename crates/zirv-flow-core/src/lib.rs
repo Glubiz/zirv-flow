@@ -8,6 +8,7 @@ pub mod csv_file;
 pub mod egress;
 mod email;
 pub mod events;
+pub mod flow;
 pub mod freshness;
 mod ids;
 pub mod mapping;
