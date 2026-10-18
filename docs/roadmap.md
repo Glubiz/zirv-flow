@@ -253,7 +253,7 @@ and run waits, branches and actions as designed, testable before publishing.
 - **Assistant.** Natural language drafts and explains flow graphs; publish validation drives bounded repair; the user reviews a graph diff and simulation summary. Trace explanation is the first read-only trace consumer and cites decision-record ids.
 - **Test mode.** A real or synthetic person on a virtual clock, effects captured, events injectable.
 - **UI.** React Flow canvas editor, node panels, validation on the canvas, publish with impact preview, version history, enrollment inspector (one person's path), per-node counts.
-- **Decisions.** OQ-7 (version migration), OQ-14 (pause on stale inputs).
+- **Decisions.** OQ-7 (version migration) and OQ-14 (pause on stale inputs), decided in #154: no migration of in-flight enrollments in v1, and no automatic pause (architecture 21.1).
 
 **Out of scope.** Send-message and sync nodes (M6), loops, migrating in-flight
 enrollments, A/B test statistics.
