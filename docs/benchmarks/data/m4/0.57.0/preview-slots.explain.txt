@@ -1,0 +1,21 @@
+Finalize Aggregate  (cost=1724484.05..1724484.06 rows=1 width=8) (actual time=1086.435..1104.682 rows=1 loops=1)
+  Buffers: shared hit=141846 read=1497536
+  ->  Gather  (cost=1724483.83..1724484.04 rows=2 width=8) (actual time=1086.300..1104.666 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=141846 read=1497536
+        ->  Partial Aggregate  (cost=1723483.83..1723483.84 rows=1 width=8) (actual time=1078.064..1078.065 rows=1 loops=3)
+              Buffers: shared hit=141846 read=1497536
+              ->  Parallel Seq Scan on people p  (cost=0.00..1722781.46 rows=280949 width=0) (actual time=74.958..1067.328 rows=225840 loops=3)
+                    Filter: ((merged_into IS NULL) AND (trait_s1 IS NOT NULL) AND (trait_n1 IS NOT NULL) AND (trait_b1 IS TRUE) AND (trait_b1 IS NOT NULL) AND (trait_n1 >= '25'::double precision) AND (trait_n1 <= '45'::double precision) AND (workspace_id = '31d6e33b-415a-4559-b314-f0b8d2d0fab1'::uuid) AND (trait_s1 = 'pro'::text))
+                    Rows Removed by Filter: 3107493
+                    Buffers: shared hit=141846 read=1497536
+Settings: effective_cache_size = '16GB'
+Planning:
+  Buffers: shared hit=753
+Planning Time: 0.951 ms
+JIT:
+  Functions: 14
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 0.983 ms, Inlining 99.946 ms, Optimization 76.358 ms, Emission 48.393 ms, Total 225.679 ms
+Execution Time: 1113.309 ms

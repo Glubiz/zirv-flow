@@ -1,0 +1,197 @@
+{
+  "phase": "preview-agg",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "measured_at": "2026-10-18T10:27:41Z",
+  "definition_name": "agg90",
+  "definition": {
+    "v": 1,
+    "all": [
+      {
+        "trait": "plan",
+        "op": "eq",
+        "value": "pro"
+      },
+      {
+        "event": "bench_order_placed",
+        "window": {
+          "last": "P90D"
+        },
+        "agg": {
+          "fn": "count",
+          "op": "gte",
+          "value": 2
+        }
+      }
+    ]
+  },
+  "runs": 20,
+  "warmup": {
+    "status": 200,
+    "seconds": 4.522604
+  },
+  "samples": [
+    {
+      "status": 200,
+      "seconds": 4.547497,
+      "count": 150006,
+      "compiled_at": "2026-10-18T10:24:18.156888Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.458394,
+      "count": 150006,
+      "compiled_at": "2026-10-18T10:24:22.803468Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.639001,
+      "count": 150006,
+      "compiled_at": "2026-10-18T10:24:27.356721Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.489242,
+      "count": 150005,
+      "compiled_at": "2026-10-18T10:24:32.093514Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.446621,
+      "count": 150005,
+      "compiled_at": "2026-10-18T10:24:36.678192Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.374956,
+      "count": 150005,
+      "compiled_at": "2026-10-18T10:24:41.216622Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.681096,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:24:45.692586Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 5.018403,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:24:50.456282Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.503739,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:24:55.565225Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.377041,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:00.152739Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.528477,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:04.625633Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.397400,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:09.248113Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.429752,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:13.746065Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.427142,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:18.265883Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.404561,
+      "count": 150003,
+      "compiled_at": "2026-10-18T10:25:22.79499Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.474867,
+      "count": 150002,
+      "compiled_at": "2026-10-18T10:25:27.300757Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.476635,
+      "count": 150002,
+      "compiled_at": "2026-10-18T10:25:31.872388Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.420070,
+      "count": 150002,
+      "compiled_at": "2026-10-18T10:25:36.445637Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.328350,
+      "count": 150002,
+      "compiled_at": "2026-10-18T10:25:40.948978Z",
+      "code": null
+    },
+    {
+      "status": 200,
+      "seconds": 4.457770,
+      "count": 150002,
+      "compiled_at": "2026-10-18T10:25:45.37736Z",
+      "code": null
+    }
+  ],
+  "seconds": {
+    "n": 20,
+    "min": 4.328350,
+    "max": 5.018403,
+    "p50": 4.458082,
+    "p95": 4.681096
+  },
+  "non_200": 0,
+  "count": [
+    150002,
+    150003,
+    150005,
+    150006
+  ],
+  "mirror_count_at_last_compiled_at": 150002,
+  "target_p95_s": 15,
+  "explain_indexes": [
+    "events_y2026m07_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+    "events_y2026m10_workspace_id_person_id_occurred_at_idx",
+    "people_trait_s1_idx"
+  ]
+}

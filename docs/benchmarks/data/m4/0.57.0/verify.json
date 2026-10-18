@@ -1,0 +1,23 @@
+{
+  "trait_only": {
+    "api_status": 200,
+    "api_preview": 677521,
+    "handwritten_sql": 677521,
+    "equal": true,
+    "compiled_at": "2026-10-18T10:22:23.177384Z"
+  },
+  "agg90": {
+    "api_status": 200,
+    "api_preview": 150009,
+    "handwritten_sql": 150009,
+    "equal": true,
+    "compiled_at": "2026-10-18T10:22:43.933418Z"
+  },
+  "sum_category90": {
+    "api_status": 200,
+    "api_preview": 77361,
+    "handwritten_sql": 77361,
+    "equal": true,
+    "compiled_at": "2026-10-18T10:22:56.671012Z"
+  }
+}
