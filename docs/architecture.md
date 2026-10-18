@@ -1970,15 +1970,17 @@ the 15-minute target, a thin margin. The figures
 are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
 
 **As measured (M4).** The segment rows were measured at 10 million people and 50 million events on a
-development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU), image 0.56.0, in
-[docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md). Held: full refresh (trait-only 77.6 s
-against 2 min, with an aggregate 57.6 s against 10 min) and event to `segment.entered` (p95 0.38 s
-against 60 s). Missed, and code-caused rather than hardware: the trait-only preview (p95 6.14 s on
-slots against 3 s; 1.01 s once each execution is planned on its own, because the persistent prepared
-statement falls back to a generic plan after five executions and a slot backfill leaves no statistics)
-and both aggregate previews (503 at the fixed 10 s limit; 38.7 s and 97.5 s uncapped against 15 s,
-from a correlated subquery per person). OQ-2 stays open (21); the 10 s limit of 8.2 also contradicts
-the 15 s target. The figures are not a v1 sign-off.
+development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU) in
+[docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md), first on image 0.56.0 and again on 0.57.0
+after #142 to #144. On 0.57.0: trait-only preview p95 1.06 s on slots (3 s), aggregate preview p95
+4.68 s and property-filtered aggregate preview p95 1.20 s (15 s, no 503s), full refresh median 45.7 s
+trait-only (2 min) and 14.5 s with an aggregate (10 min). OQ-2 is decided (21.1): no rollup for v1.
+Still missed: event to `segment.entered` (p95 278 s against 60 s, a plan problem in the batch diff
+that #144 exposed, section 4.3, follow-up D, of the benchmark document), and an aggregate preview on a cold cache
+(about 15 s right after an app restart). On 0.56.0 the previews had missed because the persistent
+prepared statement fell back to a generic plan after five executions, a slot backfill left no
+statistics, and an aggregate was a correlated subquery per person (38.7 s and 97.5 s uncapped; 503 at
+the 10 s limit, which also contradicted the 15 s target). The figures are not a v1 sign-off.
 
 ## 20. Key decisions
 
@@ -2061,7 +2063,6 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? Open after the M4 benchmark (#127): a 90-day aggregate preview takes 38.7 s and a property-filtered sum 97.5 s at 10 M / 50 M against 15 s, from the compiler's correlated subquery per person. Next: reshape the compiler to a grouped set semi-joined to `people`, re-bench, and decide "no rollup for v1" only if both cases then meet 15 s; otherwise a rollup design that also covers property-filtered aggregates. See docs/benchmarks/m4-segments.md. | M4, by the re-bench after the compiler reshape (#144) |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
@@ -2084,6 +2085,22 @@ they were ruled as their capabilities were added to the plan.
 | OQ-32 | Consent dimensions and policies: are dimensions a per-workspace catalog with typed values, or topics with categories? How does the policy reuse the M4 condition AST, and how does a recorded-consent read address dimension values? | M6, before the send pipeline ships |
 
 ### 21.1 Decided questions
+
+- **OQ-2:** No per-person daily rollup for v1. Event aggregates compile to a grouped
+  set over `events` (workspace, name, window, property filters, `GROUP BY person_id
+  HAVING agg op N`) semi-joined to `people` (#144), and the incremental path
+  restricts that set to the batch's people. Decided by the D5 rule of the M4
+  benchmark (#127) on 0.57.0 at 10 million people and 50 million events: the
+  90-day aggregate preview is p95 4.68 s and the property-filtered sum p95
+  1.20 s, both under 15 s with no 503s, and a full aggregate refresh takes a
+  median 14.5 s against 10 min (38.7 s, 97.5 s and 57.6 s before). The grouped
+  set reads every event of the window, so a preview of a large aggregate is
+  I/O-bound: measured 8.7 s to 15 s on a cold cache, which is the thin margin to
+  watch at M8. The same run showed the incremental path missing its target (p95
+  278 s against 60 s) on a plan problem in the batch diff, not on the aggregate
+  (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
+  M8 on reference hardware misses the preview target with a warm cache. See
+  [docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md).
 
 - **OQ-4:** Custom object types are post-1.0. v1 sources map to people, events
   and list membership (7.2); order- or account-like data arrives as events with

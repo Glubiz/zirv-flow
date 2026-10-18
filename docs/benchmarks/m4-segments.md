@@ -1,12 +1,14 @@
 # M4 segment benchmark
 
 Issue #127: architecture section 19 targets for segment preview, full refresh and incremental
-re-evaluation at 10 million people and 50 million events, and the data for OQ-2. Measured with the
-published image `ghcr.io/glubiz/zirv-flow:0.56.0` (main after #126), digest
-`sha256:0b429e9f3dee4b652076429773539c10a39fc47121003c31f54cdb575039b7cd`. The smoke run of the
+re-evaluation at 10 million people and 50 million events, and the data for OQ-2. Measured twice with
+published images: `ghcr.io/glubiz/zirv-flow:0.56.0` (main after #126), digest
+`sha256:0b429e9f3dee4b652076429773539c10a39fc47121003c31f54cdb575039b7cd`, and
+`ghcr.io/glubiz/zirv-flow:0.57.0` (after #142 to #144), digest
+`sha256:d99a14927195f59f547d771a9574e191d775d2c03741cf6617462d92bf37c65a` (section 6). The smoke run of the
 scripts used 0.55.0 and is not a result. Raw JSON and plans are in
-[`data/m4/`](data/m4/); the scripts are in `scripts/bench/m4/` (runbook: `scripts/bench/README.md`
-section 9).
+[`data/m4/`](data/m4/) (0.56.0) and [`data/m4/0.57.0/`](data/m4/0.57.0/); the scripts are in
+`scripts/bench/m4/` (runbook: `scripts/bench/README.md` section 9).
 
 **This is a development machine, not reference hardware.** Every figure is one host with Docker
 Desktop. A target missed here is provisional (spec D1) and is not revised from this run alone.
@@ -14,6 +16,14 @@ Where a miss below is marked **code-caused**, a defect in the product's queries 
 hardware, and the re-check on reference hardware does not apply to it until the defect is fixed.
 
 ## 1. Summary
+
+**Current state (0.57.0, section 6).** The preview and refresh targets are met: trait-only preview p95
+1.06 s, aggregate preview p95 4.68 s, property-filtered aggregate preview p95 1.20 s (no 503s), full
+refresh median 45.7 s trait-only and 14.5 s with an aggregate, and all three API counts equal the
+hand-written SQL. **OQ-2 is decided: no rollup for v1.** Two things still miss: event to
+`segment.entered` is p95 278.5 s against 60 s (a regression from 0.38 s on 0.56.0, caused by the plan of
+the batch diff, section 4.3 follow-up D), and an aggregate preview right after an app restart took
+15.1 s (a cold-cache caveat, section 6.4). The rest of this section is the first run on 0.56.0.
 
 As shipped means the 0.56.0 image with no change of settings. "Custom plan" is the same stack with
 `ALTER DATABASE ... SET plan_cache_mode = force_custom_plan` (section 4.1), kept only as evidence of
@@ -168,28 +178,31 @@ shipped only.
 
 ## 4. Decisions and follow-ups
 
-### 4.1 OQ-2: open
+### 4.1 OQ-2: decided, no rollup for v1
 
-The measured gap is above: previews with a 90-day aggregate take 38.7 s and a property-filtered one
-97.5 s uncapped against a 15 s target, and 503 at the 10 s limit. The cause is the compiler's
-correlated subquery per person, not the absence of a rollup. OQ-2 stays open (supervisor ruling
-b54f3196). The next step: reshape the compiler first, to emit a grouped set over events (workspace,
-name, window, property filters, `GROUP BY person_id HAVING agg op N`) semi-joined to `people`, with a
-`LEFT JOIN`/`COALESCE` form for comparisons that zero-event people satisfy, then re-bench at the same
-10 M / 50 M. "No rollup for v1" is decided only if both aggregate cases then meet 15 s; otherwise a
-rollup design is required and it must cover property-filtered aggregates.
+Decided on the 0.57.0 re-run (section 6) by #127's D5 rule: both aggregate previews meet p95 < 15 s
+(D4.4 4.68 s, D4.5 1.20 s, no 503s) and the aggregate refresh meets < 10 min (median 14.5 s). **No
+rollup for v1; event aggregates compile to grouped sets (#144).** On 0.56.0 the same preview took 38.7 s
+and the property-filtered one 97.5 s uncapped (503 at the 10 s limit), from the compiler's correlated
+subquery per person, not from the absence of a rollup (supervisor ruling b54f3196 kept OQ-2 open until
+the compiler was reshaped and re-benched at the same 10 M / 50 M). The margin on the aggregate preview
+is thin on a cold cache (section 6.4): to be re-checked on reference hardware at M8, where a rollup
+returns only if the warm-cache preview misses 15 s.
 
 ### 4.2 Missed targets
 
+On 0.57.0 (section 6): the preview misses of 0.56.0 are closed. What misses now:
+
 | Miss | Gap | Cause | What closes it |
 |---|---|---|---|
-| Trait-only preview on `jsonb` and on slots | 5.57 s and 6.14 s against 3 s | code-caused: generic plan of the persistent prepared statement; no `ANALYZE` after a backfill | `.persistent(false)` on the compiled segment count, sample and membership queries; `ANALYZE people` when a slot backfill reaches `ready`. With per-execution planning the slots reach 1.01 s |
-| Aggregate previews | 38.7 s and 97.5 s uncapped; 503 at 10 s | code-caused: correlated subquery per person | the compiler reshape of 4.1, then a rollup if that is not enough |
-| 10 s limit against the 15 s target | 503 even at 10 to 15 s | design inconsistency: architecture 8.2 fixes 10 s, section 19 targets 15 s | a fixed 20 s limit (ruling 9201125b) |
+| Event to `segment.entered` | p95 278.5 s against 60 s (0.38 s on 0.56.0); 46,107 entries, p50 140.5 s, max 284.7 s; the ingest API p99 was 299 ms against 60 ms | code-caused: the batch diff of `segment.reevaluate` plans a nested loop over all open members (planner estimates the 8 batch members as 1 row), so a batch of 23 people costs 0.4 to 0.7 s and the single serial job per segment falls behind 2,000 events/s | follow-up D below |
+| Aggregate preview on a cold cache | 15.1 s (count statement 13.6 s) right after an app restart, against 15 s | I/O-bound plan: the grouped set reads every event of the window and the planner under-estimates the groups 3.3 times | none needed for v1; re-check at M8 on reference hardware |
 
-What stays provisional under D1 (hardware pending M8) is whatever remains after those fixes. Section
+On 0.56.0 the misses were the trait-only preview (generic plan, no `ANALYZE` after a backfill; closed by #143),
+the aggregate previews (correlated subquery; closed by #144) and the 10 s limit against the 15 s target
+(closed by #142). What stays provisional under D1 (hardware pending M8) is the figures above. Section
 19's fallbacks (name-level dirty filtering, `database.read_url`, rollups) are not needed for the
-passes above.
+previews.
 
 ### 4.3 Follow-up issues
 
@@ -224,6 +237,21 @@ Meeting 15 s alone still leaves 503s for previews between 10 and 15 s. Ruling 92
 fixed 20 s, a margin above the target, with no config key, and say so in 8.2; the section 19 targets
 stay.
 
+**D (draft, to file). Incremental re-evaluation of an aggregate segment falls behind at 2,000 events/s after the grouped-set compile (#144)**
+
+At 10 M people / 52 M events with an aggregate segment of 150,000 members, 2,000 track events/s for
+600 s over 1,000,000 people gave event to `segment.entered` p95 278.5 s (p50 140.5 s, max 284.7 s;
+46,107 entries) against 60 s (0.38 s on 0.56.0). The `target` CTE of the batch statement is cheap
+(1.8 ms for a batch of 23 people, an index scan per partition restricted by `person_id = ANY(batch)`),
+but the diff around it is not: the planner estimates the target at 1 row (actual 8) and runs the
+`entering` and `leaving` anti joins as a nested loop over `segment_members_open_idx`, reading 94,233
+index entries per loop and 197,562 buffers (`EXPLAIN` in `data/m4/0.57.0/incremental-batch.explain.txt`,
+390 ms for 23 people). Batches are serialized by the segment's advisory lock, so the throughput of one
+segment is below the arrival rate and the backlog grows. Not verified: whether the 0.56.0 shape had the same
+diff plan with a better estimate. Fix options to compare: a
+`MATERIALIZED` target with a probe of `segment_members` by `(segment_id, person_id)`, or a
+join that probes `segment_members` by the batch people instead of a scan. Re-measure with `measure.sh incremental`.
+
 ## 5. Reproduce
 
 ```sh
@@ -242,3 +270,86 @@ for p in verify preview-jsonb index preview-slots preview-agg preview-sum refres
 
 For the custom-plan set: `ALTER DATABASE zirv_flow SET plan_cache_mode = force_custom_plan`, recreate the
 `zirv-flow` service so the pool reconnects, measure, then `ALTER DATABASE zirv_flow RESET plan_cache_mode`.
+
+## 6. Re-run on 0.57.0 (after #142 to #144)
+
+### 6.1 Image and method
+
+Image `ghcr.io/glubiz/zirv-flow:0.57.0`, digest
+`sha256:d99a14927195f59f547d771a9574e191d775d2c03741cf6617462d92bf37c65a` (created 2026-10-18 10:20 UTC),
+containing #142 (20 s preview limit), #143 (per-execution planning, `ANALYZE` after a backfill) and #144
+(grouped aggregates). The same stack, volumes and 10 M / 50 M seed as section 2 (compose project
+`zirv-flow-m4bench10m`), brought up on the new image; 0.57.0 adds no migration and none ran. Three
+slot-backed traits `ready`, 10,000,000 people. `events` now holds about 52.4 M rows: the 0.56.0
+incremental run left 1.2 M new events and this run added 1.2 M, in the newest partition, so the
+aggregate counts are not the seed-time counts. Method as section 2.4, one phase at a time with nothing
+else heavy running, plus one plain `ANALYZE people` and `ANALYZE events` (9 s) before the previews. The
+`index` phase was skipped: the slots are already `ready`, and the `ANALYZE` after a backfill is covered by
+#143's test. Consequence: the "jsonb" phase (D4.1) now runs the same slot-backed statement as the slots
+phase, so D4.1 on `jsonb` is not re-measured (the 0.56.0 figure stands for the jsonb shape). Results are in
+[`data/m4/0.57.0/`](data/m4/0.57.0/) under the names of the 0.56.0 files.
+
+### 6.2 Results against the section 19 targets
+
+| Target (section 19) | 0.56.0 | 0.57.0 | |
+|---|---|---|---|
+| Preview, trait-only, p95 < 3 s, on `jsonb` (D4.1) | p95 5.57 s | not re-measured (slot-backed statement: p50 1.00 s, p95 1.05 s) | open, jsonb shape not re-run |
+| Preview, trait-only, p95 < 3 s, on slots (D4.3) | p95 6.14 s | p50 1.00 s, p95 1.06 s, 0 non-200 | HIT |
+| Preview with a 90-day aggregate, p95 < 15 s (D4.4) | 20 of 20 503; 38.7 s uncapped | p50 4.46 s, p95 4.68 s, 0 non-200 (min 4.33, max 5.02) | HIT |
+| Preview, property-filtered aggregate, p95 < 15 s (D4.5) | 20 of 20 503; 97.5 s uncapped | p50 1.14 s, p95 1.20 s, 0 non-200 | HIT |
+| Full refresh, trait-only, < 2 min (D4.6) | median 77.6 s | median 45.7 s (53.4, 43.8, 45.1, 45.7, 49.7); manual 6.0 s | HIT |
+| Full refresh with an aggregate, < 10 min (D4.6) | median 57.6 s | median 14.5 s (19.7, 14.5, 14.1, 14.2, 14.5); manual 8.2 s | HIT |
+| Event to `segment.entered`, p95 < 60 s (D4.7) | p95 0.382 s | p95 278.5 s (p50 140.5, p99 282.9, max 284.7; 46,107 entries) | MISS, code-caused (follow-up D) |
+
+The incremental run was the same as before: 2,000 events/s for 600 s (1,200,000 accepted, 0 late, 0 429), an
+aggregate segment of 149,976 members before and 196,083 after, 0 exits, nothing pending after the drain.
+The ingest API p99 was 299 ms (60 ms on 0.56.0).
+
+**Verify (spec D3).** The preview count through the API equals the hand-written SQL count of
+`verify.sql` for all three definitions: trait-only 677,521 = 677,521; aggregate 150,009 = 150,009;
+property-filtered aggregate 77,361 = 77,361 (each at its own `compiled_at`). On 0.56.0 the two aggregate
+previews returned 503, so this is the first comparison of them at 10 M. The counts of the timed runs
+vary slightly (150,002 to 150,006), which the sliding 90-day window explains; the mirror and API
+counts agree at each run's last `compiled_at`.
+
+### 6.3 Plans
+
+The plans are of the statement the API actually runs, not a hand-written mirror: `log_min_duration_statement=0`
+was set on the bench database for one call per definition, the logged SQL was run with its values under
+`EXPLAIN (ANALYZE, BUFFERS)` through psql's `\bind` (an unnamed statement, planned per execution as the API
+now does), and the setting was reset
+(`data/m4/0.57.0/preview-*.api-sql.explain.txt`, `preview.api-statements.log`; `preview-slots.explain.txt` and
+`preview-jsonb.explain.txt` are the older mirror of the trait-only statement, still the same shape).
+
+- **Trait-only** (slots): `Parallel Seq Scan on people` with two workers, 1.1 s warm (3.9 s first and 1.5 s on the repeat in the
+  captures). No generic-plan flip: every execution is planned for its values.
+- **Aggregate (D4.4):** `people` is probed 589,985 times through `people_pkey` after a parallel scan of the
+  four partitions that cover 90 days, a partial hash aggregate and a sort/group; the planner estimates 176,085
+  groups and 58,777 result rows against 589,985 and 196,055. One execution: 8.7 s (9.9 s first) in the capture,
+  about 4.5 s in the timed runs. The scan reads about 3.2 M event rows per execution.
+- **Property-filtered sum (D4.5):** the `properties @> {"category":"books"}` filter and the sum run in the same grouped scan, 304,918
+  groups before the `HAVING`, 77,331 after; 1.5 s warm (2.4 s first).
+
+### 6.4 Cold-cache caveat (one observation, not a target)
+
+The first preview of each aggregate is a warm-up, recorded apart from the 20 timed runs. In the
+normal run the aggregate warm-up took 4.52 s against a p50 of 4.46 s, so it was not slower; the
+property-filtered sum took 2.79 s against 1.14 s (2.4 times). Separately, about four minutes after the
+incremental phase had written 1.2 M events, and right after the app restart that turned logging on, the same previews took
+3.0 s (trait-only count 2.97 s), 15.1 s (aggregate; its count statement 13.6 s) and 4.6 s (sum), and the
+immediate repeats under `EXPLAIN` 1.5 s, 8.7 s and 1.5 s with the same plans. The page cache was not
+evicted on purpose. So the aggregate preview is 4.5 s only when the 90-day window of `events` is cached:
+the grouped set reads about 3.2 M rows and the `people_pkey` probes depend on how well the planner's
+too-low group estimate (176 k against 590 k) holds. A cold first run can sit at the 15 s target, so this is
+the figure to re-check on reference hardware at M8. The orchestrator's earlier cold measurement of the D4.4 statement, 53.7 s after
+an hour of builds had evicted the cache, is consistent with this and not reproduced here.
+
+### 6.5 What still misses
+
+- **Event to `segment.entered`: p95 278.5 s against 60 s, gap 4.6 times.** Code-caused; the diagnosis and the
+  follow-up draft are in section 4.3 D. The batch-diff plan for one 23-person batch is in
+  `data/m4/0.57.0/incremental-batch.explain.txt`.
+- The ingest API p99 rose from 60 ms to 299 ms during the same run (not judged here, and
+  its cause was not investigated).
+- D4.1 on `jsonb` was not re-measured (6.1).
+- Everything remains provisional under D1 until the M8 hardware run.
