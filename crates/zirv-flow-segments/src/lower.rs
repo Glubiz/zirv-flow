@@ -24,7 +24,7 @@ use crate::storage::{Storage, TraitStorage};
 use crate::time_value::parse_duration;
 use crate::validate::Kind;
 
-/// Where `CompiledSegment::query` renders the batch restriction inside a grouped event set. The
+/// Where `CompiledSegment::scoped` renders the batch restriction inside a grouped event set. The
 /// marker becomes `AND e.person_id = ANY($n::uuid[])` for a batch query and nothing otherwise.
 /// The lowered text holds only fixed text, column names and placeholders, so no bound value or
 /// key can collide with it.
@@ -632,32 +632,30 @@ impl Lowerer<'_> {
                 (format!("{function}(e.occurred_at)"), true)
             }
         };
-        if !grouped {
-            let expr = format!("(SELECT {aggregate} {from})");
-            let comparison = self.aggregate_comparison(agg, &expr, is_time);
-            return format!("COALESCE(({comparison}), false)");
-        }
-        if positive && !empty_aggregate_satisfies(agg) {
+        let expr = if !grouped {
+            format!("(SELECT {aggregate} {from})")
+        } else if positive && !empty_aggregate_satisfies(agg) {
             // A person without a matching event has no group and the empty aggregate fails the
             // comparison, so the set of persons whose group passes is exactly the members.
             let having = self.aggregate_comparison(agg, &aggregate, is_time);
             return format!(
                 "p.id IN (SELECT e.person_id {from} GROUP BY e.person_id HAVING {having})"
             );
-        }
-        let alias = format!("a{}", self.joins.len());
-        // A count of no events is 0 and any other aggregate of none is NULL, the value the
-        // correlated subquery gave.
-        let value = if agg.func == AggFn::Count {
-            format!("COALESCE({alias}.v, 0::float8)")
         } else {
-            format!("{alias}.v")
+            let alias = format!("a{}", self.joins.len());
+            self.joins.push(format!(
+                "LEFT JOIN (SELECT e.person_id, {aggregate} AS v {from} GROUP BY e.person_id) \
+                 {alias} ON {alias}.person_id = p.id"
+            ));
+            // A count of no events is 0 and any other aggregate of none is NULL, the value the
+            // correlated subquery gave.
+            if agg.func == AggFn::Count {
+                format!("COALESCE({alias}.v, 0::float8)")
+            } else {
+                format!("{alias}.v")
+            }
         };
-        let comparison = self.aggregate_comparison(agg, &value, is_time);
-        self.joins.push(format!(
-            "LEFT JOIN (SELECT e.person_id, {aggregate} AS v {from} GROUP BY e.person_id) {alias} \
-             ON {alias}.person_id = p.id"
-        ));
+        let comparison = self.aggregate_comparison(agg, &expr, is_time);
         format!("COALESCE(({comparison}), false)")
     }
 
