@@ -5363,6 +5363,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zirv-flow-engine"
+version = "0.58.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "uuid",
+ "zirv-flow-core",
+]
+
+[[package]]
 name = "zirv-flow-identity"
 version = "0.58.0"
 dependencies = [
