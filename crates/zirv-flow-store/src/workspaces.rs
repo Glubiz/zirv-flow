@@ -10,7 +10,7 @@ use crate::StoreError;
 
 macro_rules! workspace_columns {
     () => {
-        "id, name, slug, created_at"
+        "id, name, slug, timezone, created_at"
     };
 }
 
@@ -19,6 +19,8 @@ pub struct Workspace {
     pub id: WorkspaceId,
     pub name: String,
     pub slug: String,
+    /// The IANA time zone name of the workspace; `UTC` until it is set.
+    pub timezone: String,
     pub created_at: OffsetDateTime,
 }
 
@@ -27,6 +29,7 @@ struct WorkspaceRow {
     id: Uuid,
     name: String,
     slug: String,
+    timezone: String,
     created_at: OffsetDateTime,
 }
 
@@ -36,6 +39,7 @@ impl From<WorkspaceRow> for Workspace {
             id: WorkspaceId::from_uuid(row.id),
             name: row.name,
             slug: row.slug,
+            timezone: row.timezone,
             created_at: row.created_at,
         }
     }
@@ -109,7 +113,7 @@ pub async fn list_workspaces_for_user<'e>(
     is_owner: bool,
 ) -> Result<Vec<Workspace>, StoreError> {
     let rows: Vec<WorkspaceRow> = sqlx::query_as(
-        "SELECT w.id, w.name, w.slug, w.created_at FROM workspaces w \
+        "SELECT w.id, w.name, w.slug, w.timezone, w.created_at FROM workspaces w \
          WHERE $2 OR EXISTS (SELECT 1 FROM memberships m \
                              WHERE m.workspace_id = w.id AND m.user_id = $1) \
          ORDER BY w.created_at, w.id",
@@ -248,6 +252,25 @@ pub async fn set_orphan_policy<'e>(
     Ok(done.rows_affected() == 1)
 }
 
+/// Sets the workspace time zone and returns the saved workspace, or `None` when there is no such
+/// workspace. The caller has checked the name against the zone database; the store only keeps it.
+pub async fn set_workspace_timezone<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    timezone: &str,
+) -> Result<Option<Workspace>, StoreError> {
+    let row: Option<WorkspaceRow> = sqlx::query_as(concat!(
+        "UPDATE workspaces SET timezone = $2 WHERE id = $1 RETURNING ",
+        workspace_columns!()
+    ))
+    .bind(workspace.as_uuid())
+    .bind(timezone)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.map(Into::into))
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -285,6 +308,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_starts_in_utc_and_keeps_the_time_zone_it_is_given(pool: PgPool) {
+        let created = workspace(&pool, "Acme").await;
+        let other = workspace(&pool, "Other").await;
+        assert_eq!(created.timezone, "UTC");
+
+        let saved = set_workspace_timezone(&pool, created.id, "Europe/Copenhagen")
+            .await
+            .unwrap()
+            .unwrap();
+        let missing = set_workspace_timezone(&pool, WorkspaceId::new(), "UTC")
+            .await
+            .unwrap();
+        let too_long = set_workspace_timezone(&pool, created.id, &"x".repeat(65)).await;
+
+        assert_eq!(saved.timezone, "Europe/Copenhagen");
+        assert!(missing.is_none());
+        assert!(too_long.is_err());
+        let found = find_workspace(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(found.timezone, "Europe/Copenhagen");
+        let untouched = find_workspace(&pool, other.id).await.unwrap().unwrap();
+        assert_eq!(untouched.timezone, "UTC");
     }
 
     #[sqlx::test]
