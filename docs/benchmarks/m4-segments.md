@@ -93,8 +93,8 @@ through the API at this size (the smoke run, 100,000 people, compared all three 
 ### 2.4 Method
 
 Every measurement goes through the HTTP API as the bench owner. Preview: one warm-up and 20 timed
-`POST .../segments/preview` calls (sample size 20, the default), p50 and p95 by nearest rank,
-curl's `time_total`. A preview that returns 503 is recorded with its status, and the statement is then
+`POST .../segments/preview` calls (sample size 20, the default), p50 the median and p95 by nearest
+rank, of curl's `time_total`. A preview that returns 503 is recorded with its status, and the statement is then
 timed uncapped under `EXPLAIN (ANALYZE, BUFFERS)` through a hand-written mirror of the compiled SQL
 (`explain.sql`; the store cannot print the compiler's SQL, so the mirror's count is checked against the
 API's). Refresh: five fresh segments, each timed from the refresh job's `created_at` to the poll that
@@ -163,7 +163,7 @@ identified here (possibly a plan difference on the worker's connection). A manua
 nothing changes, is 5.4 s. The aggregate refresh is 57.6 s at the median (the compile plus the 45 s
 query), inside 10 min. Incremental: 22,084 event-caused entries into the aggregate segment (128,230
 members before, 150,313 after, 1 exit), p95 0.382 s, p99 9.7 s, max 13.3 s, target 60 s. The inbox and
-the marks were empty when the loadgen run ended. The refresh and re-evaluation jobs were measured as
+the marks were empty after the drain wait that follows the loadgen run. The refresh and re-evaluation jobs were measured as
 shipped only.
 
 ## 4. Decisions and follow-ups
@@ -185,15 +185,15 @@ rollup design is required and it must cover property-filtered aggregates.
 |---|---|---|---|
 | Trait-only preview on `jsonb` and on slots | 5.57 s and 6.14 s against 3 s | code-caused: generic plan of the persistent prepared statement; no `ANALYZE` after a backfill | `.persistent(false)` on the compiled segment count, sample and membership queries; `ANALYZE people` when a slot backfill reaches `ready`. With per-execution planning the slots reach 1.01 s |
 | Aggregate previews | 38.7 s and 97.5 s uncapped; 503 at 10 s | code-caused: correlated subquery per person | the compiler reshape of 4.1, then a rollup if that is not enough |
-| 10 s limit against the 15 s target | 503 even at 10 to 15 s | design inconsistency: architecture 8.2 fixes 10 s, section 19 targets 15 s | decide one number |
+| 10 s limit against the 15 s target | 503 even at 10 to 15 s | design inconsistency: architecture 8.2 fixes 10 s, section 19 targets 15 s | a fixed 20 s limit (ruling 9201125b) |
 
 What stays provisional under D1 (hardware pending M8) is whatever remains after those fixes. Section
 19's fallbacks (name-level dirty filtering, `database.read_url`, rollups) are not needed for the
 passes above.
 
-### 4.3 Follow-up issues (drafts, not filed)
+### 4.3 Follow-up issues
 
-**A. Segment queries lose their parallel plan after five executions (generic plan), and slot backfills leave no statistics**
+**A (#143). Segment queries lose their parallel plan after five executions (generic plan), and slot backfills leave no statistics**
 
 At 10 M people the slotted trait-only preview takes p95 6.14 s as shipped (target 3 s) and 1.01 s with
 `plan_cache_mode = force_custom_plan` (D4.3). The compiled count is a persistent sqlx prepared
@@ -207,7 +207,7 @@ only (not `plan_cache_mode` in `begin_snapshot_for`), and `ANALYZE people` when 
 and the trait-only first refresh varied between 78 s and 40 s across runs (unexplained). Evidence:
 `docs/benchmarks/data/m4/preview-slots*.json`, `preview-slots.api-sql.explain.txt`.
 
-**B. Segment aggregate predicates are a correlated subquery per person (OQ-2)**
+**B (#144). Segment aggregate predicates are a correlated subquery per person (OQ-2)**
 
 Compile event aggregates as a grouped set over events (workspace, name, window, property filters,
 `GROUP BY person_id HAVING agg op N`) semi-joined to `people`, with a `LEFT JOIN`/`COALESCE` form for
@@ -217,11 +217,12 @@ refresh of the aggregate segment takes 45 s per full recompute. Re-bench at the 
 "no rollup for v1" only if both cases meet 15 s, otherwise design a rollup that also covers
 property-filtered aggregates.
 
-**C. The 10 s preview timeout contradicts the 15 s aggregate target (architecture 8.2 against 19)**
+**C (#142). The 10 s preview timeout contradicts the 15 s aggregate target (architecture 8.2 against 19)**
 
 `PREVIEW_TIMEOUT` is a fixed 10 s (`crates/zirv-flow-api/src/segments/mod.rs:20`), with no setting.
-Meeting 15 s alone still leaves 503s for previews between 10 and 15 s. Decide one number (or make the
-limit configurable) and record it in 8.2 and 19.
+Meeting 15 s alone still leaves 503s for previews between 10 and 15 s. Ruling 9201125b: raise it to a
+fixed 20 s, a margin above the target, with no config key, and say so in 8.2; the section 19 targets
+stay.
 
 ## 5. Reproduce
 

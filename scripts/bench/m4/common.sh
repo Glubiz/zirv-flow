@@ -5,7 +5,7 @@
 # Environment (all optional):
 #   M4_PROJECT      compose project, default zirv-flow-m4bench (never the quickstart's or the
 #                   M2 bench's `zirv-flow-bench`)
-#   M4_STATE        untracked directory for credentials and state, default
+#   M4_STATE        git-ignored directory for credentials and state, default
 #                   <repo>/.zirv/work/78780329-2a06-4f61-835f-0bdad59d6dd2/m4-state. It holds
 #                   the owner password, the session header file and the loadgen key: never
 #                   commit it and never print its files.
@@ -33,6 +33,7 @@ BENCH_IMAGE_TAG="${BENCH_IMAGE_TAG:-0.55.0}"
 api_base="http://${M4_HOST:-127.0.0.1}:${M4_PORT:-8080}"
 mkdir -p "$M4_STATE" "$M4_OUT"
 chmod 700 "$M4_STATE" 2>/dev/null || true
+printf '*\n' >"$M4_STATE/.gitignore"
 
 case "$M4_TIER" in
   S) BENCH_APP_CPUSET="0-1"; mem=(2048 1638 410) ;;

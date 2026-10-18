@@ -2060,7 +2060,7 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? Open after the M4 benchmark (#127): a 90-day aggregate preview takes 38.7 s and a property-filtered sum 97.5 s at 10 M / 50 M against 15 s, from the compiler's correlated subquery per person. Next: reshape the compiler to a grouped set semi-joined to `people`, re-bench, and decide "no rollup for v1" only if both cases then meet 15 s; otherwise a rollup design that also covers property-filtered aggregates. See docs/benchmarks/m4-segments.md. | M4 follow-up (re-bench after the compiler reshape) |
+| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? Open after the M4 benchmark (#127): a 90-day aggregate preview takes 38.7 s and a property-filtered sum 97.5 s at 10 M / 50 M against 15 s, from the compiler's correlated subquery per person. Next: reshape the compiler to a grouped set semi-joined to `people`, re-bench, and decide "no rollup for v1" only if both cases then meet 15 s; otherwise a rollup design that also covers property-filtered aggregates. See docs/benchmarks/m4-segments.md. | M4, by the re-bench after the compiler reshape (#144) |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
