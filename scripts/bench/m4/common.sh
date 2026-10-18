@@ -12,7 +12,7 @@
 #   M4_OUT          where measurement results go, default $M4_STATE/out
 #   M4_HOST, M4_PORT  the API, default 127.0.0.1:8080
 #   M4_EMAIL        the bench owner, default bench@example.com
-#   M4_TIER         app tier S, M or L (tier.sh), default M: 4 vCPU, worker concurrency 4
+#   M4_TIER         app tier S, M or L (compose.tiers.yaml), default M: 4 vCPU, worker concurrency 4
 #   BENCH_IMAGE_TAG release tag of ghcr.io/glubiz/zirv-flow, default 0.55.0
 #   BENCH_PG_CPUSET, BENCH_PG_SHM  PostgreSQL cpuset (default 8-31) and /dev/shm (default 1gb)
 #
@@ -88,15 +88,11 @@ login() {
 # api METHOD PATH [BODY_FILE]: the JSON body on standard output; exit status 1 and the problem
 # on standard error for an HTTP status of 400 or more. PATH is below /api/v1.
 api() {
-  local method="$1" path="$2" data="${3:-}" out status
+  local method="$1" path="$2" data="${3:-}" out status body=()
   out="$(mktemp)"
-  if [ -n "$data" ]; then
-    status="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$api_base/api/v1$path" \
-      -H "@$M4_STATE/auth.hdr" -H 'content-type: application/json' --data-binary "@$data")"
-  else
-    status="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$api_base/api/v1$path" \
-      -H "@$M4_STATE/auth.hdr" -H 'content-type: application/json')"
-  fi
+  [ -z "$data" ] || body=(--data-binary "@$data")
+  status="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$api_base/api/v1$path" \
+    -H "@$M4_STATE/auth.hdr" -H 'content-type: application/json' ${body[@]+"${body[@]}"})"
   if [ "$status" -ge 400 ]; then
     echo "$method $path -> $status: $(head -c 600 "$out")" >&2
     rm -f "$out"

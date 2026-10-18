@@ -73,32 +73,31 @@ WHERE workspace_id = :'ws' AND slot_state = 'ready';
 SQL
 }
 
-# explain_to VARIANT OUTFILE [HI]: the EXPLAIN (ANALYZE, BUFFERS) of the mirrored statement; the
-# slot columns of the ready traits are passed along.
-explain_to() {
-  local variant="$1" out="$2" hi="${3:-}" slots args=()
+# sql_vars VARIANT MODE [HI]: the psql variables of explain.sql; the slot columns of the ready
+# traits are passed along. Fills the caller's array sql_args.
+sql_vars() {
+  local slots pair slot
   slots="$(ready_slots)"
-  args=(-v "ws=$ws" -v "variant=$variant" -v mode=explain)
-  [ -z "$hi" ] || args+=(-v "hi=$hi")
+  sql_args=(-v "ws=$ws" -v "variant=$1" -v "mode=$2")
+  [ -z "${3:-}" ] || sql_args+=(-v "hi=$3")
   for pair in plan:slot_plan age:slot_age marketing_opt_in:slot_opt; do
-    local slot
     slot="$(jq -r --arg k "${pair%%:*}" '.[$k] // empty' <<<"$slots")"
-    if [ -n "$slot" ]; then args+=(-v "${pair##*:}=$slot"); fi
+    if [ -n "$slot" ]; then sql_args+=(-v "${pair##*:}=$slot"); fi
   done
-  pg -At "${args[@]}" -f - <"$m4_dir/explain.sql" >"$out"
+}
+
+# explain_to VARIANT OUTFILE HI: the EXPLAIN (ANALYZE, BUFFERS) of the mirrored statement.
+explain_to() {
+  local sql_args=()
+  sql_vars "$1" explain "$3"
+  pg -At "${sql_args[@]}" -f - <"$m4_dir/explain.sql" >"$2"
 }
 
 # mirror_count VARIANT HI: the count of the mirrored statement.
 mirror_count() {
-  local variant="$1" hi="$2" slots args=()
-  slots="$(ready_slots)"
-  args=(-v "ws=$ws" -v "variant=$variant" -v mode=count -v "hi=$hi")
-  for pair in plan:slot_plan age:slot_age marketing_opt_in:slot_opt; do
-    local slot
-    slot="$(jq -r --arg k "${pair%%:*}" '.[$k] // empty' <<<"$slots")"
-    if [ -n "$slot" ]; then args+=(-v "${pair##*:}=$slot"); fi
-  done
-  pg -At "${args[@]}" -f - <"$m4_dir/explain.sql"
+  local sql_args=()
+  sql_vars "$1" count "$2"
+  pg -At "${sql_args[@]}" -f - <"$m4_dir/explain.sql"
 }
 
 # plan_indexes FILE: the distinct index names an EXPLAIN plan scans, as a JSON array.
@@ -117,14 +116,13 @@ preview_body() { # DEFINITION_FILE -> a request file
 # preview_series PHASE DEFINITION_NAME VARIANT TARGET_S: the warm-up, the timed runs, the plan.
 preview_series() {
   local phase="$1" def="$2" variant="$3" target="$4"
-  local body out samples i res status secs
+  local body out samples i res status secs warm
   body="$(preview_body "$m4_dir/defs/$def.json")"
   out="$(tmpfile)"
   samples="$(tmpfile)"
   log "$phase: warm-up and $runs timed previews of $def"
   res="$(timed_post "/workspaces/$ws/segments/preview" "$body" "$out")"
-  jq -nc --arg r "$res" '($r | split(" ")) as $x | {status: ($x[0] | tonumber), seconds: ($x[1] | tonumber)}' \
-    >"$M4_OUT/$phase.warmup.json"
+  warm="$(jq -nc --arg r "$res" '($r | split(" ")) as $x | {status: ($x[0] | tonumber), seconds: ($x[1] | tonumber)}')"
   for i in $(seq 1 "$runs"); do
     res="$(timed_post "/workspaces/$ws/segments/preview" "$body" "$out")"
     status="${res% *}"
@@ -140,17 +138,16 @@ preview_series() {
   local mirror
   mirror="$(mirror_count "$variant" "$last_hi")"
   jq -n --arg phase "$phase" --arg def "$def" --slurpfile definition "$m4_dir/defs/$def.json" \
-    --slurpfile samples "$samples" --slurpfile warm "$M4_OUT/$phase.warmup.json" \
+    --slurpfile samples "$samples" --argjson warm "$warm" \
     --argjson target "$target" --argjson indexes "$(plan_indexes "$M4_OUT/$phase.explain.txt")" \
     --arg mirror "$mirror" --arg ws "$ws" --arg at "$(date -u +%FT%TZ)" \
-    --argjson stats "$(jq -s '[.[].seconds]' "$samples" | jq -c '.[]' | stats)" '
+    --argjson stats "$(jq -c .seconds "$samples" | stats)" '
     {phase: $phase, workspace: $ws, measured_at: $at, definition_name: $def, definition: $definition[0],
-     runs: ($samples | length), warmup: $warm[0], samples: $samples, seconds: $stats,
+     runs: ($samples | length), warmup: $warm, samples: $samples, seconds: $stats,
      non_200: ($samples | map(select(.status != 200)) | length),
      count: ($samples | map(.count) | map(select(. != null)) | unique),
      mirror_count_at_last_compiled_at: ($mirror | tonumber), target_p95_s: $target,
      explain_indexes: $indexes}' >"$M4_OUT/$phase.json"
-  rm -f "$M4_OUT/$phase.warmup.json"
   jq -c '{phase, runs, seconds, non_200, count, mirror_count_at_last_compiled_at, explain_indexes}' "$M4_OUT/$phase.json"
 }
 
@@ -282,13 +279,13 @@ SQL
 phase_incremental() {
   [ -x "$loadgen" ] || die "no loadgen at $loadgen; cargo build --release -p zirv-flow-loadgen"
   [ -s "$M4_STATE/loadgen.key" ] || die "no ingest key; run setup.sh"
-  local name created seg since t_call timing before after deadline pending latency
+  local name created seg since t_call before after deadline pending latency
   name="m4-incremental-$(date -u +%H%M%S)"
   t_call="$(pg -At -c 'SELECT clock_timestamp()')"
   created="$(api_json POST "/workspaces/$ws/segments" \
     "$(jq -nc --arg n "$name" --slurpfile d "$m4_dir/defs/agg90.json" '{name: $n, definition: $d[0], cadence_minutes: 10080}')")"
   seg="$(jq -r .id <<<"$created")"
-  timing="$(job_wait "$seg" "$t_call")"
+  job_wait "$seg" "$t_call" >/dev/null
   before="$(api GET "/workspaces/$ws/segments/$seg" | jq -c '{member_count, computed_version}')"
   log "incremental: segment $seg refreshed ($before); loadgen $inc_rate/s for $inc_seconds s over $inc_pool people"
   since="$(pg -At -c "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
