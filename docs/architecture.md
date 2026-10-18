@@ -1968,6 +1968,17 @@ items per second, and a measured 10-minute burst at 10,000/s drained in 890 s (1
 the 15-minute target, a thin margin. The figures
 are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
 
+**As measured (M4).** The segment rows were measured at 10 million people and 50 million events on a
+development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU), image 0.56.0, in
+[docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md). Held: full refresh (trait-only 77.6 s
+against 2 min, with an aggregate 57.6 s against 10 min) and event to `segment.entered` (p95 0.38 s
+against 60 s). Missed, and code-caused rather than hardware: the trait-only preview (p95 6.14 s on
+slots against 3 s; 1.01 s once each execution is planned on its own, because the persistent prepared
+statement falls back to a generic plan after five executions and a slot backfill leaves no statistics)
+and both aggregate previews (503 at the fixed 10 s limit; 38.7 s and 97.5 s uncapped against 15 s,
+from a correlated subquery per person). OQ-2 stays open (21); the 10 s limit of 8.2 also contradicts
+the 15 s target. The figures are not a v1 sign-off.
+
 ## 20. Key decisions
 
 ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 to ADR-009 are **Accepted**;
@@ -2049,7 +2060,7 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? | M4, by benchmark (#127) |
+| OQ-2 | Do event aggregates need a per-person daily rollup; how are property-filtered aggregates served at 10 M people? Open after the M4 benchmark (#127): a 90-day aggregate preview takes 38.7 s and a property-filtered sum 97.5 s at 10 M / 50 M against 15 s, from the compiler's correlated subquery per person. Next: reshape the compiler to a grouped set semi-joined to `people`, re-bench, and decide "no rollup for v1" only if both cases then meet 15 s; otherwise a rollup design that also covers property-filtered aggregates. See docs/benchmarks/m4-segments.md. | M4 follow-up (re-bench after the compiler reshape) |
 | OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
