@@ -254,7 +254,13 @@ describe("the runs of a source", () => {
 
     expect(await screen.findByText("Running")).toBeInTheDocument();
     expect(await screen.findByText("Succeeded")).toBeInTheDocument();
-    const settled = reads;
+    // A poll that started before "Succeeded" rendered may still reach the server afterwards, so take
+    // the baseline once the read count has held still for a whole poll period.
+    let settled = -1;
+    while (settled !== reads) {
+      settled = reads;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(reads).toBe(settled);
   });
