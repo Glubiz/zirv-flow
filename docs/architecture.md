@@ -181,6 +181,11 @@ The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
 I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
 `connectors`, `ai` and `identity` are the outbound-I/O crates.
 
+`engine` depends on `core` only, so it never sees `segments`. The flow graph types
+and their structural publish validation (cycles, unreachable nodes, untyped edges)
+live in `core::flow`. The engine's simulation uses a seeded test evaluator; the
+reference evaluator lives in `segments` and is used by test mode in `api` (9.4).
+
 Two cross-cutting policies add no crate and no edge. The egress policy (16.1) is
 pure code in `core::egress` (address classification, allowlist matching, the
 decision type); `connectors` and `ai` each enforce it at their own connect point.
@@ -256,9 +261,10 @@ the app shell composes features, not the reverse.
 - Reviews never loosen an allowlist, purity rule or import boundary merely to
   make a change pass. A boundary change requires an architecture decision.
 
-The engine evaluates branch conditions through an injected
-`ConditionEvaluator` (production: `segments` + `store`; simulation: the
-reference evaluator). The renderer never evaluates conditions itself: it lists
+The engine yields branch conditions to an injected `ConditionEvaluator`
+(production: compiled SQL from `segments`, run by `store` in the step transaction;
+test mode: the reference evaluator over a snapshot; simulation: a seeded test
+evaluator, 9.2 and 9.4). The renderer never evaluates conditions itself: it lists
 a template's block conditions, the handler evaluates them in one
 `ConditionEvaluator` call, and the results go into the render as plain inputs
 (section 11.4). CI builds `web/` before the release build; `build.rs` embeds `web/dist`, or a
@@ -329,7 +335,8 @@ erDiagram
 | Consent | Recorded consent: state per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. It is the input to the workspace consent policy (10.1), which decides effective consent. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
 | List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). Erasure and person deletion remove a person's membership rows; a merge closes the merged person's rows, and the survivor's `merge` change class (7.1) re-evaluates it. |
-| Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
+| Workspace | Isolation unit. `workspaces.timezone` is an IANA zone name, default `UTC`, set by an Admin. It is the fallback zone for `wait.until_time` (9.1). |
+| Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. The enrollment context holds ids only (9.3). `flow_entries(flow_id, person_id, entries, last_entered_at)` records each person's entries for the re-entry rule, and a partial unique index allows one active enrollment per flow and person (9.4). One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
 | Template, template version | Channel (`email`, `webhook`; `sms`, `push`, `in_app` reserved), category, mode (`blocks` or `code`) and a versioned content document (section 11). Versions are immutable once published. |
 | Snippet, snippet version | Reusable block fragment (e.g. legal footer). Templates reference the snippet, and rendering uses its current published version. |
 | Brand theme, theme version | One per workspace: colours, fonts, logo asset, default footer snippet. Published versions are immutable; rendering uses the current one. |
@@ -706,8 +713,9 @@ connector delete or a reconciliation. Lists only add: a removed record's list me
 | Segment | `computed_at` plus the oldest input freshness of sources feeding its dependencies | "Data as of ..." on counts and membership |
 | Send decision | Segment and trait freshness at decision time | recorded on the message |
 
-Stale and failing sources are metrics and Sources-page badges (auto-pausing
-sends on stale inputs is OQ-14). The connector runtime, not each connector,
+Stale and failing sources are metrics and Sources-page badges. Flows do not pause
+on stale inputs; they record input freshness on external effects and warn (OQ-14,
+21.1). The connector runtime, not each connector,
 owns (ADR-004): auth (API key, basic, bearer, OAuth2 client credentials and
 authorization code with refresh), retries honouring `Retry-After`, rate limits,
 pagination (cursor, offset, page, link header), checkpoints, the egress policy
@@ -942,21 +950,48 @@ A **flow** has drafts and immutable published **versions**: directed acyclic
 graphs of typed nodes with stable node ids. Publish validation rejects cycles,
 unreachable nodes and untyped edges. Lifecycle: `draft -> published -> paused ->
 archived`; enrollments stay on the version they entered, new ones use the latest
-(migrating in-flight enrollments is OQ-7). Triggers: segment entered or exited
+(in-flight enrollments do not migrate, OQ-7, 21.1). Triggers: segment entered or exited
 (optionally enrolling current members at publish); named event with property
 filters; schedule (cron + time zone, audience = segment or everyone); manual
 start for an audience; API (`POST .../flows/{id}/enrollments`).
 
+**Segment triggers.** The membership diff transaction (refresh and re-evaluation)
+enqueues `flow.enroll` for the published, not-paused flows triggered by that
+segment's entry or exit, ignoring `definition_change`. A payload holds at most 1,000
+pairs of person and segment event id, and the segment event id is the trigger
+occurrence. "Enroll current members at publish" fans out over `segment_members` in
+batches of 1,000, with the publish as the occurrence.
+
+**Event triggers.** They are checked in the apply transaction, once per batch. One
+query joins the batch's events with the published, not-paused event-trigger flows, the
+`enrollment_waits` rows, and the event-based goals and exit criteria (9.4). It skips
+events flagged `no_triggers` and forwarding re-drives (12.2). Property filters use the
+segment AST's event-property filter nodes.
+
+**Time zones.** A person's `timezone` trait overrides the workspace zone
+(`workspaces.timezone`, 6) for `wait.until_time`. An invalid zone falls back to the
+workspace zone, and the fallback is recorded on the step decision. Schedule triggers use
+the trigger's own zone.
+
 | Node | Behaviour |
 |------|-----------|
-| `wait.duration`, `wait.until_time` | Resume after a duration, or at a local time/date (person `timezone` trait, else workspace zone) |
+| `wait.duration`, `wait.until_time` | Resume after a duration, or at a local time/date (person `timezone` trait, else workspace zone; invalid zone falls back, recorded) |
 | `wait.until_event` | Resume on a matching event, or take the timeout edge |
 | `branch` | Ordered segment-AST conditions evaluated for this person now, plus else |
 | `split.random` | Percentage split by stable hash of `(enrollment_id, node_id)` (reproducible in simulation) |
 | `action.send` | Message via destination + template, through the send pipeline (10.1) |
-| `action.webhook`, `action.sync` | Signed HTTP call; upsert/remove the person in a destination |
-| `action.update_trait`, `action.list` | Set/increment/unset a trait (as source `flow:<id>`); add/remove list membership |
+| `action.webhook`, `action.sync` | Signed HTTP call (below); upsert/remove the person in a destination |
+| `action.update_trait`, `action.list` | Set/increment/unset a trait (as source `flow:<flow_id>`, below); add/remove list membership |
 | `goal`, `exit` | Record conversion (optionally exit); end the enrollment |
+
+**`action.webhook`** (ruling 9cb0bea9).
+
+- **Payload.** A fixed JSON envelope with no templating in M5: `flow_id`, `version`, `node_id`, `enrollment_id`, `person_id`, `trace_id`, the idempotency key and `occurred_at`, plus only the trait keys an editor lists on the node. M6 adds templated payloads.
+- **Signing.** The exact body bytes are signed with `core::signature::sign(secret, timestamp, body)`. The key is a per-workspace webhook signing secret, held in `encrypted_secrets` (16.2), rotatable and shown once. The request carries signature, timestamp and idempotency-key headers.
+- **Delivery.** A `webhook.call` job sends it through the guarded client and the egress policy (16.1), with retry and backoff. A 2xx response succeeds. A 4xx other than 408 and 429 is terminal. Outcome events `webhook.succeeded` and `webhook.failed` carry the node and enrollment ids.
+- **Freshness.** Every external-effect step decision (webhook in M5, send in M6) records the freshness of the flow's inputs (OQ-14, 21.1).
+
+**`action.update_trait`.** It writes the flow's own contribution as source `flow:<flow_id>`. Set writes the value; unset removes the flow's contribution. Increment reads the person's effective value (missing counts as 0; a non-number fails the step) and writes the sum.
 
 ### 9.2 Execution model
 
@@ -964,10 +999,18 @@ start for an audience; API (`POST .../flows/{id}/enrollments`).
 pub fn step(
     graph: &FlowGraph,
     state: &EnrollmentState,
-    input: StepInput,      // Start | TimerDue | EventArrived(..) | Resume
+    input: StepInput,      // Start | TimerDue | EventArrived(..) | Resume | ConditionsEvaluated(..)
     ctx: &dyn StepContext, // injected Clock + ConditionEvaluator
 ) -> Result<Transition, EngineError>; // Transition { state, effects, wake, outcome }
 ```
+
+`step` stays pure. At a `branch` it returns a `NeedsConditions` transition (supervisor
+ruling, unparsed reply): the node and its conditions, with the effects so far. The jobs
+runtime applies those internal effects, evaluates each condition for this one person with
+the compiled SQL in the same transaction (exact, and it sees the effects), then calls
+`step` again with `ConditionsEvaluated`. The evaluator is an engine trait. Test mode
+implements it with the reference evaluator over a snapshot, with the captured internal
+effects overlaid. Each yielded effect is applied exactly once.
 
 One call advances through consecutive non-blocking nodes and stops at a wait,
 an exit or the end of the graph. **Internal effects** (trait update, list,
@@ -978,10 +1021,12 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 
 ### 9.3 Durability, idempotency, timers
 
-- Enrollment state (node, context, `wake_at`, `state_version`) lives in Postgres. Each `flow.step` job carries the `state_version` it expects; stale jobs are no-ops. So when an awaited event races its timeout, the first commit wins.
+- Enrollment state (node, context, `wake_at`, `state_version`) lives in Postgres. The context stores ids only: trigger kind, occurrence id (event id, segment event id or schedule slot), trace and cause. It holds no property or trait values. Each `flow.step` job carries the `state_version` it expects; stale jobs are no-ops. So when an awaited event races its timeout, the first commit wins.
 - Step idempotency key: `(enrollment_id, node_id)`, sufficient because graphs are acyclic and re-entry creates a new enrollment. It is stored on `step_executions` and passed to effect jobs and destinations.
 - A wait sets `wake_at` and enqueues `flow.step` with `run_at = wake_at`, unique key `wake:{enrollment_id}:{state_version}`. `wait.until_event` also writes `enrollment_waits(person_id, event_name, enrollment_id, timeout_at)`, which apply-batch checks on event insert.
 - Failed steps retry with backoff; then the enrollment is `failed` with the error visible, and an operator can retry or skip.
+- Merge: the merged-away person's active enrollments exit with reason `merge` on the merge trace and their `enrollment_waits` are removed; the survivor keeps its own enrollments. Erasure deletes enrollments, `step_executions`, `enrollment_waits` and `flow_entries` (16.3).
+- Per-node counts are computed on read from `step_executions`, with an index and a statement timeout. There are no hot counter rows.
 - Enrollment states: `active`, `waiting` (timer or event), `awaiting_conditions` (yielded at a branch; transient, since the runtime evaluates the conditions and resumes in the same transaction), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
 
 ### 9.4 Enrollment rules and test mode
@@ -989,17 +1034,33 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 | Rule | Behaviour |
 |------|-----------|
 | Fan-out | `flow.enroll` jobs of up to 1,000 people; idempotent on `(flow_id, person_id, trigger_occurrence)` (event id or schedule slot) |
-| Re-entry | `once`, `once_at_a_time` (after the previous ends), or `always` with a minimum interval; partial unique index on active enrollments + history check |
-| Exit criteria | Leaves trigger segment, event occurs, or goal reached; checked from dirty marks and events for people with active enrollments |
-| Pause | No new enrollments (skips are counted); due timers held and re-enqueued on resume |
+| Re-entry | `once` refuses any person with a `flow_entries` row, `once_at_a_time` refuses while an enrollment is active (partial unique index on active enrollments per flow and person), `always` checks the minimum interval. A refused enrollment is a `flow.enroll` decision with outcome `skipped` and its reason |
+| Goal | Optional per flow: a named event (same property filters as an event trigger) or entry into a chosen segment. Reaching it during an active enrollment records a conversion (ruling 4d134de2); the setting "exit on goal" ends the enrollment. Graph `goal` nodes also record a conversion |
+| Exit criteria | A list of: leaves the trigger segment (with a cause other than `definition_change`), a named event occurs, goal reached (ruling 4d134de2). All are checked from the existing hooks: the event-insert path, and the `segment.entered` and `segment.exited` writes of refresh and re-evaluation. There are no arbitrary AST goals in v1 |
+| Pause | No new enrollments (skips are counted and recorded); due timers and arrived events are held and re-enqueued on resume |
+| Archive | Exits the active enrollments with reason `flow_archived` |
+| Publish | Shows how many active enrollments stay on older versions. An Admin can end every enrollment of an older version in bulk; each exits with cause `manual` and gets its own decision (ruling 469cfc51) |
 
 The injected clock and evaluator let one engine run three ways. **Test mode**
 (UI and API) walks a real or synthetic person through a version on a virtual
-clock: conditions read the profile store, effects are captured not executed,
-events can be injected to satisfy waits, and the UI shows the path.
-**Simulation tests** run thousands of enrollments over virtual months with the
-reference evaluator and injected crashes (section 18). **Production** uses wall
-time, with due-time comparisons in SQL.
+clock: conditions are evaluated by the reference evaluator over a snapshot,
+effects are captured not executed, events can be injected to satisfy waits, and
+the UI shows the path. **Simulation tests** run thousands of enrollments over
+virtual months with a seeded test evaluator and injected crashes (section 18);
+the engine does not depend on the reference evaluator, which lives in `segments`.
+**Production** uses wall time, with due-time comparisons in SQL.
+
+**Test mode request** (ruling 90fa390a). A stateless, deterministic
+`POST .../flows/{id}/test` takes a draft graph or a version; a person (a real person
+id, whose bounded snapshot is loaded read-only, or a synthetic snapshot); a start time;
+and a script of steps (advance the clock to T, or inject event E at T). It returns the
+path (nodes with times and branch results, plus observed values), the captured internal
+and external effects, the waits and wakes, and the final state. It writes no rows. A
+capped, unknown condition stops the walk with an "unable to evaluate" result that names
+the condition and the cap; the partial path is still returned. The first call for a real
+person returns the snapshot it used, and a replay re-posts that snapshot. The person is
+read once, so the walk stays deterministic. A client-supplied snapshot is just a
+synthetic person: test mode has no side effects, so it needs no signature.
 
 ## 10. Channels, destinations and delivery tracking
 
@@ -1355,6 +1416,12 @@ delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
 action type, outcome, durable domain ids and one typed cause: `event`,
 `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`, with the
 cause id. It never stores identifier, trait or event-property values.
+For enrollments a segment trigger keeps the cause of the membership change; an event
+trigger is cause `event` with the event id; a schedule trigger is cause `schedule`, the
+API trigger cause `api`, and operator actions (retry, skip, bulk exit, manual audience
+enrollment) cause `manual`. Every enrollment, step, branch, wait, failure, retry and
+skip decision stays under the originating trace. Every external-effect step decision
+records the freshness of the flow's inputs (9.1, OQ-14).
 A sync writes one decision per record, appended with one multi-row insert per
 batch in the apply-batch transaction.
 
@@ -1484,7 +1551,7 @@ schema. The registry contains workspace-scoped reads and draft creation only:
 | Artifact | Assistant work | Deterministic authority and review |
 |----------|----------------|------------------------------------|
 | Segment AST | Draft or explain a segment | Segment parser/compiler; diff plus preview count and sample |
-| Flow graph | Draft or explain a flow | Flow publish validation; graph diff plus simulation summary |
+| Flow graph | Draft or explain a flow | Flow publish validation (`core::flow`); graph diff plus simulation summary (test-mode walks of synthetic persons, 9.4) |
 | Template document | Draft copy, subject variants, layout or translation | Template validation; rendered diff at desktop/mobile widths |
 | Source field mapping | Draft mappings from schema and samples | Mapping schema and sample dry run; field-by-field diff |
 | HTTP connector manifest | Draft a manifest from pasted API documentation | Manifest schema and mock/test-connection preview |
@@ -1848,6 +1915,10 @@ As built (M3): `core::secrets` seals a secret with a random 32-byte data key and
 
 Editors create segments, save current segment versions (ruling e4aa60bb) and refresh a segment now; viewers read its members and history.
 
+Flow permissions until the M8 Publisher role exists (ruling 43163028). Read: flows, versions, enrollments and counts. Write (a member, or a write-scoped key): drafts, validation and test mode, and the API trigger `POST .../flows/{id}/enrollments`. Admin: publish, pause, resume and archive; operator retry and skip; the bulk exit of old-version enrollments; a manual audience enrollment.
+
+The per-workspace webhook signing secret for `action.webhook` (9.1) is stored in `encrypted_secrets`, rotatable and shown once.
+
 M1 ships owner, admin and member; the full matrix lands in M8. The **audit
 log** is append-only (actor, action, object, time, request id, change summary
 without personal data values) and covers sign-ins, membership and key changes,
@@ -1863,7 +1934,7 @@ history, enrollments, messages) behind an expiring link. **Erasure**
 (`privacy.erase`): (1) record the request in the erasure ledger (person id,
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
-segment memberships, enrollments, step executions, messages, test-send log entries,
+segment memberships, enrollments, step executions, enrollment waits, flow entries, messages, test-send log entries,
 person-scoped decision records, stored assistant transcripts, pending
 and dead forwarding payloads and pending exports, and clear saved preview-person
 references; (4) call `erase` on forwarding and delivery destinations that
@@ -1918,7 +1989,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 |-------|-------|
 | `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; the AST generators (`proptest`, behind a `test-support` feature) and the golden corpus live in `segments`, golden files blessed with `ZIRV_FLOW_BLESS` |
 | Segments on PostgreSQL | Tests in `zirv-flow-jobs` comparing compiled SQL on Postgres with the reference evaluator; CI runs fixed seeds, and a scheduled nightly workflow runs random seeds without filing issues |
-| `engine` | Inline unit tests; deterministic simulation: virtual clock, crash after every effect, randomized event arrival. Invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. |
+| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |
@@ -1952,7 +2023,7 @@ replica for preview and explain (deferred, 8.3), event rollups (OQ-2), then the 
 | Segment preview, 10 M people | p95 < 3 s trait-only; < 15 s with a 90-day event aggregate |
 | Full segment refresh, 10 M people | < 2 min trait-only; < 10 min with event aggregates |
 | Event to segment entry to enrollment | p95 < 60 s |
-| Waiting enrollments; timer lateness | 10 million; p99 < 60 s at that volume |
+| Waiting enrollments; timer lateness | 10 million; p99 < 60 s at that volume (M5 measures at 1 million, M8 at 10 million) |
 | Job throughput | 1,000 jobs/s claimed and completed |
 | Send throughput | 300 messages/s per deployment, provider limits permitting |
 | Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message |
@@ -1985,6 +2056,8 @@ the previews had missed because the persistent prepared statement fell back to a
 executions, a slot backfill left no statistics, and an aggregate was a correlated subquery per person (38.7 s
 and 97.5 s uncapped; 503 at the 10 s limit, which also contradicted the 15 s target). An aggregate preview on
 a cold cache can take about 15 s. D4.1 on `jsonb` was not re-run. The figures are not a v1 sign-off.
+
+M5 measures timer lateness at 1 million waiting enrollments (exit criterion 8). The 10 million row stays the target for the M8 reference-hardware run.
 
 ## 20. Key decisions
 
@@ -2067,13 +2140,11 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-7 | Can in-flight enrollments migrate to a new flow version? | M5 |
 | OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
 | OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
 | OQ-11 | Scope and timing of a dedicated transactional messaging API | M6 |
 | OQ-12 | Bounce handling for SMTP-only setups without provider webhooks (VERP, DSN mailbox polling)? | M6 |
 | OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
-| OQ-14 | Should flows pause sends automatically when an input source is stale? | M5 |
 | OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? Decided in M1: OIDC SSO through any compliant provider, with Keycloak as the reference. | Closed (M1) |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
@@ -2134,6 +2205,16 @@ they were ruled as their capabilities were added to the plan.
   `definition_change`; events and decisions are recorded. Flow segment-entry and segment-exit
   triggers ignore `definition_change` changes. A flow that wants the current members chooses
   "enroll current members" at publish (M5). Section 8.4.
+
+- **OQ-7:** Decided for v1 (ruling 469cfc51). In-flight enrollments do not migrate: they stay
+  pinned to their version until they end. Publishing shows how many active enrollments stay
+  on older versions. An Admin can end every enrollment of an older version in bulk; each one
+  exits with cause `manual` and gets its own decision. Migration stays a post-1.0 theme
+  (9.1, 9.4).
+- **OQ-14:** There is no automatic pause in v1 (ruling 5c679ecb). Every external-effect step
+  decision (webhook in M5, send in M6) records the freshness of the flow's inputs: the trigger
+  segment, and the segments and sources behind the branch conditions. The flow page and the
+  publish dialog warn when an input is stale or failing, and operators pause by hand (9.1, 12.4).
 
 - **Segment semantics (M4):** leaves are two-valued, `not` is boolean negation that normalization
   never pushes into a leaf operator, and aggregates over zero events are missing except `count`
