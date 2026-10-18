@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, ErrorState, formatDateTime, HiddenValue, LoadingState, Panel, SelectField, shortId } from "../../ui";
 import { fromDefinition, getAt, place, type Node } from "./ast";
-import { describeNode, valueText, type Names } from "./describe";
+import { describeNode, namesOf, valueText, type Names } from "./describe";
 
 type Explain = components["schemas"]["ExplainBody"];
 type ExplainNode = components["schemas"]["ExplainNodeBody"];
@@ -200,10 +200,7 @@ export function SegmentExplainPanel({ workspaceId, personId }: PanelProps) {
     [workspaceId, personId, segmentId, version],
   );
 
-  const names: Names = {
-    lists: new Map(lists.status === "ready" ? lists.data.map((list) => [list.id, list.name]) : []),
-    segments: new Map(segments.status === "ready" ? segments.data.map((segment) => [segment.id, segment.name]) : []),
-  };
+  const names = namesOf(lists.status === "ready" ? lists.data : undefined, segments.status === "ready" ? segments.data : undefined);
 
   function definitionOf(result: Explain): Node | null {
     if (versions.status !== "ready") return null;

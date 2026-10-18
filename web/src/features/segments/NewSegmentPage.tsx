@@ -1,6 +1,7 @@
 import { Link, useParams } from "react-router";
 
 import { EmptyState, PageHeader, Panel } from "../../ui";
+import { useAssistantEnabled } from "../assistant";
 import { useSegmentAccess } from "./access";
 import { SegmentForm } from "./SegmentForm";
 
@@ -10,7 +11,8 @@ export function NewSegmentPage() {
 }
 
 function NewSegment({ workspaceId }: { workspaceId: string }) {
-  const { canWrite } = useSegmentAccess(workspaceId);
+  const { canWrite, canUseAssistant } = useSegmentAccess(workspaceId);
+  const assistantOn = useAssistantEnabled(workspaceId, canUseAssistant);
   return (
     <div className="page">
       <p>
@@ -18,7 +20,7 @@ function NewSegment({ workspaceId }: { workspaceId: string }) {
       </p>
       <PageHeader title="New segment" lede="Say who belongs, and watch the count as you build the rule." />
       {canWrite ? (
-        <SegmentForm workspaceId={workspaceId} segment={null} canWrite />
+        <SegmentForm workspaceId={workspaceId} segment={null} canWrite assistant={assistantOn} />
       ) : (
         <Panel flush>
           <EmptyState title="You cannot create segments">Ask a member of the workspace to create one, or to give you a role.</EmptyState>

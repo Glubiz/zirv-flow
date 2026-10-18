@@ -9365,6 +9365,163 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/segments/{id}/ai/explain": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "summary": "Explains a saved version of a segment in plain language: a summary and a sentence for every\ncondition, each named by its JSON pointer. The model's answer is checked (every pointer must\nbe a node, every condition cited once, plain text with a length cap) and, when it fails,\nasked again at most `ai.max_repair_attempts` times. Nothing is stored. Workspace admins who\nare signed in; an API key is refused. Every attempt is a gated model call that counts against\nthe budget and the rate limit, and with the assistant off nothing is read or sent. The model\nis not told any trait or event value, count, sample or member.",
+        "operationId": "explain_segment_with_ai",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AiExplainRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiExplainBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or an API key (`ai_user_required`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, segment or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The assistant is off (`ai_disabled`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The model's explanation did not pass its checks within the repair attempts (`ai_explain_failed`, with the issue codes), or the body is not a version",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many AI calls (`ai_rate_limited`); try again in a minute",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The model provider failed (`ai_provider_error`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the provider key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/segments/{id}/archive": {
       "post": {
         "tags": [
@@ -14023,6 +14180,13 @@
           "kind": {
             "$ref": "#/components/schemas/DraftKindBody"
           },
+          "segment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "source_id": {
             "type": [
               "string",
@@ -14186,6 +14350,66 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "AiExplainBody": {
+        "type": "object",
+        "description": "The explanation of one segment version.",
+        "required": [
+          "version",
+          "summary",
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiExplainedNode"
+            },
+            "description": "One entry for every condition of the definition, and for some compositions."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Who the segment holds, in plain text."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version that was explained."
+          }
+        }
+      },
+      "AiExplainRequest": {
+        "type": "object",
+        "description": "Which version to explain.",
+        "properties": {
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version of the segment to explain; the current one when absent."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AiExplainedNode": {
+        "type": "object",
+        "description": "What the model said about one node of the definition.",
+        "required": [
+          "pointer",
+          "text"
+        ],
+        "properties": {
+          "pointer": {
+            "type": "string",
+            "description": "The JSON pointer of the node in the version's definition; empty for the root."
+          },
+          "text": {
+            "type": "string",
+            "description": "Plain text. Show it as text, never as markup."
           }
         }
       },
@@ -16022,7 +16246,8 @@
         "description": "What a draft is of.",
         "enum": [
           "mapping",
-          "manifest"
+          "manifest",
+          "segment"
         ]
       },
       "DraftRequest": {
@@ -16060,6 +16285,14 @@
               }
             },
             "description": "For a webhook stream, which has no source to read: 1 to 20 JSON objects (64 KiB in all).\nIts top-level keys are the stream's fields for this draft. Required for a webhook stream\nand refused for any other."
+          },
+          "segment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a segment: the segment being edited; absent for a new one. Refused for the other kinds."
           },
           "source_id": {
             "type": [

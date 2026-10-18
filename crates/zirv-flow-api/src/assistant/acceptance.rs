@@ -1515,4 +1515,767 @@ mod tests {
         let mapping: Mapping = serde_json::from_value(good_mapping()).unwrap();
         assert_eq!(mapping.columns.len(), 2);
     }
+
+    // ---- the segment assistant (#126) ----
+
+    impl Fixture {
+        /// A trait of the registry for definitions to name.
+        async fn string_trait(&self, key: &str, pii: bool) {
+            zirv_flow_store::create_trait_definition(
+                &self.pool,
+                self.ws,
+                &zirv_flow_store::NewTraitDefinition {
+                    key: key.into(),
+                    trait_type: zirv_flow_core::people::TraitType::String,
+                    precedence: zirv_flow_core::people::Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii,
+                    channel_address: false,
+                    inferred: false,
+                    description: format!("The {key}."),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        /// The `plan` trait (clear) and the `city` trait (personal).
+        async fn segment_traits(&self) {
+            self.string_trait("plan", false).await;
+            self.string_trait("city", true).await;
+        }
+
+        /// Saves a segment through the API and returns its id.
+        async fn segment(&self, name: &str, definition: Value) -> String {
+            let created = self
+                .path_as(
+                    &self.admin,
+                    "POST",
+                    "/segments",
+                    Some(json!({"name": name, "definition": definition})),
+                )
+                .await;
+            assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+            created.body["id"].as_str().unwrap().to_owned()
+        }
+
+        async fn explain(&self, who: &Login, segment: &str, body: Option<Value>) -> Reply {
+            self.path_as(
+                who,
+                "POST",
+                &format!("/segments/{segment}/ai/explain"),
+                body,
+            )
+            .await
+        }
+    }
+
+    fn saved_definition() -> Value {
+        json!({"v": 1, "all": [
+            {"trait": "city", "op": "in", "value": ["Aarhus", "Odense"]},
+            {"trait": "plan", "op": "eq", "value": "free"}
+        ]})
+    }
+
+    fn segment_run(segment: Option<&str>) -> Value {
+        let mut body = json!({"kind": "segment", "prompt": "Make it the pro plan"});
+        if let Some(segment) = segment {
+            body["segment_id"] = json!(segment);
+        }
+        body
+    }
+
+    fn pro_in_the_same_cities() -> Value {
+        json!({"definition": {"v": 1, "all": [
+            {"trait": "city", "op": "in", "value": ["(kept:1)", "(kept:2)"]},
+            {"trait": "plan", "op": "eq", "value": "pro"}
+        ]}})
+    }
+
+    fn explanation(texts: &[(&str, &str)]) -> Value {
+        json!({"summary": "People in two cities on a plan.",
+            "nodes": texts.iter()
+                .map(|(pointer, text)| json!({"pointer": pointer, "text": text}))
+                .collect::<Vec<_>>()})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_segment_is_drafted_with_the_catalog_as_context_and_every_node_added(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let sent = fx.fake.call_count();
+        let definition = json!({"v": 1, "trait": "plan", "op": "eq", "value": "pro"});
+        fx.fake
+            .push(answer("draft_segment", json!({"definition": definition})));
+
+        let reply = fx.draft(segment_run(None)).await;
+
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["kind"], "segment");
+        assert_eq!(reply.body["status"], "valid");
+        assert_eq!(reply.body["content"], definition);
+        assert!(reply.body["dry_run"].is_null());
+        let changes = reply.body["changes"].as_array().unwrap();
+        assert!(!changes.is_empty());
+        assert!(changes.iter().all(|change| change["change"] == "added"));
+        let requests = fx.requests_after(sent);
+        assert_eq!(tool_names(&requests[0]), ["draft_segment"]);
+        let text = everything(&requests[0]);
+        assert!(text.contains("- plan (string): The plan."), "{text}");
+        assert!(text.contains("No definition is saved yet."), "{text}");
+        let id: Uuid = reply.body["id"].as_str().unwrap().parse().unwrap();
+        let stored: (String, Option<Uuid>, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT kind, segment_id, base_digest FROM ai_drafts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, ("segment".to_owned(), None, None));
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ai_calls WHERE feature = 'segment' AND draft_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_that_breaks_the_rules_is_repaired_with_pointers_and_never_a_value(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let sent = fx.fake.call_count();
+        let bad = json!({"definition":
+            {"v": 1, "trait": "ghost", "op": "eq", "value": "TOP-SECRET"}});
+        let good = json!({"definition": {"v": 1, "trait": "plan", "op": "exists"}});
+        fx.fake.push(answer("draft_segment", bad.clone()));
+        fx.fake.push(answer("draft_segment", good));
+
+        let reply = fx.draft(segment_run(None)).await;
+
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["status"], "valid");
+        assert_eq!(reply.body["attempts"], 2);
+        let requests = fx.requests_after(sent);
+        let feedback = last_feedback(&requests[1]);
+        assert!(feedback.contains("unknown_trait at /trait"), "{feedback}");
+        assert!(!feedback.contains("TOP-SECRET"), "{feedback}");
+
+        // When every attempt fails, the issues come back and nothing can be accepted.
+        for _ in 0..3 {
+            fx.fake.push(answer("draft_segment", bad.clone()));
+        }
+        let exhausted = fx.draft(segment_run(None)).await;
+        assert_eq!(
+            exhausted.status,
+            StatusCode::CREATED,
+            "{:?}",
+            exhausted.body
+        );
+        assert_eq!(exhausted.body["status"], "invalid");
+        assert!(exhausted.body["content"].is_null());
+        assert_eq!(exhausted.body["issues"][0]["code"], "unknown_trait");
+        assert_eq!(exhausted.body["issues"][0]["at"], "/trait");
+        assert!(!exhausted.body.to_string().contains("TOP-SECRET"));
+        let id = exhausted.body["id"].as_str().unwrap();
+        let accepted = fx.accept(&fx.admin, id).await;
+        assert_eq!(accepted.status, StatusCode::CONFLICT);
+        assert_eq!(accepted.body["code"], "ai_draft_invalid");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_saved_segment_is_drafted_against_its_version_with_personal_literals_masked(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+        fx.fake
+            .push(answer("draft_segment", pro_in_the_same_cities()));
+
+        let reply = fx.draft(segment_run(Some(&segment))).await;
+
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        // The literals the model was not shown are back in the draft, and the diff is against the
+        // saved version: only the plan changed.
+        assert_eq!(
+            reply.body["content"]["all"][0]["value"],
+            json!(["Aarhus", "Odense"])
+        );
+        assert_eq!(reply.body["content"]["all"][1]["value"], "pro");
+        let changes = reply.body["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0]["path"], "/all");
+        assert_eq!(changes[0]["change"], "changed");
+        let requests = fx.requests_after(sent);
+        let text = everything(&requests[0]);
+        for hidden in ["Aarhus", "Odense"] {
+            assert!(!text.contains(hidden), "{hidden} reached the provider");
+        }
+        assert!(
+            text.contains("(kept:1)") && text.contains("(kept:2)"),
+            "{text}"
+        );
+        // A clear trait's literal is part of the model's picture of the segment.
+        assert!(text.contains("\"free\""), "{text}");
+        assert!(text.contains("Saved definition:"), "{text}");
+        // The draft is stored with the digest of the saved version, and restored.
+        let id: Uuid = reply.body["id"].as_str().unwrap().parse().unwrap();
+        let stored: (Option<Uuid>, Option<Vec<u8>>, Option<Value>) =
+            sqlx::query_as("SELECT segment_id, base_digest, content FROM ai_drafts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.0, Some(segment.parse().unwrap()));
+        let saved: Value = sqlx::query_scalar(
+            "SELECT definition FROM segment_versions WHERE segment_id = $1::uuid AND version = 1",
+        )
+        .bind(&segment)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored.1.as_deref(),
+            Some(zirv_flow_core::token::sha256(&saved.to_string()).as_slice())
+        );
+        assert!(!stored.2.unwrap().to_string().contains("(kept:"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_placeholder_that_moved_or_was_made_up_goes_back_to_the_model(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+        // The first placeholder moves onto the plan; one under the city is made up.
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "all": [
+                {"trait": "plan", "op": "eq", "value": "(kept:1)"},
+                {"trait": "city", "op": "in", "value": ["(kept:2)", "(kept:7)"]}
+            ]}}),
+        ));
+        fx.fake
+            .push(answer("draft_segment", pro_in_the_same_cities()));
+
+        let reply = fx.draft(segment_run(Some(&segment))).await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_eq!(reply.body["attempts"], 2);
+        let feedback = last_feedback(&fx.requests_after(sent)[1]);
+        for line in [
+            "placeholder_moved at /all/0/value",
+            "placeholder_invented at /all/1/value/1",
+        ] {
+            assert!(feedback.contains(line), "{line} missing from {feedback}");
+        }
+        assert!(!feedback.contains("Aarhus"), "{feedback}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_the_opt_in_the_saved_definition_is_sent_fenced_and_unmasked(pool: PgPool) {
+        let fx = setup(&pool, true, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "all": [
+                {"trait": "city", "op": "in", "value": ["Aarhus", "Odense"]},
+                {"trait": "plan", "op": "eq", "value": "pro"}
+            ]}}),
+        ));
+
+        let reply = fx.draft(segment_run(Some(&segment))).await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_only_fenced(&fx.requests_after(sent)[0], "Aarhus");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accepting_a_segment_draft_writes_no_version_and_audits_the_kind_and_segment(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        fx.fake
+            .push(answer("draft_segment", pro_in_the_same_cities()));
+        let drafted = fx.draft(segment_run(Some(&segment))).await;
+        let id = drafted.body["id"].as_str().unwrap().to_owned();
+        let versions = fx.count("segment_versions").await;
+        let audited = fx.count("audit_log").await;
+
+        let accepted = fx.accept(&fx.admin, &id).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["kind"], "segment");
+        assert_eq!(accepted.body["segment_id"], segment);
+        assert_eq!(accepted.body["content"], drafted.body["content"]);
+        // Accepting is not saving: the segment keeps its one version.
+        assert_eq!(fx.count("segment_versions").await, versions);
+        let current: i32 =
+            sqlx::query_scalar("SELECT current_version FROM segments WHERE id = $1::uuid")
+                .bind(&segment)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, 1);
+        assert_eq!(fx.count("audit_log").await, audited + 1);
+        let entries = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.action == "ai.draft.accepted")
+            .unwrap();
+        assert_eq!(
+            entry.summary,
+            json!({"kind": "segment", "segment_id": segment})
+        );
+        assert!(!entry.summary.to_string().contains("Aarhus"));
+        // Saving what was accepted is the ordinary, separate action.
+        let saved = fx
+            .path_as(
+                &fx.admin,
+                "PATCH",
+                &format!("/segments/{segment}"),
+                Some(json!({"definition": accepted.body["content"]})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(fx.count("segment_versions").await, versions + 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accept_refuses_an_outdated_segment_draft_and_one_that_no_longer_validates(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        fx.fake
+            .push(answer("draft_segment", pro_in_the_same_cities()));
+        let first = fx.draft(segment_run(Some(&segment))).await;
+        let first_id = first.body["id"].as_str().unwrap().to_owned();
+        // Someone saves another version after the draft was made.
+        let other = json!({"v": 1, "trait": "plan", "op": "exists"});
+        let saved = fx
+            .path_as(
+                &fx.admin,
+                "PATCH",
+                &format!("/segments/{segment}"),
+                Some(json!({"definition": other})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let outdated = fx.accept(&fx.admin, &first_id).await;
+
+        assert_eq!(outdated.status, StatusCode::CONFLICT, "{:?}", outdated.body);
+        assert_eq!(outdated.body["code"], "ai_draft_outdated");
+
+        // A draft made against the new version, whose trait is archived afterwards.
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "trait": "plan", "op": "eq", "value": "pro"}}),
+        ));
+        let second = fx.draft(segment_run(Some(&segment))).await;
+        let second_id = second.body["id"].as_str().unwrap().to_owned();
+        zirv_flow_store::update_trait_definition(
+            &pool,
+            fx.ws,
+            "plan",
+            &zirv_flow_store::TraitDefinitionUpdate {
+                precedence: None,
+                source_order: None,
+                pii: None,
+                channel_address: None,
+                description: None,
+                archived: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+
+        let archived = fx.accept(&fx.admin, &second_id).await;
+
+        assert_eq!(archived.status, StatusCode::CONFLICT, "{:?}", archived.body);
+        assert_eq!(archived.body["code"], "ai_draft_invalid");
+        assert_eq!(archived.body["issues"][0]["code"], "unknown_trait");
+        assert_eq!(archived.body["issues"][0]["pointer"], "/trait");
+        let status: String = sqlx::query_scalar("SELECT status FROM ai_drafts WHERE id = $1::uuid")
+            .bind(&second_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "valid", "a refused accept changes nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_segment_draft_is_not_outdated_by_other_segments(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "trait": "plan", "op": "exists"}}),
+        ));
+        let drafted = fx.draft(segment_run(None)).await;
+        fx.segment("Another", saved_definition()).await;
+
+        let accepted = fx
+            .accept(&fx.admin, drafted.body["id"].as_str().unwrap())
+            .await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert!(accepted.body["segment_id"].is_null());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_draft_is_for_an_admin_with_a_session_and_a_segment_of_the_workspace(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+
+        let member = fx
+            .path_as(&fx.member, "POST", "/ai/drafts", Some(segment_run(None)))
+            .await;
+        let key = fx
+            .as_key("POST", "/ai/drafts", Some(segment_run(None)))
+            .await;
+        let foreign = fx
+            .draft(segment_run(Some(&Uuid::now_v7().to_string())))
+            .await;
+        let mixed = fx
+            .draft(json!({"kind": "segment", "prompt": "x", "source_id": Uuid::now_v7()}))
+            .await;
+        let stray = fx
+            .draft(json!({"kind": "manifest", "prompt": "x", "segment_id": segment}))
+            .await;
+
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(key.status, StatusCode::FORBIDDEN);
+        assert_eq!(key.body["code"], "ai_user_required");
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{:?}", foreign.body);
+        assert_eq!(mixed.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(stray.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(fx.fake.call_count(), sent, "nothing was sent");
+        assert_eq!(fx.count("ai_drafts").await, 0);
+
+        // An assistant that is off is the first answer.
+        let off = fx
+            .path_as(
+                &fx.admin,
+                "PUT",
+                "/ai/settings",
+                Some(
+                    json!({"enabled": false, "provider_id": "openai", "model": "big",
+                    "monthly_budget_micros": 100_000_000, "pii_opt_in": false,
+                    "transcript_days": null}),
+                ),
+            )
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        let sent = fx.fake.call_count();
+        let disabled = fx.draft(segment_run(Some(&segment))).await;
+        assert_eq!(disabled.status, StatusCode::CONFLICT, "{:?}", disabled.body);
+        assert_eq!(disabled.body["code"], "ai_disabled");
+        assert_eq!(fx.fake.call_count(), sent);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_user_demoted_during_a_segment_run_is_refused_at_the_next_tool_call(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let mut state = fx.state.clone();
+        state.ai = state.ai.clone().with_replacement(Arc::new(Demoting {
+            inner: Arc::clone(&fx.fake),
+            pool: pool.clone(),
+            ws: fx.ws,
+            user: fx.admin_id,
+            done: AtomicBool::new(false),
+        }));
+        let router = router(state);
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "trait": "plan", "op": "exists"}}),
+        ));
+
+        let reply = call(
+            &router,
+            "POST",
+            &uri(fx.ws, "/ai/drafts"),
+            Some(segment_run(None)),
+            Auth::Session(&fx.admin),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{:?}", reply.body);
+        assert_eq!(fx.count("ai_drafts").await, 0, "no draft was stored");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_returns_the_cited_nodes_with_the_literals_back_and_stores_nothing(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+        let drafts = fx.count("ai_drafts").await;
+        let audited = fx.count("audit_log").await;
+        fx.fake.push(answer(
+            "explain_segment",
+            explanation(&[
+                ("/all/0", "The city is one of (kept:1) or (kept:2)."),
+                ("/all/1", "They are on the free plan."),
+            ]),
+        ));
+
+        let reply = fx.explain(&fx.admin, &segment, None).await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["version"], 1);
+        assert_eq!(reply.body["summary"], "People in two cities on a plan.");
+        assert_eq!(reply.body["nodes"][0]["pointer"], "/all/0");
+        // The admin who owns the segment reads the literals; the provider never got them.
+        assert_eq!(
+            reply.body["nodes"][0]["text"],
+            "The city is one of Aarhus or Odense."
+        );
+        let requests = fx.requests_after(sent);
+        assert_eq!(tool_names(&requests[0]), ["explain_segment"]);
+        let text = everything(&requests[0]);
+        assert!(
+            !text.contains("Aarhus") && !text.contains("Odense"),
+            "{text}"
+        );
+        assert!(text.contains("\"free\""), "{text}");
+        assert_eq!(fx.count("ai_drafts").await, drafts);
+        assert_eq!(fx.count("audit_log").await, audited, "nothing is audited");
+        let logged: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_calls WHERE feature = 'segment_explain'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_takes_a_version_and_refuses_an_unknown_one_or_a_foreign_segment(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let second = json!({"v": 1, "trait": "plan", "op": "exists"});
+        let saved = fx
+            .path_as(
+                &fx.admin,
+                "PATCH",
+                &format!("/segments/{segment}"),
+                Some(json!({"definition": second})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        fx.fake.push(answer(
+            "explain_segment",
+            explanation(&[("", "A plan is set.")]),
+        ));
+
+        let current = fx.explain(&fx.admin, &segment, Some(json!({}))).await;
+        assert_eq!(current.status, StatusCode::OK, "{:?}", current.body);
+        assert_eq!(current.body["version"], 2);
+
+        fx.fake.push(answer(
+            "explain_segment",
+            explanation(&[("/all/0", "A city."), ("/all/1", "The free plan.")]),
+        ));
+        let first = fx
+            .explain(&fx.admin, &segment, Some(json!({"version": 1})))
+            .await;
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(first.body["version"], 1);
+
+        let sent = fx.fake.call_count();
+        let unknown = fx
+            .explain(&fx.admin, &segment, Some(json!({"version": 9})))
+            .await;
+        let absent = fx
+            .explain(&fx.admin, &Uuid::now_v7().to_string(), None)
+            .await;
+        let junk = fx
+            .explain(&fx.admin, &segment, Some(json!({"version": "x"})))
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(absent.status, StatusCode::NOT_FOUND);
+        assert_eq!(junk.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // A segment of another workspace is 404 here, and nothing is sent.
+        let created = call(
+            &fx.router,
+            "POST",
+            &uri(fx.other_ws, "/segments"),
+            Some(json!({"name": "Theirs", "definition": {"v": 1, "identifier": "email"}})),
+            Auth::Session(&fx.theirs_admin),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let foreign = fx
+            .explain(&fx.admin, created.body["id"].as_str().unwrap(), None)
+            .await;
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{:?}", foreign.body);
+        assert_eq!(fx.fake.call_count(), sent, "nothing was sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explanation_that_never_passes_is_422_with_the_issue_codes(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+        // Every answer leaves one condition unexplained and cites a node that is not there.
+        for _ in 0..3 {
+            fx.fake.push(answer(
+                "explain_segment",
+                explanation(&[("/all/0", "A city."), ("/all/7", "Nothing.")]),
+            ));
+        }
+
+        let reply = fx.explain(&fx.admin, &segment, None).await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "ai_explain_failed");
+        let codes: Vec<&str> = reply.body["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["unknown_pointer", "leaf_not_explained"]);
+        assert_eq!(fx.fake.call_count() - sent, 3, "one run and two repairs");
+        let text = last_feedback(&fx.requests_after(sent)[2]);
+        assert!(text.contains("leaf_not_explained at /all/1"), "{text}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_is_for_admins_with_a_session_and_an_assistant_that_is_on(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Free in two cities", saved_definition()).await;
+        let sent = fx.fake.call_count();
+
+        let member = fx.explain(&fx.member, &segment, None).await;
+        let key = fx
+            .as_key("POST", &format!("/segments/{segment}/ai/explain"), None)
+            .await;
+        let anonymous = call(
+            &fx.router,
+            "POST",
+            &uri(fx.ws, &format!("/segments/{segment}/ai/explain")),
+            None,
+            Auth::Anonymous,
+        )
+        .await;
+
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(key.status, StatusCode::FORBIDDEN);
+        assert_eq!(key.body["code"], "ai_user_required");
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(fx.fake.call_count(), sent, "nothing was sent");
+
+        let off = fx
+            .path_as(
+                &fx.admin,
+                "PUT",
+                "/ai/settings",
+                Some(
+                    json!({"enabled": false, "provider_id": "openai", "model": "big",
+                    "monthly_budget_micros": 100_000_000, "pii_opt_in": false,
+                    "transcript_days": null}),
+                ),
+            )
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        let sent = fx.fake.call_count();
+        let disabled = fx.explain(&fx.admin, &segment, None).await;
+        assert_eq!(disabled.status, StatusCode::CONFLICT, "{:?}", disabled.body);
+        assert_eq!(disabled.body["code"], "ai_disabled");
+        assert_eq!(fx.fake.call_count(), sent);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_segment_tools_authorize_the_user_again_and_take_the_target_from_the_request(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let user = zirv_flow_store::find_user(&pool, fx.admin_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let context = ToolContext {
+            state: fx.state.clone(),
+            principal: Principal::session_for_tests(user),
+            workspace: fx.ws,
+            privacy: Privacy::SchemaOnly,
+            target: DraftTarget::Segment { segment_id: None },
+            sample: None,
+        };
+        let draft = find_tool("draft_segment").unwrap();
+        let arguments = json!({"definition": {"v": 1, "trait": "plan", "op": "exists"}});
+
+        let valid = draft.call(&context, &arguments).await;
+        assert!(valid.is_ok());
+        // A target of another kind is not a segment draft.
+        let manifest = ToolContext {
+            target: DraftTarget::Manifest,
+            ..context
+        };
+        match draft.call(&manifest, &arguments).await {
+            Err(ToolError::Failed(error)) => {
+                assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("not refused: {:?}", other.is_ok()),
+        }
+        // Outside the user's workspace the call is refused before anything is read.
+        let outside = ToolContext {
+            workspace: fx.other_ws,
+            target: DraftTarget::Segment { segment_id: None },
+            ..manifest
+        };
+        match draft.call(&outside, &arguments).await {
+            Err(ToolError::Failed(error)) => {
+                assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+            }
+            other => panic!("not refused: {:?}", other.is_ok()),
+        }
+    }
 }

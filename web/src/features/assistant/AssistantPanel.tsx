@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useInRouterContext } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
 import { Button, EmptyState, InlineError, LoadingState, ResourceView, TextAreaField } from "../../ui";
 import { DraftChanges } from "./DraftChanges";
 import { DryRunResult } from "./DryRunResult";
-import { failureText, issueSentence, type Draft, type Failure } from "./labels";
+import { failureText, issueSentence, type Draft, type DraftKindName, type Failure } from "./labels";
 
 /** The longest prompt the server takes, in characters. */
 export const MAX_PROMPT_CHARS = 2000;
@@ -21,11 +21,13 @@ type Run =
 
 interface AssistantPanelProps {
   workspaceId: string;
-  kind: "mapping" | "manifest";
+  kind: DraftKindName;
   /** The source: required for a mapping; for a manifest, the saved `http` source being edited. */
   sourceId?: string;
   /** The stream whose mapping is drafted. */
   stream?: string;
+  /** For a segment: the saved segment being edited; absent when the segment is new. */
+  segmentId?: string;
   /**
    * For a webhook stream, which has no source to read: the parsed sample payload, or null while the
    * pasted text does not parse. Absent for any other stream.
@@ -35,9 +37,15 @@ interface AssistantPanelProps {
   onAccept: (content: unknown) => void;
   /**
    * Asked before the accept request, so a refusal accepts nothing on the server: the host returns
-   * false when loading the draft would replace edits the person has not agreed to lose.
+   * false when loading the draft would replace edits the person has not agreed to lose. It may ask
+   * the person in a dialog of its own and answer when they have.
    */
-  confirmAccept?: () => boolean;
+  confirmAccept?: () => boolean | Promise<boolean>;
+  /**
+   * Shows what the drafted content makes of the workspace's data, for a kind whose draft has no dry
+   * run on the server. The host renders it, so this feature never imports the host.
+   */
+  renderPreview?: (content: unknown) => ReactNode;
 }
 
 /**
@@ -81,7 +89,18 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confirmAccept, personal }: AssistantPanelProps & { personal: boolean }) {
+function Drafting({
+  workspaceId,
+  kind,
+  sourceId,
+  stream,
+  segmentId,
+  sample,
+  onAccept,
+  confirmAccept,
+  renderPreview,
+  personal,
+}: AssistantPanelProps & { personal: boolean }) {
   const [prompt, setPrompt] = useState("");
   const [documentation, setDocumentation] = useState("");
   const [run, setRun] = useState<Run>({ status: "idle" });
@@ -114,6 +133,7 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confi
             prompt: prompt.trim(),
             ...(sourceId ? { source_id: sourceId } : {}),
             ...(kind === "mapping" && stream ? { stream } : {}),
+            ...(kind === "segment" && segmentId ? { segment_id: segmentId } : {}),
             ...(kind === "manifest" && documentation.trim() !== "" ? { documentation } : {}),
             ...(sample ? { sample: sample as never } : {}),
           },
@@ -134,7 +154,7 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confi
   }
 
   async function accept(current: Draft) {
-    if (confirmAccept && !confirmAccept()) return;
+    if (confirmAccept && !(await confirmAccept())) return;
     setRun({ status: "done", draft: current, accepting: true, accepted: false, acceptFailure: null });
     try {
       const accepted = await unwrap(
@@ -153,9 +173,13 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confi
   return (
     <div className="stack-tight">
       <p className="faint">
-        {personal
-          ? "Also sends up to 5 sample records (personal data is allowed in this workspace)."
-          : "Sends field names and types only."}
+        {kind === "segment"
+          ? personal
+            ? "Sends the names of your fields, events and lists, and the values of the saved definition (personal data is allowed in this workspace)."
+            : "Sends the names of your fields, events and lists. Values in the saved definition that could be personal are hidden from it."
+          : personal
+            ? "Also sends up to 5 sample records (personal data is allowed in this workspace)."
+            : "Sends field names and types only."}
       </p>
       <TextAreaField
         label="What do you want?"
@@ -213,6 +237,12 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confi
             </p>
             <h5>Changes</h5>
             <DraftChanges changes={run.draft.changes} />
+            {renderPreview && run.draft.content != null ? (
+              <>
+                <h5>Preview</h5>
+                {renderPreview(run.draft.content)}
+              </>
+            ) : null}
             {run.draft.dry_run ? (
               <>
                 <h5>Dry run</h5>
@@ -240,7 +270,7 @@ function Drafting({ workspaceId, kind, sourceId, stream, sample, onAccept, confi
             </h4>
             <ul className="list-plain attention" aria-label="Problems with the last attempt">
               {run.draft.issues.map((issue, index) => (
-                <li key={`${issue.code}-${issue.at ?? ""}-${index}`}>{issueSentence(issue)}</li>
+                <li key={`${issue.code}-${issue.at ?? ""}-${index}`}>{issueSentence(issue, kind)}</li>
               ))}
             </ul>
             <p className="faint">Say it differently, or add detail, and draft again.</p>
