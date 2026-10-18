@@ -132,7 +132,7 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
         }
         Shape::Split => NodeKind::SplitRandom {
             arms: {
-                let count = rng_arms(rng);
+                let count = usize::try_from(rng.range(2, 4)).unwrap_or(2);
                 arms(rng, count)
             },
         },
@@ -176,10 +176,6 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
         Shape::GoalExit => NodeKind::Goal { exit: true },
         Shape::Exit => NodeKind::Exit {},
     }
-}
-
-fn rng_arms(rng: &mut Rng) -> usize {
-    usize::try_from(rng.range(2, 4)).unwrap_or(2)
 }
 
 /// `count` arms with positive weights that sum to 100: cut points between 1 and 99.

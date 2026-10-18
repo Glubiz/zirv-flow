@@ -103,6 +103,12 @@ impl Sim<'_> {
         self.report.push(Violation { invariant, detail });
     }
 
+    fn record(&mut self, found: Vec<Violation>) {
+        for violation in found {
+            self.report.push(violation);
+        }
+    }
+
     fn populate(&mut self) {
         let graph_count = (self.config.enrollments / 150).clamp(6, 60);
         let mut graph_rng = Rng::derive(self.config.seed, &[2]);
@@ -146,9 +152,7 @@ impl Sim<'_> {
                 self.checked_horizon = true;
                 let mut found = Vec::new();
                 invariants::liveness(&self.world(), false, &mut found);
-                for violation in found {
-                    self.report.push(violation);
-                }
+                self.record(found);
             }
             let Some(job) = self.db.queue.remove(&first) else {
                 break;
@@ -382,9 +386,7 @@ impl Sim<'_> {
         invariants::internal_effects_once(&world, &mut found);
         invariants::external_effects_once(&world, &mut found);
         invariants::liveness(&world, true, &mut found);
-        for violation in found {
-            self.report.push(violation);
-        }
+        self.record(found);
         let mut fingerprint = 0_u64;
         for (id, state) in &self.db.enrollments {
             fingerprint = mix(fingerprint
