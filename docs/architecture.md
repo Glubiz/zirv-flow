@@ -879,7 +879,7 @@ least 50 in 90 days, not VIP, subscribed to the newsletter":
 `parse -> validate -> normalize -> lower`. Validation checks types, operators,
 references and window limits against the field registry and event catalog.
 Normalization flattens, pushes `not` inward through `all` and `any` (never rewriting a leaf operator under `not`) and folds constants. Lowering emits
-SQL with an `EXISTS` subquery per event condition; every value is a bind
+SQL with an `EXISTS` subquery per event condition without an aggregate, and for an aggregate over a `since_trait` window, whose bound reads the person's own trait. Any other event aggregate is one grouped set over `events` (`GROUP BY person_id`): a semi-join (`p.id IN (... HAVING ...)`) when the condition is a positive conjunct (the root, or reached through `all` only) that an empty aggregate does not satisfy, judged by the evaluator's own comparison, and a `LEFT JOIN` of the grouped set otherwise (under `any` or `not`, or when zero events satisfy it). A batch query also restricts every grouped set to its batch. Every value is a bind
 parameter, column and JSON keys come only from the registry, and relative
 windows bind `$now` from the explicit `now` the caller passes, so output is deterministic. Result:
 `CompiledSegment { sql, params, deps, time_sensitive }`, where `deps` lists the
