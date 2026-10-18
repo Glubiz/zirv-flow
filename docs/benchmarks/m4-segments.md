@@ -197,7 +197,7 @@ returns only if the warm-cache preview misses 15 s.
 
 ### 4.2 Missed targets
 
-On 0.57.1 (sections 6 and 6.6) the misses of 0.56.0 and 0.57.0 are closed:
+On 0.57.1 (sections 6 and 6.6) the misses of 0.56.0 and 0.57.0 that were re-measured are closed:
 
 | Miss | Gap | Cause | Closed by |
 |---|---|---|---|
@@ -252,9 +252,11 @@ On 0.57.0 at 10 M people with an aggregate segment of about 150,000 members, 2,0
 `segment.reevaluate` batch statement `.persistent(false)`, so each batch is planned with the segment id as a
 literal. A new segment is missing from the statistics of `segment_members` (8.7 M rows, 19 most common
 values summing to 1.0, and the autoanalyze threshold of about 871 k changes not reached), so the planner
-estimates 1 row and scans every open row of the segment for each batch person. For the same 23-person batch
-the custom plan took 563 ms and the generic plan 0.57 ms, probing `(segment_id, person_id)`; a `LATERAL ...
-LIMIT 1` rewrite did not help (273 ms). Batches are serialized by the segment's lock, so one segment's
+estimates 1 row and scans every open row of the segment for each batch person. For the same 23-person batch on
+the same database, with the segment still missing from the statistics, the custom plan took 624 and 716 ms and
+the generic plan 0.89 and 0.83 ms, probing `(segment_id, person_id)`
+(`data/m4/0.57.1/incremental-batch.custom-vs-generic.txt`); a `LATERAL ... LIMIT 1` rewrite tried during the
+diagnosis did not help (273 ms, #149). Batches are serialized by the segment's lock, so one segment's
 throughput fell below the arrival rate and the backlog grew. 0.56.0 was fast because its persistent
 statements switched to the generic plan after five executions. Fix (#149, ruling d30289c3):
 `apply_reevaluation` runs the batch statement under `SET LOCAL plan_cache_mode = force_generic_plan` and
@@ -334,7 +336,7 @@ now does), and the setting was reset
 - **Aggregate (D4.4):** `people` is probed 589,985 times through `people_pkey` after a parallel scan of the
   four partitions that cover 90 days, a partial hash aggregate and a sort/group; the planner estimates 176,085
   groups and 58,777 result rows against 589,985 and 196,055. One execution: 8.7 s (9.9 s first) in the capture,
-  about 4.5 s in the timed runs. The scan reads about 3.2 M event rows per execution.
+  about 4.5 s in the timed runs. The scan reads about 3.5 M event rows per execution.
 - **Property-filtered sum (D4.5):** the `properties @> {"category":"books"}` filter and the sum run in the same grouped scan, 304,918
   groups before the `HAVING`, 77,331 after; 1.5 s warm (2.4 s first).
 
@@ -347,7 +349,7 @@ incremental phase had written 1.2 M events, and right after the app restart that
 3.0 s (trait-only count 2.97 s), 15.1 s (aggregate; its count statement 13.6 s) and 4.6 s (sum), and the
 immediate repeats under `EXPLAIN` 1.5 s, 8.7 s and 1.5 s with the same plans. The page cache was not
 evicted on purpose. So the aggregate preview is 4.5 s only when the 90-day window of `events` is cached:
-the grouped set reads about 3.2 M rows and the `people_pkey` probes depend on how well the planner's
+the grouped set reads about 3.5 M rows and the `people_pkey` probes depend on how well the planner's
 too-low group estimate (176 k against 590 k) holds. A cold first run can sit at the 15 s target, so this is
 the figure to re-check on reference hardware at M8. The orchestrator's earlier cold measurement of the D4.4 statement, 53.7 s after
 an hour of builds had evicted the cache, is consistent with this and not reproduced here.
@@ -402,4 +404,6 @@ because `EXPLAIN` of a bound statement is always a custom plan): execution 2.8 m
 segment membership probes use `segment_members_open_idx` with `Index Cond: (segment_id = $8) AND (person_id = t.id)`
 and `(segment_id = $8) AND (person_id = ANY ($7))`, 23 rows. On 0.57.0 the same statement took 390 ms
 because the custom plan scanned about 94,000 open rows of the segment per batch person
-(`data/m4/0.57.1/incremental-batch.explain.txt`, `data/m4/0.57.0/incremental-batch.explain.txt`).
+(`data/m4/0.57.1/incremental-batch.explain.txt`, `data/m4/0.57.0/incremental-batch.explain.txt`). The same
+batch on the 0.57.1 database took 624 and 716 ms under a custom plan and 0.89 and 0.83 ms under the generic
+plan (`data/m4/0.57.1/incremental-batch.custom-vs-generic.txt`).
