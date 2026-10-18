@@ -35,6 +35,26 @@ pub struct Problem {
     /// repeated at the end.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle: Option<Vec<SegmentRefProblem>>,
+    /// What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it
+    /// concerns, never a value from the flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_issues: Option<Vec<FlowIssueProblem>>,
+}
+
+/// One issue of a flow.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FlowIssueProblem {
+    /// A fixed issue code such as `port_not_wired` or `unknown_segment`.
+    pub code: String,
+    /// The id of the node it concerns, when it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The id of the edge it concerns, when it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+    /// A JSON pointer into the node, the edge or the settings object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 /// One issue of a segment definition.
@@ -82,6 +102,8 @@ pub(crate) struct ApiError {
     code: Option<&'static str>,
     /// The extra fields of a segment problem, boxed to keep the error small.
     segment: Option<Box<SegmentExtra>>,
+    /// The issues of a flow that does not validate.
+    flow_issues: Option<Vec<FlowIssueProblem>>,
 }
 
 impl ApiError {
@@ -93,6 +115,7 @@ impl ApiError {
             retry_after: None,
             code: None,
             segment: None,
+            flow_issues: None,
         }
     }
 
@@ -387,6 +410,40 @@ impl ApiError {
         }
     }
 
+    /// A flow that does not pass the publish checks: every issue with its code and place.
+    pub(crate) fn flow_invalid(issues: Vec<FlowIssueProblem>) -> Self {
+        Self {
+            code: Some("flow_invalid"),
+            flow_issues: Some(issues),
+            ..Self::unprocessable("the flow is not valid")
+        }
+    }
+
+    /// A graph or settings document that is not a flow document at all (wrong shape, unknown
+    /// node type or key), which a draft cannot hold.
+    pub(crate) fn flow_malformed(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("flow_malformed"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A lifecycle action the flow's state does not allow.
+    pub(crate) fn flow_state(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("flow_state"),
+            ..Self::new(StatusCode::CONFLICT, detail)
+        }
+    }
+
+    /// A write to an archived flow.
+    pub(crate) fn flow_archived() -> Self {
+        Self {
+            code: Some("flow_archived"),
+            ..Self::new(StatusCode::CONFLICT, "the flow is archived")
+        }
+    }
+
     /// A write to an archived segment.
     pub(crate) fn segment_archived() -> Self {
         Self {
@@ -607,6 +664,7 @@ impl IntoResponse for ApiError {
             code: self.code.map(str::to_owned),
             issues: self.segment.as_mut().and_then(|extra| extra.issues.take()),
             cycle: self.segment.as_mut().and_then(|extra| extra.cycle.take()),
+            flow_issues: self.flow_issues,
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (

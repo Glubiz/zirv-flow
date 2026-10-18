@@ -14,7 +14,9 @@ use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
 use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
 
-pub(crate) use schema::SegmentSchemas;
+pub(crate) use schema::{
+    NODE as SEGMENT_NODE_SCHEMA, PROPERTY_FILTER as SEGMENT_FILTER_SCHEMA, SegmentSchemas,
+};
 
 /// How long a preview may run before PostgreSQL cancels it (architecture 8.3). It is fixed, with no
 /// setting, and sits above the 15 s target of an aggregate preview (architecture 19).
