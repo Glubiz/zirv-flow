@@ -313,7 +313,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Status;
+    use crate::{Status, effect_key, step_key, wake_key};
     use zirv_flow_core::flow::{ListChange, TraitChange};
 
     fn state(id: Uuid, version: u64) -> EnrollmentState {
@@ -330,7 +330,7 @@ mod tests {
     fn tx(id: Uuid, base: u64) -> Tx {
         let internal = Effect {
             node: "a".into(),
-            step_key: format!("{id}:a"),
+            step_key: step_key(id, "a"),
             effect_key: None,
             kind: EffectKind::UpdateTrait {
                 key: "k".into(),
@@ -339,7 +339,7 @@ mod tests {
         };
         let list = Effect {
             node: "b".into(),
-            step_key: format!("{id}:b"),
+            step_key: step_key(id, "b"),
             effect_key: None,
             kind: EffectKind::List {
                 list_id: Uuid::nil(),
@@ -348,8 +348,8 @@ mod tests {
         };
         let hook = Effect {
             node: "c".into(),
-            step_key: format!("{id}:c"),
-            effect_key: Some(format!("{id}:c:webhook")),
+            step_key: step_key(id, "c"),
+            effect_key: Some(effect_key(id, "c", "webhook")),
             kind: EffectKind::Webhook {
                 url: "https://example.com".into(),
                 trait_keys: Vec::new(),
@@ -359,7 +359,7 @@ mod tests {
             .iter()
             .map(|node| Visit {
                 node: (*node).into(),
-                step_key: format!("{id}:{node}"),
+                step_key: step_key(id, node),
             })
             .collect();
         Tx {
@@ -370,7 +370,7 @@ mod tests {
             effects: vec![internal, list, hook],
             wake: Some(Wake {
                 at: DateTime::<Utc>::UNIX_EPOCH,
-                key: format!("wake:{id}:{}", base + 1),
+                key: wake_key(id, base + 1),
             }),
             waits: Vec::new(),
             decisions: vec!["zone".into()],

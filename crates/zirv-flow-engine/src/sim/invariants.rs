@@ -15,7 +15,7 @@ use zirv_flow_core::flow::{FlowGraph, FlowNode, NodeKind};
 
 use super::db::{Db, JobKind};
 use super::{Invariant, Violation};
-use crate::{Status, effect_key};
+use crate::{Status, effect_key, step_key};
 
 /// Everything the checks read.
 pub(super) struct World<'a> {
@@ -103,7 +103,7 @@ pub(super) fn external_effects_once(world: &World<'_>, out: &mut Vec<Violation>)
         }
         if !db
             .step_executions
-            .contains(&format!("{}:{}", row.enrollment, row.node))
+            .contains(&step_key(row.enrollment, &row.node))
         {
             violation(
                 out,
@@ -242,7 +242,7 @@ mod tests {
         }
     }
 
-    fn run(db: &Db, check: fn(&World<'_>, &mut Vec<Violation>)) -> Vec<Violation> {
+    fn run(db: &Db, check: impl Fn(&World<'_>, &mut Vec<Violation>)) -> Vec<Violation> {
         let graphs = [graph()];
         let graph_of: BTreeMap<Uuid, usize> = db.enrollments.keys().map(|id| (*id, 0)).collect();
         let world = World {
@@ -269,7 +269,7 @@ mod tests {
                 awaiting: None,
             },
         );
-        db.step_executions.insert(format!("{id}:set"));
+        db.step_executions.insert(step_key(id, "set"));
         (db, id)
     }
 
@@ -284,41 +284,23 @@ mod tests {
     #[test]
     fn a_double_internal_effect_is_reported() {
         let (mut db, id) = db(Status::Completed);
-        db.applied.push(format!("{id}:set"));
+        db.applied.push(step_key(id, "set"));
         assert!(run(&db, internal_effects_once).is_empty());
-        db.applied.push(format!("{id}:set"));
+        db.applied.push(step_key(id, "set"));
         assert_eq!(run(&db, internal_effects_once).len(), 1);
     }
 
     #[test]
     fn a_waiting_enrollment_without_a_wake_is_stuck() {
         let (db, _) = db(Status::Waiting);
-        let mid_run = |world: &World<'_>, out: &mut Vec<Violation>| liveness(world, false, out);
-        let graphs = [graph()];
-        let graph_of: BTreeMap<Uuid, usize> = db.enrollments.keys().map(|id| (*id, 0)).collect();
-        let world = World {
-            db: &db,
-            graphs: &graphs,
-            graph_of: &graph_of,
-        };
-        let mut out = Vec::new();
-        mid_run(&world, &mut out);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].invariant, Invariant::Liveness);
+        let found = run(&db, |world, out| liveness(world, false, out));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].invariant, Invariant::Liveness);
     }
 
     #[test]
     fn an_ended_enrollment_is_live() {
         let (db, _) = db(Status::Completed);
-        let graphs = [graph()];
-        let graph_of: BTreeMap<Uuid, usize> = db.enrollments.keys().map(|id| (*id, 0)).collect();
-        let world = World {
-            db: &db,
-            graphs: &graphs,
-            graph_of: &graph_of,
-        };
-        let mut out = Vec::new();
-        liveness(&world, true, &mut out);
-        assert!(out.is_empty());
+        assert!(run(&db, |world, out| liveness(world, true, out)).is_empty());
     }
 }
