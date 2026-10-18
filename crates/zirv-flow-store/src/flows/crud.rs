@@ -137,7 +137,11 @@ impl fmt::Display for FlowError {
         match self {
             Self::NotFound => formatter.write_str("no such flow"),
             Self::IllegalTransition { state, action } => {
-                write!(formatter, "the flow is {state} and cannot be {}", action.past())
+                write!(
+                    formatter,
+                    "the flow is {state} and cannot be {}",
+                    action.past()
+                )
             }
             Self::Archived => formatter.write_str("the flow is archived"),
             Self::Store(error) => error.fmt(formatter),
