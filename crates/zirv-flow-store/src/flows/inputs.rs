@@ -76,3 +76,113 @@ pub async fn unhealthy_inputs(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::flows::tests_support::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_signing_secret_is_found_only_in_its_own_workspace(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            !has_webhook_signing_secret(&mut connection, one)
+                .await
+                .unwrap()
+        );
+        for (workspace, purpose) in [(two, "webhook_signing"), (one, "webhook_secret")] {
+            sqlx::query(
+                "INSERT INTO encrypted_secrets \
+                    (id, workspace_id, purpose, key_id, wrapped_key, nonce, ciphertext) \
+                 VALUES ($1, $2, $3, 'k', '\\x00', decode(repeat('00', 24), 'hex'), '\\x00')",
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace.as_uuid())
+            .bind(purpose)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert!(
+            !has_webhook_signing_secret(&mut connection, one)
+                .await
+                .unwrap()
+        );
+        assert!(
+            has_webhook_signing_secret(&mut connection, two)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_source_that_failed_is_reported_for_what_the_flow_reads_and_a_healthy_one_is_not(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let now = time::OffsetDateTime::now_utc();
+        let failing = Uuid::now_v7();
+        let healthy = Uuid::now_v7();
+        let mapping = |trait_key: &str| {
+            json!({"columns": [
+                {"column": "e", "target": {"type": "identifier", "kind": "email"}},
+                {"column": "p", "target": {"type": "trait", "key": trait_key}}
+            ]})
+        };
+        for (source, name, trait_key, failed) in [
+            (failing, "CRM", "plan", true),
+            (healthy, "Billing", "tier", false),
+        ] {
+            sqlx::query(
+                "INSERT INTO sources (id, workspace_id, name, kind, config, enabled) \
+                 VALUES ($1, $2, $3, 'postgres', '{}', true)",
+            )
+            .bind(source)
+            .bind(ws.as_uuid())
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO streams (id, workspace_id, source_id, name, enabled, sync_mode, \
+                    mapping, discovered, enabled_at, last_success_at, last_run_failed) \
+                 VALUES ($1, $2, $3, 'contacts', true, 'full_refresh', $4, '{}', $5, $5, $6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(source)
+            .bind(mapping(trait_key))
+            .bind(now)
+            .bind(failed)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let reads_plan = unhealthy_inputs(&mut connection, ws, &json!({"traits": ["plan"]}), now)
+            .await
+            .unwrap();
+        let reads_tier = unhealthy_inputs(&mut connection, ws, &json!({"traits": ["tier"]}), now)
+            .await
+            .unwrap();
+        let reads_nothing = unhealthy_inputs(&mut connection, ws, &json!({}), now)
+            .await
+            .unwrap();
+
+        assert_eq!(reads_plan.len(), 1);
+        assert_eq!(reads_plan[0].source_id, failing);
+        assert_eq!(reads_plan[0].state, zirv_flow_core::Freshness::Failing);
+        assert!(reads_tier.is_empty());
+        assert!(reads_nothing.is_empty());
+    }
+}

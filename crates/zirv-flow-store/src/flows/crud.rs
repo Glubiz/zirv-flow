@@ -315,3 +315,129 @@ pub async fn find_flow_version<'e>(
     .await
     .map_err(StoreError::query)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::flows::tests_support::*;
+    use crate::flows::{FlowAction, FlowState};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_flow_is_a_draft_with_no_version(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+
+        let flow = create(&pool, ws, "Welcome").await;
+
+        assert_eq!(flow.state, FlowState::Draft);
+        assert_eq!(flow.current_version, None);
+        assert_eq!(flow.draft_graph, graph("draft"));
+        assert!(
+            list_flow_versions(&pool, ws, flow.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(find_flow(&pool, ws, flow.id).await.unwrap(), Some(flow));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_live_name_is_unique_ignoring_case_and_an_archived_name_is_free(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let first = create(&pool, ws, "Welcome").await;
+        let new = |name: &str| NewFlow {
+            id: Uuid::now_v7(),
+            name: name.to_owned(),
+            graph: graph("x"),
+            settings: settings(),
+        };
+        let mut connection = pool.acquire().await.unwrap();
+
+        let duplicate = create_flow(&mut connection, ws, &new("WELCOME"), None).await;
+        let elsewhere = create_flow(&mut connection, other, &new("Welcome"), None).await;
+        drop(connection);
+        lifecycle(&pool, ws, first.id, FlowAction::Archive)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let reused = create_flow(&mut connection, ws, &new("Welcome"), None).await;
+
+        assert!(duplicate.unwrap_err().is_conflict());
+        assert!(elsewhere.is_ok());
+        assert!(reused.is_ok());
+        let live: Vec<String> = list_flows(&pool, ws, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|flow| flow.name)
+            .collect();
+        let all = list_flows(&pool, ws, true).await.unwrap();
+        assert_eq!(live, ["Welcome"]);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flow_is_scoped_to_its_workspace(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let flow = create(&pool, one, "Welcome").await;
+        publish(&pool, one, flow.id).await.unwrap();
+
+        assert!(find_flow(&pool, two, flow.id).await.unwrap().is_none());
+        assert!(list_flows(&pool, two, true).await.unwrap().is_empty());
+        assert!(
+            find_flow_version(&pool, two, flow.id, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            list_flow_versions(&pool, two, flow.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            publish(&pool, two, flow.id).await,
+            Err(FlowError::NotFound)
+        ));
+        assert!(matches!(
+            lifecycle(&pool, two, flow.id, FlowAction::Archive).await,
+            Err(FlowError::NotFound)
+        ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn deleting_the_flow_or_the_workspace_removes_the_versions(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let gone = create(&pool, one, "A").await;
+        publish(&pool, one, gone.id).await.unwrap();
+        let kept = create(&pool, one, "B").await;
+        publish(&pool, one, kept.id).await.unwrap();
+        let other = create(&pool, two, "C").await;
+        publish(&pool, two, other.id).await.unwrap();
+
+        sqlx::query("DELETE FROM flows WHERE id = $1")
+            .bind(gone.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(two.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(version_rows(&pool, gone.id).await, 0);
+        assert_eq!(version_rows(&pool, kept.id).await, 1);
+        assert_eq!(version_rows(&pool, other.id).await, 0);
+    }
+}
