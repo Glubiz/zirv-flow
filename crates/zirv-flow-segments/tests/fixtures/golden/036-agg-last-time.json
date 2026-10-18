@@ -30,6 +30,6 @@
       "timestamp": "2025-06-15T12:00:00Z"
     }
   ],
-  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (COALESCE(((SELECT max(e.occurred_at) FROM events e WHERE e.workspace_id = p.workspace_id AND e.person_id = p.id AND e.name = $2::text) <@ tstzrange($3::timestamptz, $4::timestamptz, '(]')), false))",
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (p.id IN (SELECT e.person_id FROM events e WHERE e.workspace_id = $1 AND e.name = $2::text GROUP BY e.person_id HAVING max(e.occurred_at) <@ tstzrange($3::timestamptz, $4::timestamptz, '(]')))",
   "time_sensitive": true
 }
