@@ -5,6 +5,8 @@
 
 mod error;
 mod hash;
+#[cfg(test)]
+mod sim;
 mod state;
 mod step;
 mod time;
