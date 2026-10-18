@@ -796,6 +796,11 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let known = segment(&pool, ws, "Known", 60).await;
         fill(&pool, ws, known.id, 300).await;
+        // Autovacuum stays off so that it cannot analyze the second fill before the batch runs.
+        sqlx::query("ALTER TABLE segment_members SET (autovacuum_enabled = false)")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("ANALYZE segment_members")
             .execute(&pool)
             .await
