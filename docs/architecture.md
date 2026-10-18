@@ -1549,7 +1549,7 @@ schema. The registry contains workspace-scoped reads and draft creation only:
 | Artifact | Assistant work | Deterministic authority and review |
 |----------|----------------|------------------------------------|
 | Segment AST | Draft or explain a segment | Segment parser/compiler; diff plus preview count and sample |
-| Flow graph | Draft or explain a flow | Flow publish validation (`core::flow`); graph diff plus a test-mode run summary (9.4) |
+| Flow graph | Draft or explain a flow | Flow publish validation (`core::flow`); graph diff plus simulation summary (test-mode walks of synthetic persons, 9.4) |
 | Template document | Draft copy, subject variants, layout or translation | Template validation; rendered diff at desktop/mobile widths |
 | Source field mapping | Draft mappings from schema and samples | Mapping schema and sample dry run; field-by-field diff |
 | HTTP connector manifest | Draft a manifest from pasted API documentation | Manifest schema and mock/test-connection preview |
