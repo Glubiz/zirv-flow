@@ -2097,7 +2097,10 @@ they were ruled as their capabilities were added to the plan.
   median 14.5 s against 10 min (38.7 s, 97.5 s and 57.6 s before). The grouped
   set reads every event of the window, so a preview of a large aggregate is
   I/O-bound: measured 8.7 s to 15 s on a cold cache, which is the thin margin to
-watch at M8. The incremental path meets its target on 0.57.1 (event to  `segment.entered` p95 4.05 s against 60 s) after #149; the miss on 0.57.0 (278 s) was  a custom plan of the re-evaluation batch statement, not the aggregate compile  (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
+  watch at M8. The incremental path meets its target on 0.57.1 (event to
+  `segment.entered` p95 4.05 s against 60 s) after #149; the miss on 0.57.0 (278 s) was
+  a custom plan of the re-evaluation batch statement, not the aggregate compile
+  (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
   M8 on reference hardware misses the preview target with a warm cache. See
   [docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md).
 
