@@ -1517,9 +1517,9 @@ mod tests {
                 cookie: f.lead.cookie.clone(),
                 csrf: f.lead.csrf.clone(),
             };
-            tokio::spawn(async move {
-                send(&router, "POST", &uri, None, Auth::Session(&login)).await
-            })
+            tokio::spawn(
+                async move { send(&router, "POST", &uri, None, Auth::Session(&login)).await },
+            )
         };
         // Wait until the exit is blocked on the flow row.
         let mut blocked = false;
