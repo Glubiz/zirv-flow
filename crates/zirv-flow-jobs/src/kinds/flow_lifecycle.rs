@@ -361,6 +361,11 @@ mod tests {
             0,
             "the batch found it no longer held"
         );
+        assert_eq!(
+            decisions_of(&env, &held.trace, "resumed").await,
+            1,
+            "the step that released it recorded the resume under the enrollment's trace"
+        );
     }
 
     #[sqlx::test]

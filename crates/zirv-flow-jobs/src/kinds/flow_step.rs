@@ -149,7 +149,8 @@ fn is_stale(enrollment: &Enrollment, job: &StepJobPayload) -> bool {
 /// A job found its enrollment held on a flow that is not paused: the flow was resumed and its
 /// batch has not reached the enrollment. The enrollment goes back from `held` to the state it was
 /// held from and the job runs its own input (the caller checked the `state_version`); the batch
-/// then finds it no longer held. `None` leaves it held for the batch: the job is not for the state
+/// then finds it no longer held. The release records the `resumed` decision the batch would have.
+/// `None` leaves it held for the batch: the job is not for the state
 /// the enrollment was held from, or it is a timer and an event is stored (a timer never replaces
 /// an event).
 async fn release(
@@ -171,6 +172,22 @@ async fn release(
         return Ok(None);
     }
     release_enrollment(conn, job.workspace, enrollment.id, before).await?;
+    // The decision the resume batch would have written, under the enrollment's own trace (the
+    // batch's is not known here) and in this transaction, so the trace reads held, resumed, steps.
+    let decision = NewDecision {
+        workspace_id: job.workspace,
+        trace: enrollment.trace.clone(),
+        action: "flow.enrollment",
+        outcome: "resumed",
+        reason: Some("flow_resumed"),
+        subject_ids: vec![
+            ("flow", enrollment.flow_id),
+            ("enrollment", enrollment.id),
+            ("person", enrollment.person_id),
+        ],
+        job: None,
+    };
+    append_decisions(conn, &[decision]).await?;
     Ok(Some(Enrollment {
         status: before,
         resume_input: None,
