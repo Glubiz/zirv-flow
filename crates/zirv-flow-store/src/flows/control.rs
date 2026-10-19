@@ -107,21 +107,23 @@ pub struct LifecycleBatch {
     pub changed: usize,
 }
 
+/// Locks the people of `found` (enrollment, person) in id order, and returns the enrollment ids.
 async fn lock_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    people: &[Uuid],
-) -> Result<(), StoreError> {
+    found: &[(Uuid, Uuid)],
+) -> Result<Vec<Uuid>, StoreError> {
+    let people: Vec<Uuid> = found.iter().map(|(_, person)| *person).collect();
     sqlx::query(
         "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id \
          FOR NO KEY UPDATE",
     )
     .bind(workspace.as_uuid())
-    .bind(people)
+    .bind(&people)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(())
+    Ok(found.iter().map(|(id, _)| *id).collect())
 }
 
 /// A batch of enrollments to end, and why.
@@ -166,9 +168,7 @@ pub async fn exit_batch(
     if found.is_empty() {
         return Ok(LifecycleBatch::default());
     }
-    let people: Vec<Uuid> = found.iter().map(|(_, person)| *person).collect();
-    let ids: Vec<Uuid> = found.iter().map(|(id, _)| *id).collect();
-    lock_people(connection, workspace, &people).await?;
+    let ids = lock_people(connection, workspace, &found).await?;
     let ended: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
              state_version = state_version + 1, wake_at = NULL, error = NULL, \
@@ -250,9 +250,7 @@ pub async fn resume_batch(
     if found.is_empty() {
         return Ok(LifecycleBatch::default());
     }
-    let people: Vec<Uuid> = found.iter().map(|(_, person)| *person).collect();
-    let ids: Vec<Uuid> = found.iter().map(|(id, _)| *id).collect();
-    lock_people(connection, workspace, &people).await?;
+    let ids = lock_people(connection, workspace, &found).await?;
     let held: Vec<HeldRow> = sqlx::query_as(
         "SELECT id, person_id, state_version, resume_input, trace_id, cause_kind, cause_id \
          FROM enrollments WHERE workspace_id = $1 AND id = ANY($2) AND state = 'held' \
@@ -305,22 +303,21 @@ pub async fn resume_batch(
             job: None,
         });
     }
-    for (id, state) in &resumed {
-        sqlx::query(
-            "UPDATE enrollments SET state = $2, resume_input = NULL, updated_at = now() \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .bind(state)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-    }
+    let (resumed_ids, states): (Vec<Uuid>, Vec<&str>) = resumed.into_iter().unzip();
+    sqlx::query(
+        "UPDATE enrollments e SET state = t.state, resume_input = NULL, updated_at = now() \
+         FROM unnest($1::uuid[], $2::text[]) AS t(id, state) WHERE e.id = t.id",
+    )
+    .bind(&resumed_ids)
+    .bind(&states)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     enqueue_many(&mut *connection, &jobs).await?;
     append_decisions(connection, &decisions).await?;
     Ok(LifecycleBatch {
         read: found.len(),
-        changed: resumed.len(),
+        changed: resumed_ids.len(),
     })
 }
 

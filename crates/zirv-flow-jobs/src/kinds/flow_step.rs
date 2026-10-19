@@ -152,9 +152,9 @@ async fn hold(
     let stored = enrollment
         .resume_input
         .as_ref()
-        .and_then(|v| v.get("input"));
+        .and_then(StepJobInput::from_stored);
     let replaces = matches!(job.input, StepJobInput::Event { .. })
-        && stored.and_then(Value::as_str) != Some("event");
+        && !matches!(stored, Some(StepJobInput::Event { .. }));
     if already && !replaces {
         return Ok(());
     }
