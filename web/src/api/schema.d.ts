@@ -4472,8 +4472,8 @@ export interface components {
             /**
              * Format: int64
              * @description Active enrollments that stay on the version they entered when the new version goes live
-             *     (ruling 469cfc51: in-flight enrollments are never migrated). It is 0 until the runtime
-             *     writes enrollments.
+             *     (ruling 469cfc51: in-flight enrollments are never migrated): the flow's active, waiting and
+             *     failed enrollments.
              */
             enrollments_staying_on_older_versions: number;
             issues: components["schemas"]["FlowIssue"][];
