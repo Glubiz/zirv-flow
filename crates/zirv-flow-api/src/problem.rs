@@ -440,6 +440,14 @@ impl ApiError {
         }
     }
 
+    /// A retry or skip of an enrollment that is not failed, or whose failure it cannot reach.
+    pub(crate) fn enrollment_state(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("enrollment_state"),
+            ..Self::new(StatusCode::CONFLICT, detail)
+        }
+    }
+
     /// A write to an archived flow.
     pub(crate) fn flow_archived() -> Self {
         Self {

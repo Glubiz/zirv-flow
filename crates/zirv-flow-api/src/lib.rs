@@ -220,6 +220,18 @@ fn routes() -> Router<AppState> {
             post(flows::triggers::enroll_person),
         )
         .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry",
+            post(flows::operator::retry),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip",
+            post(flows::operator::skip),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments",
+            post(flows::operator::exit_version),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/flows/{id}/start",
             post(flows::triggers::start),
         )

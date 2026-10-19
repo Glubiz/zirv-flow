@@ -5211,6 +5211,208 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Retries a failed enrollment: the step that failed runs again from the state it started from.\nRecords a `flow.enrollment` decision (`retried`) and is audited as\n`flow.enrollment_retried`.",
+        "operationId": "retry_flow_enrollment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "enrollment_id",
+            "in": "path",
+            "description": "Enrollment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The retry was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentActionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or enrollment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The enrollment is not failed (`code` is `enrollment_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a\nfailure that stopped the walk at its node can be skipped; any other is retried. Records a\n`flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.",
+        "operationId": "skip_flow_enrollment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "enrollment_id",
+            "in": "path",
+            "description": "Enrollment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The skip was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentActionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or enrollment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The enrollment is not failed, or its failure cannot be skipped (`code` is `enrollment_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/flows/{id}/pause": {
       "post": {
         "tags": [
@@ -5983,6 +6185,107 @@
           },
           "404": {
             "description": "No such workspace, flow or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling\n469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older\nthan the flow's current one. Audited as `flow.enrollments_exited`.",
+        "operationId": "exit_flow_version_enrollments",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number; older than the current version",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The exit was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExitVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is a draft or archived, or the version is not older than the current one (`code` is `flow_state`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -18250,6 +18553,30 @@
           }
         }
       },
+      "EnrollmentActionBody": {
+        "type": "object",
+        "description": "A retry or a skip that was queued.",
+        "required": [
+          "enrollment_id",
+          "action",
+          "trace_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`retry` or `skip`."
+          },
+          "enrollment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trace_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The trace the operator's decision is recorded under."
+          }
+        }
+      },
       "ErasureBody": {
         "type": "object",
         "required": [
@@ -18520,6 +18847,26 @@
               "$ref": "#/components/schemas/SchemaVersionBody"
             },
             "description": "Published versions, newest first. A version never changes."
+          }
+        }
+      },
+      "ExitVersionBody": {
+        "type": "object",
+        "description": "A bulk exit that was queued.",
+        "required": [
+          "version",
+          "trace_id"
+        ],
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The trace each enrollment's decision is recorded under."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version whose in-flight enrollments are ended."
           }
         }
       },
