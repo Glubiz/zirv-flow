@@ -84,6 +84,27 @@ pub async fn hold_enrollment(
     Ok(())
 }
 
+/// Takes a held enrollment back to `state`, the one it was held from, and forgets its stored input:
+/// a step job reached it before the flow's resume batch did. The caller holds the enrollment's
+/// lock; a row that is not held is left alone.
+pub async fn release_enrollment(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+    state: EnrollmentStatus,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE enrollments SET state = $3, resume_input = NULL, updated_at = now() \n         WHERE workspace_id = $1 AND id = $2 AND state = 'held'",
+    )
+    .bind(workspace.as_uuid())
+    .bind(enrollment)
+    .bind(state.as_str())
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Forgets the failed step row of a node, so a retry that runs the node again records it afresh
 /// (and applies its effects) instead of finding the row of the failure.
 pub async fn reopen_failed_step(

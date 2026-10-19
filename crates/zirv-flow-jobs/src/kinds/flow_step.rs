@@ -37,8 +37,8 @@ use zirv_flow_store::{
     StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list,
     apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
     find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment, record_steps,
-    register_wait, reopen_failed_step, run_person_batch, save_enrollment, segment_catalog,
-    settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
+    register_wait, release_enrollment, reopen_failed_step, run_person_batch, save_enrollment,
+    segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -77,7 +77,8 @@ impl JobKind for FlowStep {
         // either sees the enrollment this step holds or the step sees the flow resumed. The
         // flow, then the person, then the enrollment: the order a resume locks them in.
         let flow_state = flow_state_for_step(conn, job.workspace, known.flow_id).await?;
-        let Some(enrollment) = lock_enrollment(conn, job.workspace, job.enrollment).await? else {
+        let Some(mut enrollment) = lock_enrollment(conn, job.workspace, job.enrollment).await?
+        else {
             return Ok(());
         };
         if is_stale(&enrollment, &job) {
@@ -91,8 +92,14 @@ impl JobKind for FlowStep {
             (Some(FlowState::Paused), _) => {
                 return hold(conn, &job, &enrollment, at).await;
             }
-            // A held enrollment of a flow that is not paused was resumed already.
-            _ if enrollment.status == EnrollmentStatus::Held => return Ok(()),
+            // A held enrollment of a flow that is no longer paused, which its resume batch has not
+            // reached yet, takes this job at once: an event must not lose to the stored timer.
+            _ if enrollment.status == EnrollmentStatus::Held => {
+                match release(conn, &job, enrollment).await? {
+                    Some(released) => enrollment = released,
+                    None => return Ok(()),
+                }
+            }
             _ => {}
         }
         if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at)
@@ -137,6 +144,38 @@ fn is_stale(enrollment: &Enrollment, job: &StepJobPayload) -> bool {
     let held = enrollment.status == EnrollmentStatus::Held
         && !matches!(job.input, StepJobInput::Resume { .. });
     enrollment.state_version != job.state_version || (enrollment.status != wanted && !held)
+}
+
+/// A job found its enrollment held on a flow that is not paused: the flow was resumed and its
+/// batch has not reached the enrollment. The enrollment goes back from `held` to the state it was
+/// held from and the job runs its own input (the caller checked the `state_version`); the batch
+/// then finds it no longer held. `None` leaves it held for the batch: the job is not for the state
+/// the enrollment was held from, or it is a timer and an event is stored (a timer never replaces
+/// an event).
+async fn release(
+    conn: &mut PgConnection,
+    job: &StepJobPayload,
+    enrollment: Enrollment,
+) -> Result<Option<Enrollment>, JobError> {
+    let stored = enrollment
+        .resume_input
+        .as_ref()
+        .and_then(StepJobInput::from_stored);
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let before = stored.status_before();
+    let timer_over_event = matches!(stored, StepJobInput::Event { .. })
+        && !matches!(job.input, StepJobInput::Event { .. });
+    if before != job.input.status_before() || timer_over_event {
+        return Ok(None);
+    }
+    release_enrollment(conn, job.workspace, enrollment.id, before).await?;
+    Ok(Some(Enrollment {
+        status: before,
+        resume_input: None,
+        ..enrollment
+    }))
 }
 
 /// The flow is paused: the step that fell due is held, not run. The enrollment keeps its node,

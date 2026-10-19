@@ -104,9 +104,10 @@ pub use flows::{
     flow_state_for_step, has_webhook_signing_secret, hold_enrollment, list_flow_versions,
     list_flows, live_signing_keys, lock_enrollment, lock_flow, lock_webhook_person, occurrence_of,
     pause_flow, publish_flow, read_webhook_subject, reconcile_flow_schedules, record_steps,
-    record_webhook_outcome, register_wait, reopen_failed_step, resume_batch, resume_failed,
-    resume_flow, rotate_signing_key, save_enrollment, segment_is_watched, segment_trigger_flows,
-    settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft, wait_filters,
+    record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step, resume_batch,
+    resume_failed, resume_flow, rotate_signing_key, save_enrollment, segment_is_watched,
+    segment_trigger_flows, settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft,
+    wait_filters,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

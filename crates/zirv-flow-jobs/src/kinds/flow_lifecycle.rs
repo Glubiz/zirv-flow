@@ -310,6 +310,61 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_for_a_held_wait_on_a_resumed_flow_runs_before_the_resume_batch_reaches_it(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.define_event("order").await;
+        env.define_trait("path", TraitType::String).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "wait", "type": "wait.until_event", "event": "order", "timeout_seconds": 3600},
+            {"id": "by_event", "type": "action.update_trait", "key": "path",
+             "change": {"op": "set", "value": "event"}},
+            {"id": "by_timeout", "type": "action.update_trait", "key": "path",
+             "change": {"op": "set", "value": "timeout"}},
+            {"id": "end_event", "type": "exit"},
+            {"id": "end_timeout", "type": "exit"}
+        ], "edges": [
+            edge("e1", "wait", "event", "by_event"),
+            edge("e2", "wait", "timeout", "by_timeout"),
+            edge("e3", "by_event", "next", "end_event"),
+            edge("e4", "by_timeout", "next", "end_timeout")
+        ]});
+        let flow = env.flow("Race", graph).await;
+        let person = env.person("ada@example.com", json!({})).await;
+        let id = env.enroll(flow, 1, &[person]).await.enrolled[0].enrollment;
+        env.run_matching(Some("start"), Some(id)).await;
+        env.pause(flow).await;
+        env.advance(3601);
+        env.run_matching(Some("wake"), Some(id)).await;
+        let held = env.enrollment(id).await;
+        assert_eq!(held.status, EnrollmentStatus::Held);
+        assert_eq!(held.resume_input, Some(json!({"input": "wake"})));
+
+        // The flow is resumed, but its batch has not reached the enrollment when the event does.
+        let trace = env.resume(flow).await;
+        env.apply_event("ada@example.com", "order", json!({"total": 5}))
+            .await;
+        env.run_matching(Some("event"), Some(id)).await;
+        let taken = env.enrollment(id).await;
+        assert_ne!(taken.status, EnrollmentStatus::Held);
+        assert!(taken.resume_input.is_none());
+        assert_eq!(lifecycle_jobs(&env).await, 1);
+        env.run_due().await;
+
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        assert_eq!(env.traits(person).await["path"], json!("event"));
+        assert_eq!(ended_nodes(&env, "by_event").await, 1);
+        assert_eq!(ended_nodes(&env, "by_timeout").await, 0);
+        assert_eq!(
+            decisions_of(&env, &trace, "resumed").await,
+            0,
+            "the batch found it no longer held"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_goal_exits_a_held_enrollment_like_the_state_it_was_held_from(pool: PgPool) {
         let env = Env::new(pool).await;
         env.define_event("order").await;
