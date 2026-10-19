@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::TraceId;
 use crate::signature::{
     DEFAULT_SIGNATURE_HEADER, DEFAULT_SIGNATURE_PREFIX, DEFAULT_TIMESTAMP_HEADER, sign,
 };
@@ -37,7 +38,8 @@ pub struct Envelope<'a> {
     pub node_id: &'a str,
     pub enrollment_id: Uuid,
     pub person_id: Uuid,
-    pub trace_id: Uuid,
+    /// The enrollment's trace, in the form of the `x-trace-id` header: 32 lowercase hex digits.
+    pub trace_id: TraceId,
     /// The effect key: the same for every attempt and every redelivery of this effect.
     pub idempotency_key: &'a str,
     /// When the step that produced the call ran, in RFC 3339.
@@ -77,7 +79,7 @@ mod tests {
             node_id: "hook",
             enrollment_id: Uuid::from_u128(2),
             person_id: Uuid::from_u128(3),
-            trace_id: Uuid::from_u128(4),
+            trace_id: TraceId::from_uuid(Uuid::from_u128(4)),
             idempotency_key: "key",
             occurred_at: "2026-01-02T03:04:05Z",
             traits,
@@ -100,7 +102,7 @@ mod tests {
                 "node_id": "hook",
                 "enrollment_id": "00000000-0000-0000-0000-000000000002",
                 "person_id": "00000000-0000-0000-0000-000000000003",
-                "trace_id": "00000000-0000-0000-0000-000000000004",
+                "trace_id": "00000000000000000000000000000004",
                 "idempotency_key": "key",
                 "occurred_at": "2026-01-02T03:04:05Z",
                 "traits": {"plan": "pro", "missing": null},

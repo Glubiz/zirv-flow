@@ -26,6 +26,7 @@ mod sync_run;
 mod sync_tokens;
 mod traits_recompute;
 mod traits_slot;
+mod webhook_call;
 
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
@@ -47,6 +48,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &segment_reevaluate::SegmentReevaluate,
     &flow_step::FlowStep,
     &flow_enroll::FlowEnroll,
+    &webhook_call::WebhookCall,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text
