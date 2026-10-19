@@ -1,6 +1,7 @@
 //! The error a job handler returns.
 
 use std::fmt;
+use std::time::Duration;
 
 use zirv_flow_store::StoreError;
 
@@ -9,11 +10,27 @@ use zirv_flow_store::StoreError;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JobError {
     message: &'static str,
+    retry_after: Option<Duration>,
 }
 
 impl JobError {
     pub const fn new(message: &'static str) -> Self {
-        Self { message }
+        Self {
+            message,
+            retry_after: None,
+        }
+    }
+
+    /// Asks the worker to wait at least this long before the next attempt, such as the time a
+    /// server named in a `Retry-After` header. The worker never waits less than its own backoff
+    /// and never more than the backoff cap.
+    pub const fn with_retry_after(mut self, wait: Duration) -> Self {
+        self.retry_after = Some(wait);
+        self
+    }
+
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
     }
 
     pub const fn message(&self) -> &'static str {
@@ -57,6 +74,16 @@ mod tests {
 
         assert_eq!(error.to_string(), "the upstream refused the request");
         assert_eq!(error.message(), "the upstream refused the request");
+    }
+
+    #[test]
+    fn an_error_can_ask_for_a_later_retry_without_changing_its_message() {
+        let error = JobError::new("the destination asked for a pause")
+            .with_retry_after(Duration::from_secs(30));
+
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+        assert_eq!(error.to_string(), "the destination asked for a pause");
+        assert_eq!(JobError::new("x").retry_after(), None);
     }
 
     #[test]

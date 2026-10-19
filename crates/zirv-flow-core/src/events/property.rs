@@ -31,10 +31,22 @@ pub fn validate_event_name(name: &str) -> Result<(), ValidationError> {
 /// (architecture 8.3). A client, a sync or an import never sends one.
 pub const RESERVED_EVENT_PREFIX: &str = "segment.";
 
-/// Whether `name` is reserved for the system, ignoring case so a variant cannot slip past.
+/// The event a flow writes when a webhook action's call succeeded (architecture 9.1).
+pub const WEBHOOK_SUCCEEDED_EVENT: &str = "webhook.succeeded";
+/// The event a flow writes when a webhook action's call failed for good (architecture 9.1).
+pub const WEBHOOK_FAILED_EVENT: &str = "webhook.failed";
+
+/// The reserved names that are not under [`RESERVED_EVENT_PREFIX`].
+const RESERVED_EVENT_NAMES: [&str; 2] = [WEBHOOK_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT];
+
+/// Whether `name` is reserved for the system, ignoring case so a variant cannot slip past: the
+/// `segment.` prefix, and the two webhook outcome names.
 pub fn is_reserved_event_name(name: &str) -> bool {
     name.get(..RESERVED_EVENT_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_EVENT_PREFIX))
+        || RESERVED_EVENT_NAMES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// The error code of a client event under a reserved name.
@@ -46,7 +58,7 @@ pub fn validate_client_event_name(name: &str) -> Result<(), ValidationError> {
     if is_reserved_event_name(name) {
         Err(ValidationError::new(
             "name",
-            "must not start with segment., which is reserved for the system",
+            "must not start with segment. or be a webhook outcome name, which the system reserves",
         ))
     } else {
         Ok(())
@@ -267,6 +279,8 @@ mod tests {
             "segment.x",
             "Segment.Entered",
             "SEGMENT.",
+            "webhook.succeeded",
+            "Webhook.Failed",
         ] {
             assert!(is_reserved_event_name(name), "{name}");
             assert!(validate_client_event_name(name).is_err(), "{name}");
@@ -275,6 +289,8 @@ mod tests {
         for name in [
             "segment",
             "segments.entered",
+            "webhook.succeeded.x",
+            "webhook.called",
             "my.segment.entered",
             "order",
             "seg",

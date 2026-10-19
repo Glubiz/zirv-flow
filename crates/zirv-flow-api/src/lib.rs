@@ -236,6 +236,14 @@ fn routes() -> Router<AppState> {
             get(flows::crud::version),
         )
         .route(
+            "/api/v1/workspaces/{ws}/webhook-signing-secret",
+            get(flows::signing::get).post(flows::signing::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate",
+            post(flows::signing::rotate),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/segments",
             get(segments::crud::list).post(segments::crud::create),
         )

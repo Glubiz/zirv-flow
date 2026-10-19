@@ -125,7 +125,8 @@ mod tests {
                 "segment.refresh",
                 "segment.reevaluate",
                 "flow.step",
-                "flow.enroll"
+                "flow.enroll",
+                "webhook.call"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -171,6 +172,7 @@ mod tests {
                 "segment.reevaluate",
                 "flow.step",
                 "flow.enroll",
+                "webhook.call",
                 "test.first",
                 "test.second"
             ]

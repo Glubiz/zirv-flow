@@ -259,7 +259,7 @@ enum Attempt {
     Completed,
     LeaseLost,
     /// The handler failed; the text is safe to store.
-    Failed(String),
+    Failed(String, Option<Duration>),
 }
 
 /// Runs one claimed job inside its `job` span and records what happened to it.
@@ -288,15 +288,15 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     // A panicking handler fails the attempt instead of taking the worker down.
     let attempt = match (&mut task.0).await {
         Ok(attempt) => attempt,
-        Err(_) => Attempt::Failed("the job handler panicked".into()),
+        Err(_) => Attempt::Failed("the job handler panicked".into(), None),
     };
 
     let mut failure = None;
     let outcome = match attempt {
         Attempt::Completed => Outcome::Completed,
         Attempt::LeaseLost => Outcome::LeaseLost,
-        Attempt::Failed(reason) => {
-            let outcome = settle_failure(shared, &job, &reason).await;
+        Attempt::Failed(reason, retry_after) => {
+            let outcome = settle_failure(shared, &job, &reason, retry_after).await;
             failure = Some(reason);
             outcome
         }
@@ -316,13 +316,28 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     metrics::record_attempt(&job.kind, outcome, elapsed.as_secs_f64());
 }
 
+/// How long to wait before the next attempt: the backoff, or the wait the handler asked for
+/// (a `Retry-After`) when that is longer, but never past the backoff cap.
+fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Duration) -> Duration {
+    asked.map_or(backoff, |asked| backoff.max(asked.min(cap)))
+}
+
 /// Retries or buries a job whose handler failed, fenced on its lease.
-async fn settle_failure(shared: &Shared, job: &ClaimedJob, reason: &str) -> Outcome {
-    let delay = backoff(
-        u32::try_from(job.attempts).unwrap_or(u32::MAX),
-        shared.config.backoff_base,
+async fn settle_failure(
+    shared: &Shared,
+    job: &ClaimedJob,
+    reason: &str,
+    retry_after: Option<Duration>,
+) -> Outcome {
+    let delay = retry_delay(
+        backoff(
+            u32::try_from(job.attempts).unwrap_or(u32::MAX),
+            shared.config.backoff_base,
+            shared.config.backoff_cap,
+            random_unit(),
+        ),
+        retry_after,
         shared.config.backoff_cap,
-        random_unit(),
     );
     match fail_job(&shared.pool, job.id, job.lease_token, delay, reason).await {
         Ok(Some(FailOutcome::Retried)) => Outcome::Retried,
@@ -340,15 +355,15 @@ async fn settle_failure(shared: &Shared, job: &ClaimedJob, reason: &str) -> Outc
 /// delete the job and commit with everything the handler wrote.
 async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Some(kind) = shared.registry.get(&job.kind) else {
-        return Attempt::Failed("no handler is registered for this job kind".into());
+        return Attempt::Failed("no handler is registered for this job kind".into(), None);
     };
     let Ok(mut tx) = begin(&shared.pool).await else {
-        return Attempt::Failed("could not start the job transaction".into());
+        return Attempt::Failed("could not start the job transaction".into(), None);
     };
     match lock_lease(&mut tx, job.id, job.lease_token).await {
         Ok(true) => {}
         Ok(false) => return Attempt::LeaseLost,
-        Err(_) => return Attempt::Failed("could not confirm the lease".into()),
+        Err(_) => return Attempt::Failed("could not confirm the lease".into(), None),
     }
 
     let (lost, mut lease_lost) = oneshot::channel();
@@ -383,15 +398,15 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
 
     match result {
         None => Attempt::LeaseLost,
-        Some(Err(error)) => Attempt::Failed(error.to_string()),
+        Some(Err(error)) => Attempt::Failed(error.to_string(), error.retry_after()),
         Some(Ok(())) => match complete_job(&mut *tx, job.id, job.lease_token).await {
             Ok(true) => match tx.commit().await {
                 Ok(()) => Attempt::Completed,
-                Err(_) => Attempt::Failed("could not commit the job transaction".into()),
+                Err(_) => Attempt::Failed("could not commit the job transaction".into(), None),
             },
             // Another worker owns the job now: roll back this attempt's writes.
             Ok(false) => Attempt::LeaseLost,
-            Err(_) => Attempt::Failed("could not complete the job".into()),
+            Err(_) => Attempt::Failed("could not complete the job".into(), None),
         },
     }
 }
@@ -438,6 +453,32 @@ mod tests {
 
     use super::*;
     use crate::{JobError, JobKind};
+
+    #[test]
+    fn a_requested_wait_lengthens_the_retry_but_never_past_the_cap() {
+        let second = Duration::from_secs(1);
+        let cap = Duration::from_secs(60);
+
+        assert_eq!(retry_delay(second, None, cap), second);
+        assert_eq!(
+            retry_delay(second, Some(Duration::from_secs(30)), cap),
+            Duration::from_secs(30)
+        );
+        assert_eq!(retry_delay(second, Some(Duration::ZERO), cap), second);
+        assert_eq!(
+            retry_delay(second, Some(Duration::from_secs(9999)), cap),
+            cap
+        );
+        assert_eq!(
+            retry_delay(
+                Duration::from_secs(90),
+                Some(Duration::from_secs(9999)),
+                cap
+            ),
+            Duration::from_secs(90),
+            "the backoff itself is never shortened"
+        );
+    }
 
     #[test]
     fn the_pool_holds_a_job_transaction_and_a_batch_per_shard_for_every_slot_and_one_spare() {

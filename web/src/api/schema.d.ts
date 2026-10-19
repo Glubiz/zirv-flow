@@ -2464,6 +2464,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/webhook-signing-secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether the workspace has a webhook signing secret and when a rotation's previous secret
+         *     stops signing. Never returns a secret. Workspace admins only.
+         */
+        get: operations["get_webhook_signing_secret"];
+        put?: never;
+        /**
+         * Creates the workspace's webhook signing secret and returns it once. Workspace admins only.
+         *     Audited as `webhook_signing.created`.
+         */
+        post: operations["create_webhook_signing_secret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issues a new signing secret and returns it once. The previous secret keeps signing for the
+         *     grace window; an earlier retired secret stops at once. Workspace admins only. Audited as
+         *     `webhook_signing.rotated`.
+         */
+        post: operations["rotate_webhook_signing_secret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/webhooks": {
         parameters: {
             query?: never;
@@ -4655,6 +4700,23 @@ export interface components {
             /** @description A JSON pointer into the manifest; empty for the manifest itself. */
             path: string;
         };
+        /** @description A signing secret, shown once. */
+        IssuedSigningSecretBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: int64
+             * @description How long a rotation keeps the previous secret signing, in seconds.
+             */
+            grace_seconds: number;
+            /**
+             * Format: date-time
+             * @description When the previous secret stops signing; null for a new secret that replaced nothing.
+             */
+            previous_valid_until?: string | null;
+            /** @description The signing secret. Shown only in this response; keep it. */
+            secret: string;
+        };
         /** @description One invalid field of one item of an ingestion request. */
         ItemProblem: {
             /** @description The field, or empty when the item itself is the wrong type. */
@@ -5901,6 +5963,29 @@ export interface components {
             /** @example owner@example.com */
             email: string;
             password: string;
+        };
+        /** @description Whether the workspace has a signing secret, without the secret. */
+        SigningSecretBody: {
+            /**
+             * @description Whether a signing secret exists. A flow with a webhook node cannot be published without
+             *     one.
+             */
+            configured: boolean;
+            /**
+             * Format: date-time
+             * @description When the current secret was made.
+             */
+            created_at?: string | null;
+            /**
+             * Format: int64
+             * @description How long a rotation keeps the previous secret signing, in seconds.
+             */
+            grace_seconds: number;
+            /**
+             * Format: date-time
+             * @description When the previous secret stops signing; null when no rotation left one inside its window.
+             */
+            previous_valid_until?: string | null;
         };
         /**
          * @description What the reference evaluator reads about one person. `capped_events` and
@@ -16687,6 +16772,192 @@ export interface operations {
             };
             /** @description `trait_not_indexed`: the trait holds no slot */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_webhook_signing_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The signing secret's state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SigningSecretBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_webhook_signing_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret, shown only now */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedSigningSecretBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace already has a signing secret, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    rotate_webhook_signing_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret, shown only now */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedSigningSecretBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace has no signing secret yet, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

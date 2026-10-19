@@ -177,7 +177,15 @@ fn verify(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<signature::Verified, SignatureError> {
-    let lookup = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    // Every value of a header counts: a sender in a rotation grace window signs with two secrets
+    // and sends one signature value for each.
+    let lookup = |name: &str| {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>()
+    };
     signature::verify(
         &scheme(hook),
         secret.expose(),
