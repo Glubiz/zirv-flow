@@ -225,3 +225,26 @@ pub(crate) async fn exit_version(
         }),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use zirv_flow_store::EnrollmentStatus;
+
+    use super::*;
+
+    #[test]
+    fn a_refused_control_is_a_404_or_a_409_with_the_enrollment_state_code() {
+        assert_eq!(
+            control_error(ControlError::NotFound).status(),
+            StatusCode::NOT_FOUND
+        );
+        for refused in [
+            ControlError::NotFailed(EnrollmentStatus::Waiting),
+            ControlError::SkipUnavailable,
+        ] {
+            let error = control_error(refused);
+            assert_eq!(error.status(), StatusCode::CONFLICT);
+            assert_eq!(error.code(), Some("enrollment_state"));
+        }
+    }
+}
