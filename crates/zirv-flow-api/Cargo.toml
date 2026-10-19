@@ -28,7 +28,7 @@ uuid.workspace = true
 zirv-flow-ai.workspace = true
 zirv-flow-connectors.workspace = true
 zirv-flow-core.workspace = true
-zirv-flow-engine = { path = "../zirv-flow-engine" }
+zirv-flow-engine.workspace = true
 zirv-flow-identity.workspace = true
 zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
