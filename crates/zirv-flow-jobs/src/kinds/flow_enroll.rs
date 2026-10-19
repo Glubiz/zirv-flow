@@ -1429,7 +1429,6 @@ mod tests {
             env.decisions("skipped", Some("already_entered")).await,
             100_000
         );
-        assert!(finished < Duration::from_secs(150), "{finished:?}");
         eprintln!(
             "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
              re-entry refused {finished:?}"

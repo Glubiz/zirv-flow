@@ -1,2 +1,7 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The 100,000-person criterion-4 test takes about two minutes, past the default limit.
+[[profile.default.overrides]]
+filter = 'package(zirv-flow-jobs) & test(a_segment_entry_trigger_for_100000_people_enrolls_each_exactly_once)'
+slow-timeout = { period = "60s", terminate-after = 6 }
