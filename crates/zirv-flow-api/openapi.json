@@ -5446,7 +5446,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TestRequest"
+                "$ref": "#/components/schemas/FlowTestRequest"
               }
             }
           },
@@ -5458,7 +5458,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TestBody"
+                  "$ref": "#/components/schemas/FlowTestBody"
                 }
               }
             }
@@ -16164,7 +16164,7 @@
           "observed": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ObservedBody"
+              "$ref": "#/components/schemas/FlowObservedBody"
             }
           },
           "outcome": {
@@ -19301,6 +19301,29 @@
         ],
         "description": "One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused."
       },
+      "FlowObservedBody": {
+        "type": "object",
+        "description": "What a leaf condition saw, flattened out of the evaluation tree.",
+        "required": [
+          "pointer",
+          "outcome",
+          "observed"
+        ],
+        "properties": {
+          "observed": {
+            "type": "object",
+            "description": "`{\"value\": ..}` for a trait, `{\"missing\": true}`, `{\"count\": n}` or `{\"value\": .., \"count\": n}`\nfor events, `{\"present\": bool}` for a list, segment, consent or identifier."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`pass`, `fail` or `unknown` (a capped event name)."
+          },
+          "pointer": {
+            "type": "string",
+            "description": "The JSON pointer of the leaf in the condition."
+          }
+        }
+      },
       "FlowReentry": {
         "oneOf": [
           {
@@ -19492,6 +19515,191 @@
             "enum": [
               "split.random"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowTestBody": {
+        "type": "object",
+        "description": "The result of a walk.",
+        "required": [
+          "flow_id",
+          "source",
+          "enrollment_id",
+          "start_at",
+          "snapshot",
+          "path",
+          "internal_effects",
+          "external_effects",
+          "waits",
+          "wakes",
+          "script",
+          "final_state",
+          "person_after",
+          "not_simulated"
+        ],
+        "properties": {
+          "enrollment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "external_effects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectBody"
+            }
+          },
+          "final_state": {
+            "$ref": "#/components/schemas/FinalStateBody"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "halted": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HaltBody",
+                "description": "Set when the walk stopped early; the path up to there is still returned."
+              }
+            ]
+          },
+          "internal_effects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectBody"
+            }
+          },
+          "merged_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "not_simulated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Settings the walk cannot trigger, because a script has no segment membership changes:\n`goal_segment` (a goal of entering a segment), `exit_leaves_segment` (the criterion) and\n`exit_goal_reached_by_segment` (a `goal_reached` criterion when the goal is a segment)."
+          },
+          "path": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PathStepBody"
+            }
+          },
+          "person_after": {
+            "$ref": "#/components/schemas/PersonAfterBody"
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person walked: the survivor when `person_id` was merged into another, or the person a\nposted snapshot names; null for a synthetic one."
+          },
+          "script": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptResultBody"
+            }
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/SnapshotBody",
+            "description": "The snapshot the walk started from. Re-post it as `snapshot` to replay."
+          },
+          "source": {
+            "type": "string",
+            "description": "`draft`, `version` or `inline`."
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version walked; null for the draft and an inline graph."
+          },
+          "waits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WaitBody"
+            }
+          },
+          "wakes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WakeBody"
+            }
+          }
+        }
+      },
+      "FlowTestRequest": {
+        "type": "object",
+        "description": "The request of `POST .../flows/{id}/test`.\n\nThe graph is the flow's draft unless `version` or `graph` is given (not both). The person is\n`person_id` or `snapshot` (exactly one).",
+        "properties": {
+          "enrollment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the\ndefault is derived from the flow and the person, so a call is repeatable."
+          },
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A real person, whose bounded snapshot is read (read only) and returned. Needs the right\nto see personal values (workspace admin, owner or an `admin` key), because the snapshot\nholds them."
+          },
+          "script": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptStepBody"
+            },
+            "description": "Steps applied in order after the first run; at most 50, times never going back."
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotBody",
+                "description": "A synthetic person, or the snapshot a previous call returned."
+              }
+            ]
+          },
+          "start_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The virtual time the walk starts at; the database's time when omitted. Microsecond\nprecision."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Walk this published version instead of the draft."
           }
         },
         "additionalProperties": false
@@ -24450,66 +24658,6 @@
             "description": "Whether the connection works."
           }
         }
-      },
-      "TestRequest": {
-        "type": "object",
-        "description": "The request of `POST .../flows/{id}/test`.\n\nThe graph is the flow's draft unless `version` or `graph` is given (not both). The person is\n`person_id` or `snapshot` (exactly one).",
-        "properties": {
-          "enrollment_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the\ndefault is derived from the flow and the person, so a call is repeatable."
-          },
-          "graph": {
-            "$ref": "#/components/schemas/FlowGraph"
-          },
-          "person_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "A real person, whose bounded snapshot is read (read only) and returned. Needs the right\nto see personal values (workspace admin, owner or an `admin` key), because the snapshot\nholds them."
-          },
-          "script": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ScriptStepBody"
-            },
-            "description": "Steps applied in order after the first run; at most 50, times never going back."
-          },
-          "snapshot": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/SnapshotBody",
-                "description": "A synthetic person, or the snapshot a previous call returned."
-              }
-            ]
-          },
-          "start_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "The virtual time the walk starts at; the database's time when omitted. Microsecond\nprecision."
-          },
-          "version": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Walk this published version instead of the draft."
-          }
-        },
-        "additionalProperties": false
       },
       "TimelineBody": {
         "type": "object",

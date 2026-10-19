@@ -2834,7 +2834,7 @@ export interface components {
         /** @description How one condition of a branch came out. */
         ConditionBody: {
             index: number;
-            observed: components["schemas"]["ObservedBody"][];
+            observed: components["schemas"]["FlowObservedBody"][];
             /** @description `pass`, `fail`, `unknown`, or `not_evaluated` for a condition after the first that passed. */
             outcome: string;
         };
@@ -4099,6 +4099,18 @@ export interface components {
         };
         /** @description One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused. */
         FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
+        /** @description What a leaf condition saw, flattened out of the evaluation tree. */
+        FlowObservedBody: {
+            /**
+             * @description `{"value": ..}` for a trait, `{"missing": true}`, `{"count": n}` or `{"value": .., "count": n}`
+             *     for events, `{"present": bool}` for a list, segment, consent or identifier.
+             */
+            observed: Record<string, never>;
+            /** @description `pass`, `fail` or `unknown` (a capped event name). */
+            outcome: string;
+            /** @description The JSON pointer of the leaf in the condition. */
+            pointer: string;
+        };
         /** @description Whether a person may enter again. */
         FlowReentry: {
             /** @enum {string} */
@@ -4151,6 +4163,83 @@ export interface components {
             id: string;
             /** @enum {string} */
             type: "split.random";
+        };
+        /** @description The result of a walk. */
+        FlowTestBody: {
+            /** Format: uuid */
+            enrollment_id: string;
+            external_effects: components["schemas"]["EffectBody"][];
+            final_state: components["schemas"]["FinalStateBody"];
+            /** Format: uuid */
+            flow_id: string;
+            halted?: null | components["schemas"]["HaltBody"];
+            internal_effects: components["schemas"]["EffectBody"][];
+            /** Format: uuid */
+            merged_from?: string | null;
+            /**
+             * @description Settings the walk cannot trigger, because a script has no segment membership changes:
+             *     `goal_segment` (a goal of entering a segment), `exit_leaves_segment` (the criterion) and
+             *     `exit_goal_reached_by_segment` (a `goal_reached` criterion when the goal is a segment).
+             */
+            not_simulated: string[];
+            path: components["schemas"]["PathStepBody"][];
+            person_after: components["schemas"]["PersonAfterBody"];
+            /**
+             * Format: uuid
+             * @description The person walked: the survivor when `person_id` was merged into another, or the person a
+             *     posted snapshot names; null for a synthetic one.
+             */
+            person_id?: string | null;
+            script: components["schemas"]["ScriptResultBody"][];
+            /** @description The snapshot the walk started from. Re-post it as `snapshot` to replay. */
+            snapshot: components["schemas"]["SnapshotBody"];
+            /** @description `draft`, `version` or `inline`. */
+            source: string;
+            /** Format: date-time */
+            start_at: string;
+            /**
+             * Format: int32
+             * @description The version walked; null for the draft and an inline graph.
+             */
+            version?: number | null;
+            waits: components["schemas"]["WaitBody"][];
+            wakes: components["schemas"]["WakeBody"][];
+        };
+        /**
+         * @description The request of `POST .../flows/{id}/test`.
+         *
+         *     The graph is the flow's draft unless `version` or `graph` is given (not both). The person is
+         *     `person_id` or `snapshot` (exactly one).
+         */
+        FlowTestRequest: {
+            /**
+             * Format: uuid
+             * @description The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the
+             *     default is derived from the flow and the person, so a call is repeatable.
+             */
+            enrollment_id?: string | null;
+            graph?: components["schemas"]["FlowGraph"];
+            /**
+             * Format: uuid
+             * @description A real person, whose bounded snapshot is read (read only) and returned. Needs the right
+             *     to see personal values (workspace admin, owner or an `admin` key), because the snapshot
+             *     holds them.
+             */
+            person_id?: string | null;
+            /** @description Steps applied in order after the first run; at most 50, times never going back. */
+            script?: components["schemas"]["ScriptStepBody"][];
+            snapshot?: null | components["schemas"]["SnapshotBody"];
+            /**
+             * Format: date-time
+             * @description The virtual time the walk starts at; the database's time when omitted. Microsecond
+             *     precision.
+             */
+            start_at?: string | null;
+            /**
+             * Format: int32
+             * @description Walk this published version instead of the draft.
+             */
+            version?: number | null;
         };
         FlowTraitChange: {
             /** @enum {string} */
@@ -6001,42 +6090,6 @@ export interface components {
             error?: string | null;
             /** @description Whether the connection works. */
             ok: boolean;
-        };
-        /**
-         * @description The request of `POST .../flows/{id}/test`.
-         *
-         *     The graph is the flow's draft unless `version` or `graph` is given (not both). The person is
-         *     `person_id` or `snapshot` (exactly one).
-         */
-        TestRequest: {
-            /**
-             * Format: uuid
-             * @description The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the
-             *     default is derived from the flow and the person, so a call is repeatable.
-             */
-            enrollment_id?: string | null;
-            graph?: components["schemas"]["FlowGraph"];
-            /**
-             * Format: uuid
-             * @description A real person, whose bounded snapshot is read (read only) and returned. Needs the right
-             *     to see personal values (workspace admin, owner or an `admin` key), because the snapshot
-             *     holds them.
-             */
-            person_id?: string | null;
-            /** @description Steps applied in order after the first run; at most 50, times never going back. */
-            script?: components["schemas"]["ScriptStepBody"][];
-            snapshot?: null | components["schemas"]["SnapshotBody"];
-            /**
-             * Format: date-time
-             * @description The virtual time the walk starts at; the database's time when omitted. Microsecond
-             *     precision.
-             */
-            start_at?: string | null;
-            /**
-             * Format: int32
-             * @description Walk this published version instead of the draft.
-             */
-            version?: number | null;
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -10269,7 +10322,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TestRequest"];
+                "application/json": components["schemas"]["FlowTestRequest"];
             };
         };
         responses: {
@@ -10279,7 +10332,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TestBody"];
+                    "application/json": components["schemas"]["FlowTestBody"];
                 };
             };
             /** @description Not authenticated */
