@@ -451,7 +451,7 @@ async fn replayed_of(
 
 /// How many times [`lock_people`] resolves the people again because a merge committed while it
 /// waited for their locks, before it gives the enroll back as a retryable race.
-const LOCK_ROUNDS: usize = 4;
+pub(super) const LOCK_ROUNDS: usize = 4;
 
 /// Resolves the entries' people to the people they are now and locks those rows `FOR KEY SHARE`,
 /// in id order: a merge or an erasure, which lock a merged group `FOR UPDATE` in id order, then
@@ -463,6 +463,10 @@ const LOCK_ROUNDS: usize = 4;
 /// the next round. The round's locks are released first, with a savepoint rollback, so the
 /// survivor is never locked after a higher id. A person erased meanwhile has no row and is not in
 /// the returned set. After [`LOCK_ROUNDS`] rounds the enroll is a retryable race.
+///
+/// An audience page (`lock_audience_page`) has locked its people and their survivors already, in
+/// one id-ordered statement, so for those people this takes rows the transaction holds; only a
+/// merge that committed after the page was locked can name a survivor not held yet.
 async fn lock_people(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,

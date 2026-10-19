@@ -8,7 +8,7 @@
 //! enrolls for. The job calls [`super::enroll_entries`], which is idempotent on
 //! `(flow, person, occurrence)`.
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use time::OffsetDateTime;
@@ -528,11 +528,20 @@ pub async fn audience_page(
     page.map_err(StoreError::query)
 }
 
-/// Locks the people of an audience page `FOR KEY SHARE`, in id order, and returns those still
-/// there, in id order. The flow's enroll lock comes first, as in [`super::enroll_entries`], then
-/// the people: an erasure (`FOR UPDATE` on the person) waits for the page's transaction, so its
-/// strip sees the next page the job queues, and one that committed first has taken its person
-/// out of the result, so the next page's cursor is never an erased id.
+/// Locks the people of an audience page and their survivors `FOR KEY SHARE`, in one statement in
+/// id order, and returns the page's people that are still there, in id order. The flow's enroll
+/// lock comes first, as in [`super::enroll_entries`], then the people: an erasure (`FOR UPDATE`
+/// on the person) waits for the page's transaction, so its strip sees the next page the job
+/// queues, and one that committed first has taken its person out of the result, so the next
+/// page's cursor is never an erased id.
+///
+/// A page person may be merged away, with the merge's rewrite of the membership not yet done;
+/// `enroll_entries` then enrolls and so locks its survivor. The survivors are therefore locked
+/// with the page, in the same id order, so that later lock finds the row already held and a merge
+/// or an erasure of a group (`FOR UPDATE`, in id order) never waits on this page while this page
+/// waits on it. A merge that committed between the resolve and the lock leaves a survivor out of
+/// the locked set; the round's locks are released with a savepoint rollback and the page is
+/// resolved again, up to [`super::enroll::LOCK_ROUNDS`] rounds, then it is a retryable race.
 pub async fn lock_audience_page(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -540,14 +549,46 @@ pub async fn lock_audience_page(
     page: &[Uuid],
 ) -> Result<Vec<Uuid>, StoreError> {
     super::enroll::lock_enrolls(connection, flow).await?;
-    sqlx::query_scalar(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR KEY SHARE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(page)
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::query)
+    for _ in 0..super::enroll::LOCK_ROUNDS {
+        let survivors = super::enroll::resolve_survivors(connection, workspace, page).await?;
+        let mut people: Vec<Uuid> = page.iter().chain(survivors.values()).copied().collect();
+        people.sort_unstable();
+        people.dedup();
+        sqlx::query("SAVEPOINT audience_page")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2)              ORDER BY id FOR KEY SHARE",
+        )
+        .bind(workspace.as_uuid())
+        .bind(&people)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        let held: HashSet<Uuid> = locked.iter().map(|(id, _)| *id).collect();
+        if locked
+            .iter()
+            .any(|(_, merged_into)| merged_into.is_some_and(|survivor| !held.contains(&survivor)))
+        {
+            sqlx::query("ROLLBACK TO SAVEPOINT audience_page")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+            continue;
+        }
+        sqlx::query("RELEASE SAVEPOINT audience_page")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        let page: HashSet<Uuid> = page.iter().copied().collect();
+        return Ok(locked
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| page.contains(id))
+            .collect());
+    }
+    Err(StoreError::retryable_race())
 }
 
 /// Makes the `schedules` row of a flow match its trigger, in the caller's transaction: a schedule
@@ -1293,5 +1334,111 @@ mod tests {
             assert_eq!(all.len(), total, "{source:?}");
             assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
         }
+    }
+
+    /// Waits until the backend `pid` is blocked on a lock, by polling `pg_blocking_pids`.
+    async fn wait_until_blocked(pool: &PgPool, pid: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(pid)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if blocked {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the merge never waited for the page"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_with_a_merged_away_person_locks_the_survivor_in_id_order(pool: PgPool) {
+        use crate::flows::{EnrollEntries, EnrollEntry, enroll_entries};
+
+        let ws = workspace(&pool, "page-lock-order").await;
+        let flow = published(
+            &pool,
+            ws,
+            "Audience",
+            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
+        )
+        .await;
+        let mut ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+        ids.sort_unstable();
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        for id in &ids {
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(id)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // C is merged into A, but a list membership still names C: the page reads {B, C}.
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(c)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Connection 1 locks the page.
+        let mut page_tx = crate::begin(&pool).await.unwrap();
+        let locked = lock_audience_page(&mut page_tx, ws, flow, &[b, c])
+            .await
+            .unwrap();
+        assert_eq!(locked, [b, c]);
+
+        // Connection 2 locks the group {A, B} `FOR UPDATE` in id order, as a merge does.
+        let mut merge = crate::begin(&pool).await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *merge)
+            .await
+            .unwrap();
+        let merger = tokio::spawn(async move {
+            sqlx::query("SELECT id FROM people WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+                .bind(vec![a, b])
+                .execute(&mut *merge)
+                .await
+                .unwrap();
+            crate::commit(merge).await.unwrap();
+        });
+        wait_until_blocked(&pool, pid).await;
+
+        // The page enrolls: C resolves to A, which the merge holds or is queued for.
+        let entries: Vec<EnrollEntry> = [b, c]
+            .into_iter()
+            .map(|person| EnrollEntry {
+                person,
+                occurrence: Uuid::now_v7(),
+                cause: None,
+            })
+            .collect();
+        let outcome = enroll_entries(
+            &mut page_tx,
+            &EnrollEntries {
+                workspace: ws,
+                flow,
+                version: 1,
+                trigger: "manual",
+                entries: &entries,
+                now: OffsetDateTime::now_utc(),
+                trace: &TraceContext::root(Cause::api("enroll")),
+            },
+        )
+        .await
+        .unwrap();
+        crate::commit(page_tx).await.unwrap();
+        merger.await.unwrap();
+
+        let mut enrolled: Vec<Uuid> = outcome.enrolled.iter().map(|e| e.person).collect();
+        enrolled.sort_unstable();
+        assert_eq!(enrolled, [a, b]);
     }
 }
