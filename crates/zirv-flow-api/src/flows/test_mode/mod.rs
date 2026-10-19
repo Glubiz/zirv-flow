@@ -378,3 +378,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod acceptance;
