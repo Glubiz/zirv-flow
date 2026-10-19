@@ -171,6 +171,7 @@ async fn open_secret(
 }
 
 fn verify(
+    now: OffsetDateTime,
     hook: &HookReceive,
     secret: &zirv_flow_core::SecretBytes,
     headers: &HeaderMap,
@@ -182,7 +183,7 @@ fn verify(
         secret.expose(),
         &lookup,
         body,
-        OffsetDateTime::now_utc().unix_timestamp(),
+        now.unix_timestamp(),
     )
 }
 
@@ -210,7 +211,14 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         .map_err(|error| Refusal::new(error, "too_large"))?;
     let verified = {
         let secret = open_secret(state, &hook).await?;
-        verify(&hook, &secret, &headers, &body).map_err(invalid_signature)?
+        verify(
+            state.clock.now_in_process(),
+            &hook,
+            &secret,
+            &headers,
+            &body,
+        )
+        .map_err(invalid_signature)?
     };
 
     let invalid_payload = || {
