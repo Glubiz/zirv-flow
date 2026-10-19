@@ -93,12 +93,12 @@ async fn startable(
         .ok_or_else(ApiError::internal)?;
     let settings: FlowSettings =
         serde_json::from_value(published.settings).map_err(|_| ApiError::internal())?;
-    let has = match settings.trigger {
-        Trigger::Api {} => "api",
-        Trigger::Manual {} => "manual",
-        _ => "other",
+    let matches = match settings.trigger {
+        Trigger::Api {} => wanted == "api",
+        Trigger::Manual {} => wanted == "manual",
+        _ => false,
     };
-    if has != wanted {
+    if !matches {
         return Err(ApiError::flow_state(format!(
             "the flow's trigger is not {wanted}"
         )));

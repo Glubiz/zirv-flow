@@ -338,15 +338,11 @@ pub async fn apply_reevaluation(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let counts = captured.counts.clone();
+    let outcome = captured.outcome();
     if !triggered.is_empty() {
-        let changes = captured.changes();
-        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
+        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
+            .await?;
     }
-    let outcome = RefreshOutcome {
-        entered: counts[0],
-        exited: counts[1],
-    };
     if outcome.entered != outcome.exited {
         sqlx::query(
             "UPDATE segments SET member_count = member_count + $3 - $4 \

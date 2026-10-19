@@ -260,6 +260,13 @@ pub(super) struct Captured {
 }
 
 impl Captured {
+    pub(super) fn outcome(&self) -> RefreshOutcome {
+        RefreshOutcome {
+            entered: self.counts[0],
+            exited: self.counts[1],
+        }
+    }
+
     /// The captured changes. A change whose cause kind is not one we know is left out.
     pub(super) fn changes(self) -> SegmentMembershipChanges {
         fn zip(
@@ -539,15 +546,11 @@ pub async fn apply_refresh(
             .await
             .map_err(StoreError::query)?;
     }
-    let counts = captured.counts.clone();
+    let outcome = captured.outcome();
     if !triggered.is_empty() {
-        let changes = captured.changes();
-        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
+        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
+            .await?;
     }
-    let outcome = RefreshOutcome {
-        entered: counts[0],
-        exited: counts[1],
-    };
 
     sqlx::query(
         "UPDATE segments SET computed_version = $3, computed_at = $4, \

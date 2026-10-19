@@ -13,14 +13,12 @@
 //! the decision log. Both are counted.
 
 use serde_json::Value;
-use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::Cause;
 use zirv_flow_core::flow::{FlowSettings, Trigger};
-use zirv_flow_core::{Cause, WorkspaceId};
 use zirv_flow_segments::{
-    Catalog, Outcome as Verdict, PersonSnapshot, SnapshotEvent, TraitStorage, evaluate,
-    parse_and_validate,
+    Outcome as Verdict, PersonSnapshot, SnapshotEvent, evaluate, parse_and_validate,
 };
 use zirv_flow_store::{
     AudienceSource, ENROLL_JOB_KIND, EnrollEntries, EnrollEntry, EnrollJobPayload, EnrollOutcome,
@@ -54,8 +52,11 @@ impl JobKind for FlowEnroll {
         let live = flow.state == FlowState::Published;
         // An audience for a flow that takes nobody is one skip; a flow with no version has
         // nothing to enroll into.
-        let version = job.version.or(flow.current_version);
-        let Some(version) = version.filter(|_| live || !is_audience) else {
+        let Some(version) = job
+            .version
+            .or(flow.current_version)
+            .filter(|_| live || !is_audience)
+        else {
             return skip_whole(ctx, &job, flow.state).await;
         };
         match &job.work {
@@ -151,7 +152,7 @@ async fn matching_events(
     };
     let ids: Vec<Uuid> = entries.iter().map(|entry| entry.occurrence).collect();
     let events = find_events(ctx.conn(), job.workspace, &ids).await?;
-    let (catalog, _) = catalog_for(ctx.conn(), job.workspace).await?;
+    let (catalog, _) = catalog_of(segment_catalog(ctx.conn(), job.workspace).await?);
     let wire = serde_json::json!({"v": 1, "event": wanted.name, "where": wanted.filters});
     // Something the filters read was archived since the publish: no event can match.
     let definition = if wanted.filters.is_empty() {
@@ -188,13 +189,6 @@ fn snapshot_event(event: &TriggerEvent) -> SnapshotEvent {
         occurred_at: event.occurred_at,
         properties: event.properties.as_object().cloned().unwrap_or_default(),
     }
-}
-
-async fn catalog_for(
-    conn: &mut PgConnection,
-    workspace: WorkspaceId,
-) -> Result<(Catalog, TraitStorage), JobError> {
-    Ok(catalog_of(segment_catalog(conn, workspace).await?))
 }
 
 /// One page of an audience, and the job for the next page when this one was full. The next job
@@ -281,7 +275,9 @@ mod tests {
     use time::Duration as Span;
     use zirv_flow_core::events::EventMode;
     use zirv_flow_core::people::{Precedence, TraitType};
-    use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName};
+    use zirv_flow_core::{
+        HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceId, WorkspaceName,
+    };
     use zirv_flow_segments::{compile, normalize};
     use zirv_flow_store::{
         ClaimedJob, Clock, EventRecord, ManualClock, NewEventSchema, NewFlow, NewJob, NewSegment,

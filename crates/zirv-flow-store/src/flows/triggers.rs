@@ -370,19 +370,15 @@ pub(crate) async fn enqueue_event_enrolls(
     .await
     .map_err(StoreError::query)?;
     // The rows come ordered by flow: one entry per flow with its version and its pairs.
-    let mut by_flow: Vec<(Uuid, i32)> = Vec::new();
-    let mut pairs_of: Vec<Vec<(Uuid, Uuid)>> = Vec::new();
+    let mut by_flow: Vec<(Uuid, i32, Vec<(Uuid, Uuid)>)> = Vec::new();
     for (flow, version, person, event) in matches {
-        if by_flow.last().is_none_or(|(last, _)| *last != flow) {
-            by_flow.push((flow, version));
-            pairs_of.push(Vec::new());
-        }
-        if let Some(pairs) = pairs_of.last_mut() {
-            pairs.push((person, event));
+        match by_flow.last_mut() {
+            Some((last, _, pairs)) if *last == flow => pairs.push((person, event)),
+            _ => by_flow.push((flow, version, vec![(person, event)])),
         }
     }
     let mut enqueued = 0;
-    for ((flow, version), pairs) in by_flow.into_iter().zip(pairs_of) {
+    for (flow, version, pairs) in by_flow {
         for chunk in pairs.chunks(MAX_ENROLL_PEOPLE) {
             let Some(&(_, first)) = chunk.first() else {
                 continue;
@@ -501,9 +497,6 @@ pub async fn audience_page(
     page.map_err(StoreError::query)
 }
 
-/// The kind of the job a schedule trigger's `schedules` row fires.
-const SCHEDULE_KIND: &str = ENROLL_JOB_KIND;
-
 /// Makes the `schedules` row of a flow match its trigger, in the caller's transaction: a schedule
 /// trigger has one row with the trigger's cron and zone, any other trigger none. A changed cron or
 /// zone moves the first slot to the next one after now; an unchanged one keeps its place.
@@ -552,7 +545,7 @@ pub(crate) async fn sync_flow_schedule(
     )
     .bind(Uuid::new_v4())
     .bind(workspace.as_uuid())
-    .bind(SCHEDULE_KIND)
+    .bind(ENROLL_JOB_KIND)
     .bind(cron)
     .bind(timezone)
     .bind(next_run_at)
