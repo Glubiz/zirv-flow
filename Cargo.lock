@@ -5397,6 +5397,8 @@ name = "zirv-flow-jobs"
 version = "0.60.0"
 dependencies = [
  "axum",
+ "chrono",
+ "chrono-tz",
  "futures-util",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",

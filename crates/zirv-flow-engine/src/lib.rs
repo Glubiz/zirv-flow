@@ -9,9 +9,6 @@ mod state;
 mod step;
 mod time;
 
-// The time types of [`StepContext`], so a caller names them without a dependency of its own.
-pub use chrono::{DateTime, Utc};
-pub use chrono_tz::Tz;
 pub use error::EngineError;
 pub use hash::{effect_key, split_bucket, step_key, wake_key};
 pub use state::{
