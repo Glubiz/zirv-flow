@@ -5,6 +5,7 @@ mod graph;
 mod issue;
 mod settings;
 mod validate;
+mod webhook;
 
 pub use graph::{
     Arm, Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, ListChange, NODE_TYPES, NodeKind,
@@ -18,4 +19,8 @@ pub use settings::{
 pub use validate::{
     MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_EXIT_CRITERIA, MAX_ID_CHARS, MAX_ISSUES,
     MAX_NODES, MAX_TRAIT_KEYS, MIN_ARMS, validate, validate_graph, validate_settings,
+};
+pub use webhook::{
+    Envelope, IDEMPOTENCY_HEADER, SIGNATURE_HEADER, SIGNING_GRACE_SECONDS, TIMESTAMP_HEADER,
+    signature_value,
 };

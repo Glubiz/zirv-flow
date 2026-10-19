@@ -14,7 +14,10 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::{PAYLOAD_STREAM, StreamDescriptor, SyncMode};
-use zirv_flow_core::signature::{check_header_name, generate_secret};
+use zirv_flow_core::signature::{
+    DEFAULT_SIGNATURE_HEADER, DEFAULT_SIGNATURE_PREFIX, DEFAULT_TIMESTAMP_HEADER,
+    check_header_name, generate_secret,
+};
 use zirv_flow_core::{SecretBytes, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{
     DiscoveredStream, NewSource, NewWebhook, SourceUpdate, StreamSettings, Webhook, WebhookUpdate,
@@ -28,12 +31,6 @@ use crate::problem::{ApiError, Problem};
 use crate::sources::crud::{check_name, name_taken};
 use crate::sources::problems;
 
-/// The signature header a hook starts with.
-const DEFAULT_SIGNATURE_HEADER: &str = "X-Zirv-Signature";
-/// The text before the digest a hook starts with.
-const DEFAULT_SIGNATURE_PREFIX: &str = "sha256=";
-/// The timestamp header a hook starts with.
-const DEFAULT_TIMESTAMP_HEADER: &str = "X-Zirv-Timestamp";
 /// The tolerance a hook starts with, in seconds.
 const DEFAULT_TOLERANCE_SECONDS: i32 = 300;
 const MAX_TOLERANCE_SECONDS: i32 = 86_400;

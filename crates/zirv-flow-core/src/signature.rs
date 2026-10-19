@@ -14,6 +14,14 @@ use crate::SecretString;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// The signature header of the scheme a hook starts with, and the one an outbound webhook call
+/// uses.
+pub const DEFAULT_SIGNATURE_HEADER: &str = "X-Zirv-Signature";
+/// The text before the digest in the signature header.
+pub const DEFAULT_SIGNATURE_PREFIX: &str = "sha256=";
+/// The timestamp header of the timestamped scheme.
+pub const DEFAULT_TIMESTAMP_HEADER: &str = "X-Zirv-Timestamp";
+
 /// The longest header name a scheme accepts.
 pub const MAX_HEADER_NAME_CHARS: usize = 64;
 /// The length of a SHA-256 digest in hex digits.
