@@ -12,10 +12,10 @@ mod time;
 
 pub use error::EngineError;
 pub use hash::{effect_key, split_bucket, step_key, wake_key};
+pub use settle::{Matched, settle};
 pub use state::{
     ArrivedEvent, Effect, EffectKind, EnrollmentState, ExitReason, Failure, Outcome, Status,
     StepContext, StepInput, Transition, Visit, WaitChange, Wake,
 };
-pub use settle::{Matched, settle};
 pub use step::step;
 pub use time::resolve_local;
