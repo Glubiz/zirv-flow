@@ -370,7 +370,8 @@ pub(crate) async fn enqueue_event_enrolls(
     .await
     .map_err(StoreError::query)?;
     // The rows come ordered by flow: one entry per flow with its version and its pairs.
-    let mut by_flow: Vec<(Uuid, i32, Vec<(Uuid, Uuid)>)> = Vec::new();
+    type Pairs = Vec<(Uuid, Uuid)>;
+    let mut by_flow: Vec<(Uuid, i32, Pairs)> = Vec::new();
     for (flow, version, person, event) in matches {
         match by_flow.last_mut() {
             Some((last, _, pairs)) if *last == flow => pairs.push((person, event)),
