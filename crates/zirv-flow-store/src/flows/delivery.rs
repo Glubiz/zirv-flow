@@ -11,7 +11,9 @@ use zirv_flow_core::events::{WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::arrivals::{Arrival, enqueue_arrivals};
-use crate::{NewDecision, StoreError, append_decision, find_enrollment, find_person};
+use crate::{
+    EnrollmentStatus, NewDecision, StoreError, append_decision, find_enrollment, find_person,
+};
 
 /// The source of the events a flow writes.
 const FLOWS_SOURCE: &str = "flows";
@@ -26,7 +28,8 @@ pub struct WebhookSubject {
 
 /// Reads the person of `enrollment` and `trait_keys`, taking no row lock, so the HTTP call that
 /// follows holds nothing an ingest batch or an erasure could wait for. None when the enrollment
-/// or its person is gone: erased, and the call must not be made.
+/// or its person is gone (erased), the enrollment exited, or the person was merged into another:
+/// the call must not be made.
 pub async fn read_webhook_subject(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -36,9 +39,19 @@ pub async fn read_webhook_subject(
     let Some(found) = find_enrollment(connection, workspace, enrollment).await? else {
         return Ok(None);
     };
+    // An enrollment an exit ended (a goal, an operator, a merge) calls nobody: the call is not
+    // sent. One that completed still sends, since the flow may end right after its node.
+    if found.status == EnrollmentStatus::Exited {
+        return Ok(None);
+    }
     let Some(person) = find_person(&mut *connection, workspace, found.person_id).await? else {
         return Ok(None);
     };
+    // `find_person` follows `merged_into`: a different id is a person merged away. The call is
+    // not sent for the survivor, who was never the one this enrollment was about.
+    if person.id != found.person_id {
+        return Ok(None);
+    }
     let held = person.traits.as_object();
     let traits = trait_keys
         .iter()
@@ -63,7 +76,8 @@ pub enum WebhookPerson {
     /// The person or the enrollment is gone: erased while the call was in flight. No outcome may
     /// be written.
     Gone,
-    /// The enrollment moved to another person (a merge); a retry reads it again.
+    /// The person was merged into another while the call was in flight. Nothing is written for
+    /// them and the job ends, since a retry would read the same.
     Moved,
 }
 
@@ -80,16 +94,20 @@ pub async fn lock_webhook_person(
     enrollment: Uuid,
     person: Uuid,
 ) -> Result<WebhookPerson, StoreError> {
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
+    let locked: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
     )
     .bind(workspace.as_uuid())
     .bind(person)
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    if locked.is_none() {
-        return Ok(WebhookPerson::Gone);
+    match locked {
+        None => return Ok(WebhookPerson::Gone),
+        // Merged away while the call was in flight: an outcome event written now would sit on
+        // an id the merge's rewrite has already passed.
+        Some(Some(_)) => return Ok(WebhookPerson::Moved),
+        Some(None) => {}
     }
     // The erasure that won the lock before us deleted the enrollment; one that comes later waits.
     Ok(
@@ -430,5 +448,61 @@ mod tests {
             (outcome.as_str(), reason.as_deref()),
             ("failed", Some("transport"))
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_exited_enrollment_and_a_merged_away_person_are_not_called_about(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = person(&pool, ws, json!({"plan": "pro"})).await;
+        let survivor = person(&pool, ws, json!({})).await;
+        let enrollment = enrolled(&pool, ws, id, "never").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let live = read_webhook_subject(&mut connection, ws, enrollment, &keys(&["plan"]))
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE enrollments SET state = 'completed', ended_at = now() WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let completed = read_webhook_subject(&mut connection, ws, enrollment, &[])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE enrollments SET state = 'exited', exit_reason = 'goal', ended_at = now() \n             WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let exited = read_webhook_subject(&mut connection, ws, enrollment, &[])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE enrollments SET state = 'waiting', exit_reason = NULL, ended_at = NULL \n             WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(id)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let merged = read_webhook_subject(&mut connection, ws, enrollment, &[])
+            .await
+            .unwrap();
+        let locked = lock_webhook_person(&mut connection, ws, enrollment, id)
+            .await
+            .unwrap();
+
+        assert!(live.is_some());
+        assert!(
+            completed.is_some(),
+            "an enrollment that finished still sends"
+        );
+        assert_eq!(exited, None, "an exited enrollment is not called about");
+        assert_eq!(merged, None, "a merged-away person is not called about");
+        assert_eq!(locked, WebhookPerson::Moved);
     }
 }
