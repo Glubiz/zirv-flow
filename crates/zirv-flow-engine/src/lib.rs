@@ -5,6 +5,7 @@
 
 mod error;
 mod hash;
+mod settle;
 mod state;
 mod step;
 mod time;
@@ -15,5 +16,6 @@ pub use state::{
     ArrivedEvent, Effect, EffectKind, EnrollmentState, ExitReason, Failure, Outcome, Status,
     StepContext, StepInput, Transition, Visit, WaitChange, Wake,
 };
+pub use settle::{Matched, settle};
 pub use step::step;
 pub use time::resolve_local;
