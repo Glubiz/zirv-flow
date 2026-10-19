@@ -20,7 +20,8 @@ use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all};
 /// How long and how large an outbound exchange may be.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HttpLimits {
-    /// The most redirect hops followed; each is checked against the policy again.
+    /// The most redirect hops followed; each is checked against the policy again. Zero follows
+    /// none: the 3xx response itself is returned to the caller, not an error.
     pub max_redirects: usize,
     pub connect_timeout: Duration,
     /// The whole exchange, response body included.
@@ -177,6 +178,9 @@ fn check_literal(policy: &EgressPolicy, host: Option<Host<&str>>) -> Result<(), 
 }
 
 fn redirect_policy(policy: Arc<EgressPolicy>, max_redirects: usize) -> Policy {
+    if max_redirects == 0 {
+        return Policy::none();
+    }
     Policy::custom(move |attempt: Attempt| {
         // `previous` holds the original URL and every hop already followed.
         if attempt.previous().len() > max_redirects {
@@ -546,6 +550,23 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_limit_of_zero_returns_the_redirect_itself_and_follows_nothing() {
+        let (port, hits) = serve().await;
+        let limits = HttpLimits {
+            max_redirects: 0,
+            ..HttpLimits::default()
+        };
+        let guarded = client(&["127.0.0.1/32"], limits);
+
+        let response = get_url(&guarded, &format!("http://127.0.0.1:{port}/hop"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 307);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the target was not called");
     }
 
     #[tokio::test]
