@@ -16,6 +16,6 @@ pub use settings::{
     Audience, ExitCriterion, FlowSettings, Goal, Reentry, SegmentChange, TRIGGER_TYPES, Trigger,
 };
 pub use validate::{
-    MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_ID_CHARS, MAX_NODES, MAX_TRAIT_KEYS,
-    MIN_ARMS, validate, validate_graph, validate_settings,
+    MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_EXIT_CRITERIA, MAX_ID_CHARS, MAX_ISSUES,
+    MAX_NODES, MAX_TRAIT_KEYS, MIN_ARMS, validate, validate_graph, validate_settings,
 };

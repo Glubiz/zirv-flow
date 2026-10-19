@@ -325,7 +325,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Changes the workspace's settings: today its time zone. Needs the workspace admin role and the
+         *     CSRF token. Audited as `workspace.updated`.
+         */
+        patch: operations["update_workspace"];
         trace?: never;
     };
     "/api/v1/workspaces/{ws}/ai/drafts": {
@@ -801,6 +805,183 @@ export interface paths {
         put?: never;
         /** The events of the range that match, newest first in keyset pages, masked for the caller. */
         post: operations["explore_event_list"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's flows by name; archived ones with `archived=true`. */
+        get: operations["list_flows"];
+        put?: never;
+        /**
+         * Creates a draft flow. The graph and the settings must be flow documents, but they need not be
+         *     complete or valid: that is checked by validate and publish. Audited as `flow.created`.
+         */
+        post: operations["create_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One flow with its draft graph and settings. */
+        get: operations["get_flow"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Changes the name, the draft graph or the draft settings of a flow that is not archived.
+         *     A published version is never touched. Audited as `flow.updated`.
+         */
+        patch: operations["update_flow"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archives a flow. Nothing is deleted: the versions stay readable. Records a `flow.archive`
+         *     decision and is audited as `flow.archived`.
+         */
+        post: operations["archive_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pauses a published flow: no new enrollments until it is resumed. Records a `flow.pause`
+         *     decision and is audited as `flow.paused`.
+         */
+        post: operations["pause_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next immutable version. With `dry_run` (`?dry_run=true`) nothing is
+         *     written and the response is the impact: the issues, the audience a segment trigger would
+         *     enroll, how many active enrollments stay on older versions, and the stale or failing inputs.
+         *     Without it, a draft with issues is a 422 `flow_invalid` that lists them. A draft becomes
+         *     `published`; a published or paused flow keeps its state. Records a `flow.publish` decision and
+         *     is audited as `flow.published`.
+         */
+        post: operations["publish_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`. */
+        post: operations["resume_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Checks the saved draft as a publish would and returns every issue, each with a stable code and
+         *     the node, edge and pointer it concerns. It writes nothing.
+         */
+        post: operations["validate_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The versions of a flow, newest first. */
+        get: operations["list_flow_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of a flow. */
+        get: operations["get_flow_version"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2496,6 +2677,21 @@ export interface components {
              */
             scopes: string[];
         };
+        /** @description The people a segment trigger with `enroll_current` would enroll at publish. */
+        AudienceBody: {
+            /**
+             * Format: date-time
+             * @description When the members were last computed; null before the first refresh.
+             */
+            computed_at?: string | null;
+            /**
+             * Format: int64
+             * @description The members at the last refresh of the segment.
+             */
+            members: number;
+            /** Format: uuid */
+            segment_id: string;
+        };
         /** @description One item of a batch: an identify or a track, named in `type`. */
         BatchItemRequest: {
             anonymousId?: string | null;
@@ -2795,6 +2991,16 @@ export interface components {
             name: string;
             /** @description The first draft. */
             properties?: components["schemas"]["PropertyBody"][];
+        };
+        CreateFlowRequest: {
+            graph?: components["schemas"]["FlowGraph"];
+            /**
+             * @description 1 to 100 characters after trimming; unique among the workspace's flows that are not
+             *     archived, ignoring case.
+             * @example Welcome series
+             */
+            name: string;
+            settings?: components["schemas"]["FlowSettings"];
         };
         CreateListRequest: {
             /** @description At most 500 characters. */
@@ -3632,6 +3838,321 @@ export interface components {
             /** @description True for a credential field: render a password input and never prefill it. */
             secret: boolean;
         };
+        /** @description Adds a person to a list or removes them. Port `next`. */
+        FlowActionListNode: {
+            /** @enum {string} */
+            change: "add" | "remove";
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** Format: uuid */
+            list_id: string;
+            /** @enum {string} */
+            type: "action.list";
+        };
+        /** @description Changes one trait as the flow's own contribution. Port `next`. */
+        FlowActionUpdateTraitNode: {
+            change: components["schemas"]["FlowTraitChange"];
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            key: string;
+            /** @enum {string} */
+            type: "action.update_trait";
+        };
+        /** @description Calls a URL with a signed, fixed envelope plus the listed trait keys. Port `next`. */
+        FlowActionWebhookNode: {
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            trait_keys?: string[];
+            /** @enum {string} */
+            type: "action.webhook";
+            /** @description An http or https URL. A literal address the egress policy refuses is an issue. */
+            url: string;
+        };
+        /** @description `POST .../flows/{id}/enrollments` enrolls people. */
+        FlowApiTrigger: {
+            /** @enum {string} */
+            type: "api";
+        };
+        /** @description Who a schedule trigger enrolls. */
+        FlowAudience: {
+            /** @enum {string} */
+            type: "everyone";
+        } | {
+            /** Format: uuid */
+            segment_id: string;
+            /** @enum {string} */
+            type: "segment";
+        };
+        FlowBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The newest published version; null before the first publish.
+             */
+            current_version?: number | null;
+            /** Format: uuid */
+            id: string;
+            /** @example Welcome series */
+            name: string;
+            /**
+             * @description `draft` before the first publish, `published` while live, `paused` (no new enrollments) and `archived` (final).
+             * @enum {string}
+             */
+            state: "draft" | "published" | "paused" | "archived";
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description The first matching condition wins. Ports `case_0`, `case_1`, ... and `else`. */
+        FlowBranchNode: {
+            /** @description Segment condition nodes without `v`, evaluated in order for this person. */
+            conditions: components["schemas"]["SegmentNode"][];
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            type: "branch";
+        };
+        /**
+         * @description A flow with its draft. The draft is what the editor changes; published content is in the
+         *     versions.
+         */
+        FlowDetailBody: components["schemas"]["FlowBody"] & {
+            graph: components["schemas"]["FlowGraph"];
+            settings: components["schemas"]["FlowSettings"];
+        };
+        /** @description The output port `port` of node `from` leads to node `to`. Every port of every node is wired exactly once. */
+        FlowEdge: {
+            from: string;
+            id: string;
+            /** @description `next`, `event`, `timeout`, `else`, `case_<i>` or `arm_<i>`, as the node's type defines. */
+            port: string;
+            to: string;
+        };
+        /** @description A named event with property filters. */
+        FlowEventTrigger: {
+            /** @description The event name; it must have a schema in the workspace. */
+            event: string;
+            /** @description Property filters, as the `where` of a segment event condition. */
+            filters?: components["schemas"]["SegmentPropertyFilter"][];
+            /** @enum {string} */
+            type: "event";
+        };
+        /** @description A reason to end an active enrollment. */
+        FlowExitCriterion: {
+            /** @enum {string} */
+            type: "leaves_segment";
+        } | {
+            /** @description The event name; it must have a schema in the workspace. */
+            event: string;
+            /** @description Property filters, as the `where` of a segment event condition. */
+            filters?: components["schemas"]["SegmentPropertyFilter"][];
+            /** @enum {string} */
+            type: "event";
+        } | {
+            /** @enum {string} */
+            type: "goal_reached";
+        };
+        /** @description Ends the enrollment. No port. */
+        FlowExitNode: {
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            type: "exit";
+        };
+        /** @description A conversion. */
+        FlowGoal: {
+            /** @description The event name; it must have a schema in the workspace. */
+            event: string;
+            /** @description Property filters, as the `where` of a segment event condition. */
+            filters?: components["schemas"]["SegmentPropertyFilter"][];
+            /** @enum {string} */
+            type: "event";
+        } | {
+            /** Format: uuid */
+            segment_id: string;
+            /** @enum {string} */
+            type: "segment";
+        };
+        /** @description Records a conversion. With `exit` it also ends the enrollment and has no port; otherwise port `next`. */
+        FlowGoalNode: {
+            exit?: boolean;
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            type: "goal";
+        };
+        /** @description A flow graph, version 1: a directed acyclic graph with one entry node. */
+        FlowGraph: {
+            edges: components["schemas"]["FlowEdge"][];
+            nodes: components["schemas"]["FlowNode"][];
+            /** @enum {integer} */
+            v: 1;
+        };
+        /** @description One problem with a flow. It names a fixed code and where it is, never a value from the flow. */
+        FlowIssue: {
+            /** @description A JSON pointer into the node, the edge or the settings object. Inside a condition or a filter it continues with the segment pointer. */
+            at?: string;
+            /** @enum {string} */
+            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing";
+            /** @description The id of the edge it concerns, when it does. */
+            edge?: string;
+            /** @description The id of the node it concerns, when it does. */
+            node?: string;
+        };
+        /** @description One issue of a flow. */
+        FlowIssueProblem: {
+            /** @description A JSON pointer into the node, the edge or the settings object. */
+            at?: string | null;
+            /** @description A fixed issue code such as `port_not_wired` or `unknown_segment`. */
+            code: string;
+            /** @description The id of the edge it concerns, when it does. */
+            edge?: string | null;
+            /** @description The id of the node it concerns, when it does. */
+            node?: string | null;
+        };
+        /** @description An operator enrolls people by hand. */
+        FlowManualTrigger: {
+            /** @enum {string} */
+            type: "manual";
+        };
+        /** @description One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused. */
+        FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
+        /** @description Whether a person may enter again. */
+        FlowReentry: {
+            /** @enum {string} */
+            mode: "once";
+        } | {
+            /** @enum {string} */
+            mode: "once_at_a_time";
+        } | {
+            /** @description 0 for no wait. */
+            min_interval_seconds?: number;
+            /** @enum {string} */
+            mode: "always";
+        };
+        /** @description A cron slot in its own time zone. */
+        FlowScheduleTrigger: {
+            audience: components["schemas"]["FlowAudience"];
+            cron: string;
+            /** @description An IANA time zone name such as `Europe/Copenhagen`. */
+            timezone: string;
+            /** @enum {string} */
+            type: "schedule";
+        };
+        /** @description A person enters or leaves a segment. */
+        FlowSegmentTrigger: {
+            /** @description Also enroll the current members at publish. */
+            enroll_current?: boolean;
+            /** @enum {string} */
+            on: "entered" | "exited";
+            /** Format: uuid */
+            segment_id: string;
+            /** @enum {string} */
+            type: "segment";
+        };
+        /** @description The settings beside the graph: the trigger, re-entry, the optional goal and the exit criteria. */
+        FlowSettings: {
+            exit_criteria?: components["schemas"]["FlowExitCriterion"][];
+            /** @description End the enrollment when the goal is reached. */
+            exit_on_goal?: boolean;
+            goal?: components["schemas"]["FlowGoal"];
+            reentry: components["schemas"]["FlowReentry"];
+            trigger: components["schemas"]["FlowTrigger"];
+        };
+        /** @description Sends a person down one arm by weight. Ports `arm_0`, `arm_1`, ... */
+        FlowSplitRandomNode: {
+            /** @description The weights of all arms sum to 100. */
+            arms: {
+                weight: number;
+            }[];
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            type: "split.random";
+        };
+        FlowTraitChange: {
+            /** @enum {string} */
+            op: "set";
+            /** @description The value; its type follows the trait's type. */
+            value: unknown;
+        } | {
+            by: number;
+            /** @enum {string} */
+            op: "increment";
+        } | {
+            /** @enum {string} */
+            op: "unset";
+        };
+        /** @description How a person comes into the flow. */
+        FlowTrigger: components["schemas"]["FlowSegmentTrigger"] | components["schemas"]["FlowEventTrigger"] | components["schemas"]["FlowScheduleTrigger"] | components["schemas"]["FlowManualTrigger"] | components["schemas"]["FlowApiTrigger"];
+        /** @description A local time, in the person's time zone and else the workspace's. */
+        FlowUntilTime: {
+            /** @enum {string} */
+            kind: "time_of_day";
+            /** @description `HH:MM`, 24 hours. */
+            time: string;
+            weekdays?: ("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")[];
+        } | {
+            /** @description `YYYY-MM-DDTHH:MM:SS`, with no offset. */
+            at: string;
+            /** @enum {string} */
+            kind: "date_time";
+        };
+        FlowVersionBody: {
+            graph: components["schemas"]["FlowGraph"];
+            /** Format: date-time */
+            published_at: string;
+            /**
+             * Format: uuid
+             * @description The user who published it; null when an API key did.
+             */
+            published_by?: string | null;
+            settings: components["schemas"]["FlowSettings"];
+            /**
+             * Format: uuid
+             * @description The trace of the publish request.
+             */
+            trace_id: string;
+            /** Format: int32 */
+            version: number;
+        };
+        /** @description Waits a fixed time. Port `next`. */
+        FlowWaitDurationNode: {
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @description How long to wait. */
+            seconds: number;
+            /** @enum {string} */
+            type: "wait.duration";
+        };
+        /** @description Waits for an event, or the timeout. Ports `event` and `timeout`. */
+        FlowWaitUntilEventNode: {
+            /** @description The event name; it must have a schema in the workspace. */
+            event: string;
+            /** @description Property filters, as the `where` of a segment event condition. */
+            filters?: components["schemas"]["SegmentPropertyFilter"][];
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @description How long to wait for the event before taking `timeout`. */
+            timeout_seconds: number;
+            /** @enum {string} */
+            type: "wait.until_event";
+        };
+        /** @description Waits for a local time of day or date. Port `next`. */
+        FlowWaitUntilTimeNode: {
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            type: "wait.until_time";
+            when: components["schemas"]["FlowUntilTime"];
+        };
         /** @description Whether a stream's data is current (architecture 7.5). The state is derived on every read. */
         FreshnessBody: {
             /**
@@ -3761,6 +4282,30 @@ export interface components {
              * @example crm
              */
             source: string;
+        };
+        /** @description What publishing would do, computed and not written. */
+        ImpactBody: {
+            audience?: null | components["schemas"]["AudienceBody"];
+            /**
+             * Format: int64
+             * @description Active enrollments that stay on the version they entered when the new version goes live
+             *     (ruling 469cfc51: in-flight enrollments are never migrated). It is 0 until the runtime
+             *     writes enrollments.
+             */
+            enrollments_staying_on_older_versions: number;
+            issues: components["schemas"]["FlowIssue"][];
+            /**
+             * Format: int32
+             * @description The version a publish would create.
+             */
+            next_version: number;
+            /**
+             * @description Sources that feed what the flow reads and are stale or failing. They are recorded for the
+             *     operator and never pause the flow (ruling 5c679ecb).
+             */
+            unhealthy_inputs: components["schemas"]["UnhealthyInputBody"][];
+            /** @description True exactly when there are no issues: a publish would succeed. */
+            valid: boolean;
         };
         ImportBody: {
             /** @description People newly added; on a dry run, the people that would be. */
@@ -4274,6 +4819,11 @@ export interface components {
             /** @description The invalid fields of an ingestion request: field names and reason codes, never values. */
             errors?: components["schemas"]["ItemProblem"][] | null;
             /**
+             * @description What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it
+             *     concerns, never a value from the flow.
+             */
+            flow_issues?: components["schemas"]["FlowIssueProblem"][] | null;
+            /**
              * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
              *     definition and a fixed code for each issue, never a value from it.
              */
@@ -4383,6 +4933,11 @@ export interface components {
             /** @description `openai_compatible` or `anthropic`. */
             kind: string;
             models: components["schemas"]["ModelBody"][];
+        };
+        /** @description The new version and the flow after the publish. */
+        PublishedBody: {
+            flow: components["schemas"]["FlowBody"];
+            version: components["schemas"]["FlowVersionBody"];
         };
         /** @description The whole settings of the workspace; a PUT replaces them. */
         PutAiSettingsRequest: {
@@ -5399,6 +5954,19 @@ export interface components {
             op: "split";
             separator: string;
         };
+        /** @description A source that feeds what the flow reads and is not fresh. */
+        UnhealthyInputBody: {
+            /**
+             * Format: date-time
+             * @description When its oldest feeding stream last succeeded; null when one never has.
+             */
+            last_success_at?: string | null;
+            name: string;
+            /** Format: uuid */
+            source_id: string;
+            /** @description `stale` or `failing`: the worst state among the source's enabled streams. */
+            state: string;
+        };
         UnmatchedRow: {
             /**
              * @description `not_found`, `malformed_row`, or the rule the identifier broke, such as `invalid_email`.
@@ -5420,6 +5988,11 @@ export interface components {
              *     the deployment default.
              */
             retention_days?: number | null;
+        };
+        UpdateFlowRequest: {
+            graph?: components["schemas"]["FlowGraph"];
+            name?: string | null;
+            settings?: components["schemas"]["FlowSettings"];
         };
         UpdateListRequest: {
             description?: string | null;
@@ -5474,6 +6047,13 @@ export interface components {
             /** Format: int32 */
             tolerance_seconds?: number | null;
         };
+        UpdateWorkspaceRequest: {
+            /**
+             * @description An IANA time zone name such as `Europe/Copenhagen` or `UTC`, at most 64 characters.
+             * @example Europe/Copenhagen
+             */
+            timezone: string;
+        };
         /** @description A user as shown to API callers; never includes the password hash. */
         UserBody: {
             email: string;
@@ -5502,6 +6082,12 @@ export interface components {
         ValidateRequest: {
             /** @description The draft manifest: any JSON value. Whether it is a valid manifest v1 is the answer. */
             manifest?: Record<string, never>;
+        };
+        /** @description What validating a flow found. */
+        ValidationBody: {
+            issues: components["schemas"]["FlowIssue"][];
+            /** @description True exactly when there are no issues: the flow can be published. */
+            valid: boolean;
         };
         ValueCountBody: {
             /** Format: int64 */
@@ -5563,6 +6149,12 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+            /**
+             * @description The workspace's IANA time zone, the local clock of a wait for a person with no zone of
+             *     their own. `UTC` until an admin sets it.
+             * @example Europe/Copenhagen
+             */
+            timezone: string;
         };
     };
     responses: never;
@@ -6568,6 +7160,69 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWorkspaceRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated workspace */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The time zone is not an IANA zone name */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8779,6 +9434,698 @@ export interface operations {
             };
             /** @description The query ran past its time limit (`code` is `query_timeout`) */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_flows: {
+        parameters: {
+            query?: {
+                /** @description Include archived flows; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateFlowRequest"];
+            };
+        };
+        responses: {
+            /** @description The new draft flow */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A flow that is not archived has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, or a graph or settings that are not flow documents (`code` is `flow_malformed`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateFlowRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another flow has that name, or the flow is archived (`code` is `flow_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is already archived (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    pause_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The paused flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not published (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_flow: {
+        parameters: {
+            query?: {
+                /** @description Only compute the impact; write nothing */
+                dry_run?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A dry run: what publishing would do */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImpactBody"];
+                };
+            };
+            /** @description The flow and its new version */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishedBody"];
+                };
+            };
+            /** @description dry_run is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is archived (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft has issues (`code` is `flow_invalid`, with `flow_issues`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    resume_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The resumed flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not paused (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    validate_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The issues; none means the draft can be published */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidationBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_flow_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowVersionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_flow_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or version, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

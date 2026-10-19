@@ -8,6 +8,7 @@ mod contacts;
 mod cookies;
 mod credentials;
 mod events;
+mod flows;
 mod health;
 mod imports;
 mod ingest;
@@ -119,7 +120,10 @@ fn routes() -> Router<AppState> {
             "/api/v1/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
-        .route("/api/v1/workspaces/{ws}", get(workspaces::get))
+        .route(
+            "/api/v1/workspaces/{ws}",
+            get(workspaces::get).patch(workspaces::update),
+        )
         .route("/api/v1/workspaces/{ws}/members", get(members::list))
         .route(
             "/api/v1/workspaces/{ws}/members/{user_id}",
@@ -182,6 +186,42 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/people/search",
             post(people::search::search),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows",
+            get(flows::crud::list).post(flows::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}",
+            get(flows::crud::get).patch(flows::crud::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/validate",
+            post(flows::crud::validate),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/publish",
+            post(flows::publish::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/pause",
+            post(flows::publish::pause),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/resume",
+            post(flows::publish::resume),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/archive",
+            post(flows::publish::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/versions",
+            get(flows::crud::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}",
+            get(flows::crud::version),
         )
         .route(
             "/api/v1/workspaces/{ws}/segments",

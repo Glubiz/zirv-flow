@@ -1324,6 +1324,95 @@
             "api_key": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Changes the workspace's settings: today its time zone. Needs the workspace admin role and the\nCSRF token. Audited as `workspace.updated`.",
+        "operationId": "update_workspace",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The time zone is not an IANA zone name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/api/v1/workspaces/{ws}/ai/drafts": {
@@ -4519,6 +4608,1047 @@
           },
           "503": {
             "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "The workspace's flows by name; archived ones with `archived=true`.",
+        "operationId": "list_flows",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived flows; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FlowBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Creates a draft flow. The graph and the settings must be flow documents, but they need not be\ncomplete or valid: that is checked by validate and publish. Audited as `flow.created`.",
+        "operationId": "create_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new draft flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A flow that is not archived has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, or a graph or settings that are not flow documents (`code` is `flow_malformed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "One flow with its draft graph and settings.",
+        "operationId": "get_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Changes the name, the draft graph or the draft settings of a flow that is not archived.\nA published version is never touched. Audited as `flow.updated`.",
+        "operationId": "update_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another flow has that name, or the flow is archived (`code` is `flow_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/archive": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Archives a flow. Nothing is deleted: the versions stay readable. Records a `flow.archive`\ndecision and is audited as `flow.archived`.",
+        "operationId": "archive_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is already archived (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/pause": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Pauses a published flow: no new enrollments until it is resumed. Records a `flow.pause`\ndecision and is audited as `flow.paused`.",
+        "operationId": "pause_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The paused flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not published (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/publish": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Publishes the draft as the next immutable version. With `dry_run` (`?dry_run=true`) nothing is\nwritten and the response is the impact: the issues, the audience a segment trigger would\nenroll, how many active enrollments stay on older versions, and the stale or failing inputs.\nWithout it, a draft with issues is a 422 `flow_invalid` that lists them. A draft becomes\n`published`; a published or paused flow keeps its state. Records a `flow.publish` decision and\nis audited as `flow.published`.",
+        "operationId": "publish_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "Only compute the impact; write nothing",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A dry run: what publishing would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImpactBody"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The flow and its new version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "dry_run is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is archived (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft has issues (`code` is `flow_invalid`, with `flow_issues`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/resume": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`.",
+        "operationId": "resume_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The resumed flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not paused (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/validate": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Checks the saved draft as a publish would and returns every issue, each with a stable code and\nthe node, edge and pointer it concerns. It writes nothing.",
+        "operationId": "validate_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The issues; none means the draft can be published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/versions": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "The versions of a flow, newest first.",
+        "operationId": "list_flow_versions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FlowVersionBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "One version of a flow.",
+        "operationId": "get_flow_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or version, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14600,6 +15730,33 @@
           }
         }
       },
+      "AudienceBody": {
+        "type": "object",
+        "description": "The people a segment trigger with `enroll_current` would enroll at publish.",
+        "required": [
+          "segment_id",
+          "members"
+        ],
+        "properties": {
+          "computed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the members were last computed; null before the first refresh."
+          },
+          "members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The members at the last refresh of the segment."
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "BatchItemRequest": {
         "type": "object",
         "description": "One item of a batch: an identify or a track, named in `type`.",
@@ -15275,6 +16432,25 @@
               "$ref": "#/components/schemas/PropertyBody"
             },
             "description": "The first draft."
+          }
+        }
+      },
+      "CreateFlowRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters after trimming; unique among the workspace's flows that are not\narchived, ignoring case.",
+            "example": "Welcome series"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/FlowSettings"
           }
         }
       },
@@ -17219,6 +18395,1168 @@
           }
         }
       },
+      "FlowActionListNode": {
+        "type": "object",
+        "description": "Adds a person to a list or removes them. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "list_id",
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "list_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "action.list"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowActionUpdateTraitNode": {
+        "type": "object",
+        "description": "Changes one trait as the flow's own contribution. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "key",
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/FlowTraitChange"
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "action.update_trait"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowActionWebhookNode": {
+        "type": "object",
+        "description": "Calls a URL with a signed, fixed envelope plus the listed trait keys. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "trait_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "action.webhook"
+            ]
+          },
+          "url": {
+            "type": "string",
+            "description": "An http or https URL. A literal address the egress policy refuses is an issue."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowApiTrigger": {
+        "type": "object",
+        "description": "`POST .../flows/{id}/enrollments` enrolls people.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "api"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowAudience": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Every person.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "everyone"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The members of a segment.",
+            "required": [
+              "type",
+              "segment_id"
+            ],
+            "properties": {
+              "segment_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "segment"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "Who a schedule trigger enrolls."
+      },
+      "FlowBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The newest published version; null before the first publish."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Welcome series"
+          },
+          "state": {
+            "type": "string",
+            "description": "`draft` before the first publish, `published` while live, `paused` (no new enrollments) and `archived` (final).",
+            "enum": [
+              "draft",
+              "published",
+              "paused",
+              "archived"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "FlowBranchNode": {
+        "type": "object",
+        "description": "The first matching condition wins. Ports `case_0`, `case_1`, ... and `else`.",
+        "required": [
+          "type",
+          "id",
+          "conditions"
+        ],
+        "properties": {
+          "conditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentNode"
+            },
+            "description": "Segment condition nodes without `v`, evaluated in order for this person.",
+            "maxItems": 10,
+            "minItems": 1
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "branch"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FlowBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "graph",
+              "settings"
+            ],
+            "properties": {
+              "graph": {
+                "$ref": "#/components/schemas/FlowGraph"
+              },
+              "settings": {
+                "$ref": "#/components/schemas/FlowSettings"
+              }
+            }
+          }
+        ],
+        "description": "A flow with its draft. The draft is what the editor changes; published content is in the\nversions."
+      },
+      "FlowEdge": {
+        "type": "object",
+        "description": "The output port `port` of node `from` leads to node `to`. Every port of every node is wired exactly once.",
+        "required": [
+          "id",
+          "from",
+          "port",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "port": {
+            "type": "string",
+            "description": "`next`, `event`, `timeout`, `else`, `case_<i>` or `arm_<i>`, as the node's type defines."
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowEventTrigger": {
+        "type": "object",
+        "description": "A named event with property filters.",
+        "required": [
+          "type",
+          "event"
+        ],
+        "properties": {
+          "event": {
+            "type": "string",
+            "description": "The event name; it must have a schema in the workspace."
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentPropertyFilter"
+            },
+            "description": "Property filters, as the `where` of a segment event condition."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "event"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowExitCriterion": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The person leaves the trigger segment (a segment trigger only).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "leaves_segment"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The event occurs.",
+            "required": [
+              "type",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "description": "The event name; it must have a schema in the workspace."
+              },
+              "filters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SegmentPropertyFilter"
+                },
+                "description": "Property filters, as the `where` of a segment event condition."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "event"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "The flow's goal is reached (needs a goal).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "goal_reached"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "A reason to end an active enrollment."
+      },
+      "FlowExitNode": {
+        "type": "object",
+        "description": "Ends the enrollment. No port.",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "exit"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowGoal": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An event with the filters of an event trigger.",
+            "required": [
+              "type",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "description": "The event name; it must have a schema in the workspace."
+              },
+              "filters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SegmentPropertyFilter"
+                },
+                "description": "Property filters, as the `where` of a segment event condition."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "event"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Entry into a segment.",
+            "required": [
+              "type",
+              "segment_id"
+            ],
+            "properties": {
+              "segment_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "segment"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "A conversion."
+      },
+      "FlowGoalNode": {
+        "type": "object",
+        "description": "Records a conversion. With `exit` it also ends the enrollment and has no port; otherwise port `next`.",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "exit": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "goal"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowGraph": {
+        "type": "object",
+        "description": "A flow graph, version 1: a directed acyclic graph with one entry node.",
+        "required": [
+          "v",
+          "nodes",
+          "edges"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowEdge"
+            }
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowNode"
+            },
+            "maxItems": 200
+          },
+          "v": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowIssue": {
+        "type": "object",
+        "description": "One problem with a flow. It names a fixed code and where it is, never a value from the flow.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "A JSON pointer into the node, the edge or the settings object. Inside a condition or a filter it continues with the segment pointer."
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "unsupported_version",
+              "too_many_nodes",
+              "too_many_edges",
+              "invalid_id",
+              "duplicate_node_id",
+              "duplicate_edge_id",
+              "unknown_node",
+              "unknown_port",
+              "port_wired_twice",
+              "port_not_wired",
+              "no_entry",
+              "multiple_entries",
+              "cycle",
+              "unreachable",
+              "invalid_duration",
+              "invalid_time",
+              "invalid_weekdays",
+              "invalid_event_name",
+              "invalid_filter",
+              "no_conditions",
+              "too_many_conditions",
+              "invalid_condition",
+              "too_few_arms",
+              "too_many_arms",
+              "invalid_weight",
+              "weights_not_100",
+              "invalid_url",
+              "invalid_trait_key",
+              "invalid_trait_value",
+              "too_many_trait_keys",
+              "invalid_cron",
+              "invalid_timezone",
+              "exit_on_goal_without_goal",
+              "goal_criterion_without_goal",
+              "leaves_segment_without_segment_trigger",
+              "too_many_exit_criteria",
+              "unknown_segment",
+              "unknown_list",
+              "unknown_trait",
+              "unknown_event",
+              "unknown_property",
+              "unknown_topic",
+              "webhook_url_refused",
+              "webhook_secret_missing"
+            ]
+          },
+          "edge": {
+            "type": "string",
+            "description": "The id of the edge it concerns, when it does."
+          },
+          "node": {
+            "type": "string",
+            "description": "The id of the node it concerns, when it does."
+          }
+        }
+      },
+      "FlowIssueProblem": {
+        "type": "object",
+        "description": "One issue of a flow.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A JSON pointer into the node, the edge or the settings object."
+          },
+          "code": {
+            "type": "string",
+            "description": "A fixed issue code such as `port_not_wired` or `unknown_segment`."
+          },
+          "edge": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id of the edge it concerns, when it does."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id of the node it concerns, when it does."
+          }
+        }
+      },
+      "FlowManualTrigger": {
+        "type": "object",
+        "description": "An operator enrolls people by hand.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "manual"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowNode": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FlowWaitDurationNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowWaitUntilTimeNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowWaitUntilEventNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowBranchNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowSplitRandomNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowActionWebhookNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowActionUpdateTraitNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowActionListNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowGoalNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowExitNode"
+          }
+        ],
+        "description": "One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused."
+      },
+      "FlowReentry": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Never again after the first entry.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "once"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Again once the active enrollment has ended.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "once_at_a_time"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Again, no sooner than `min_interval_seconds` after the last entry.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "min_interval_seconds": {
+                "type": "integer",
+                "description": "0 for no wait.",
+                "maximum": 31536000,
+                "minimum": 0
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "always"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "Whether a person may enter again."
+      },
+      "FlowScheduleTrigger": {
+        "type": "object",
+        "description": "A cron slot in its own time zone.",
+        "required": [
+          "type",
+          "cron",
+          "timezone",
+          "audience"
+        ],
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/FlowAudience"
+          },
+          "cron": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "An IANA time zone name such as `Europe/Copenhagen`."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "schedule"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowSegmentTrigger": {
+        "type": "object",
+        "description": "A person enters or leaves a segment.",
+        "required": [
+          "type",
+          "segment_id",
+          "on"
+        ],
+        "properties": {
+          "enroll_current": {
+            "type": "boolean",
+            "description": "Also enroll the current members at publish."
+          },
+          "on": {
+            "type": "string",
+            "enum": [
+              "entered",
+              "exited"
+            ]
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "segment"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowSettings": {
+        "type": "object",
+        "description": "The settings beside the graph: the trigger, re-entry, the optional goal and the exit criteria.",
+        "required": [
+          "trigger",
+          "reentry"
+        ],
+        "properties": {
+          "exit_criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowExitCriterion"
+            }
+          },
+          "exit_on_goal": {
+            "type": "boolean",
+            "description": "End the enrollment when the goal is reached."
+          },
+          "goal": {
+            "$ref": "#/components/schemas/FlowGoal"
+          },
+          "reentry": {
+            "$ref": "#/components/schemas/FlowReentry"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/FlowTrigger"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowSplitRandomNode": {
+        "type": "object",
+        "description": "Sends a person down one arm by weight. Ports `arm_0`, `arm_1`, ...",
+        "required": [
+          "type",
+          "id",
+          "arms"
+        ],
+        "properties": {
+          "arms": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "weight"
+              ],
+              "properties": {
+                "weight": {
+                  "type": "integer",
+                  "maximum": 100,
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            "description": "The weights of all arms sum to 100.",
+            "maxItems": 10,
+            "minItems": 2
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "split.random"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowTraitChange": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Sets the trait.",
+            "required": [
+              "op",
+              "value"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set"
+                ]
+              },
+              "value": {
+                "description": "The value; its type follows the trait's type."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Adds to a number trait.",
+            "required": [
+              "op",
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "increment"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Removes the flow's contribution.",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "unset"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "FlowTrigger": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FlowSegmentTrigger"
+          },
+          {
+            "$ref": "#/components/schemas/FlowEventTrigger"
+          },
+          {
+            "$ref": "#/components/schemas/FlowScheduleTrigger"
+          },
+          {
+            "$ref": "#/components/schemas/FlowManualTrigger"
+          },
+          {
+            "$ref": "#/components/schemas/FlowApiTrigger"
+          }
+        ],
+        "description": "How a person comes into the flow."
+      },
+      "FlowUntilTime": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The next `HH:MM`, on any of `weekdays`.",
+            "required": [
+              "kind",
+              "time"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "time_of_day"
+                ]
+              },
+              "time": {
+                "type": "string",
+                "description": "`HH:MM`, 24 hours."
+              },
+              "weekdays": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "mon",
+                    "tue",
+                    "wed",
+                    "thu",
+                    "fri",
+                    "sat",
+                    "sun"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "A local date and time with no offset.",
+            "required": [
+              "kind",
+              "at"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "description": "`YYYY-MM-DDTHH:MM:SS`, with no offset."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "date_time"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "A local time, in the person's time zone and else the workspace's."
+      },
+      "FlowVersionBody": {
+        "type": "object",
+        "required": [
+          "version",
+          "graph",
+          "settings",
+          "published_at",
+          "trace_id"
+        ],
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who published it; null when an API key did."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/FlowSettings"
+          },
+          "trace_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The trace of the publish request."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "FlowWaitDurationNode": {
+        "type": "object",
+        "description": "Waits a fixed time. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "seconds"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "seconds": {
+            "type": "integer",
+            "description": "How long to wait.",
+            "maximum": 31536000,
+            "minimum": 0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "wait.duration"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowWaitUntilEventNode": {
+        "type": "object",
+        "description": "Waits for an event, or the timeout. Ports `event` and `timeout`.",
+        "required": [
+          "type",
+          "id",
+          "event",
+          "timeout_seconds"
+        ],
+        "properties": {
+          "event": {
+            "type": "string",
+            "description": "The event name; it must have a schema in the workspace."
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentPropertyFilter"
+            },
+            "description": "Property filters, as the `where` of a segment event condition."
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "description": "How long to wait for the event before taking `timeout`.",
+            "maximum": 31536000,
+            "minimum": 0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "wait.until_event"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "FlowWaitUntilTimeNode": {
+        "type": "object",
+        "description": "Waits for a local time of day or date. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "when"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "wait.until_time"
+            ]
+          },
+          "when": {
+            "$ref": "#/components/schemas/FlowUntilTime"
+          }
+        },
+        "additionalProperties": false
+      },
       "FreshnessBody": {
         "type": "object",
         "description": "Whether a stream's data is current (architecture 7.5). The state is derived on every read.",
@@ -17506,6 +19844,57 @@
             "type": "string",
             "description": "The source whose live records list these identities.",
             "example": "crm"
+          }
+        }
+      },
+      "ImpactBody": {
+        "type": "object",
+        "description": "What publishing would do, computed and not written.",
+        "required": [
+          "valid",
+          "issues",
+          "next_version",
+          "enrollments_staying_on_older_versions",
+          "unhealthy_inputs"
+        ],
+        "properties": {
+          "audience": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudienceBody",
+                "description": "The members a segment trigger with `enroll_current` would enroll; null for any other\ntrigger, and when the segment does not exist."
+              }
+            ]
+          },
+          "enrollments_staying_on_older_versions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active enrollments that stay on the version they entered when the new version goes live\n(ruling 469cfc51: in-flight enrollments are never migrated). It is 0 until the runtime\nwrites enrollments."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowIssue"
+            }
+          },
+          "next_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version a publish would create."
+          },
+          "unhealthy_inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnhealthyInputBody"
+            },
+            "description": "Sources that feed what the flow reads and are stale or failing. They are recorded for the\noperator and never pause the flow (ruling 5c679ecb)."
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "True exactly when there are no issues: a publish would succeed."
           }
         }
       },
@@ -18819,6 +21208,16 @@
             },
             "description": "The invalid fields of an ingestion request: field names and reason codes, never values."
           },
+          "flow_issues": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/FlowIssueProblem"
+            },
+            "description": "What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it\nconcerns, never a value from the flow."
+          },
           "issues": {
             "type": [
               "array",
@@ -19103,6 +21502,22 @@
             "items": {
               "$ref": "#/components/schemas/ModelBody"
             }
+          }
+        }
+      },
+      "PublishedBody": {
+        "type": "object",
+        "description": "The new version and the flow after the publish.",
+        "required": [
+          "flow",
+          "version"
+        ],
+        "properties": {
+          "flow": {
+            "$ref": "#/components/schemas/FlowBody"
+          },
+          "version": {
+            "$ref": "#/components/schemas/FlowVersionBody"
           }
         }
       },
@@ -22014,6 +24429,36 @@
         ],
         "description": "One step between a cell and its target."
       },
+      "UnhealthyInputBody": {
+        "type": "object",
+        "description": "A source that feeds what the flow reads and is not fresh.",
+        "required": [
+          "source_id",
+          "name",
+          "state"
+        ],
+        "properties": {
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When its oldest feeding stream last succeeded; null when one never has."
+          },
+          "name": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "description": "`stale` or `failing`: the worst state among the source's enabled streams."
+          }
+        }
+      },
       "UnmatchedRow": {
         "type": "object",
         "required": [
@@ -22055,6 +24500,23 @@
             ],
             "format": "int32",
             "description": "Days events of this name are kept, within the operator's bounds; `null` goes back to\nthe deployment default."
+          }
+        }
+      },
+      "UpdateFlowRequest": {
+        "type": "object",
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/FlowSettings"
           }
         }
       },
@@ -22285,6 +24747,19 @@
         },
         "additionalProperties": false
       },
+      "UpdateWorkspaceRequest": {
+        "type": "object",
+        "required": [
+          "timezone"
+        ],
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "description": "An IANA time zone name such as `Europe/Copenhagen` or `UTC`, at most 64 characters.",
+            "example": "Europe/Copenhagen"
+          }
+        }
+      },
       "UserBody": {
         "type": "object",
         "description": "A user as shown to API callers; never includes the password hash.",
@@ -22367,6 +24842,26 @@
           }
         },
         "additionalProperties": false
+      },
+      "ValidationBody": {
+        "type": "object",
+        "description": "What validating a flow found.",
+        "required": [
+          "valid",
+          "issues"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowIssue"
+            }
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "True exactly when there are no issues: the flow can be published."
+          }
+        }
       },
       "ValueCountBody": {
         "type": "object",
@@ -22504,6 +24999,7 @@
           "id",
           "name",
           "slug",
+          "timezone",
           "created_at"
         ],
         "properties": {
@@ -22520,6 +25016,11 @@
           },
           "slug": {
             "type": "string"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "The workspace's IANA time zone, the local clock of a wait for a person with no zone of\ntheir own. `UTC` until an admin sets it.",
+            "example": "Europe/Copenhagen"
           }
         }
       }
