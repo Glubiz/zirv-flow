@@ -101,6 +101,29 @@ impl GuardedClient {
             max_body_bytes: self.limits.max_body_bytes,
         })
     }
+
+    /// Sends a POST of `body` with `headers`, under the same checks as [`GuardedClient::execute`].
+    /// A header name or value that is not valid HTTP, or a URL that does not parse, is a
+    /// transport failure that names neither.
+    pub async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<GuardedResponse, HttpError> {
+        let unbuildable = || HttpError::Transport("the request could not be built".to_owned());
+        let url = url::Url::parse(url).map_err(|_| unbuildable())?;
+        let mut request = reqwest::Request::new(reqwest::Method::POST, url);
+        for (name, value) in headers {
+            request.headers_mut().append(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| unbuildable())?,
+                reqwest::header::HeaderValue::from_str(value).map_err(|_| unbuildable())?,
+            );
+        }
+        *request.body_mut() = Some(body.into());
+        self.execute(request).await
+    }
 }
 
 /// A response whose body can only be read under the client's `max_body_bytes`.
@@ -334,6 +357,60 @@ mod tests {
         let printed = format!("{response:?}");
         assert!(printed.contains("200"), "{printed}");
         assert!(!printed.contains("hunter2"), "{printed}");
+    }
+
+    #[tokio::test]
+    async fn a_post_sends_its_headers_and_exact_body_and_is_checked_like_a_get() {
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+        use std::sync::Mutex;
+
+        let seen: Arc<Mutex<Option<(Option<String>, Vec<u8>)>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let router = Router::new().route(
+            "/echo",
+            post(move |headers: HeaderMap, body: Bytes| async move {
+                let header = headers
+                    .get("x-test")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                *sink.lock().unwrap() = Some((header, body.to_vec()));
+                "ok"
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+
+        let response = guarded
+            .post(
+                &format!("http://127.0.0.1:{port}/echo"),
+                &[("X-Test", "yes")],
+                b"{\"a\": 1 }".to_vec(),
+            )
+            .await
+            .unwrap();
+        let refused = client(&[], HttpLimits::default())
+            .post(&format!("http://127.0.0.1:{port}/echo"), &[], Vec::new())
+            .await;
+        let bad_header = guarded
+            .post("http://127.0.0.1:9/", &[("bad name", "x")], Vec::new())
+            .await;
+        let bad_url = guarded.post("not a url", &[], Vec::new()).await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some((Some("yes".to_owned()), b"{\"a\": 1 }".to_vec()))
+        );
+        assert_eq!(
+            refused.unwrap_err(),
+            denied("127.0.0.1", AddressClass::Loopback)
+        );
+        let unbuildable = HttpError::Transport("the request could not be built".to_owned());
+        assert_eq!(bad_header.unwrap_err(), unbuildable);
+        assert_eq!(bad_url.unwrap_err(), unbuildable);
     }
 
     #[tokio::test]
