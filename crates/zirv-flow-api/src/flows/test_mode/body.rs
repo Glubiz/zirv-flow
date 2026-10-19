@@ -81,6 +81,10 @@ pub(crate) struct InjectBody {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct SnapshotBody {
+    /// The person the snapshot was read from. A real-person walk fills it in, so the webhook
+    /// envelope of a replay names the same person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) person_id: Option<Uuid>,
     /// Stored trait values by key.
     #[schema(value_type = Object)]
     pub(crate) traits: Map<String, Value>,
@@ -125,6 +129,7 @@ impl SnapshotBody {
     /// The wire form of an evaluator snapshot, sets in sorted order so a response is repeatable.
     pub(crate) fn of(snapshot: &PersonSnapshot) -> Self {
         Self {
+            person_id: None,
             traits: snapshot.traits.clone(),
             events: snapshot
                 .events
@@ -222,7 +227,8 @@ pub(crate) struct PathStepBody {
     #[schema(value_type = String, format = DateTime)]
     pub(crate) at: OffsetDateTime,
     /// `passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,
-    /// `failed` or `unable_to_evaluate`.
+    /// `failed`, `unable_to_evaluate`, or for a step of type `settings.goal` / `settings.exit`
+    /// (the flow settings, not a node) `converted` / `exited`.
     pub(crate) outcome: &'static str,
     /// The output port the walk left through; null when it stopped here or the port is not
     /// unambiguous from the edges.
@@ -271,7 +277,7 @@ pub(crate) struct WaitBody {
     pub(crate) wake_at: OffsetDateTime,
     /// The event name a `wait.until_event` waits for.
     pub(crate) awaiting: Option<String>,
-    /// `open`, `timer`, `event` or `timeout`.
+    /// `open`, `timer`, `event`, `timeout`, or `exit` (the flow settings ended the enrollment).
     pub(crate) resolved: &'static str,
 }
 
@@ -298,7 +304,9 @@ pub(crate) struct ScriptResultBody {
     #[schema(value_type = String, format = DateTime)]
     pub(crate) at: OffsetDateTime,
     /// `advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match
-    /// a wait), `event_ignored` (the filters did not match) or `skipped` (the walk had stopped).
+    /// a wait), `event_ignored` (the filters did not match), `goal_reached` (the flow goal, recorded as a
+    /// conversion; the enrollment goes on), `goal_exit` or `exit_criterion` (the settings ended the
+    /// enrollment as exited) or `skipped` (the walk had stopped).
     pub(crate) outcome: &'static str,
 }
 
@@ -355,8 +363,8 @@ pub(crate) struct TestBody {
     pub(crate) source: &'static str,
     /// The version walked; null for the draft and an inline graph.
     pub(crate) version: Option<i32>,
-    /// The person walked: the survivor when `person_id` was merged into another. Null for a
-    /// snapshot.
+    /// The person walked: the survivor when `person_id` was merged into another, or the person a
+    /// posted snapshot names; null for a synthetic one.
     pub(crate) person_id: Option<Uuid>,
     pub(crate) merged_from: Option<Uuid>,
     pub(crate) enrollment_id: Uuid,
@@ -375,6 +383,10 @@ pub(crate) struct TestBody {
     /// Set when the walk stopped early; the path up to there is still returned.
     pub(crate) halted: Option<HaltBody>,
     pub(crate) person_after: PersonAfterBody,
+    /// Settings the walk cannot trigger, because a script has no segment membership changes:
+    /// `goal_segment` (a goal of entering a segment), `exit_leaves_segment` (the criterion) and
+    /// `exit_goal_reached_by_segment` (a `goal_reached` criterion when the goal is a segment).
+    pub(crate) not_simulated: Vec<&'static str>,
 }
 
 #[cfg(test)]

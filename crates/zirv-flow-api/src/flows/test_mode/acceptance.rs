@@ -569,11 +569,13 @@ mod tests {
                 {"trait": "plan", "op": "eq", "value": "pro"},
                 {"event": "order"}
             ]},
+            {"id": "hook", "type": "action.webhook", "url": "https://example.com/hook"},
             {"id": "pro", "type": "exit"},
             {"id": "buyer", "type": "exit"},
             {"id": "none", "type": "exit"}
         ], "edges": [
-            {"id": "e1", "from": "b", "port": "case_0", "to": "pro"},
+            {"id": "e0", "from": "hook", "port": "next", "to": "pro"},
+            {"id": "e1", "from": "b", "port": "case_0", "to": "hook"},
             {"id": "e2", "from": "b", "port": "case_1", "to": "buyer"},
             {"id": "e3", "from": "b", "port": "else", "to": "none"}
         ]});
@@ -600,7 +602,7 @@ mod tests {
         );
         assert_eq!(
             path_nodes(&first.body),
-            pairs(&[("b", "branched"), ("pro", "completed")])
+            pairs(&[("b", "branched"), ("hook", "passed"), ("pro", "completed")])
         );
 
         let replay = send(
@@ -616,11 +618,58 @@ mod tests {
         )
         .await;
         assert_eq!(replay.status, StatusCode::OK, "{:?}", replay.body);
-        // Only who was walked differs: a snapshot has no person.
-        let mut expected = first.body.clone();
-        expected["person_id"] = Value::Null;
-        assert_eq!(replay.body, expected);
+        // The snapshot names the person, so the webhook envelope and the whole response repeat.
+        assert_eq!(replay.body, first.body);
+        let envelope = &first.body["external_effects"][0]["detail"]["envelope"];
+        assert_eq!(envelope["person_id"], person.to_string());
+        assert_eq!(first.body["snapshot"]["person_id"], person.to_string());
         assert_eq!(f.counts().await, before, "the reads wrote nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_flow_settings_goal_and_exit_criteria_apply_to_the_walk(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = f.create_flow("Journey", journey(false)).await;
+        let patched = f
+            .lead(
+                "PATCH",
+                &format!("/api/v1/workspaces/{}/flows/{flow}", f.ws.as_uuid()),
+                Some(json!({"settings": {
+                    "trigger": {"type": "manual"}, "reentry": {"mode": "once"},
+                    "goal": {"type": "event", "event": "order",
+                             "filters": [{"prop": "total", "op": "gt", "value": 100}]},
+                    "exit_on_goal": true,
+                    "exit_criteria": [{"type": "leaves_segment"}]
+                }})),
+            )
+            .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+
+        let reply = f
+            .lead(
+                "POST",
+                &f.uri(&flow),
+                Some(
+                    json!({"snapshot": {}, "start_at": "2030-01-01T00:00:00Z", "script": [
+                        {"inject": {"name": "order", "properties": {"total": 500},
+                                    "at": "2030-01-01T00:03:00Z"}}
+                    ]}),
+                ),
+            )
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["script"][0]["outcome"], "goal_exit");
+        assert_eq!(reply.body["final_state"]["status"], "exited");
+        let last = reply.body["path"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last["type"], "settings.exit");
+        assert_eq!(reply.body["not_simulated"], json!(["exit_leaves_segment"]));
     }
 
     #[sqlx::test]

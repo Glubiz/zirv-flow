@@ -14,12 +14,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::flow::{
-    EventMatch, FlowGraph, ListChange, NodeKind, PORT_ELSE, PORT_EVENT, PORT_NEXT, PORT_TIMEOUT,
-    TraitChange, case_port,
+    EventMatch, ExitCriterion, FlowGraph, FlowSettings, Goal, ListChange, NodeKind, PORT_ELSE,
+    PORT_EVENT, PORT_NEXT, PORT_TIMEOUT, TraitChange, case_port,
 };
 use zirv_flow_engine::{
-    ArrivedEvent, Effect, EffectKind, EngineError, EnrollmentState, Outcome, Status, StepContext,
-    StepInput, Transition, step,
+    ArrivedEvent, Effect, EffectKind, EngineError, EnrollmentState, ExitReason, Matched, Outcome,
+    Status, StepContext, StepInput, Transition, settle, step,
 };
 use zirv_flow_segments::{
     Catalog, Definition, EvalNode, Issue, Observed, Outcome as Verdict, PersonSnapshot,
@@ -66,6 +66,8 @@ pub(crate) struct Subject {
 
 pub(crate) struct Walk<'a> {
     pub(crate) graph: &'a FlowGraph,
+    /// The flow settings the graph runs under: the goal and the exit criteria.
+    pub(crate) settings: &'a FlowSettings,
     pub(crate) catalog: &'a Catalog,
     pub(crate) subject: &'a Subject,
     /// The workspace zone, for `wait.until_time`.
@@ -100,6 +102,7 @@ pub(crate) struct Walked {
     pub(crate) final_state: FinalStateBody,
     pub(crate) halted: Option<HaltBody>,
     pub(crate) person_after: PersonAfterBody,
+    pub(crate) not_simulated: Vec<&'static str>,
 }
 
 /// The wire time of an instant. A chrono instant outside the range of `time` clamps to the epoch.
@@ -356,12 +359,29 @@ impl Walker<'_> {
         }
     }
 
-    /// Records what a step did and moves the state on.
+    /// Records what a step did and moves the state on. An effect that fails stops the walk at
+    /// its node: the path ends there, and the state stays where it was, failed, as the runtime
+    /// would end after its retries.
     fn absorb(&mut self, transition: Transition) {
         let at = to_time(self.clock);
-        for (index, visit) in transition.visited.iter().enumerate() {
-            let port = transition
+        let mut failed_at = None;
+        for effect in &transition.effects {
+            self.apply(effect);
+            if self.halted.is_some() {
+                failed_at = Some(effect.node.clone());
+                break;
+            }
+        }
+        let kept = failed_at.as_ref().map_or(transition.visited.len(), |node| {
+            transition
                 .visited
+                .iter()
+                .position(|visit| &visit.node == node)
+                .map_or(transition.visited.len(), |index| index + 1)
+        });
+        let visited = &transition.visited[..kept];
+        for (index, visit) in visited.iter().enumerate() {
+            let port = visited
                 .get(index + 1)
                 .and_then(|next| unique_port(self.graph(), &visit.node, &next.node));
             self.path.push(PathStepBody {
@@ -375,24 +395,32 @@ impl Walker<'_> {
                 woke_by: None,
             });
         }
-        let last = match &transition.outcome {
-            Outcome::Waiting => Some("waiting"),
-            Outcome::NeedsConditions { .. } => Some("branched"),
-            Outcome::Completed => Some("completed"),
-            Outcome::Exited { .. } => Some("exited"),
-            Outcome::Failed { .. } => Some("failed"),
-            Outcome::Stale => None,
+        let last = if failed_at.is_some() {
+            Some("failed")
+        } else {
+            match &transition.outcome {
+                Outcome::Waiting => Some("waiting"),
+                Outcome::NeedsConditions { .. } => Some("branched"),
+                Outcome::Completed => Some("completed"),
+                Outcome::Exited { .. } => Some("exited"),
+                Outcome::Converted => None,
+                Outcome::Failed { .. } => Some("failed"),
+                Outcome::Stale => None,
+            }
         };
         if let (Some(outcome), false, Some(entry)) =
-            (last, transition.visited.is_empty(), self.path.last_mut())
+            (last, visited.is_empty(), self.path.last_mut())
         {
             entry.outcome = outcome;
         }
-        for effect in &transition.effects {
-            self.apply(effect);
-            if self.halted.is_some() {
-                break;
-            }
+        if failed_at.is_some() {
+            self.state = EnrollmentState {
+                status: Status::Failed,
+                wake_at: None,
+                awaiting: None,
+                ..self.state.clone()
+            };
+            return;
         }
         if matches!(transition.outcome, Outcome::Waiting) {
             let node = transition.state.node.clone();
@@ -636,7 +664,8 @@ impl Walker<'_> {
     }
 
     /// Delivers an injected event at `at`: the timers due before it fire first, and the event
-    /// lands in the snapshot whether or not it wakes anything.
+    /// lands in the snapshot whether or not it wakes anything. The flow's goal and event exit
+    /// criteria see it before the wait does, as the runtime's event hook would.
     fn inject(
         &mut self,
         name: &str,
@@ -653,6 +682,19 @@ impl Walker<'_> {
             properties: properties.clone(),
         };
         self.snapshot.events.push(event.clone());
+        let converted = match self.settle_event(&event) {
+            Settled::Ended(outcome) => return Ok(outcome),
+            Settled::Converted => true,
+            Settled::Nothing => false,
+        };
+        if self.halted.is_some() {
+            return Ok("skipped");
+        }
+        let recorded = if converted {
+            "goal_reached"
+        } else {
+            "event_recorded"
+        };
         let awaited =
             self.state.status == Status::Waiting && self.state.awaiting.as_deref() == Some(name);
         let wanted = match self
@@ -662,7 +704,7 @@ impl Walker<'_> {
             .map(|found| &found.kind)
         {
             Some(NodeKind::WaitUntilEvent { event: wanted, .. }) if awaited => wanted.clone(),
-            _ => return Ok("event_recorded"),
+            _ => return Ok(recorded),
         };
         if !self.matches(&wanted, event) {
             return Ok(if self.halted.is_some() {
@@ -680,6 +722,74 @@ impl Walker<'_> {
             },
         })?;
         Ok("event_delivered")
+    }
+
+    /// Matches `event` against the flow's goal and event exit criteria, and applies what the
+    /// engine decides: a conversion, or the end of the enrollment.
+    fn settle_event(&mut self, event: &SnapshotEvent) -> Settled {
+        let settings = self.input.settings;
+        let named = |wanted: &EventMatch| wanted.name == event.name;
+        let goal = match &settings.goal {
+            Some(Goal::Event(wanted)) if named(wanted) => self.matches(wanted, event.clone()),
+            _ => false,
+        };
+        let mut exit_event = false;
+        for criterion in &settings.exit_criteria {
+            if let ExitCriterion::Event(wanted) = criterion
+                && named(wanted)
+                && self.matches(wanted, event.clone())
+            {
+                exit_event = true;
+            }
+        }
+        if self.halted.is_some() {
+            return Settled::Nothing;
+        }
+        let Some(transition) = settle(settings, &self.state, Matched { goal, exit_event }) else {
+            return Settled::Nothing;
+        };
+        for effect in &transition.effects {
+            self.apply(effect);
+        }
+        let ended = match &transition.outcome {
+            Outcome::Exited { reason } => Some(match reason {
+                ExitReason::ExitEvent => "exit_criterion",
+                ExitReason::Goal | ExitReason::GoalCriterion => "goal_exit",
+            }),
+            _ => None,
+        };
+        self.path.push(PathStepBody {
+            node: self.state.node.clone(),
+            node_type: if ended.is_some() {
+                "settings.exit"
+            } else {
+                "settings.goal"
+            },
+            at: to_time(self.clock),
+            outcome: if ended.is_some() {
+                "exited"
+            } else {
+                "converted"
+            },
+            port: None,
+            branch: None,
+            woke_at: None,
+            woke_by: None,
+        });
+        let Some(outcome) = ended else {
+            return Settled::Converted;
+        };
+        let node = self.state.node.clone();
+        if let Some(wait) = self
+            .waits
+            .iter_mut()
+            .rev()
+            .find(|wait| wait.node == node && wait.resolved == "open")
+        {
+            wait.resolved = "exit";
+        }
+        self.state = transition.state;
+        Settled::Ended(outcome)
     }
 
     /// Whether `event` passes the property filters of the wait, by the reference evaluator over
@@ -716,12 +826,11 @@ impl Walker<'_> {
     fn mark_woke(&mut self, by: &'static str) {
         let node = self.state.node.clone();
         let at = to_time(self.clock);
-        if let Some(entry) = self
-            .path
-            .iter_mut()
-            .rev()
-            .find(|entry| entry.node == node && entry.woke_by.is_none())
-        {
+        if let Some(entry) = self.path.iter_mut().rev().find(|entry| {
+            entry.node == node
+                && entry.woke_by.is_none()
+                && !entry.node_type.starts_with("settings.")
+        }) {
             entry.outcome = "passed";
             entry.woke_at = Some(at);
             entry.woke_by = Some(by);
@@ -781,8 +890,34 @@ impl Walker<'_> {
                 traits: self.snapshot.traits,
                 lists: self.snapshot.lists.into_iter().collect(),
             },
+            not_simulated: not_simulated(self.input.settings),
         }
     }
+}
+
+/// What the settings' goal and event hook did with one injected event.
+enum Settled {
+    Nothing,
+    Converted,
+    Ended(&'static str),
+}
+
+/// The goal and exit criteria a walk cannot trigger, because a script has no segment membership
+/// changes. Stable codes, listed in the response.
+fn not_simulated(settings: &FlowSettings) -> Vec<&'static str> {
+    let segment_goal = matches!(settings.goal, Some(Goal::Segment { .. }));
+    let has = |wanted: fn(&ExitCriterion) -> bool| settings.exit_criteria.iter().any(wanted);
+    let mut codes = Vec::new();
+    if segment_goal {
+        codes.push("goal_segment");
+    }
+    if has(|criterion| matches!(criterion, ExitCriterion::LeavesSegment {})) {
+        codes.push("exit_leaves_segment");
+    }
+    if segment_goal && has(|criterion| matches!(criterion, ExitCriterion::GoalReached {})) {
+        codes.push("exit_goal_reached_by_segment");
+    }
+    codes
 }
 
 fn engine_halt(error: &EngineError) -> HaltBody {
@@ -835,14 +970,33 @@ mod tests {
         }
     }
 
+    fn settings(extra: Value) -> FlowSettings {
+        let mut wire = json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}});
+        wire.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        serde_json::from_value(wire).unwrap()
+    }
+
     fn run(
         graph: &FlowGraph,
         snapshot: PersonSnapshot,
         script: &[Step],
         max_steps: usize,
     ) -> Result<Walked, Refusal> {
+        run_under(graph, &settings(json!({})), snapshot, script, max_steps)
+    }
+
+    fn run_under(
+        graph: &FlowGraph,
+        settings: &FlowSettings,
+        snapshot: PersonSnapshot,
+        script: &[Step],
+        max_steps: usize,
+    ) -> Result<Walked, Refusal> {
         walk(Walk {
             graph,
+            settings,
             catalog: &catalog(),
             subject: &subject(),
             zone: Tz::UTC,
@@ -1058,21 +1212,36 @@ mod tests {
     fn incrementing_a_trait_that_is_not_a_number_fails_the_step() {
         let graph = graph(
             json!([
+                {"id": "w", "type": "wait.duration", "seconds": 5},
                 {"id": "inc", "type": "action.update_trait", "key": "plan",
                  "change": {"op": "increment", "by": 1}},
+                {"id": "w2", "type": "wait.duration", "seconds": 5},
                 {"id": "end", "type": "exit"}
             ]),
-            &[("inc", "next", "end")],
+            &[
+                ("w", "next", "inc"),
+                ("inc", "next", "w2"),
+                ("w2", "next", "end"),
+            ],
         );
         let mut snapshot = PersonSnapshot::default();
         snapshot.traits.insert("plan".into(), json!("pro"));
 
-        let walked = run(&graph, snapshot, &[], MAX_STEPS).unwrap();
+        let walked = run(&graph, snapshot, &[Step::AdvanceTo(at(60))], MAX_STEPS).unwrap();
 
-        let halted = walked.halted.unwrap();
+        let halted = walked.halted.clone().unwrap();
         assert_eq!(halted.reason, "step_failed");
         assert_eq!(halted.node.as_deref(), Some("inc"));
         assert_eq!(walked.internal_effects[0].detail["error"], halted.message);
+        // The path ends at the failing node, and nothing after it (the second wait) is recorded.
+        assert_eq!(nodes_of(&walked), [("w", "passed"), ("inc", "failed")]);
+        assert_eq!(walked.waits.len(), 1);
+        assert_eq!(walked.wakes.len(), 1);
+        // The state is the one before the node, failed.
+        assert_eq!(walked.final_state.status, "failed");
+        assert_eq!(walked.final_state.node, "w");
+        assert_eq!(walked.final_state.state_version, 1);
+        assert_eq!(walked.final_state.wake_at, None);
     }
 
     #[test]
@@ -1099,7 +1268,7 @@ mod tests {
             nodes_of(&walked),
             [("w", "passed"), ("b", "unable_to_evaluate")]
         );
-        let halted = walked.halted.unwrap();
+        let halted = walked.halted.clone().unwrap();
         assert_eq!(halted.reason, "unable_to_evaluate");
         assert_eq!(halted.node.as_deref(), Some("b"));
         assert_eq!(halted.condition, Some(0));
@@ -1144,7 +1313,7 @@ mod tests {
 
         let walked = run(&graph, PersonSnapshot::default(), &[], MAX_STEPS).unwrap();
 
-        let halted = walked.halted.unwrap();
+        let halted = walked.halted.clone().unwrap();
         assert_eq!(halted.reason, "invalid_condition");
         assert_eq!(halted.condition, Some(0));
         assert_eq!(walked.path[0].outcome, "failed");
@@ -1174,6 +1343,133 @@ mod tests {
         );
     }
 
+    const BIG_ORDER: &str =
+        r#"{"event": "order", "filters": [{"prop": "total", "op": "gt", "value": 100}]}"#;
+
+    fn big_order() -> Value {
+        serde_json::from_str(BIG_ORDER).unwrap()
+    }
+
+    #[test]
+    fn a_goal_with_exit_on_goal_ends_the_walk_as_exited_while_it_waits() {
+        let settings = settings(json!({"goal": {"type": "event", "event": "order",
+            "filters": big_order()["filters"]}, "exit_on_goal": true}));
+        let walked = run_under(
+            &journey(),
+            &settings,
+            PersonSnapshot::default(),
+            &[
+                inject("order", json!({"total": 5}), 120),
+                inject("order", json!({"total": 500}), 180),
+                inject("order", json!({"total": 900}), 200),
+            ],
+            MAX_STEPS,
+        )
+        .unwrap();
+
+        assert_eq!(walked.script[0].outcome, "event_ignored");
+        assert_eq!(walked.script[1].outcome, "goal_exit");
+        assert_eq!(walked.script[2].outcome, "event_recorded");
+        let last = walked.path.last().unwrap();
+        assert_eq!(
+            (last.node.as_str(), last.node_type, last.outcome),
+            ("ev", "settings.exit", "exited")
+        );
+        assert_eq!(walked.final_state.status, "exited");
+        assert_eq!(walked.final_state.node, "ev");
+        assert_eq!(walked.waits[1].resolved, "exit");
+        // The conversion is captured with the settings step key.
+        let conversion = walked.internal_effects.last().unwrap();
+        assert_eq!(conversion.kind, "goal");
+        assert!(conversion.step_key.ends_with(":ev:settings.goal"));
+        assert!(walked.not_simulated.is_empty());
+    }
+
+    #[test]
+    fn a_goal_without_exit_converts_and_the_wait_still_resumes() {
+        let settings = settings(json!({"goal": {"type": "event", "event": "order",
+            "filters": big_order()["filters"]}}));
+        let walked = run_under(
+            &journey(),
+            &settings,
+            PersonSnapshot::default(),
+            &[inject("order", json!({"total": 500}), 180)],
+            MAX_STEPS,
+        )
+        .unwrap();
+
+        assert_eq!(walked.script[0].outcome, "event_delivered");
+        let converted = walked
+            .path
+            .iter()
+            .find(|step| step.node_type == "settings.goal");
+        assert_eq!(converted.unwrap().outcome, "converted");
+        assert_eq!(walked.final_state.status, "completed");
+        // An order the wait does not await (the walk ended) is still a goal, with no exit.
+        assert_eq!(
+            walked
+                .internal_effects
+                .iter()
+                .filter(|e| e.kind == "goal")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn exit_criteria_end_the_walk_on_an_event_or_on_the_goal() {
+        let by_event = settings(json!({"exit_criteria": [{"type": "event", "event": "order",
+            "filters": big_order()["filters"]}]}));
+        let walked = run_under(
+            &journey(),
+            &by_event,
+            PersonSnapshot::default(),
+            &[inject("order", json!({"total": 500}), 180)],
+            MAX_STEPS,
+        )
+        .unwrap();
+        assert_eq!(walked.script[0].outcome, "exit_criterion");
+        assert_eq!(walked.final_state.status, "exited");
+        assert!(walked.internal_effects.iter().all(|e| e.kind != "goal"));
+
+        let by_goal = settings(json!({"goal": {"type": "event", "event": "order"},
+            "exit_criteria": [{"type": "goal_reached"}]}));
+        let walked = run_under(
+            &journey(),
+            &by_goal,
+            PersonSnapshot::default(),
+            &[inject("order", json!({"total": 1}), 180)],
+            MAX_STEPS,
+        )
+        .unwrap();
+        assert_eq!(walked.script[0].outcome, "goal_exit");
+        assert_eq!(walked.final_state.status, "exited");
+    }
+
+    #[test]
+    fn segment_settings_are_listed_as_not_simulated() {
+        let segment = "018f0000-0000-7000-8000-000000000009";
+        let settings = settings(json!({"goal": {"type": "segment", "segment_id": segment},
+            "exit_criteria": [{"type": "leaves_segment"}, {"type": "goal_reached"}]}));
+
+        let walked = run_under(
+            &journey(),
+            &settings,
+            PersonSnapshot::default(),
+            &[],
+            MAX_STEPS,
+        )
+        .unwrap();
+
+        assert_eq!(
+            walked.not_simulated,
+            [
+                "goal_segment",
+                "exit_leaves_segment",
+                "exit_goal_reached_by_segment"
+            ]
+        );
+    }
     #[test]
     fn the_walk_refuses_more_steps_than_the_cap_and_a_script_that_goes_back() {
         let graph = journey();

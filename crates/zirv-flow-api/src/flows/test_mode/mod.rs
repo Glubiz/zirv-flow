@@ -20,7 +20,7 @@ use axum::extract::{Path, State};
 use chrono_tz::Tz;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::flow::{FlowGraph, NodeKind, validate_graph};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, validate_graph};
 use zirv_flow_segments::Catalog;
 use zirv_flow_segments::event_lower_bounds;
 use zirv_flow_store::{EXPLAIN_EVENT_CAP, ExplainEventScope, StoreError};
@@ -212,17 +212,22 @@ pub(crate) async fn test(
         .await
         .map_err(|error| read_error(error.into_bounded()))?
         .ok_or_else(ApiError::not_found)?;
-    let (graph, source, version) = match (body.version, body.graph) {
+    let (graph, settings, source, version) = match (body.version, body.graph) {
         (Some(number), _) => {
             let saved = zirv_flow_store::find_flow_version(&mut *tx, workspace.id, flow_id, number)
                 .await
                 .map_err(|error| read_error(error.into_bounded()))?
                 .ok_or_else(ApiError::not_found)?;
             let graph = FlowGraph::from_value(saved.graph).map_err(|_| ApiError::internal())?;
-            (graph, "version", Some(number))
+            let settings: FlowSettings =
+                serde_json::from_value(saved.settings).map_err(|_| ApiError::internal())?;
+            (graph, settings, "version", Some(number))
         }
-        (None, Some(inline)) => (parse_graph(inline)?.0, "inline", None),
-        (None, None) => (draft_of(&flow)?.0, "draft", None),
+        (None, Some(inline)) => (parse_graph(inline)?.0, draft_of(&flow)?.1, "inline", None),
+        (None, None) => {
+            let (graph, settings) = draft_of(&flow)?;
+            (graph, settings, "draft", None)
+        }
     };
     let issues = validate_graph(&graph);
     if !issues.is_empty() {
@@ -235,6 +240,10 @@ pub(crate) async fn test(
     );
     let start_at = to_chrono(body.start_at.unwrap_or(database_now))
         .ok_or_else(|| request_invalid("start_at is out of range"))?;
+    let named_person = body
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.person_id);
     let (snapshot, person_id, merged_from) = match (body.person_id, given) {
         (Some(requested), _) => {
             let scope = event_scope(&graph, &catalog, to_time(start_at));
@@ -245,7 +254,7 @@ pub(crate) async fn test(
                     .ok_or_else(ApiError::not_found)?;
             (snapshot_of(&person), Some(person.id), person.merged_from)
         }
-        (None, Some(snapshot)) => (snapshot, None, None),
+        (None, Some(snapshot)) => (snapshot, named_person, None),
         (None, None) => return Err(ApiError::internal()),
     };
     drop(tx);
@@ -258,9 +267,11 @@ pub(crate) async fn test(
             .enrollment_id
             .unwrap_or_else(|| derived_enrollment(flow_id, person_id)),
     };
-    let used = SnapshotBody::of(&snapshot);
+    let mut used = SnapshotBody::of(&snapshot);
+    used.person_id = person_id;
     let walked = walk::walk(Walk {
         graph: &graph,
+        settings: &settings,
         catalog: &catalog,
         subject: &subject,
         zone: workspace.timezone.parse::<Tz>().unwrap_or(Tz::UTC),
@@ -299,6 +310,7 @@ pub(crate) async fn test(
         final_state: walked.final_state,
         halted: walked.halted,
         person_after: walked.person_after,
+        not_simulated: walked.not_simulated,
     }))
 }
 
