@@ -764,7 +764,10 @@ mod tests {
         ));
         assert!(body.contains(r#"route="unmatched",status="404""#));
         assert!(body.contains(r#"method="OTHER""#));
-        assert!(!body.contains("1234"));
+        // Neither the raw path nor the raw method is a label. A bare "1234" would also match a
+        // float sample value by chance.
+        assert!(!body.contains("no/such/path"));
+        assert!(!body.contains("FOO"));
         assert!(body.contains("zirv_flow_http_request_duration_seconds"));
     }
 
