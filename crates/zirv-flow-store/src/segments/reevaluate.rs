@@ -12,10 +12,11 @@ use uuid::Uuid;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::preview::{SqlQuery, bind_all};
+use super::preview::{SqlQuery, bind_all_as};
 use super::refresh::{
-    MembershipCause, RefreshOutcome, Scope, lock_segment_refresh, refresh_statement,
+    Captured, MembershipCause, RefreshOutcome, Scope, lock_segment_refresh, refresh_statement,
 };
+use crate::flows::{enqueue_segment_enrolls, segment_trigger_flows};
 use crate::{DirtyPerson, StoreError};
 
 /// A claimed batch as the parallel arrays the diff statement unnests: each person with the
@@ -302,7 +303,8 @@ pub async fn apply_reevaluation(
     connection: &mut PgConnection,
     apply: &ReevaluateApply<'_>,
 ) -> Result<RefreshOutcome, StoreError> {
-    let statement = refresh_statement(apply.members, Scope::Batch);
+    let triggered = segment_trigger_flows(connection, apply.workspace, apply.segment).await?;
+    let statement = refresh_statement(apply.members, Scope::Batch, !triggered.is_empty());
     let batch = apply.batch;
     // A custom plan for a segment that is missing from the `segment_members` statistics (new, or
     // not yet analyzed) estimates one row for its id, so the diff scans every open row of the
@@ -313,8 +315,8 @@ pub async fn apply_reevaluation(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let counts = bind_all(
-        sqlx::query_scalar::<_, Vec<i64>>(sqlx::AssertSqlSafe(statement)),
+    let captured = bind_all_as(
+        sqlx::query_as::<_, Captured>(sqlx::AssertSqlSafe(statement)),
         apply.workspace,
         &apply.members.params,
     )
@@ -336,10 +338,11 @@ pub async fn apply_reevaluation(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let outcome = RefreshOutcome {
-        entered: counts[0],
-        exited: counts[1],
-    };
+    let outcome = captured.outcome();
+    if !triggered.is_empty() {
+        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
+            .await?;
+    }
     if outcome.entered != outcome.exited {
         sqlx::query(
             "UPDATE segments SET member_count = member_count + $3 - $4 \
@@ -518,7 +521,7 @@ mod tests {
             params: vec![SqlParam::Text("pro".into())],
         };
 
-        let statement = refresh_statement(&members, Scope::Batch);
+        let statement = refresh_statement(&members, Scope::Batch, false);
 
         // One compiled value ($2), the people $3, then segment $4, version $5, time $6, cause
         // $7, the three parallel arrays $8 to $10, the job $11 and the attempt $12.

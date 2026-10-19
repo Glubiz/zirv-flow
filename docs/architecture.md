@@ -968,6 +968,17 @@ query joins the batch's events with the published, not-paused event-trigger flow
 events flagged `no_triggers` and forwarding re-drives (12.2). Property filters use the
 segment AST's event-property filter nodes.
 
+**Schedule, manual and API triggers.** All five triggers end in a `flow.enroll` job that calls
+`enroll_entries`, idempotent on `(flow, person, occurrence)`. A job carries up to 1,000
+`(person, occurrence)` pairs, or names an audience (segment members, list members or everyone)
+and pages through it by person id, a thousand per job, chained. A schedule trigger is a
+`schedules` row (`flow_id`, kept on a pause, removed on an archive) and its occurrence is the
+slot. `POST .../flows/{id}/start` (Admin) queues a segment or list audience under the cause
+`manual`; `POST .../flows/{id}/enrollments` (Write) queues one person, and an idempotency key
+makes a retry one occurrence. A paused flow takes nobody: a job for people records each skip as a
+decision, and a job for an audience records one skip; both are counted
+(`zirv_flow_flow_enroll_skips_total`).
+
 **Time zones.** A person's `timezone` trait overrides the workspace zone
 (`workspaces.timezone`, 6) for `wait.until_time`. An invalid zone falls back to the
 workspace zone, and the fallback is recorded on the step decision. Schedule triggers use

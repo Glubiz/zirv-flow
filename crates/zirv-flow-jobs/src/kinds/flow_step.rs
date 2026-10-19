@@ -1114,10 +1114,16 @@ mod tests {
                 .await
                 .unwrap();
             let trace = TraceContext::root(Cause::api("publish"));
-            let (_, version) =
-                zirv_flow_store::publish_flow(&mut tx, self.ws, &locked, None, &trace)
-                    .await
-                    .unwrap();
+            let (_, version) = zirv_flow_store::publish_flow(
+                &mut tx,
+                &zirv_flow_store::Clock::default(),
+                self.ws,
+                &locked,
+                None,
+                &trace,
+            )
+            .await
+            .unwrap();
             zirv_flow_store::commit(tx).await.unwrap();
             version.version
         }

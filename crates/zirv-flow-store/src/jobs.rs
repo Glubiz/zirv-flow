@@ -216,6 +216,71 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
     Ok(notified.is_some())
 }
 
+/// Enqueues many jobs with one statement; returns how many rows were inserted (a job whose unique
+/// key is held is skipped, as in [`enqueue`]). One wake-up notification goes out per kind, in the
+/// caller's transaction.
+pub async fn enqueue_many<'e>(
+    executor: impl PgExecutor<'e>,
+    jobs: &[NewJob],
+) -> Result<u64, StoreError> {
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = jobs.iter().map(|_| Uuid::new_v4()).collect();
+    let workspaces: Vec<Option<Uuid>> = jobs
+        .iter()
+        .map(|job| job.workspace_id.map(|id| id.as_uuid()))
+        .collect();
+    let kinds: Vec<&str> = jobs.iter().map(|job| job.kind.as_str()).collect();
+    let payloads: Vec<&Value> = jobs.iter().map(|job| &job.payload).collect();
+    let priorities: Vec<i16> = jobs.iter().map(|job| job.priority).collect();
+    let run_ats: Vec<Option<OffsetDateTime>> = jobs.iter().map(|job| job.run_at).collect();
+    let attempts: Vec<i32> = jobs.iter().map(|job| job.max_attempts).collect();
+    let keys: Vec<Option<&str>> = jobs.iter().map(|job| job.unique_key.as_deref()).collect();
+    let traces: Vec<Uuid> = jobs
+        .iter()
+        .map(|job| job.trace.trace_id.as_uuid())
+        .collect();
+    let cause_kinds: Vec<&str> = jobs
+        .iter()
+        .map(|job| job.trace.cause.kind.as_str())
+        .collect();
+    let cause_ids: Vec<&str> = jobs.iter().map(|job| job.trace.cause.id.as_str()).collect();
+    let inserted: Vec<String> = sqlx::query_scalar(
+        "WITH inserted AS ( \
+             INSERT INTO jobs \
+                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()), \
+                    t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id \
+             FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[], \
+                         $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[], \
+                         $11::text[]) \
+                  AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts, \
+                       unique_key, trace_id, cause_kind, cause_id) \
+             ON CONFLICT DO NOTHING \
+             RETURNING kind), \
+         notified AS (SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k) \
+         SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n",
+    )
+    .bind(&ids)
+    .bind(&workspaces)
+    .bind(&kinds)
+    .bind(&payloads)
+    .bind(&priorities)
+    .bind(&run_ats)
+    .bind(&attempts)
+    .bind(&keys)
+    .bind(&traces)
+    .bind(&cause_kinds)
+    .bind(&cause_ids)
+    .bind(NOTIFY_CHANNEL)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(u64::try_from(inserted.len()).unwrap_or(u64::MAX))
+}
+
 /// Claims the next runnable job of one of `kinds`, or none.
 ///
 /// A short transaction of its own, committed before the handler runs. With

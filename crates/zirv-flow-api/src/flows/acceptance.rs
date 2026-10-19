@@ -946,4 +946,306 @@ mod tests {
             reply.body["id"].as_str().unwrap().parse().unwrap()
         }
     }
+
+    fn api_trigger() -> Value {
+        json!({"trigger": {"type": "api"}, "reentry": {"mode": "once"}})
+    }
+
+    impl Fixture {
+        /// Creates a flow and publishes it as a workspace admin; returns its id.
+        async fn live(&self, name: &str, settings: Value) -> String {
+            let flow = self.create(name, simple_graph(), settings).await;
+            let published = self.lead("POST", &format!("/{flow}/publish"), None).await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+            flow
+        }
+
+        /// A person with an email identifier.
+        async fn person(&self, email: &str) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(id)
+                .bind(self.ws.as_uuid())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 VALUES ($1, $2, $3, 'email', $4)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(self.ws.as_uuid())
+            .bind(id)
+            .bind(email)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            id
+        }
+
+        /// The queued `flow.enroll` payloads and the cause kind of their jobs.
+        async fn enroll_jobs(&self) -> Vec<(Value, String)> {
+            sqlx::query_as(
+                "SELECT payload, cause_kind FROM jobs WHERE kind = 'flow.enroll' \
+                 ORDER BY created_at",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enrolling_through_the_api_takes_write_and_a_manual_start_takes_admin(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let api = f.live("By api", api_trigger()).await;
+        let manual_flow = f.live("By hand", manual()).await;
+        let ada = f.person("ada@example.com").await;
+        let list = zirv_flow_store::create_list(&pool, f.ws, "VIPs", "", None)
+            .await
+            .unwrap()
+            .id;
+        let credentials: [(&str, Auth<'_>, u8); 7] = [
+            ("anonymous", Auth::Anonymous, 0),
+            ("read key", Auth::Key(&f.read), 1),
+            ("write key", Auth::Key(&f.write), 2),
+            ("admin key", Auth::Key(&f.admin), 3),
+            ("member", Auth::Session(&f.member), 12),
+            ("workspace admin", Auth::Session(&f.lead), 123),
+            ("other workspace's admin key", Auth::Key(&f.other_admin), 9),
+        ];
+        let held = |code: u8, need: u8| code.to_string().contains(&need.to_string());
+        let requests = [
+            (
+                "enroll",
+                f.flows(&format!("/{api}/enrollments")),
+                json!({"person_id": ada}),
+                2_u8,
+            ),
+            (
+                "start",
+                f.flows(&format!("/{manual_flow}/start")),
+                json!({"list_id": list}),
+                3,
+            ),
+        ];
+
+        for (label, uri, body, need) in requests {
+            for (who, auth, code) in &credentials {
+                let auth = match auth {
+                    Auth::Anonymous => Auth::Anonymous,
+                    Auth::Key(key) => Auth::Key(key),
+                    Auth::Session(login) => Auth::Session(login),
+                };
+                let reply = f.call("POST", &uri, Some(body.clone()), auth).await;
+                let expected = match (*code, held(*code, need)) {
+                    (0, _) => StatusCode::UNAUTHORIZED,
+                    (9, _) => StatusCode::NOT_FOUND,
+                    (_, true) => StatusCode::ACCEPTED,
+                    (_, false) => StatusCode::FORBIDDEN,
+                };
+                assert_eq!(reply.status, expected, "{label} as {who}: {:?}", reply.body);
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_api_enrollment_is_queued_for_a_person_by_id_or_identifier_and_a_key_makes_a_retry_one_occurrence(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let flow = f.live("By api", api_trigger()).await;
+        let ada = f.person("ada@example.com").await;
+        let uri = f.flows(&format!("/{flow}/enrollments"));
+        let post = |body: Value| f.call("POST", &uri, Some(body), Auth::Key(&f.write));
+
+        let by_id = post(json!({"person_id": ada, "idempotency_key": "order-1"})).await;
+        let retry = post(json!({
+            "identifier": {"kind": "email", "value": "ada@example.com"},
+            "idempotency_key": "order-1"
+        }))
+        .await;
+        let other_key = post(json!({"person_id": ada, "idempotency_key": "order-2"})).await;
+        let no_key = post(json!({"person_id": ada})).await;
+
+        for reply in [&by_id, &retry, &other_key, &no_key] {
+            assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        }
+        assert_eq!(by_id.body["occurrence_id"], retry.body["occurrence_id"]);
+        assert_ne!(by_id.body["occurrence_id"], other_key.body["occurrence_id"]);
+        assert_ne!(
+            other_key.body["occurrence_id"],
+            no_key.body["occurrence_id"]
+        );
+        let jobs = f.enroll_jobs().await;
+        assert_eq!(jobs.len(), 3, "the retry holds the first job's key");
+        let (payload, cause) = &jobs[0];
+        assert_eq!(cause, "api");
+        assert_eq!(payload["trigger"], "api");
+        assert_eq!(payload["flow_id"], flow);
+        assert_eq!(
+            payload["people"],
+            json!([[ada, by_id.body["occurrence_id"]]])
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_api_enrollment_that_names_nobody_or_an_unknown_person_or_the_wrong_flow_is_refused(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let api = f.live("By api", api_trigger()).await;
+        let by_hand = f.live("By hand", manual()).await;
+        let draft = f.create("Draft", simple_graph(), api_trigger()).await;
+        let paused = f.live("Paused", api_trigger()).await;
+        let archived = f.live("Archived", api_trigger()).await;
+        f.lead("POST", &format!("/{paused}/pause"), None).await;
+        f.lead("POST", &format!("/{archived}/archive"), None).await;
+        let ada = f.person("ada@example.com").await;
+        let fixture = &f;
+        let enroll = |flow: &str, body: Value| {
+            let uri = fixture.flows(&format!("/{flow}/enrollments"));
+            async move {
+                fixture
+                    .call("POST", &uri, Some(body), Auth::Key(&fixture.write))
+                    .await
+            }
+        };
+
+        let neither = enroll(&api, json!({})).await;
+        let both = enroll(
+            &api,
+            json!({"person_id": ada, "identifier": {"kind": "email", "value": "ada@example.com"}}),
+        )
+        .await;
+        let stranger = enroll(&api, json!({"person_id": Uuid::now_v7()})).await;
+        let unknown = enroll(
+            &api,
+            json!({"identifier": {"kind": "email", "value": "nobody@example.com"}}),
+        )
+        .await;
+        let bad_identifier =
+            enroll(&api, json!({"identifier": {"kind": "fax", "value": "1"}})).await;
+        let long_key = enroll(
+            &api,
+            json!({"person_id": ada, "idempotency_key": "k".repeat(201)}),
+        )
+        .await;
+        let wrong_trigger = enroll(&by_hand, json!({"person_id": ada})).await;
+        let not_published = enroll(&draft, json!({"person_id": ada})).await;
+        let on_pause = enroll(&paused, json!({"person_id": ada})).await;
+        let ended = enroll(&archived, json!({"person_id": ada})).await;
+        let missing = enroll(&Uuid::now_v7().to_string(), json!({"person_id": ada})).await;
+
+        for (label, reply, status) in [
+            ("neither", &neither, StatusCode::UNPROCESSABLE_ENTITY),
+            ("both", &both, StatusCode::UNPROCESSABLE_ENTITY),
+            ("stranger", &stranger, StatusCode::NOT_FOUND),
+            ("unknown identifier", &unknown, StatusCode::NOT_FOUND),
+            (
+                "bad identifier",
+                &bad_identifier,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("long key", &long_key, StatusCode::UNPROCESSABLE_ENTITY),
+            ("wrong trigger", &wrong_trigger, StatusCode::CONFLICT),
+            ("draft", &not_published, StatusCode::CONFLICT),
+            // A paused flow still answers: the job records the skip.
+            ("paused", &on_pause, StatusCode::ACCEPTED),
+            ("archived", &ended, StatusCode::CONFLICT),
+            ("no such flow", &missing, StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(reply.status, status, "{label}: {:?}", reply.body);
+        }
+        assert_eq!(wrong_trigger.body["code"], "flow_state");
+        assert_eq!(
+            f.enroll_jobs().await.len(),
+            1,
+            "only the paused flow's request"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_manual_start_queues_a_segment_or_a_list_audits_and_refuses_the_rest(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let by_hand = f.live("By hand", manual()).await;
+        let api = f.live("By api", api_trigger()).await;
+        let segment = f
+            .lead_segment(
+                "Pros",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+            )
+            .await;
+        let list = zirv_flow_store::create_list(&pool, f.ws, "VIPs", "", None)
+            .await
+            .unwrap()
+            .id;
+        let uri = f.flows(&format!("/{by_hand}/start"));
+        let start = |body: Value| f.call("POST", &uri, Some(body), Auth::Session(&f.lead));
+
+        let of_segment = start(json!({"segment_id": segment})).await;
+        let of_list = start(json!({"list_id": list})).await;
+        let neither = start(json!({})).await;
+        let both = start(json!({"segment_id": segment, "list_id": list})).await;
+        let no_segment = start(json!({"segment_id": Uuid::now_v7()})).await;
+        let no_list = start(json!({"list_id": Uuid::now_v7()})).await;
+        let wrong_trigger = f
+            .call(
+                "POST",
+                &f.flows(&format!("/{api}/start")),
+                Some(json!({"list_id": list})),
+                Auth::Session(&f.lead),
+            )
+            .await;
+        let by_key = f
+            .call(
+                "POST",
+                &uri,
+                Some(json!({"list_id": list})),
+                Auth::Key(&f.admin),
+            )
+            .await;
+
+        assert_eq!(
+            of_segment.status,
+            StatusCode::ACCEPTED,
+            "{:?}",
+            of_segment.body
+        );
+        assert_eq!(of_list.status, StatusCode::ACCEPTED);
+        assert_eq!(by_key.status, StatusCode::ACCEPTED);
+        assert_eq!(neither.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(both.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(no_segment.status, StatusCode::NOT_FOUND);
+        assert_eq!(no_list.status, StatusCode::NOT_FOUND);
+        assert_eq!(wrong_trigger.status, StatusCode::CONFLICT);
+        let jobs = f.enroll_jobs().await;
+        assert_eq!(jobs.len(), 3);
+        // A signed-in admin starts it under the cause `manual`; a key has no user, so `api`.
+        assert_eq!(jobs[0].1, "manual");
+        assert_eq!(jobs[0].0["trigger"], "manual");
+        assert_eq!(
+            jobs[0].0["audience"],
+            json!({"type": "segment", "segment_id": segment})
+        );
+        assert_eq!(jobs[0].0["occurrence"], of_segment.body["occurrence_id"]);
+        assert_eq!(
+            jobs[1].0["audience"],
+            json!({"type": "list", "list_id": list})
+        );
+        assert_eq!(jobs[2].1, "api");
+        let audits = f
+            .count("SELECT count(*) FROM audit_log WHERE action = 'flow.started'")
+            .await;
+        assert_eq!(audits, 3);
+    }
 }

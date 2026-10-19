@@ -873,6 +873,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enrolls one person in a flow whose trigger is `api`. The request is queued as a `flow.enroll`
+         *     job and answered at once with its occurrence; the re-entry rule decides, in the job, whether
+         *     the person enters, and a refusal is a `flow.enroll` decision with its reason. A paused flow
+         *     takes nobody and records the skip. Retrying with the same `idempotency_key` enrolls nobody
+         *     twice.
+         */
+        post: operations["enroll_person"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/flows/{id}/pause": {
         parameters: {
             query?: never;
@@ -928,6 +951,28 @@ export interface paths {
         put?: never;
         /** Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`. */
         post: operations["resume_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Starts a flow whose trigger is `manual` for an audience: the current members of a segment or
+         *     the members of a list. Admin only, and audited as `flow.started`. The audience is queued as a
+         *     `flow.enroll` job that pages through it, a thousand people at a time, under the cause
+         *     `manual`. A paused flow takes nobody and records the skip.
+         */
+        post: operations["start_flow"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3534,6 +3579,20 @@ export interface components {
             /** @description The step idempotency key, `{enrollment_id}:{node_id}`. */
             step_key: string;
         };
+        /** @description The person to enroll: give a `person_id` or an `identifier`, not both. */
+        EnrollPersonRequest: {
+            /**
+             * @description Makes a retry of this request enroll nobody twice: the same key for the same person is one
+             *     occurrence. Without a key every request is its own occurrence.
+             */
+            idempotency_key?: string | null;
+            identifier?: null | components["schemas"]["PersonIdentifier"];
+            /**
+             * Format: uuid
+             * @description The person, or the person they were merged into.
+             */
+            person_id?: string | null;
+        };
         ErasureBody: {
             /** Format: date-time */
             completed_at?: string | null;
@@ -4906,6 +4965,16 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        /** @description An identifier of a person. */
+        PersonIdentifier: {
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`.
+             * @example email
+             */
+            kind: string;
+            /** @description The identifier value. It is looked up and not stored. */
+            value: string;
+        };
         PersonIdentitiesBody: {
             identities: components["schemas"]["IdentityBody"][];
             /** Format: uuid */
@@ -5191,6 +5260,14 @@ export interface components {
         PutContactDefinitionRequest: {
             /** @description At most 100 fields, each registry key once, each identifier kind once. */
             fields: components["schemas"]["ContactFieldBody"][];
+        };
+        /** @description A request that was queued. */
+        QueuedBody: {
+            /**
+             * Format: uuid
+             * @description The occurrence the enrollment is idempotent on.
+             */
+            occurrence_id: string;
         };
         ReasonBody: {
             /** @description The property that failed; never its value. */
@@ -5940,6 +6017,19 @@ export interface components {
              *     there; the server never fetches it.
              */
             authorization_url: string;
+        };
+        /** @description The audience of a manual start: give a `segment_id` or a `list_id`, not both. */
+        StartFlowRequest: {
+            /**
+             * Format: uuid
+             * @description Enroll the members of this list.
+             */
+            list_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Enroll the current members of this segment.
+             */
+            segment_id?: string | null;
         };
         /** @description Which stream to run. */
         StartRunRequest: {
@@ -10095,6 +10185,80 @@ export interface operations {
             };
         };
     };
+    enroll_person: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrollPersonRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueuedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not published or paused, or its trigger is not `api` (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body names no person or both, or the key is too long */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     pause_flow: {
         parameters: {
             query?: never;
@@ -10299,6 +10463,80 @@ export interface operations {
             };
             /** @description The flow is not paused (`code` is `flow_state`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    start_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartFlowRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueuedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow, segment or list, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not published or paused, or its trigger is not `manual` (`code` is `flow_state`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body names no audience or both */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

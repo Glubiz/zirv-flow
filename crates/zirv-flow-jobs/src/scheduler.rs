@@ -14,8 +14,8 @@ use zirv_flow_store::{
     database_now, delete_expired_import_data, dirty_backlog, dirty_heads, disable_schedule,
     due_schedules, enqueue, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
     ensure_event_partitions, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
-    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_segment_schedules,
-    stream_freshness, try_lead,
+    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
+    reconcile_segment_schedules, stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -202,6 +202,11 @@ impl Scheduler {
         match reconcile_segments(&self.pool).await {
             Ok(_) => {}
             Err(error) => warn!("could not reconcile the segment schedules: {error}"),
+        }
+        // Published flows with a schedule trigger get the schedule they lack.
+        match reconcile_flows(&self.pool).await {
+            Ok(_) => {}
+            Err(error) => warn!("could not reconcile the flow schedules: {error}"),
         }
         // Contact idempotency keys are remembered for 24 hours.
         if let Err(error) = expire_contact_idempotency(&self.pool).await {
@@ -485,6 +490,14 @@ async fn reconcile_segments(pool: &PgPool) -> Result<(u64, u64), StoreError> {
     let done = reconcile_segment_schedules(&mut tx).await?;
     zirv_flow_store::commit(tx).await?;
     Ok(done)
+}
+
+/// Gives the flows published before their schedule had a row that row, in one transaction.
+async fn reconcile_flows(pool: &PgPool) -> Result<u64, StoreError> {
+    let mut tx = begin(pool).await?;
+    let created = reconcile_flow_schedules(&mut tx).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(created)
 }
 
 /// The unique key of one slot of one schedule.

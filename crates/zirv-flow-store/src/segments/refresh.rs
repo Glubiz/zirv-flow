@@ -5,11 +5,13 @@
 
 use serde_json::json;
 use sqlx::PgConnection;
+use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
-use super::preview::{SqlQuery, bind_all};
+use super::preview::{SqlQuery, bind_all_as};
+use crate::flows::{enqueue_segment_enrolls, segment_trigger_flows};
 use crate::{NewJob, StoreError, enqueue};
 
 /// The kind of the job that refreshes one segment.
@@ -214,6 +216,102 @@ pub struct RefreshOutcome {
     pub exited: i64,
 }
 
+/// A person who entered or left a segment: the `segment.entered` or `segment.exited` event that
+/// recorded it and the trace and cause the change was recorded under.
+#[derive(Clone, Debug)]
+pub struct SegmentMembershipChange {
+    pub event: Uuid,
+    pub person: Uuid,
+    pub trace: TraceContext,
+}
+
+/// The changes of one diff, by person id within each kind.
+#[derive(Clone, Debug, Default)]
+pub struct SegmentMembershipChanges {
+    pub entered: Vec<SegmentMembershipChange>,
+    pub exited: Vec<SegmentMembershipChange>,
+}
+
+/// The row a diff statement returns: the counts and, when the statement was built to capture
+/// them, the changes as parallel arrays.
+#[derive(Debug, Default, FromRow)]
+pub(super) struct Captured {
+    pub(super) counts: Vec<i64>,
+    #[sqlx(default)]
+    entered_ids: Vec<Uuid>,
+    #[sqlx(default)]
+    entered_people: Vec<Uuid>,
+    #[sqlx(default)]
+    entered_traces: Vec<Uuid>,
+    #[sqlx(default)]
+    entered_kinds: Vec<String>,
+    #[sqlx(default)]
+    entered_causes: Vec<String>,
+    #[sqlx(default)]
+    exited_ids: Vec<Uuid>,
+    #[sqlx(default)]
+    exited_people: Vec<Uuid>,
+    #[sqlx(default)]
+    exited_traces: Vec<Uuid>,
+    #[sqlx(default)]
+    exited_kinds: Vec<String>,
+    #[sqlx(default)]
+    exited_causes: Vec<String>,
+}
+
+impl Captured {
+    pub(super) fn outcome(&self) -> RefreshOutcome {
+        RefreshOutcome {
+            entered: self.counts[0],
+            exited: self.counts[1],
+        }
+    }
+
+    /// The captured changes. A change whose cause kind is not one we know is left out.
+    pub(super) fn changes(self) -> SegmentMembershipChanges {
+        fn zip(
+            ids: Vec<Uuid>,
+            people: Vec<Uuid>,
+            traces: Vec<Uuid>,
+            kinds: Vec<String>,
+            causes: Vec<String>,
+        ) -> Vec<SegmentMembershipChange> {
+            ids.into_iter()
+                .zip(people)
+                .zip(traces)
+                .zip(kinds.into_iter().zip(causes))
+                .filter_map(|(((event, person), trace), (kind, cause))| {
+                    let kind = kind.parse::<CauseKind>().ok()?;
+                    Some(SegmentMembershipChange {
+                        event,
+                        person,
+                        trace: TraceContext {
+                            trace_id: TraceId::from_uuid(trace),
+                            cause: Cause::from_stored(kind, cause),
+                        },
+                    })
+                })
+                .collect()
+        }
+        SegmentMembershipChanges {
+            entered: zip(
+                self.entered_ids,
+                self.entered_people,
+                self.entered_traces,
+                self.entered_kinds,
+                self.entered_causes,
+            ),
+            exited: zip(
+                self.exited_ids,
+                self.exited_people,
+                self.exited_traces,
+                self.exited_kinds,
+                self.exited_causes,
+            ),
+        }
+    }
+}
+
 /// Which people a diff statement covers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Scope {
@@ -233,7 +331,7 @@ pub(super) enum Scope {
 /// cause, the people's trace ids, cause kinds and cause ids as three arrays parallel to the
 /// people, the job id and the attempt. Each change is recorded under its person's trace and
 /// decision cause.
-pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope) -> String {
+pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool) -> String {
     let mut at = members.params.len() + 1;
     let mut next = || {
         at += 1;
@@ -288,7 +386,8 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope) -> String {
                  SELECT gen_random_uuid(), $1, i.person_id, 'segment.{kind}', {now}, {now}, \
                      jsonb_build_object('segment_id', {segment}::text, 'version', {version}, \
                                         'cause', {cause}), \
-                     'segments', {trace}, 'valid' FROM {from} i{join} RETURNING 1), \
+                     'segments', {trace}, 'valid' FROM {from} i{join} \
+                 RETURNING id, person_id, trace_id), \
              {kind}_decisions AS ( \
                  INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
                      reason, cause_kind, cause_id, subject_ids, job_id, attempt) \
@@ -307,6 +406,47 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope) -> String {
             " JOIN batch r ON r.person_id = e.person_id",
             " JOIN batch r ON r.person_id = l.person_id",
         ),
+    };
+    // What a flow trigger needs of each change: the event that recorded it, the person and the
+    // trace and cause it was recorded under.
+    let (captured, columns) = if capture {
+        let (kind_expr, id_expr, join) = match scope {
+            Scope::Segment => (cause_kind.clone(), cause_id.clone(), ""),
+            Scope::Batch => (
+                "r.cause_kind".to_owned(),
+                "r.cause_id".to_owned(),
+                " JOIN batch r ON r.person_id = ev.person_id",
+            ),
+        };
+        let flow_rows = |kind: &str| {
+            format!(
+                "{kind}_flow AS (SELECT ev.id, ev.person_id, ev.trace_id, \
+                     {kind_expr} AS cause_kind, {id_expr} AS cause_id \
+                     FROM {kind}_events ev{join}), "
+            )
+        };
+        let arrays = |kind: &str| {
+            let column = |name: &str, alias: &str, empty: &str| {
+                format!(
+                    ", COALESCE((SELECT array_agg(f.{name} ORDER BY f.person_id) \
+                         FROM {kind}_flow f), '{{}}'::{empty}[]) AS {kind}_{alias}"
+                )
+            };
+            [
+                column("id", "ids", "uuid"),
+                column("person_id", "people", "uuid"),
+                column("trace_id", "traces", "uuid"),
+                column("cause_kind", "kinds", "text"),
+                column("cause_id", "causes", "text"),
+            ]
+            .concat()
+        };
+        (
+            format!("{}{}", flow_rows("entered"), flow_rows("exited")),
+            format!("{}{}", arrays("entered"), arrays("exited")),
+        )
+    } else {
+        (String::new(), String::new())
     };
     format!(
         "WITH {batch_cte}target AS ({members_sql}), \
@@ -331,13 +471,18 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope) -> String {
                  exited_trace_id = {trace}, exited_cause = {cause} \
              FROM leaving l{leave_join} WHERE m.id = l.row_id AND m.exited_at IS NULL \
              RETURNING m.person_id), \
-         {entered}, {exited} \
+         {entered}, {exited}{trailing} \
          SELECT ARRAY[ \
              (SELECT count(*) FROM inserted), (SELECT count(*) FROM closed), \
              (SELECT count(*) FROM entered_events) + (SELECT count(*) FROM exited_events), \
              (SELECT count(*) FROM entered_decisions) + (SELECT count(*) FROM exited_decisions) \
-         ]::bigint[]",
+         ]::bigint[] AS counts{columns}",
         members_sql = members.sql,
+        trailing = if capture {
+            format!(", {}", captured.trim_end_matches(", "))
+        } else {
+            String::new()
+        },
     )
 }
 
@@ -357,9 +502,24 @@ pub async fn apply_refresh(
     connection: &mut PgConnection,
     apply: &RefreshApply<'_>,
 ) -> Result<RefreshOutcome, StoreError> {
-    let statement = refresh_statement(apply.members, Scope::Segment);
-    let query = bind_all(
-        sqlx::query_scalar::<_, Vec<i64>>(sqlx::AssertSqlSafe(statement)),
+    // The flows this segment triggers decide whether the statement hands back its changes.
+    let triggered = segment_trigger_flows(connection, apply.workspace, apply.segment).await?;
+    let statement = refresh_statement(apply.members, Scope::Segment, !triggered.is_empty());
+    // A segment of a hundred thousand people is diffed in one statement, and the plan has to be
+    // a pair of hash joins. Before the tables are analyzed the planner thinks `segment_members`
+    // is tiny and may probe it once per person, and a probe that scans the table also scans the
+    // rows this very statement is inserting, which is quadratic. The same plan looks costly
+    // enough for the server to compile it with JIT, which takes minutes and has crashed the
+    // server on a statement of this shape. Both settings are local to the caller's transaction
+    // and restored right after the statement.
+    for setting in ["SET LOCAL jit = off", "SET LOCAL enable_nestloop = off"] {
+        sqlx::query(setting)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    let query = bind_all_as(
+        sqlx::query_as::<_, Captured>(sqlx::AssertSqlSafe(statement)),
         apply.workspace,
         &apply.members.params,
     )
@@ -373,14 +533,24 @@ pub async fn apply_refresh(
     .bind(apply.trace.cause.id.as_str())
     .bind(apply.job.0)
     .bind(apply.job.1);
-    let counts = query
+    let captured = query
         .fetch_one(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let outcome = RefreshOutcome {
-        entered: counts[0],
-        exited: counts[1],
-    };
+    for setting in [
+        "SET LOCAL jit = DEFAULT",
+        "SET LOCAL enable_nestloop = DEFAULT",
+    ] {
+        sqlx::query(setting)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    let outcome = captured.outcome();
+    if !triggered.is_empty() {
+        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
+            .await?;
+    }
 
     sqlx::query(
         "UPDATE segments SET computed_version = $3, computed_at = $4, \
@@ -556,13 +726,14 @@ mod tests {
 
     #[test]
     fn the_extra_values_are_numbered_after_the_compiled_ones() {
-        let one = refresh_statement(&plan_query("pro"), Scope::Segment);
+        let one = refresh_statement(&plan_query("pro"), Scope::Segment, false);
         let none = refresh_statement(
             &SqlQuery {
                 sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1".into(),
                 params: Vec::new(),
             },
             Scope::Segment,
+            false,
         );
 
         // One compiled value: the segment is $3 and the attempt is $11.

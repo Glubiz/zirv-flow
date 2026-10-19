@@ -8,6 +8,7 @@ pub(crate) mod crud;
 pub(crate) mod publish;
 mod schema;
 pub(crate) mod test_mode;
+pub(crate) mod triggers;
 mod validation;
 
 use serde_json::Value;

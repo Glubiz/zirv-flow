@@ -46,8 +46,9 @@ pub use reevaluate::{
 };
 pub use refresh::{
     MembershipCause, REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome,
-    RefreshRequest, RefreshTrigger, apply_refresh, decision_cause_kind, enqueue_refresh,
-    lock_segment_refresh, membership_cause, membership_trace,
+    RefreshRequest, RefreshTrigger, SegmentMembershipChange, SegmentMembershipChanges,
+    apply_refresh, decision_cause_kind, enqueue_refresh, lock_segment_refresh, membership_cause,
+    membership_trace,
 };
 pub use schedule::{reconcile_segment_schedules, segment_cron};
 

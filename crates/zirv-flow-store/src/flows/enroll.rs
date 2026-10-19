@@ -9,16 +9,15 @@
 use std::fmt;
 
 use hashbrown::{HashMap, HashSet};
-use serde_json::json;
 use sqlx::PgConnection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, Reentry};
-use zirv_flow_core::{TraceContext, TraceId, WorkspaceId};
+use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::state::FlowState;
-use crate::{NewDecision, StoreError, append_decisions, enqueue};
+use crate::{NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 
 /// The most people one enroll takes (the size of a `flow.enroll` job).
 pub const MAX_ENROLL_PEOPLE: usize = 1000;
@@ -100,7 +99,65 @@ impl From<StoreError> for EnrollError {
     }
 }
 
-/// Enrolls `request.people` in the version, or says why not, person by person.
+/// Enrolls `request.people` in the version, or says why not, person by person. Every person
+/// enters for the request's one occurrence; see [`enroll_entries`] for people who each have an
+/// occurrence of their own.
+pub async fn enroll(
+    connection: &mut PgConnection,
+    request: &EnrollRequest<'_>,
+) -> Result<EnrollOutcome, EnrollError> {
+    let entries: Vec<EnrollEntry> = request
+        .people
+        .iter()
+        .map(|person| EnrollEntry {
+            person: *person,
+            occurrence: request.occurrence.id,
+            cause: None,
+        })
+        .collect();
+    enroll_entries(
+        connection,
+        &EnrollEntries {
+            workspace: request.workspace,
+            flow: request.flow,
+            version: request.version,
+            trigger: request.occurrence.trigger,
+            entries: &entries,
+            now: request.now,
+            trace: request.trace,
+        },
+    )
+    .await
+}
+
+/// One person to enroll for one occurrence.
+#[derive(Clone, Debug)]
+pub struct EnrollEntry {
+    pub person: Uuid,
+    /// The occurrence this person enters for: an event id, a segment event id, a schedule slot or
+    /// the id of a request.
+    pub occurrence: Uuid,
+    /// The cause of this enrollment when it is not the request trace's (an event trigger is
+    /// caused by its own event).
+    pub cause: Option<Cause>,
+}
+
+/// Who to enroll in which version of which flow, each person for an occurrence of their own.
+#[derive(Clone, Debug)]
+pub struct EnrollEntries<'a> {
+    pub workspace: WorkspaceId,
+    pub flow: Uuid,
+    pub version: i32,
+    /// The trigger kind every entry came from.
+    pub trigger: &'static str,
+    pub entries: &'a [EnrollEntry],
+    /// The re-entry interval is measured against this instant.
+    pub now: OffsetDateTime,
+    /// The trace of the work that enrolls, as for [`EnrollRequest`].
+    pub trace: &'a TraceContext,
+}
+
+/// Enrolls the people of `request.entries`, or says why not, person by person.
 ///
 /// Each enrolled person gets an `active` enrollment pinned to `request.version` and a `flow.step`
 /// job that starts it. The re-entry rule of the version's settings applies: `once` refuses a
@@ -108,11 +165,15 @@ impl From<StoreError> for EnrollError {
 /// enrollment, `always` refuses until the minimum interval since the last entry has passed. A
 /// person with an in-flight enrollment is refused in every mode. A flow that is not published
 /// enrolls nobody. A refusal is a `flow.enroll` decision with outcome `skipped` and its reason.
-pub async fn enroll(
+///
+/// An entry whose `(flow, person, occurrence)` already enrolled is a replay and changes nothing.
+/// A person who appears twice enters once, by their first entry. People are written in id order,
+/// so two enrolls that touch the same people take their rows in the same order.
+pub async fn enroll_entries(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
 ) -> Result<EnrollOutcome, EnrollError> {
-    if request.people.len() > MAX_ENROLL_PEOPLE {
+    if request.entries.len() > MAX_ENROLL_PEOPLE {
         return Err(EnrollError::TooMany);
     }
     lock_enrolls(connection, request.flow).await?;
@@ -124,20 +185,23 @@ pub async fn enroll(
         .clone();
 
     let mut seen = HashSet::new();
-    let people: Vec<Uuid> = request
-        .people
+    let mut entries: Vec<&EnrollEntry> = request
+        .entries
         .iter()
-        .copied()
-        .filter(|person| seen.insert(*person))
+        .filter(|entry| seen.insert(entry.person))
         .collect();
+    entries.sort_unstable_by_key(|entry| entry.person);
+    let people: Vec<Uuid> = entries.iter().map(|entry| entry.person).collect();
+    let occurrences: Vec<Uuid> = entries.iter().map(|entry| entry.occurrence).collect();
     let existing = existing_people(connection, request, &people).await?;
-    let entries = entries_of(connection, request, &people).await?;
+    let entered = entries_of(connection, request, &people).await?;
     let in_flight = in_flight_of(connection, request, &people).await?;
-    let replayed = replayed_of(connection, request, &people).await?;
+    let replayed = replayed_of(connection, request, &people, &occurrences).await?;
 
     let mut outcome = EnrollOutcome::default();
     let mut accepted = Vec::new();
-    for person in people {
+    for entry in entries {
+        let person = entry.person;
         if replayed.contains(&person) {
             outcome.replayed += 1;
             continue;
@@ -147,12 +211,12 @@ pub async fn enroll(
             &settings.reentry,
             existing.contains(&person),
             in_flight.contains(&person),
-            entries.get(&person).copied(),
+            entered.get(&person).copied(),
             request.now,
         );
         match refusal {
             Some(reason) => outcome.skipped.push((person, reason)),
-            None => accepted.push(person),
+            None => accepted.push(entry),
         }
     }
 
@@ -169,26 +233,47 @@ pub async fn enroll(
             job: None,
         })
         .collect();
-    for person in accepted {
+    let mut occurrence_of = Vec::with_capacity(accepted.len());
+    for entry in accepted {
+        let cause = entry
+            .cause
+            .clone()
+            .unwrap_or_else(|| request.trace.cause.clone());
         outcome.enrolled.push(Enrolled {
-            person,
+            person: entry.person,
             enrollment: Uuid::now_v7(),
             trace: TraceContext {
                 trace_id: TraceId::new(),
-                cause: request.trace.cause.clone(),
+                cause,
             },
         });
+        occurrence_of.push(entry.occurrence);
     }
-    write_enrollments(connection, request, &entry, &outcome.enrolled).await?;
+    write_enrollments(
+        connection,
+        request,
+        &entry,
+        &outcome.enrolled,
+        &occurrence_of,
+    )
+    .await?;
+    // The start jobs go in with one statement: a fan-out of a thousand people is one round trip.
+    let starts: Vec<NewJob> = outcome
+        .enrolled
+        .iter()
+        .map(|enrolled| {
+            let start = StepJobPayload {
+                workspace: request.workspace,
+                enrollment: enrolled.enrollment,
+                state_version: 0,
+                input: StepJobInput::Start,
+            };
+            let key = format!("start:{}", enrolled.enrollment);
+            start.job(&enrolled.trace, None, key)
+        })
+        .collect();
+    enqueue_many(&mut *connection, &starts).await?;
     for enrolled in &outcome.enrolled {
-        let start = StepJobPayload {
-            workspace: request.workspace,
-            enrollment: enrolled.enrollment,
-            state_version: 0,
-            input: StepJobInput::Start,
-        };
-        let key = format!("start:{}", enrolled.enrollment);
-        enqueue(&mut *connection, &start.job(&enrolled.trace, None, key)).await?;
         decisions.push(NewDecision {
             workspace_id: request.workspace,
             trace: enrolled.trace.clone(),
@@ -255,7 +340,7 @@ async fn lock_enrolls(connection: &mut PgConnection, flow: Uuid) -> Result<(), S
 
 async fn read_version(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
 ) -> Result<(FlowState, FlowGraph, FlowSettings), EnrollError> {
     let row: Option<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT f.state, v.graph, v.settings FROM flows f \
@@ -279,7 +364,7 @@ async fn read_version(
 /// The people that exist and have not been merged into another.
 async fn existing_people(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
     people: &[Uuid],
 ) -> Result<HashSet<Uuid>, StoreError> {
     let found: Vec<Uuid> = sqlx::query_scalar(
@@ -296,7 +381,7 @@ async fn existing_people(
 /// When each of `people` last entered the flow.
 async fn entries_of(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
     people: &[Uuid],
 ) -> Result<HashMap<Uuid, OffsetDateTime>, StoreError> {
     let rows: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(
@@ -313,7 +398,7 @@ async fn entries_of(
 
 async fn in_flight_of(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
     people: &[Uuid],
 ) -> Result<HashSet<Uuid>, StoreError> {
     let rows: Vec<Uuid> = sqlx::query_scalar(
@@ -328,30 +413,36 @@ async fn in_flight_of(
     Ok(rows.into_iter().collect())
 }
 
-/// The people this occurrence has already enrolled.
+/// The people whose own occurrence has already enrolled them. `occurrences` is parallel to
+/// `people`.
 async fn replayed_of(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
     people: &[Uuid],
+    occurrences: &[Uuid],
 ) -> Result<HashSet<Uuid>, StoreError> {
     let rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT person_id FROM enrollments \
-         WHERE flow_id = $1 AND occurrence_id = $2 AND person_id = ANY($3)",
+        "SELECT e.person_id FROM enrollments e \
+         JOIN unnest($2::uuid[], $3::uuid[]) AS t(person_id, occurrence_id) \
+           ON e.person_id = t.person_id AND e.occurrence_id = t.occurrence_id \
+         WHERE e.flow_id = $1",
     )
     .bind(request.flow)
-    .bind(request.occurrence.id)
     .bind(people)
+    .bind(occurrences)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
     Ok(rows.into_iter().collect())
 }
 
+/// Writes the enrollments and the entries. `occurrences` is parallel to `enrolled`.
 async fn write_enrollments(
     connection: &mut PgConnection,
-    request: &EnrollRequest<'_>,
+    request: &EnrollEntries<'_>,
     entry: &str,
     enrolled: &[Enrolled],
+    occurrences: &[Uuid],
 ) -> Result<(), StoreError> {
     if enrolled.is_empty() {
         return Ok(());
@@ -362,29 +453,33 @@ async fn write_enrollments(
         .iter()
         .map(|e| e.trace.trace_id.as_uuid())
         .collect();
+    let kinds: Vec<&str> = enrolled
+        .iter()
+        .map(|e| e.trace.cause.kind.as_str())
+        .collect();
+    let causes: Vec<&str> = enrolled.iter().map(|e| e.trace.cause.id.as_str()).collect();
     // The context holds ids and the trigger kind only, never a property or a trait value.
-    let context = json!({
-        "trigger": request.occurrence.trigger,
-        "occurrence": request.occurrence.id,
-    });
     sqlx::query(
         "INSERT INTO enrollments \
             (id, workspace_id, flow_id, flow_version, person_id, state, node, context, \
              occurrence_id, state_version, trace_id, cause_kind, cause_id) \
-         SELECT t.id, $1, $2, $3, t.person_id, 'active', $4, $5, $6, 0, t.trace_id, $7, $8 \
-         FROM unnest($9::uuid[], $10::uuid[], $11::uuid[]) AS t(id, person_id, trace_id)",
+         SELECT t.id, $1, $2, $3, t.person_id, 'active', $4, \
+                jsonb_build_object('trigger', $5::text, 'occurrence', t.occurrence_id), \
+                t.occurrence_id, 0, t.trace_id, t.cause_kind, t.cause_id \
+         FROM unnest($6::uuid[], $7::uuid[], $8::uuid[], $9::uuid[], $10::text[], $11::text[]) \
+              AS t(id, person_id, trace_id, occurrence_id, cause_kind, cause_id)",
     )
     .bind(request.workspace.as_uuid())
     .bind(request.flow)
     .bind(request.version)
     .bind(entry)
-    .bind(context)
-    .bind(request.occurrence.id)
-    .bind(request.trace.cause.kind.as_str())
-    .bind(&request.trace.cause.id)
+    .bind(request.trigger)
     .bind(&ids)
     .bind(&people)
     .bind(&traces)
+    .bind(occurrences)
+    .bind(&kinds)
+    .bind(&causes)
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;

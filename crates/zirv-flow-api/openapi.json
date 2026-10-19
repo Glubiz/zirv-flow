@@ -5100,6 +5100,117 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Enrolls one person in a flow whose trigger is `api`. The request is queued as a `flow.enroll`\njob and answered at once with its occurrence; the re-entry rule decides, in the job, whether\nthe person enters, and a refusal is a `flow.enroll` decision with its reason. A paused flow\ntakes nobody and records the skip. Retrying with the same `idempotency_key` enrolls nobody\ntwice.",
+        "operationId": "enroll_person",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollPersonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueuedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not published or paused, or its trigger is not `api` (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body names no person or both, or the key is too long",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/flows/{id}/pause": {
       "post": {
         "tags": [
@@ -5393,6 +5504,117 @@
           },
           "409": {
             "description": "The flow is not paused (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/start": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Starts a flow whose trigger is `manual` for an audience: the current members of a segment or\nthe members of a list. Admin only, and audited as `flow.started`. The audience is queued as a\n`flow.enroll` job that pages through it, a thousand people at a time, under the cause\n`manual`. A paused flow takes nobody and records the skip.",
+        "operationId": "start_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueuedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow, segment or list, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not published or paused, or its trigger is not `manual` (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body names no audience or both",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -17745,6 +17967,38 @@
           }
         }
       },
+      "EnrollPersonRequest": {
+        "type": "object",
+        "description": "The person to enroll: give a `person_id` or an `identifier`, not both.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Makes a retry of this request enroll nobody twice: the same key for the same person is one\noccurrence. Without a key every request is its own occurrence."
+          },
+          "identifier": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PersonIdentifier",
+                "description": "An identifier of the person; it resolves to their current person."
+              }
+            ]
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person, or the person they were merged into."
+          }
+        }
+      },
       "ErasureBody": {
         "type": "object",
         "required": [
@@ -21417,6 +21671,25 @@
           }
         }
       },
+      "PersonIdentifier": {
+        "type": "object",
+        "description": "An identifier of a person.",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`email`, `phone`, `anonymous_id` or `external:<namespace>`.",
+            "example": "email"
+          },
+          "value": {
+            "type": "string",
+            "description": "The identifier value. It is looked up and not stored."
+          }
+        }
+      },
       "PersonIdentitiesBody": {
         "type": "object",
         "required": [
@@ -22166,6 +22439,20 @@
               "$ref": "#/components/schemas/ContactFieldBody"
             },
             "description": "At most 100 fields, each registry key once, each identifier kind once."
+          }
+        }
+      },
+      "QueuedBody": {
+        "type": "object",
+        "description": "A request that was queued.",
+        "required": [
+          "occurrence_id"
+        ],
+        "properties": {
+          "occurrence_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The occurrence the enrollment is idempotent on."
           }
         }
       },
@@ -24259,6 +24546,28 @@
           "authorization_url": {
             "type": "string",
             "description": "Where to send the browser: the provider's consent page. The page that gets it navigates\nthere; the server never fetches it."
+          }
+        }
+      },
+      "StartFlowRequest": {
+        "type": "object",
+        "description": "The audience of a manual start: give a `segment_id` or a `list_id`, not both.",
+        "properties": {
+          "list_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Enroll the members of this list."
+          },
+          "segment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Enroll the current members of this segment."
           }
         }
       },

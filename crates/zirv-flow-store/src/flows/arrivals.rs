@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::runtime::{StepJobInput, StepJobPayload};
+use super::triggers::enqueue_event_enrolls;
 use crate::{StoreError, enqueue};
 
 /// An accepted event, as far as the waits care.
@@ -34,7 +35,8 @@ struct Match {
 }
 
 /// Enqueues a `flow.step` for every enrollment waiting for one of `arrivals`, with one query for
-/// the whole batch. Property filters are not applied here: the store cannot read the segment AST,
+/// the whole batch, and a `flow.enroll` for every flow whose event trigger names one of them,
+/// with one more. Property filters are not applied here: the store cannot read the segment AST,
 /// so the step job applies them to the stored event before it moves the enrollment. Returns the
 /// number of jobs enqueued. Only waiting enrollments wake: a failed one keeps its waits but takes no
 /// event.
@@ -46,6 +48,8 @@ pub(crate) async fn enqueue_arrivals(
     if arrivals.is_empty() {
         return Ok(0);
     }
+    // The flows an event starts, from the same batch of events.
+    enqueue_event_enrolls(connection, workspace, arrivals).await?;
     let events: Vec<Uuid> = arrivals.iter().map(|a| a.event_id).collect();
     let people: Vec<Uuid> = arrivals.iter().map(|a| a.person_id).collect();
     let names: Vec<&str> = arrivals.iter().map(|a| a.name.as_str()).collect();
