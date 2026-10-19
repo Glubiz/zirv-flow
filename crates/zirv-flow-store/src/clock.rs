@@ -1,9 +1,11 @@
-//! The clock segment paths read (ruling 5292ff7e). Production reads the database's clock, the
-//! only one every instance agrees on; a test uses a [`ManualClock`] it moves, so a relative
-//! window such as "no order in 30 days" can be crossed without waiting and without new data.
+//! The clock that time-dependent paths read (ruling 5292ff7e). Production reads the database's
+//! clock, the only one every instance agrees on; a test uses a [`ManualClock`] it moves, so a
+//! relative window such as "no order in 30 days" can be crossed without waiting and without new
+//! data.
 //!
-//! It is an enum rather than a trait object so nothing needs `async_trait`. Only the segment
-//! paths adopt it: the segment refresh in the worker and the preview in the API.
+//! It is an enum rather than a trait object so nothing needs `async_trait`. The segment refresh
+//! in the worker and the preview in the API read it; the inbound webhook signature window reads
+//! [`Clock::now_in_process`], which is the process's wall clock in production.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -64,6 +66,16 @@ impl Clock {
                 .await
                 .map_err(StoreError::bounded),
             Self::Manual(clock) => Ok(clock.now()),
+        }
+    }
+
+    /// The current instant for a path that checks a request against the process's wall time and
+    /// reads no database: the wall clock for [`Clock::Database`], the test's instant for
+    /// [`Clock::Manual`].
+    pub fn now_in_process(&self) -> OffsetDateTime {
+        match self {
+            Self::Database => OffsetDateTime::now_utc(),
+            Self::Manual(clock) => clock.now(),
         }
     }
 }
