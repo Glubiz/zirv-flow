@@ -5270,6 +5270,8 @@ version = "0.60.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "chrono",
+ "chrono-tz",
  "flate2",
  "futures-util",
  "hashbrown 0.17.1",
@@ -5295,6 +5297,7 @@ dependencies = [
  "zirv-flow-ai",
  "zirv-flow-connectors",
  "zirv-flow-core",
+ "zirv-flow-engine",
  "zirv-flow-identity",
  "zirv-flow-segments",
  "zirv-flow-store",
