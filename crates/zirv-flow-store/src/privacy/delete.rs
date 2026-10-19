@@ -107,6 +107,9 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
+    "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
