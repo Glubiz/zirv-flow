@@ -1027,7 +1027,7 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 - Failed steps retry with backoff; then the enrollment is `failed` with the error visible, and an operator can retry or skip.
 - Merge: the merged-away person's active enrollments exit with reason `merge` on the merge trace and their `enrollment_waits` are removed; the survivor keeps its own enrollments. Erasure deletes enrollments, `step_executions`, `enrollment_waits` and `flow_entries` (16.3).
 - Per-node counts are computed on read from `step_executions`, with an index and a statement timeout. There are no hot counter rows.
-- Enrollment states: `active`, `waiting` (timer or event), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
+- Enrollment states: `active`, `waiting` (timer or event), `awaiting_conditions` (yielded at a branch; transient, since the runtime evaluates the conditions and resumes in the same transaction), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
 
 ### 9.4 Enrollment rules and test mode
 
