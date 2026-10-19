@@ -19,13 +19,13 @@ mod triggers;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
 pub use arrivals::{StoredEvent, find_event_of_person};
-pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use control::{
     ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
     exit_batch, flow_state_for_step, hold_enrollment, release_enrollment, reopen_failed_step,
     resume_batch, resume_failed, segment_is_watched,
 };
+pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use crud::{
     Flow, FlowError, FlowPatch, FlowVersion, LockedFlow, NewFlow, create_flow, find_flow,
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
@@ -37,7 +37,7 @@ pub use delivery::{
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
 pub use enroll::{
     EnrollEntries, EnrollEntry, EnrollError, EnrollOutcome, EnrollRequest, Enrolled,
-    MAX_ENROLL_PEOPLE, Occurrence, enroll, enroll_entries,
+    MAX_ENROLL_PEOPLE, Occurrence, enroll, enroll_entries, resolve_survivors,
 };
 pub use inputs::{UnhealthyInput, has_webhook_signing_secret, unhealthy_inputs};
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};

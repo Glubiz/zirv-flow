@@ -23,7 +23,8 @@ use zirv_flow_segments::{
 use zirv_flow_store::{
     AudienceSource, ENROLL_JOB_KIND, EnrollEntries, EnrollEntry, EnrollJobPayload, EnrollOutcome,
     EnrollWork, FlowState, MAX_ENROLL_PEOPLE, TriggerEvent, TriggerKind, audience_page,
-    enroll_entries, find_events, find_flow, find_flow_version, occurrence_of, segment_catalog,
+    enroll_entries, find_events, find_flow, find_flow_version, occurrence_of, resolve_survivors,
+    segment_catalog,
 };
 
 use super::segment_refresh::catalog_of;
@@ -117,10 +118,14 @@ async fn run_people(
     if pairs.len() > MAX_ENROLL_PEOPLE {
         return Err(JobError::new("a flow enroll takes at most 1000 people"));
     }
+    // A person merged into another since the job was queued is the survivor now: they are
+    // enrolled as that person, and the re-entry rule decides.
+    let named: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
+    let survivors = resolve_survivors(ctx.conn(), job.workspace, &named).await?;
     let mut entries: Vec<EnrollEntry> = pairs
         .iter()
         .map(|(person, occurrence)| EnrollEntry {
-            person: *person,
+            person: survivors.get(person).copied().unwrap_or(*person),
             occurrence: *occurrence,
             // An event starts a flow on its own cause; the other triggers share the job's.
             cause: (job.trigger == TriggerKind::Event).then(|| Cause::event(*occurrence)),
@@ -165,6 +170,10 @@ async fn matching_events(
             Err(_) => return Ok(Vec::new()),
         }
     };
+    // The entries name the survivor; an event may still name the person it was recorded for,
+    // until the merge's rewrite job re-points it. Both sides are compared as the survivor.
+    let recorded_for: Vec<Uuid> = events.iter().map(|event| event.person_id).collect();
+    let survivors = resolve_survivors(ctx.conn(), job.workspace, &recorded_for).await?;
     let passing: hashbrown::HashSet<(Uuid, Uuid)> = events
         .iter()
         .filter(|event| event.name == wanted.name)
@@ -177,7 +186,10 @@ async fn matching_events(
                 evaluate(definition, &catalog, &snapshot, now).outcome == Verdict::Pass
             })
         })
-        .map(|event| (event.person_id, event.id))
+        .map(|event| {
+            let person = survivors.get(&event.person_id).copied();
+            (person.unwrap_or(event.person_id), event.id)
+        })
         .collect();
     Ok(entries
         .into_iter()
@@ -1556,5 +1568,184 @@ mod tests {
             "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
              re-entry refused {finished:?}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_meeting_an_erased_person_writes_no_decision_naming_them_and_counts_the_skip(
+        pool: PgPool,
+    ) {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool).await;
+        let ann = env.person("a").await;
+        // Erased after the job was queued: no row, no id to write down.
+        let erased = Uuid::now_v7();
+        let flow = env
+            .flow("By api", settings(json!({"type": "api"}), once()))
+            .await;
+
+        env.run(
+            &EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (erased, Uuid::now_v7())]),
+            },
+            &TraceContext::root(Cause::api("req")),
+        )
+        .await;
+
+        assert_eq!(env.enrolled(flow).await, [ann]);
+        let naming = env
+            .count(&format!(
+                "SELECT count(*) FROM decision_records WHERE subject_ids::text LIKE '%{erased}%'"
+            ))
+            .await;
+        assert_eq!(naming, 0, "no decision names the erased person");
+        assert_eq!(env.decisions("skipped", Some("no_such_person")).await, 0);
+        let output = handle.render();
+        assert!(
+            output.contains(
+                "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"no_such_person\"} 1"
+            ),
+            "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_naming_a_merged_away_person_enrolls_the_survivor_once(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let (survivor, loser, other) = (
+            env.person("a").await,
+            env.person("b").await,
+            env.person("c").await,
+        );
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let only_loser = env
+            .flow("Loser only", settings(json!({"type": "api"}), once()))
+            .await;
+        let both = env
+            .flow("Both", settings(json!({"type": "api"}), once()))
+            .await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let job = |flow, pairs| EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::People(pairs),
+        };
+
+        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+            .await;
+        env.run(
+            &job(
+                both,
+                vec![
+                    (loser, Uuid::now_v7()),
+                    (survivor, Uuid::now_v7()),
+                    (other, Uuid::now_v7()),
+                ],
+            ),
+            &trace,
+        )
+        .await;
+
+        assert_eq!(env.enrolled(only_loser).await, [survivor]);
+        let mut expected = vec![survivor, other];
+        expected.sort_unstable();
+        assert_eq!(env.enrolled(both).await, expected, "the survivor once");
+        // The re-entry rule decides: the survivor is already in the flow, so a second job is refused.
+        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+            .await;
+        assert_eq!(env.enrolled(only_loser).await, [survivor]);
+        assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_job_for_a_merged_away_person_enrolls_the_survivor_whether_or_not_the_event_moved(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.define_order().await;
+        let flow = env
+            .flow(
+                "Orders",
+                settings(
+                    json!({"type": "event", "event": "order", "filters": []}),
+                    once(),
+                ),
+            )
+            .await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let record = |email: &str| EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), email.into())],
+            name: "order".into(),
+            properties: json!({"total": 5}).as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: env.clock.now(),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("event")),
+        };
+        zirv_flow_store::apply_event_batch(
+            &env.pool,
+            env.ws,
+            &key,
+            &[record("ada@example.com"), record("bea@example.com")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(env.enroll_jobs().await, 1);
+        let person_of = |email: &'static str| {
+            let pool = env.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT person_id FROM identities WHERE kind = 'email' AND value = $1",
+                )
+                .bind(email)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (ada, bea) = (
+            person_of("ada@example.com").await,
+            person_of("bea@example.com").await,
+        );
+        let (ada_survivor, bea_survivor) = (env.person("x").await, env.person("y").await);
+        // Both are merged after the job was queued. Ada's event was re-pointed to the survivor
+        // by the rewrite job; Bea's was not yet.
+        for (loser, survivor) in [(ada, ada_survivor), (bea, bea_survivor)] {
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(loser)
+                .bind(survivor)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE events SET person_id = $2 WHERE person_id = $1")
+            .bind(ada)
+            .bind(ada_survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(env.drain(1).await, 1);
+
+        let mut expected = vec![ada_survivor, bea_survivor];
+        expected.sort_unstable();
+        assert_eq!(env.enrolled(flow).await, expected);
     }
 }

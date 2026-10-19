@@ -22,6 +22,10 @@ use crate::{NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 /// The most people one enroll takes (the size of a `flow.enroll` job).
 pub const MAX_ENROLL_PEOPLE: usize = 1000;
 
+/// The reason a person with no row is refused for. It has no decision: the person is gone, and a
+/// decision would write their id back.
+const NO_SUCH_PERSON: &str = "no_such_person";
+
 /// What made the enrollment: the trigger kind and the id of its occurrence (an event id, a
 /// segment event id, a schedule slot or the id of a manual or API request). Enrolling the same
 /// person for the same occurrence twice changes nothing.
@@ -184,19 +188,54 @@ pub async fn enroll_entries(
         .id
         .clone();
 
-    let mut seen = HashSet::new();
-    let mut entries: Vec<&EnrollEntry> = request
+    // A person merged into another since the work was queued enters as the survivor, so the
+    // re-entry rule decides for the one person they now are. A person with no row (erased) keeps
+    // the id they were named by and is refused below.
+    let named: Vec<Uuid> = request.entries.iter().map(|entry| entry.person).collect();
+    let survivors = resolve_survivors(connection, request.workspace, &named).await?;
+    let resolved: Vec<(EnrollEntry, Uuid)> = request
         .entries
         .iter()
-        .filter(|entry| seen.insert(entry.person))
+        .map(|entry| {
+            let person = survivors
+                .get(&entry.person)
+                .copied()
+                .unwrap_or(entry.person);
+            (
+                EnrollEntry {
+                    person,
+                    ..entry.clone()
+                },
+                entry.person,
+            )
+        })
         .collect();
-    entries.sort_unstable_by_key(|entry| entry.person);
+
+    let mut seen = HashSet::new();
+    let mut by_person: Vec<&(EnrollEntry, Uuid)> = resolved
+        .iter()
+        .filter(|(entry, _)| seen.insert(entry.person))
+        .collect();
+    by_person.sort_unstable_by_key(|(entry, _)| entry.person);
+    let entries: Vec<&EnrollEntry> = by_person.iter().map(|(entry, _)| entry).collect();
     let people: Vec<Uuid> = entries.iter().map(|entry| entry.person).collect();
-    let occurrences: Vec<Uuid> = entries.iter().map(|entry| entry.occurrence).collect();
     let existing = existing_people(connection, request, &people).await?;
     let entered = entries_of(connection, request, &people).await?;
     let in_flight = in_flight_of(connection, request, &people).await?;
-    let replayed = replayed_of(connection, request, &people, &occurrences).await?;
+    // An enrollment made before the merge sits under the id the entry was named by.
+    let pairs: Vec<(Uuid, Uuid)> = by_person
+        .iter()
+        .flat_map(|(entry, named)| [(entry.person, entry.occurrence), (*named, entry.occurrence)])
+        .collect();
+    let replayed_pairs = replayed_of(connection, request, &pairs).await?;
+    let replayed: HashSet<Uuid> = by_person
+        .iter()
+        .filter(|(entry, named)| {
+            replayed_pairs.contains(&(entry.person, entry.occurrence))
+                || replayed_pairs.contains(&(*named, entry.occurrence))
+        })
+        .map(|(entry, _)| entry.person)
+        .collect();
 
     let mut outcome = EnrollOutcome::default();
     let mut accepted = Vec::new();
@@ -220,9 +259,12 @@ pub async fn enroll_entries(
         }
     }
 
+    // A person with no row was erased: nothing is written that names them. The skip is still in
+    // `outcome.skipped`, where the caller counts it.
     let mut decisions: Vec<NewDecision> = outcome
         .skipped
         .iter()
+        .filter(|(_, reason)| *reason != NO_SUCH_PERSON)
         .map(|(person, reason)| NewDecision {
             workspace_id: request.workspace,
             trace: request.trace.clone(),
@@ -307,7 +349,7 @@ fn refusal(
         FlowState::Draft | FlowState::Archived => return Some("flow_not_live"),
     }
     if !exists {
-        return Some("no_such_person");
+        return Some(NO_SUCH_PERSON);
     }
     if in_flight {
         return Some("already_active");
@@ -413,23 +455,43 @@ async fn in_flight_of(
     Ok(rows.into_iter().collect())
 }
 
-/// The people whose own occurrence has already enrolled them. `occurrences` is parallel to
-/// `people`.
+/// The `(person, occurrence)` pairs of `pairs` that already have an enrollment.
 async fn replayed_of(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,
-    people: &[Uuid],
-    occurrences: &[Uuid],
-) -> Result<HashSet<Uuid>, StoreError> {
-    let rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT e.person_id FROM enrollments e \
+    pairs: &[(Uuid, Uuid)],
+) -> Result<HashSet<(Uuid, Uuid)>, StoreError> {
+    let people: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
+    let occurrences: Vec<Uuid> = pairs.iter().map(|(_, occurrence)| *occurrence).collect();
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT e.person_id, e.occurrence_id FROM enrollments e \
          JOIN unnest($2::uuid[], $3::uuid[]) AS t(person_id, occurrence_id) \
            ON e.person_id = t.person_id AND e.occurrence_id = t.occurrence_id \
          WHERE e.flow_id = $1",
     )
     .bind(request.flow)
+    .bind(&people)
+    .bind(&occurrences)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The person each of `people` currently is: the survivor of one merged into another (merges are
+/// compressed, so one hop is the whole chain). A person who is not merged, and one with no row,
+/// are not in the map.
+pub async fn resolve_survivors(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<HashMap<Uuid, Uuid>, StoreError> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, merged_into FROM people \
+         WHERE workspace_id = $1 AND id = ANY($2) AND merged_into IS NOT NULL",
+    )
+    .bind(workspace.as_uuid())
     .bind(people)
-    .bind(occurrences)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
