@@ -26,6 +26,9 @@ pub const DEFAULT_TIMESTAMP_HEADER: &str = "X-Zirv-Timestamp";
 pub const MAX_HEADER_NAME_CHARS: usize = 64;
 /// The length of a SHA-256 digest in hex digits.
 const DIGEST_HEX_LEN: usize = 64;
+/// The most signature values checked per request: a sender signs with at most its current and
+/// previous secret, and every value costs a MAC over the whole body.
+const MAX_SIGNATURE_VALUES: usize = 2;
 
 /// How a hook's requests are signed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,11 +119,11 @@ fn decode_digest(hex: &str) -> Option<Vec<u8>> {
 /// timestamp present and numeric, tolerance); the MAC is computed only after they pass and is
 /// compared in constant time.
 ///
-/// `header` returns every value of a header, in order. The request verifies when any one value of
-/// the signature header does (a sender that signs with two secrets during a rotation sends one
-/// value per secret); each value is checked in constant time. When none verifies, the error is
-/// that of the first value, so a single header is judged exactly as one. The timestamp is the
-/// first value of its header.
+/// `header` returns every value of a header, in order. The request verifies when any one of the
+/// first [`MAX_SIGNATURE_VALUES`] values of the signature header does (a sender that signs with
+/// two secrets during a rotation sends one value per secret); each value is checked in constant
+/// time. When none verifies, the error is that of the first value, so a single header is judged
+/// exactly as one. The timestamp is the first value of its header.
 pub fn verify<'h>(
     scheme: &Scheme<'_>,
     secret: &[u8],
@@ -130,7 +133,7 @@ pub fn verify<'h>(
 ) -> Result<Verified, SignatureError> {
     let values = header(scheme.signature_header);
     let mut first_error = None;
-    for value in &values {
+    for value in values.iter().take(MAX_SIGNATURE_VALUES) {
         match verify_value(scheme, secret, value, header, body, now_unix) {
             Ok(verified) => return Ok(verified),
             Err(error) => {
@@ -492,6 +495,22 @@ mod tests {
         ];
         assert_eq!(
             run(&timestamped(), SECRET, &neither, BODY),
+            Err(SignatureError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn a_signature_value_after_the_second_is_not_checked() {
+        let good = signed(NOW);
+        let wrong = format!("sha256={}", sign(b"zfwh_other", Some(NOW), BODY));
+        let headers = vec![
+            ("x-sig", wrong.clone()),
+            ("x-sig", wrong),
+            good[0].clone(),
+            ("x-ts", NOW.to_string()),
+        ];
+        assert_eq!(
+            run(&timestamped(), SECRET, &headers, BODY),
             Err(SignatureError::Mismatch)
         );
     }
