@@ -975,6 +975,117 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_publish_waits_for_an_open_refresh_and_enrolls_the_member_it_adds(pool: PgPool) {
+        let env = Env::new(pool).await;
+        env.define_plan().await;
+        env.people(1, "pro").await;
+        let segment = env.segment("Pros", plan_is("pro")).await;
+        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+            .await;
+        let early = env.members(segment).await;
+        assert_eq!(early.len(), 1);
+        let late = env.person("pro").await;
+        let trigger = json!({
+            "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
+        });
+        let flow = Uuid::now_v7();
+        let mut connection = env.pool.acquire().await.unwrap();
+        zirv_flow_store::create_flow(
+            &mut connection,
+            env.ws,
+            &NewFlow {
+                id: flow,
+                name: "Welcome".into(),
+                graph: exit_graph(),
+                settings: settings(trigger, once()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+
+        // Connection A refreshes the segment as its job does, and stays open: it holds the
+        // refresh lock and has read no flow that triggers on the segment.
+        sqlx::query("DELETE FROM jobs WHERE kind = 'segment.refresh'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let mut job = NewJob::new(REFRESH_JOB_KIND, TraceContext::root(Cause::api("job")));
+        job.workspace_id = Some(env.ws);
+        job.payload = json!({
+            "workspace_id": env.ws, "segment_id": segment, "trigger": "save"
+        });
+        job.unique_key = Some(format!("test:{}", Uuid::new_v4()));
+        enqueue(&env.pool, &job).await.unwrap();
+        let claimed = claim_job(
+            &env.pool,
+            "w",
+            &[REFRESH_JOB_KIND],
+            Duration::from_secs(60),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut refresh = zirv_flow_store::begin(&env.pool).await.unwrap();
+        {
+            let mut ctx = JobContext::new(&mut refresh, &claimed).with_clock(env.clock());
+            SegmentRefresh
+                .run(&mut ctx, claimed.payload.clone())
+                .await
+                .unwrap();
+        }
+
+        // Connection B publishes after the refresh stamped the new member.
+        env.clock.advance(time::Duration::seconds(5));
+        let publisher = {
+            let (pool, clock, ws) = (env.pool.clone(), env.clock(), env.ws);
+            tokio::spawn(async move {
+                let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                let locked = zirv_flow_store::lock_flow(&mut tx, ws, flow).await.unwrap();
+                let trace = TraceContext::root(Cause::api("publish"));
+                zirv_flow_store::publish_flow(&mut tx, &clock, ws, &locked, None, &trace)
+                    .await
+                    .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let finished = loop {
+            if publisher.is_finished() {
+                break true;
+            }
+            let waiting = env
+                .count("SELECT count(*) FROM pg_locks WHERE NOT granted")
+                .await;
+            if waiting > 0 {
+                break false;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the publish neither ended nor waited"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        if finished {
+            // The publish did not wait: its pages ran without the new member.
+            publisher.await.unwrap();
+            env.drain(1).await;
+            zirv_flow_store::commit(refresh).await.unwrap();
+        } else {
+            zirv_flow_store::commit(refresh).await.unwrap();
+            publisher.await.unwrap();
+            env.drain(1).await;
+        }
+
+        let mut expected = vec![early[0], late];
+        expected.sort();
+        assert_eq!(env.enrolled(flow).await, expected, "each member, once");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_trigger_enrolls_the_people_whose_event_passes_its_filters(pool: PgPool) {
         let env = Env::new(pool).await;
         env.define_order().await;

@@ -21,7 +21,7 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::arrivals::Arrival;
 use super::enroll::MAX_ENROLL_PEOPLE;
-use crate::segments::{SegmentMembershipChange, SegmentMembershipChanges};
+use crate::segments::{SegmentMembershipChange, SegmentMembershipChanges, lock_segment_refresh};
 use crate::{Clock, NewJob, StoreError, enqueue};
 
 /// The kind of the job that enrolls people in a flow.
@@ -625,6 +625,14 @@ pub async fn reconcile_flow_schedules(connection: &mut PgConnection) -> Result<u
 /// being published. The publish is the occurrence: its trace id. The fan-out carries the publish
 /// time, read from the store's clock (the one that stamps `segment_members.entered_at`), so it
 /// enrolls only the members present at the publish.
+///
+/// It takes the segment's refresh lock first, for the rest of the publish transaction. A refresh
+/// or re-evaluation of the segment in flight read the flows that trigger on it before this
+/// publish committed, so it queues no enroll for this flow; without the lock it could stamp a
+/// member before the publish time and commit after the last page ran, and nothing would enroll
+/// that member. Waiting for it makes its members visible to the pages; one that starts later
+/// waits for this transaction and then sees the published flow. The lock comes after the flow
+/// row lock, and no refresh path waits for a flow row while holding it.
 pub(crate) async fn enqueue_publish_fan_out(
     connection: &mut PgConnection,
     clock: &Clock,
@@ -642,6 +650,7 @@ pub(crate) async fn enqueue_publish_fan_out(
     else {
         return Ok(());
     };
+    lock_segment_refresh(connection, *segment_id).await?;
     let published_at = clock.now(connection).await?;
     let payload = EnrollJobPayload {
         workspace,
