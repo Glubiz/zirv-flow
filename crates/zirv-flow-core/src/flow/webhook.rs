@@ -121,9 +121,9 @@ mod tests {
             tolerance_seconds: 300,
         };
         let lookup = |name: &str| match name {
-            SIGNATURE_HEADER => Some(header.as_str()),
-            TIMESTAMP_HEADER => Some("1700000000"),
-            _ => None,
+            SIGNATURE_HEADER => vec![header.as_str()],
+            TIMESTAMP_HEADER => vec!["1700000000"],
+            _ => Vec::new(),
         };
 
         assert!(verify(&scheme, b"zfwh_secret", &lookup, &body, 1_700_000_100).is_ok());

@@ -396,6 +396,22 @@ mod tests {
         post_hook(&fx.router, &hook.id, &headers, body).await
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_signature_header_that_verifies_is_accepted(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let hook = fx.hook("orders").await;
+        let body = order("o-2", "pro");
+        let mut headers = signed("zfwh_a_previous_secret", now(), &body);
+        // The first signature header is for another secret; the second is the hook's.
+        let right = signed(&hook.secret, now(), &body);
+        headers.push(right[1].clone());
+
+        let reply = post_hook(&fx.router, &hook.id, &headers, body).await;
+
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.text);
+    }
+
     fn is_problem(reply: &Reply) -> bool {
         reply
             .headers
