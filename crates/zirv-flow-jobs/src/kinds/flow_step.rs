@@ -1778,7 +1778,11 @@ mod tests {
         let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
         assert!(decisions.contains(&("flow.enrollment".into(), "failed".into())));
         assert!(decisions.contains(&("flow.step".into(), "failed".into())));
-        assert_eq!(env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'").await, 0);
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                .await,
+            0
+        );
         let again = env.enroll(flow, 1, &[ada]).await;
         assert_eq!(again.skipped, [(ada, "already_active")]);
     }
