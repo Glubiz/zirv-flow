@@ -1073,6 +1073,54 @@ mod tests {
         assert_eq!(step_jobs_after_a_replay(&pool, false).await, 0);
     }
 
+    /// Replays a reject of an `order` event with a published flow whose event trigger names
+    /// `order`, and counts the `flow.enroll` jobs that follow.
+    async fn enroll_jobs_after_a_replay(pool: &PgPool, emit_triggers: bool) -> i64 {
+        use crate::flows::tests_support::{create, publish as publish_flow};
+        use crate::flows::{FlowPatch, update_flow_draft};
+        let (ws, reject) = rejected(pool).await;
+        fix_the_schema(pool, ws).await;
+        let flow = create(pool, ws, "Flow").await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &FlowPatch {
+                settings: Some(serde_json::json!({
+                    "trigger": {"type": "event", "event": "order"},
+                    "reentry": {"mode": "once"}
+                })),
+                ..FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        publish_flow(pool, ws, flow.id).await.unwrap();
+
+        replay_rejects(pool, ws, &key(), &[reject], &manual_trace(), emit_triggers)
+            .await
+            .unwrap();
+
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_that_emits_triggers_starts_a_flow_with_an_event_trigger(pool: PgPool) {
+        assert_eq!(enroll_jobs_after_a_replay(&pool, true).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_flagged_no_triggers_starts_no_flow(pool: PgPool) {
+        assert_eq!(enroll_jobs_after_a_replay(&pool, false).await, 0);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reject_that_still_fails_stays_open_and_a_stored_message_id_is_a_duplicate(
