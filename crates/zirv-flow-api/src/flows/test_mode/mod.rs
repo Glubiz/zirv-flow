@@ -21,18 +21,21 @@ use chrono_tz::Tz;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, NodeKind, validate_graph};
-use zirv_flow_segments::{Catalog, PersonSnapshot, SnapshotConsent, SnapshotEvent};
-use zirv_flow_segments::{event_lower_bounds, parse_and_validate};
-use zirv_flow_store::{EXPLAIN_EVENT_CAP, ExplainEventScope, ExplainPerson, StoreError};
+use zirv_flow_segments::Catalog;
+use zirv_flow_segments::event_lower_bounds;
+use zirv_flow_store::{EXPLAIN_EVENT_CAP, ExplainEventScope, StoreError};
 
 use self::body::{ScriptStepBody, SnapshotBody, TestBody, TestRequest};
-use self::walk::{MAX_SCRIPT_STEPS, MAX_STEPS, Refusal, Step, Subject, Walk, to_chrono, to_time};
+use self::walk::{
+    MAX_SCRIPT_STEPS, MAX_STEPS, Refusal, Step, Subject, Walk, parse_condition, to_chrono, to_time,
+};
 use super::{draft_of, issue_problems, parse_graph};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::segments::catalog_of;
+use crate::segments::explain::snapshot_of;
 
 const REQUEST_INVALID: &str = "flow_test_request_invalid";
 const SCRIPT_TOO_LONG: &str = "flow_test_script_too_long";
@@ -83,36 +86,6 @@ fn script_of(script: &[ScriptStepBody]) -> Result<Vec<Step>, ApiError> {
         .collect()
 }
 
-/// The snapshot of a loaded person, in the wire form that is returned and re-posted.
-fn snapshot_of(person: &ExplainPerson) -> PersonSnapshot {
-    PersonSnapshot {
-        traits: person.traits.clone(),
-        events: person
-            .events
-            .iter()
-            .map(|event| SnapshotEvent {
-                name: event.name.clone(),
-                occurred_at: event.occurred_at,
-                properties: event.properties.clone(),
-            })
-            .collect(),
-        capped_events: person.capped_events.clone(),
-        events_complete_after: person.events_complete_after,
-        lists: person.lists.clone(),
-        consent: person
-            .consent
-            .iter()
-            .map(|row| SnapshotConsent {
-                channel: row.channel,
-                topic: row.topic,
-                status: row.status,
-            })
-            .collect(),
-        identifier_kinds: person.identifier_kinds.clone(),
-        segments: person.open_segments.keys().copied().collect(),
-    }
-}
-
 /// The events every branch condition of the graph can read, with the widest lower bound at the
 /// start of the walk. Windows only move forward, so no later condition reads further back.
 /// A condition that does not validate is left out: the walk stops there.
@@ -127,13 +100,7 @@ fn event_scope(
             continue;
         };
         for condition in conditions {
-            let Some(map) = condition.as_object() else {
-                continue;
-            };
-            let mut wire = map.clone();
-            wire.insert("v".to_owned(), 1.into());
-            let Ok(definition) = parse_and_validate(&serde_json::Value::Object(wire), catalog)
-            else {
+            let Ok(definition) = parse_condition(condition, catalog) else {
                 continue;
             };
             for (name, bound) in event_lower_bounds(&definition, start) {

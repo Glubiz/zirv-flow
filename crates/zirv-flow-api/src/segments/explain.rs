@@ -126,7 +126,7 @@ fn read_error(error: StoreError) -> ApiError {
 }
 
 /// The evaluator's snapshot of what the store loaded.
-fn snapshot_of(person: &ExplainPerson) -> PersonSnapshot {
+pub(crate) fn snapshot_of(person: &ExplainPerson) -> PersonSnapshot {
     PersonSnapshot {
         traits: person.traits.clone(),
         events: person

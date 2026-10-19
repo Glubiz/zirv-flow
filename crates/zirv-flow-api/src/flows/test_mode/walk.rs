@@ -22,8 +22,8 @@ use zirv_flow_engine::{
     StepInput, Transition, step,
 };
 use zirv_flow_segments::{
-    Catalog, EvalNode, Observed, Outcome as Verdict, PersonSnapshot, SnapshotEvent, evaluate,
-    event_lower_bounds, parse_and_validate,
+    Catalog, Definition, EvalNode, Issue, Observed, Outcome as Verdict, PersonSnapshot,
+    SnapshotEvent, evaluate, event_lower_bounds, parse_and_validate,
 };
 
 use super::body::{
@@ -111,6 +111,23 @@ pub(crate) fn to_time(at: DateTime<Utc>) -> OffsetDateTime {
 /// The engine's instant for a wire time, truncated to microseconds as the database holds it.
 pub(crate) fn to_chrono(at: OffsetDateTime) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_micros(i64::try_from(at.unix_timestamp_nanos() / 1_000).ok()?)
+}
+
+/// A branch condition parsed and validated as a segment definition, which it is in wire form
+/// without its version.
+pub(crate) fn parse_condition(
+    condition: &Value,
+    catalog: &Catalog,
+) -> Result<Definition, Vec<Issue>> {
+    let mut wire = condition.as_object().cloned().unwrap_or_default();
+    wire.insert("v".to_owned(), 1.into());
+    parse_and_validate(&Value::Object(wire), catalog)
+}
+
+fn first_issue(issues: &[Issue]) -> String {
+    issues.first().map_or_else(String::new, |issue| {
+        format!("{} at {}", issue.code, issue.pointer)
+    })
 }
 
 /// Runs the walk.
@@ -516,16 +533,11 @@ impl Walker<'_> {
                 });
                 continue;
             }
-            let mut wire = condition.as_object().cloned().unwrap_or_default();
-            wire.insert("v".to_owned(), 1.into());
-            let definition = match parse_and_validate(&Value::Object(wire), self.input.catalog) {
+            let definition = match parse_condition(condition, self.input.catalog) {
                 Ok(definition) if condition.is_object() => definition,
                 Ok(_) => return self.stop_invalid(node, index, bodies, "not a condition"),
                 Err(issues) => {
-                    let first = issues.first().map_or_else(String::new, |issue| {
-                        format!("{} at {}", issue.code, issue.pointer)
-                    });
-                    return self.stop_invalid(node, index, bodies, &first);
+                    return self.stop_invalid(node, index, bodies, &first_issue(&issues));
                 }
             };
             let evaluation = evaluate(&definition, self.input.catalog, &self.snapshot, now);
@@ -680,15 +692,13 @@ impl Walker<'_> {
         let definition = match parse_and_validate(&wire, self.input.catalog) {
             Ok(definition) => definition,
             Err(issues) => {
-                let first = issues.first().map_or_else(String::new, |issue| {
-                    format!("{} at {}", issue.code, issue.pointer)
-                });
                 self.halted = Some(halt(
                     "invalid_condition",
                     Some(&self.state.node),
                     format!(
-                        "the event filters of `{}` do not validate: {first}",
-                        self.state.node
+                        "the event filters of `{}` do not validate: {}",
+                        self.state.node,
+                        first_issue(&issues)
                     ),
                 ));
                 return false;
