@@ -6,11 +6,13 @@
 
 mod arrivals;
 mod crud;
+mod delivery;
 mod effects;
 mod enroll;
 mod inputs;
 mod lifecycle;
 mod runtime;
+mod signing;
 mod state;
 mod triggers;
 
@@ -19,6 +21,9 @@ pub use arrivals::{StoredEvent, find_event_of_person};
 pub use crud::{
     Flow, FlowError, FlowPatch, FlowVersion, LockedFlow, NewFlow, create_flow, find_flow,
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
+};
+pub use delivery::{
+    WebhookOutcome, WebhookResult, WebhookSubject, lock_webhook_subject, record_webhook_outcome,
 };
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
 pub use enroll::{
@@ -32,6 +37,9 @@ pub use runtime::{
     StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND, clear_waits,
     count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps, register_wait,
     save_enrollment, settle_wait_step, step_zones, wait_filters,
+};
+pub use signing::{
+    Rotation, SigningKey, SigningKeys, create_signing_key, live_signing_keys, rotate_signing_key,
 };
 pub use state::{FlowAction, FlowState};
 pub(crate) use triggers::enqueue_segment_enrolls;
