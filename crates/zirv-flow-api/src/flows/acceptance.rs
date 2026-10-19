@@ -1480,4 +1480,81 @@ mod tests {
             );
         }
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bulk_exit_that_waits_on_a_pausing_flow_is_refused_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = f.live("Welcome", manual()).await;
+        f.lead(
+            "PATCH",
+            &format!("/{flow}"),
+            Some(json!({"graph": {"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]}})),
+        )
+        .await;
+        let second = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(second.status, StatusCode::CREATED);
+        let flow_id: Uuid = flow.parse().unwrap();
+
+        // A pause that has the flow row locked and has not committed yet.
+        let mut pausing = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::lock_flow(&mut pausing, f.ws, flow_id)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(flow_id)
+            .execute(&mut *pausing)
+            .await
+            .unwrap();
+
+        let exit = {
+            let router = f.router.clone();
+            let uri = f.flows(&format!("/{flow}/versions/1/exit-enrollments"));
+            let login = Login {
+                cookie: f.lead.cookie.clone(),
+                csrf: f.lead.csrf.clone(),
+            };
+            tokio::spawn(async move {
+                send(&router, "POST", &uri, None, Auth::Session(&login)).await
+            })
+        };
+        // Wait until the exit is blocked on the flow row.
+        let mut blocked = false;
+        for _ in 0..200 {
+            if exit.is_finished() {
+                break;
+            }
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity                  WHERE datname = current_database() AND pid <> pg_backend_pid()                    AND wait_event_type = 'Lock' AND query ILIKE '%FROM flows%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(blocked, "the bulk exit should wait for the flow row");
+        zirv_flow_store::commit(pausing).await.unwrap();
+
+        let reply = exit.await.unwrap();
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "flow_paused");
+        assert_eq!(f.count("SELECT count(*) FROM jobs").await, 0);
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'flow.enrollments_exited'")
+                .await,
+            0
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM decision_records WHERE action = 'flow.enrollment'")
+                .await,
+            0
+        );
+    }
 }

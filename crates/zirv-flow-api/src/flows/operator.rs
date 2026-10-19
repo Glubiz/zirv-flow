@@ -205,6 +205,14 @@ pub(crate) async fn exit_version(
     }
     let trace = operator_trace(&principal);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The state again, under the lock a pause or an archive waits on: one that commits between
+    // the read above and here is seen, and refuses the exit before it writes anything.
+    match zirv_flow_store::flow_state_for_step(&mut tx, workspace.id, id).await? {
+        Some(FlowState::Paused) => return Err(ApiError::flow_paused()),
+        Some(FlowState::Archived) => return Err(ApiError::flow_archived()),
+        Some(FlowState::Draft | FlowState::Published) => {}
+        None => return Err(ApiError::not_found()),
+    }
     enqueue_lifecycle(
         &mut tx,
         workspace.id,
