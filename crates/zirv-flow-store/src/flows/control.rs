@@ -206,56 +206,27 @@ pub async fn exit_batch(
     }
     let last = found.last().map(|(_, person)| *person);
     let ids = lock_people(connection, workspace, &found).await?;
-    let ended: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
-             state_version = state_version + 1, wake_at = NULL, error = NULL, \
-             failed_node = NULL, failure_placed = false, resume_input = NULL, ended_at = $4, updated_at = now() \
-         WHERE workspace_id = $1 AND id = ANY($2) AND state IN {IN_FLIGHT} \
-         RETURNING id, person_id"
-    )))
-    .bind(workspace.as_uuid())
-    .bind(&ids)
-    .bind(batch.reason)
-    .bind(now)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let ended_ids: Vec<Uuid> = ended.iter().map(|(id, _)| *id).collect();
-    sqlx::query("DELETE FROM enrollment_waits WHERE enrollment_id = ANY($1)")
-        .bind(&ended_ids)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-    let decisions: Vec<NewDecision> = ended
-        .iter()
-        .map(|(id, person)| NewDecision {
-            workspace_id: workspace,
-            trace: batch.trace.clone(),
-            action: "flow.enrollment",
-            outcome: "exited",
-            reason: Some(batch.reason),
-            subject_ids: vec![
-                ("flow", batch.flow),
-                ("enrollment", *id),
-                ("person", *person),
-            ],
-            job: None,
-        })
-        .collect();
-    append_decisions(connection, &decisions).await?;
+    let ended = end_in_flight(
+        connection,
+        workspace,
+        "id",
+        &ids,
+        batch.reason,
+        Some(now),
+        batch.trace,
+    )
+    .await?;
     Ok(LifecycleBatch {
         read: found.len(),
-        changed: ended.len(),
+        changed: ended,
         last,
     })
 }
 
 /// Exits every in-flight enrollment (active, waiting, held and failed) of `people` with
-/// `reason`, in the caller's transaction, which holds those people (a merge locks its group). Each
-/// is set `exited` with its `state_version` grown, so a timer or an event queued for the older
-/// state finds it stale; its waits are removed and a `flow.enrollment` decision under `trace`
-/// records it. Returns how many it ended. Lock order: the people are the caller's, so this takes
-/// only the enrollments, the last of the order.
+/// `reason`, in the caller's transaction, which holds those people (a merge locks its group).
+/// Returns how many it ended. Lock order: the people are the caller's, so this takes only the
+/// enrollments, the last of the order.
 pub(crate) async fn exit_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -263,17 +234,43 @@ pub(crate) async fn exit_people(
     reason: &'static str,
     trace: &TraceContext,
 ) -> Result<usize, StoreError> {
+    end_in_flight(
+        connection,
+        workspace,
+        "person_id",
+        people,
+        reason,
+        None,
+        trace,
+    )
+    .await
+}
+
+/// Sets the in-flight enrollments whose `key` column (`id` or `person_id`) is in `keys` `exited`
+/// with `reason`, `ended_at` at `now` (the database clock when `None`) and `state_version` grown,
+/// so a timer or an event queued for the older state finds it stale. Their waits are removed and
+/// a `flow.enrollment` decision under `trace` records each. Returns how many it ended.
+async fn end_in_flight(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &'static str,
+    keys: &[Uuid],
+    reason: &'static str,
+    now: Option<OffsetDateTime>,
+    trace: &TraceContext,
+) -> Result<usize, StoreError> {
     let ended: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
              state_version = state_version + 1, wake_at = NULL, error = NULL, \
-             failed_node = NULL, failure_placed = false, resume_input = NULL, ended_at = now(), \
-             updated_at = now() \
-         WHERE workspace_id = $1 AND person_id = ANY($2) AND state IN {IN_FLIGHT} \
+             failed_node = NULL, failure_placed = false, resume_input = NULL, \
+             ended_at = COALESCE($4, now()), updated_at = now() \
+         WHERE workspace_id = $1 AND {key} = ANY($2) AND state IN {IN_FLIGHT} \
          RETURNING id, person_id, flow_id"
     )))
     .bind(workspace.as_uuid())
-    .bind(people)
+    .bind(keys)
     .bind(reason)
+    .bind(now)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
