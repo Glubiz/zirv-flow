@@ -770,13 +770,19 @@ async fn finish(
     let (status, exit_reason, error) = match &transition.outcome {
         Outcome::Waiting => (EnrollmentStatus::Waiting, None, None),
         Outcome::Completed => (EnrollmentStatus::Completed, None, None),
-        Outcome::Exited {
-            reason: ExitReason::Goal,
-        } => (EnrollmentStatus::Exited, Some("goal"), None),
+        Outcome::Exited { reason } => (
+            EnrollmentStatus::Exited,
+            Some(match reason {
+                ExitReason::Goal => "goal",
+                ExitReason::GoalCriterion => "goal_criterion",
+                ExitReason::ExitEvent => "exit_event",
+            }),
+            None,
+        ),
         Outcome::Failed { failure, .. } => {
             (EnrollmentStatus::Failed, None, Some(describe(*failure)))
         }
-        Outcome::NeedsConditions { .. } | Outcome::Stale => {
+        Outcome::NeedsConditions { .. } | Outcome::Converted | Outcome::Stale => {
             return Err(JobError::new("the walk did not end").into());
         }
     };
@@ -815,7 +821,7 @@ async fn finish(
             walk.decision("flow.wait", "waiting", Some(reason), step)
         }
         Outcome::Completed => walk.decision("flow.enrollment", "completed", None, step),
-        Outcome::Exited { .. } => walk.decision("flow.enrollment", "exited", Some("goal"), step),
+        Outcome::Exited { .. } => walk.decision("flow.enrollment", "exited", exit_reason, step),
         _ => walk.decision("flow.enrollment", "failed", error, step),
     };
     append_decisions(&mut *conn, &[decision]).await?;
