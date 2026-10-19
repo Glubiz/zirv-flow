@@ -85,6 +85,10 @@ pub struct Enrollment {
     pub error: Option<String>,
     /// The node a failure stopped at; `node` is where the failed step started.
     pub failed_node: Option<String>,
+    /// Whether the engine placed the failure at `failed_node` (a node it was walking), not just
+    /// stored the enrollment's own node for a failure it could not attribute (a missing pinned
+    /// version, a database error on the last attempt). Only a placed failure can be skipped.
+    pub failure_placed: bool,
     /// The `flow.step` input a held enrollment runs again on resume, and the input of the attempt
     /// that failed for a failed one (none for a failure the engine reported), in the form of
     /// [`StepJobInput::to_stored`].
@@ -110,6 +114,7 @@ struct EnrollmentRow {
     exit_reason: Option<String>,
     error: Option<String>,
     failed_node: Option<String>,
+    failure_placed: bool,
     resume_input: Option<Value>,
     trace_id: Uuid,
     cause_kind: String,
@@ -140,6 +145,7 @@ impl EnrollmentRow {
             exit_reason: self.exit_reason,
             error: self.error,
             failed_node: self.failed_node,
+            failure_placed: self.failure_placed,
             resume_input: self.resume_input,
             trace: TraceContext {
                 trace_id: TraceId::from_uuid(self.trace_id),
@@ -155,7 +161,7 @@ const ENROLLMENT_COLUMNS: &str = "e.id, e.flow_id, e.flow_version, e.person_id, 
      e.context, e.wake_at, e.state_version, \
      (SELECT w.event_name FROM enrollment_waits w WHERE w.enrollment_id = e.id LIMIT 1) \
          AS awaiting, \
-     e.exit_reason, e.error, e.failed_node, e.resume_input, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
+     e.exit_reason, e.error, e.failed_node, e.failure_placed, e.resume_input, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
@@ -271,6 +277,8 @@ pub struct EnrollmentUpdate<'a> {
     pub error: Option<&'a str>,
     /// The node a failure stopped at; set exactly when `error` is.
     pub failed_node: Option<&'a str>,
+    /// Whether the engine placed the failure at `failed_node`; false in every other state.
+    pub failure_placed: bool,
     /// The input a failed enrollment stopped on, for an operator retry; null in every other
     /// state (see [`Enrollment::resume_input`]).
     pub resume_input: Option<&'a Value>,
@@ -288,7 +296,8 @@ pub async fn save_enrollment(
 ) -> Result<bool, StoreError> {
     let done = sqlx::query(
         "UPDATE enrollments SET state = $4, node = $5, state_version = $6, wake_at = $7, \
-             exit_reason = $8, error = $9, failed_node = $11, resume_input = $12, updated_at = now(), \
+             exit_reason = $8, error = $9, failed_node = $11, failure_placed = $12, resume_input = $13, \
+             updated_at = now(), \
              ended_at = CASE WHEN $4 IN ('completed', 'exited') THEN $10 ELSE NULL END \
          WHERE workspace_id = $1 AND id = $2 AND state_version = $3",
     )
@@ -303,6 +312,7 @@ pub async fn save_enrollment(
     .bind(next.error)
     .bind(next.now)
     .bind(next.failed_node)
+    .bind(next.failure_placed)
     .bind(next.resume_input)
     .execute(connection)
     .await
@@ -700,6 +710,7 @@ mod tests {
             exit_reason: None,
             error: None,
             failed_node: None,
+            failure_placed: false,
             resume_input: None,
             now,
         };
@@ -865,6 +876,7 @@ mod tests {
                 exit_reason: Some("goal"),
                 error: None,
                 failed_node: None,
+                failure_placed: false,
                 resume_input: None,
                 now: OffsetDateTime::now_utc(),
             },

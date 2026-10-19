@@ -2,7 +2,8 @@
 //! 43163028): retry or skip a failed enrollment, and end every in-flight enrollment of an older
 //! version in bulk. All of them need the workspace admin role, are audited, and record a decision
 //! per enrollment under a trace whose cause is `manual` (the signed-in user), which the audit
-//! entry names.
+//! entry names. A paused or an archived flow refuses all three with a 409 (`flow_paused`,
+//! `flow_archived`) and writes nothing: an operator resumes a paused flow first.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -41,6 +42,8 @@ pub(crate) struct ExitVersionBody {
 fn control_error(error: ControlError) -> ApiError {
     match error {
         ControlError::NotFound => ApiError::not_found(),
+        ControlError::FlowArchived => ApiError::flow_archived(),
+        ControlError::FlowPaused => ApiError::flow_paused(),
         refused @ (ControlError::NotFailed(_) | ControlError::SkipUnavailable) => {
             ApiError::enrollment_state(refused.to_string())
         }
@@ -88,8 +91,8 @@ async fn act(
 }
 
 /// Retries a failed enrollment: the step that failed runs again from the state it started from.
-/// Records a `flow.enrollment` decision (`retried`) and is audited as
-/// `flow.enrollment_retried`.
+/// Refused while the flow is archived or paused. Records a `flow.enrollment` decision (`retried`)
+/// and is audited as `flow.enrollment_retried`.
 #[utoipa::path(
     post,
     operation_id = "retry_flow_enrollment",
@@ -105,7 +108,7 @@ async fn act(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or enrollment, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The enrollment is not failed (`code` is `enrollment_state`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The enrollment is not failed (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -118,7 +121,8 @@ pub(crate) async fn retry(
 }
 
 /// Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a
-/// failure that stopped the walk at its node can be skipped; any other is retried. Records a
+/// failure the engine placed at its node can be skipped; any other is retried. Refused while the
+/// flow is archived or paused. Records a
 /// `flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.
 #[utoipa::path(
     post,
@@ -135,7 +139,7 @@ pub(crate) async fn retry(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or enrollment, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The enrollment is not failed, or its failure cannot be skipped (`code` is `enrollment_state`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -149,7 +153,8 @@ pub(crate) async fn skip(
 
 /// Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling
 /// 469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older
-/// than the flow's current one. Audited as `flow.enrollments_exited`.
+/// than the flow's current one. A paused or archived flow refuses it. Audited as
+/// `flow.enrollments_exited`.
 #[utoipa::path(
     post,
     operation_id = "exit_flow_version_enrollments",
@@ -165,7 +170,7 @@ pub(crate) async fn skip(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or version, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The flow is a draft or archived, or the version is not older than the current one (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -180,7 +185,8 @@ pub(crate) async fn exit_version(
         .await?
         .ok_or_else(ApiError::not_found)?;
     match flow.state {
-        FlowState::Published | FlowState::Paused => {}
+        FlowState::Published => {}
+        FlowState::Paused => return Err(ApiError::flow_paused()),
         FlowState::Draft => {
             return Err(ApiError::flow_state(
                 "the flow is a draft and has no enrollments",
@@ -245,6 +251,14 @@ mod tests {
             let error = control_error(refused);
             assert_eq!(error.status(), StatusCode::CONFLICT);
             assert_eq!(error.code(), Some("enrollment_state"));
+        }
+        for (refused, code) in [
+            (ControlError::FlowArchived, "flow_archived"),
+            (ControlError::FlowPaused, "flow_paused"),
+        ] {
+            let error = control_error(refused);
+            assert_eq!(error.status(), StatusCode::CONFLICT);
+            assert_eq!(error.code(), Some(code));
         }
     }
 }

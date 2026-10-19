@@ -220,6 +220,7 @@ impl Run {
                     exit_reason: Some(text),
                     error: None,
                     failed_node: None,
+                    failure_placed: false,
                     resume_input: None,
                     now: self.now,
                 },

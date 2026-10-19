@@ -35,6 +35,11 @@ pub const LIFECYCLE_JOB_KIND: &str = "flow.lifecycle";
 /// How many enrollments one `flow.lifecycle` run changes, and one `flow.settle` job names.
 pub const LIFECYCLE_BATCH: usize = 500;
 
+/// Why a held enrollment whose stored input or cause does not parse is failed by a resume: it
+/// could not be run again, and a row left held would be read by every later batch.
+const UNRESUMABLE: &str =
+    "the held step could not be resumed: its stored input or cause does not parse";
+
 /// The states in which an enrollment still holds its person.
 const IN_FLIGHT: &str = "('active', 'waiting', 'held', 'failed')";
 
@@ -98,13 +103,17 @@ pub async fn reopen_failed_step(
     Ok(())
 }
 
-/// What one batch of a lifecycle action did.
+/// What one batch of a lifecycle action did. The next batch is due whenever this one read a full
+/// page, whatever it changed: a page whose rows another transaction ended first, or that could not
+/// be resumed, changes nothing and still leaves later rows behind.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LifecycleBatch {
     /// The enrollments the batch looked at. A full batch means there may be more.
     pub read: usize,
     /// The enrollments it changed: one that another transaction ended first is not counted.
     pub changed: usize,
+    /// The person of the last enrollment read: the keyset cursor of the next batch.
+    pub last: Option<Uuid>,
 }
 
 /// Locks the people of `found` (enrollment, person) in id order, and returns the enrollment ids.
@@ -137,6 +146,8 @@ pub struct ExitBatch<'a> {
     pub reason: &'static str,
     /// The trace of the action; every enrollment's decision is recorded under it.
     pub trace: &'a TraceContext,
+    /// The keyset cursor: only the enrollments of people after this one, in id order.
+    pub after: Option<Uuid>,
 }
 
 /// Exits up to `limit` of a flow's in-flight enrollments (active, waiting, held and failed) in
@@ -156,23 +167,26 @@ pub async fn exit_batch(
         "SELECT id, person_id FROM enrollments \
          WHERE workspace_id = $1 AND flow_id = $2 AND state IN {IN_FLIGHT} \
            AND ($3::int IS NULL OR flow_version = $3) \
+           AND ($5::uuid IS NULL OR person_id > $5) \
          ORDER BY person_id, id LIMIT $4"
     )))
     .bind(workspace.as_uuid())
     .bind(batch.flow)
     .bind(batch.version)
     .bind(limit)
+    .bind(batch.after)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     if found.is_empty() {
         return Ok(LifecycleBatch::default());
     }
+    let last = found.last().map(|(_, person)| *person);
     let ids = lock_people(connection, workspace, &found).await?;
     let ended: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
              state_version = state_version + 1, wake_at = NULL, error = NULL, \
-             failed_node = NULL, resume_input = NULL, ended_at = $4, updated_at = now() \
+             failed_node = NULL, failure_placed = false, resume_input = NULL, ended_at = $4, updated_at = now() \
          WHERE workspace_id = $1 AND id = ANY($2) AND state IN {IN_FLIGHT} \
          RETURNING id, person_id"
     )))
@@ -209,6 +223,7 @@ pub async fn exit_batch(
     Ok(LifecycleBatch {
         read: found.len(),
         changed: ended.len(),
+        last,
     })
 }
 
@@ -227,29 +242,37 @@ struct HeldRow {
 /// to the state it was held from and gets the `flow.step` job it was held for, under its own
 /// trace, with a unique key that carries `trace`. A `flow.enrollment` decision under `trace`
 /// (the resume's) records each. A job for a timer that is not due yet defers itself, as any
-/// other. Returns how many it looked at and how many it resumed.
+/// other. A held enrollment whose stored input or cause does not parse cannot be resumed: it is
+/// moved to `failed` with an error (and a `failed` decision) so it is never read again, never left
+/// held. Only the people after `after` are read (the keyset cursor: the `last` of the previous
+/// batch). Returns how many it looked at and how many it resumed; call it again while it reads a
+/// full batch.
 pub async fn resume_batch(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     flow: Uuid,
     trace: &TraceContext,
+    after: Option<Uuid>,
     limit: usize,
 ) -> Result<LifecycleBatch, StoreError> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let found: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT id, person_id FROM enrollments \
          WHERE workspace_id = $1 AND flow_id = $2 AND state = 'held' \
+           AND ($4::uuid IS NULL OR person_id > $4) \
          ORDER BY person_id, id LIMIT $3",
     )
     .bind(workspace.as_uuid())
     .bind(flow)
     .bind(limit)
+    .bind(after)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     if found.is_empty() {
         return Ok(LifecycleBatch::default());
     }
+    let last = found.last().map(|(_, person)| *person);
     let ids = lock_people(connection, workspace, &found).await?;
     let held: Vec<HeldRow> = sqlx::query_as(
         "SELECT id, person_id, state_version, resume_input, trace_id, cause_kind, cause_id \
@@ -264,11 +287,12 @@ pub async fn resume_batch(
     let mut jobs = Vec::with_capacity(held.len());
     let mut resumed = Vec::with_capacity(held.len());
     let mut decisions = Vec::with_capacity(held.len());
+    let mut unresumable = Vec::new();
     for row in &held {
-        let Some(input) = StepJobInput::from_stored(&row.resume_input) else {
-            continue;
-        };
-        let Ok(kind) = row.cause_kind.parse::<CauseKind>() else {
+        let input = StepJobInput::from_stored(&row.resume_input);
+        let kind = row.cause_kind.parse::<CauseKind>();
+        let (Some(input), Ok(kind)) = (input, kind) else {
+            unresumable.push(row);
             continue;
         };
         let enrollment_trace = TraceContext {
@@ -313,11 +337,36 @@ pub async fn resume_batch(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    if !unresumable.is_empty() {
+        let broken: Vec<Uuid> = unresumable.iter().map(|row| row.id).collect();
+        sqlx::query(
+            "UPDATE enrollments SET state = 'failed', error = $2, failed_node = node, \n                 failure_placed = false, resume_input = NULL, updated_at = now() \n             WHERE id = ANY($1)",
+        )
+        .bind(&broken)
+        .bind(UNRESUMABLE)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        decisions.extend(unresumable.iter().map(|row| NewDecision {
+            workspace_id: workspace,
+            trace: trace.clone(),
+            action: "flow.enrollment",
+            outcome: "failed",
+            reason: Some(UNRESUMABLE),
+            subject_ids: vec![
+                ("flow", flow),
+                ("enrollment", row.id),
+                ("person", row.person_id),
+            ],
+            job: None,
+        }));
+    }
     enqueue_many(&mut *connection, &jobs).await?;
     append_decisions(connection, &decisions).await?;
     Ok(LifecycleBatch {
         read: found.len(),
         changed: resumed_ids.len(),
+        last,
     })
 }
 
@@ -328,8 +377,14 @@ pub enum ControlError {
     NotFound,
     /// The enrollment is not `failed`.
     NotFailed(EnrollmentStatus),
-    /// The failure did not stop the walk at the node a skip would leave along: a step that
-    /// failed on a later node of its chain started from this one, so only a retry makes sense.
+    /// The flow is archived: it changes no more, and a step job would do nothing.
+    FlowArchived,
+    /// The flow is paused: a step would be held. Resume the flow first.
+    FlowPaused,
+    /// The engine did not place the failure at the node a skip would leave along: a step that
+    /// failed on a later node of its chain started from this one, and a failure with no node
+    /// attribution (the pinned version is missing, a database error on the last attempt) stores
+    /// the enrollment's own node. Only a retry makes sense.
     SkipUnavailable,
     Store(StoreError),
 }
@@ -349,8 +404,13 @@ impl fmt::Display for ControlError {
                 "the enrollment is {} and only a failed one can be retried or skipped",
                 status.as_str()
             ),
+            Self::FlowArchived => formatter.write_str("the flow is archived"),
+            Self::FlowPaused => {
+                formatter.write_str("the flow is paused; resume it before retrying or skipping")
+            }
             Self::SkipUnavailable => formatter.write_str(
-                "the failure is not at the node the enrollment stopped at; retry it instead",
+                "the failure was not placed at the node the enrollment stopped at, so there is \
+                 nothing to skip; retry it instead",
             ),
             Self::Store(error) => error.fmt(formatter),
         }
@@ -360,8 +420,9 @@ impl fmt::Display for ControlError {
 impl std::error::Error for ControlError {}
 
 /// An operator's retry (`skip: false`) or skip (`skip: true`) of a failed enrollment, in the
-/// caller's transaction. The enrollment is locked (person first), checked, and a decision under
-/// `trace` records the action.
+/// caller's transaction. The flow must be published: an archived or a paused flow refuses both
+/// (an operator resumes a paused flow first), and writes nothing. The enrollment is locked (person
+/// first), checked, and a decision under `trace` records the action.
 ///
 /// A retry of a step that failed in the runtime puts the enrollment back in the state the step
 /// started from (it kept its node, timer, waits and `state_version`) and enqueues the input that
@@ -381,13 +442,21 @@ pub async fn resume_failed(
     if known.flow_id != flow {
         return Err(ControlError::NotFound);
     }
+    // The flow before the person and the enrollment, as every step takes them.
+    match flow_state_for_step(connection, workspace, flow).await? {
+        Some(FlowState::Archived) => return Err(ControlError::FlowArchived),
+        Some(FlowState::Paused) => return Err(ControlError::FlowPaused),
+        Some(FlowState::Draft | FlowState::Published) | None => {}
+    }
     let Some(locked) = lock_enrollment(connection, workspace, enrollment).await? else {
         return Err(ControlError::NotFound);
     };
     if locked.status != EnrollmentStatus::Failed {
         return Err(ControlError::NotFailed(locked.status));
     }
-    if skip && locked.failed_node.as_deref() != Some(locked.node.as_str()) {
+    if skip
+        && !(locked.failure_placed && locked.failed_node.as_deref() == Some(locked.node.as_str()))
+    {
         return Err(ControlError::SkipUnavailable);
     }
     let stored = locked
@@ -398,7 +467,7 @@ pub async fn resume_failed(
         (false, Some(input)) => {
             sqlx::query(
                 "UPDATE enrollments SET state = $2, error = NULL, failed_node = NULL, \
-                     resume_input = NULL, updated_at = now() WHERE id = $1",
+                     failure_placed = false, resume_input = NULL, updated_at = now() WHERE id = $1",
             )
             .bind(enrollment)
             .bind(input.status_before().as_str())
@@ -766,6 +835,10 @@ pub struct LifecyclePayload {
     pub flow: Uuid,
     pub action: LifecycleAction,
     pub round: u32,
+    /// The keyset cursor: the person of the last enrollment the previous batch read. Each batch
+    /// reads the enrollments of the people after it, so a page that changed nothing cannot be read
+    /// again.
+    pub after: Option<Uuid>,
 }
 
 impl LifecyclePayload {
@@ -778,6 +851,9 @@ impl LifecyclePayload {
         });
         if let LifecycleAction::ExitVersion { version } = self.action {
             payload["version"] = json!(version);
+        }
+        if let Some(after) = self.after {
+            payload["after"] = json!(after);
         }
         payload
     }
@@ -797,6 +873,10 @@ impl LifecyclePayload {
             flow: Uuid::parse_str(text("flow_id")?).ok()?,
             action,
             round: u32::try_from(payload.get("round")?.as_u64()?).ok()?,
+            after: match payload.get("after") {
+                None | Some(Value::Null) => None,
+                Some(after) => Some(Uuid::parse_str(after.as_str()?).ok()?),
+            },
         })
     }
 
@@ -831,6 +911,7 @@ pub async fn enqueue_lifecycle(
         flow,
         action,
         round: 0,
+        after: None,
     };
     enqueue(connection, &payload.job(trace)).await
 }
@@ -912,6 +993,7 @@ mod tests {
                 flow: Uuid::from_u128(9),
                 action,
                 round: 2,
+                after: Some(Uuid::from_u128(10)),
             };
             assert_eq!(LifecyclePayload::parse(&payload.to_value()), Some(payload));
         }
@@ -927,6 +1009,7 @@ mod tests {
             flow: Uuid::from_u128(2),
             action: LifecycleAction::Archive,
             round: 0,
+            after: None,
         };
         let next = LifecyclePayload { round: 1, ..first };
         assert_ne!(first.job(&trace).unique_key, next.job(&trace).unique_key);
@@ -952,6 +1035,7 @@ mod tests {
             version: None,
             reason: "flow_archived",
             trace: &action,
+            after: None,
         };
         let mut connection = pool.acquire().await.unwrap();
         let now = OffsetDateTime::now_utc();
@@ -1049,6 +1133,7 @@ mod tests {
                 version: Some(1),
                 reason: "manual",
                 trace: &action,
+                after: None,
             },
             OffsetDateTime::now_utc(),
             10,
@@ -1072,6 +1157,68 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_reads_only_the_people_after_its_cursor_whatever_the_earlier_pages_changed(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "cursor").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let ids = sleepers(&pool, ws, flow.id, 5).await;
+        let mut connection = pool.acquire().await.unwrap();
+        for id in &ids {
+            hold_enrollment(&mut connection, ws, *id, &StepJobInput::Wake)
+                .await
+                .unwrap();
+        }
+        // Held rows that cannot be resumed fill the first page: the cursor moves past them.
+        sqlx::query(
+            "UPDATE enrollments SET resume_input = '{\"input\": \"bogus\"}'::jsonb \
+             WHERE id IN (SELECT id FROM enrollments WHERE flow_id = $1 \
+                          ORDER BY person_id, id LIMIT 2)",
+        )
+        .bind(flow.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let action = trace();
+
+        let first = resume_batch(&mut connection, ws, flow.id, &action, None, 2)
+            .await
+            .unwrap();
+        let second = resume_batch(&mut connection, ws, flow.id, &action, first.last, 2)
+            .await
+            .unwrap();
+        let third = resume_batch(&mut connection, ws, flow.id, &action, second.last, 2)
+            .await
+            .unwrap();
+
+        assert_eq!((first.read, first.changed), (2, 0));
+        assert_eq!((second.read, second.changed), (2, 2));
+        assert_eq!((third.read, third.changed), (1, 1));
+        assert!(first.last < second.last && second.last < third.last);
+        let states: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT state, error IS NOT NULL FROM enrollments WHERE flow_id = $1 \
+             ORDER BY person_id, id",
+        )
+        .bind(flow.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let states: Vec<(&str, bool)> = states.iter().map(|(s, e)| (s.as_str(), *e)).collect();
+        assert_eq!(
+            states,
+            [
+                ("failed", true),
+                ("failed", true),
+                ("waiting", false),
+                ("waiting", false),
+                ("waiting", false)
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_resume_runs_held_enrollments_in_batches_with_a_job_and_a_decision_each(
         pool: PgPool,
     ) {
@@ -1087,13 +1234,13 @@ mod tests {
         }
         let action = trace();
 
-        let first = resume_batch(&mut connection, ws, flow.id, &action, 1)
+        let first = resume_batch(&mut connection, ws, flow.id, &action, None, 1)
             .await
             .unwrap();
-        let second = resume_batch(&mut connection, ws, flow.id, &action, 1)
+        let second = resume_batch(&mut connection, ws, flow.id, &action, None, 1)
             .await
             .unwrap();
-        let third = resume_batch(&mut connection, ws, flow.id, &action, 1)
+        let third = resume_batch(&mut connection, ws, flow.id, &action, None, 1)
             .await
             .unwrap();
 

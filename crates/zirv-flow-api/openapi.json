@@ -5216,7 +5216,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Retries a failed enrollment: the step that failed runs again from the state it started from.\nRecords a `flow.enrollment` decision (`retried`) and is audited as\n`flow.enrollment_retried`.",
+        "summary": "Retries a failed enrollment: the step that failed runs again from the state it started from.\nRefused while the flow is archived or paused. Records a `flow.enrollment` decision (`retried`)\nand is audited as `flow.enrollment_retried`.",
         "operationId": "retry_flow_enrollment",
         "parameters": [
           {
@@ -5292,7 +5292,7 @@
             }
           },
           "409": {
-            "description": "The enrollment is not failed (`code` is `enrollment_state`)",
+            "description": "The enrollment is not failed (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5317,7 +5317,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a\nfailure that stopped the walk at its node can be skipped; any other is retried. Records a\n`flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.",
+        "summary": "Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a\nfailure the engine placed at its node can be skipped; any other is retried. Refused while the\nflow is archived or paused. Records a\n`flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.",
         "operationId": "skip_flow_enrollment",
         "parameters": [
           {
@@ -5393,7 +5393,7 @@
             }
           },
           "409": {
-            "description": "The enrollment is not failed, or its failure cannot be skipped (`code` is `enrollment_state`)",
+            "description": "The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6209,7 +6209,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling\n469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older\nthan the flow's current one. Audited as `flow.enrollments_exited`.",
+        "summary": "Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling\n469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older\nthan the flow's current one. A paused or archived flow refuses it. Audited as\n`flow.enrollments_exited`.",
         "operationId": "exit_flow_version_enrollments",
         "parameters": [
           {
@@ -6285,7 +6285,7 @@
             }
           },
           "409": {
-            "description": "The flow is a draft or archived, or the version is not older than the current one (`code` is `flow_state`)",
+            "description": "The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -456,6 +456,14 @@ impl ApiError {
         }
     }
 
+    /// An operator control on a paused flow: a step would be held, so the flow is resumed first.
+    pub(crate) fn flow_paused() -> Self {
+        Self {
+            code: Some("flow_paused"),
+            ..Self::new(StatusCode::CONFLICT, "the flow is paused; resume it first")
+        }
+    }
+
     /// A write to an archived segment.
     pub(crate) fn segment_archived() -> Self {
         Self {

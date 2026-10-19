@@ -907,8 +907,8 @@ export interface paths {
         put?: never;
         /**
          * Retries a failed enrollment: the step that failed runs again from the state it started from.
-         *     Records a `flow.enrollment` decision (`retried`) and is audited as
-         *     `flow.enrollment_retried`.
+         *     Refused while the flow is archived or paused. Records a `flow.enrollment` decision (`retried`)
+         *     and is audited as `flow.enrollment_retried`.
          */
         post: operations["retry_flow_enrollment"];
         delete?: never;
@@ -928,7 +928,8 @@ export interface paths {
         put?: never;
         /**
          * Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a
-         *     failure that stopped the walk at its node can be skipped; any other is retried. Records a
+         *     failure the engine placed at its node can be skipped; any other is retried. Refused while the
+         *     flow is archived or paused. Records a
          *     `flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.
          */
         post: operations["skip_flow_enrollment"];
@@ -1121,7 +1122,8 @@ export interface paths {
         /**
          * Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling
          *     469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older
-         *     than the flow's current one. Audited as `flow.enrollments_exited`.
+         *     than the flow's current one. A paused or archived flow refuses it. Audited as
+         *     `flow.enrollments_exited`.
          */
         post: operations["exit_flow_version_enrollments"];
         delete?: never;
@@ -10484,7 +10486,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The enrollment is not failed (`code` is `enrollment_state`) */
+            /** @description The enrollment is not failed (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10547,7 +10549,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The enrollment is not failed, or its failure cannot be skipped (`code` is `enrollment_state`) */
+            /** @description The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -11129,7 +11131,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The flow is a draft or archived, or the version is not older than the current one (`code` is `flow_state`) */
+            /** @description The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
             409: {
                 headers: {
                     [name: string]: unknown;

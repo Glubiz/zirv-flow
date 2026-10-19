@@ -18,3 +18,9 @@ ALTER TABLE enrollments ADD CONSTRAINT enrollments_held_input_check
 DROP INDEX enrollments_in_flight_idx;
 CREATE UNIQUE INDEX enrollments_in_flight_idx ON enrollments (flow_id, person_id)
     WHERE state IN ('active', 'waiting', 'held', 'failed');
+
+-- Whether the engine placed a failure at `failed_node`. A failure it could not attribute to a node
+-- (the pinned version is missing, a database error on the last attempt, an engine refusal) stores
+-- the enrollment's own node there to keep the check above true; only a placed failure can be
+-- skipped by an operator, since a skip leaves the node along its `next` port.
+ALTER TABLE enrollments ADD COLUMN failure_placed boolean NOT NULL DEFAULT false;

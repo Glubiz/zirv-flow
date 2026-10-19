@@ -1269,9 +1269,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO enrollments \
                 (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
-                 trace_id, cause_kind, cause_id, error, failed_node, resume_input) \
+                 trace_id, cause_kind, cause_id, error, failed_node, failure_placed, resume_input) \
              SELECT $1, $2, id, 1, $3, $5, $6, $1, $1, 'api', 't', \
-                    CASE WHEN $5 = 'failed' THEN 'boom' END, $7, \
+                    CASE WHEN $5 = 'failed' THEN 'boom' END, $7, $7 IS NOT NULL, \
                     CASE WHEN $5 = 'failed' THEN '{\"input\": \"start\"}'::jsonb END \
              FROM flows WHERE id::text = $4",
         )
@@ -1432,5 +1432,52 @@ mod tests {
         let after = f.lead("POST", &exit_older(1), None).await;
         assert_eq!(after.status, StatusCode::CONFLICT);
         assert_eq!(after.body["code"], "flow_archived");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_operator_control_works_on_a_paused_or_an_archived_flow_and_none_writes_anything(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let flow = f.live("Welcome", manual()).await;
+        f.lead(
+            "PATCH",
+            &format!("/{flow}"),
+            Some(json!({"graph": {"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]}})),
+        )
+        .await;
+        let second = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(second.status, StatusCode::CREATED);
+        let failed = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
+        let controls = [
+            format!("/{flow}/enrollments/{failed}/retry"),
+            format!("/{flow}/enrollments/{failed}/skip"),
+            format!("/{flow}/versions/1/exit-enrollments"),
+        ];
+
+        for (action, code) in [("pause", "flow_paused"), ("archive", "flow_archived")] {
+            let moved = f.lead("POST", &format!("/{flow}/{action}"), None).await;
+            assert_eq!(moved.status, StatusCode::OK, "{action}: {:?}", moved.body);
+            let written = "SELECT (SELECT count(*) FROM audit_log \
+                                   WHERE action LIKE 'flow.enrollment%') \
+                          + (SELECT count(*) FROM decision_records \
+                                   WHERE action = 'flow.enrollment') \
+                          + (SELECT count(*) FROM jobs)";
+            let before = f.count(written).await;
+            for tail in &controls {
+                let reply = f.lead("POST", tail, None).await;
+                assert_eq!(reply.status, StatusCode::CONFLICT, "{action} {tail}");
+                assert_eq!(reply.body["code"], code, "{action} {tail}");
+            }
+            assert_eq!(
+                f.count(written).await,
+                before,
+                "{action}: a refusal writes no audit entry, decision or job"
+            );
+        }
     }
 }

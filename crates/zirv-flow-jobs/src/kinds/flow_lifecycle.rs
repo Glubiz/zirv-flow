@@ -3,9 +3,11 @@
 //!
 //! One run is one batch of [`LIFECYCLE_BATCH`] enrollments in one transaction: the people are
 //! locked in id order, then the enrollments are changed and a decision is recorded for each, under
-//! the trace of the action (an operator's `manual` cause). A full batch enqueues the next round
-//! with its own unique key, so a flow of any size is done in bounded transactions, and a run that
-//! is retried does the same batch again.
+//! the trace of the action (an operator's `manual` cause). A full page (whatever it changed)
+//! enqueues the next round, with its own unique key and a keyset cursor (the last person it
+//! read), so a flow of any size is done in bounded transactions and a page that changed nothing is
+//! never read twice; a run that is retried does the same batch again. A held enrollment that
+//! cannot be resumed is failed with an error, never left held.
 //!
 //! - `archive` exits every active, waiting, held and failed enrollment with reason
 //!   `flow_archived`.
@@ -56,6 +58,7 @@ impl JobKind for FlowLifecycle {
                         version,
                         reason,
                         trace: &trace,
+                        after: job.after,
                     },
                     now,
                     LIFECYCLE_BATCH,
@@ -66,13 +69,24 @@ impl JobKind for FlowLifecycle {
                 if flow.state != FlowState::Published {
                     return Ok(());
                 }
-                resume_batch(conn, job.workspace, job.flow, &trace, LIFECYCLE_BATCH).await?
+                resume_batch(
+                    conn,
+                    job.workspace,
+                    job.flow,
+                    &trace,
+                    job.after,
+                    LIFECYCLE_BATCH,
+                )
+                .await?
             }
         };
-        // A full batch may leave more behind; one that changed nothing would only repeat itself.
-        if batch.read >= LIFECYCLE_BATCH && batch.changed > 0 {
+        // A full page may leave more behind, whatever it changed: its rows may have been ended by
+        // another transaction first, or been unresumable. The cursor moves past the page, so the
+        // next round never reads it again.
+        if batch.read >= LIFECYCLE_BATCH {
             let next = LifecyclePayload {
                 round: job.round.saturating_add(1),
+                after: batch.last,
                 ..job
             };
             enqueue(&mut *conn, &next.job(&trace)).await?;
@@ -660,5 +674,136 @@ mod tests {
             (&traits["tier"], &traits["visits"]),
             (&json!("gold"), &json!(2))
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_page_of_held_rows_that_cannot_resume_does_not_stop_the_resume(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let flow = env.flow("Wait", parked()).await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, $2)",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(i32::try_from(LIFECYCLE_BATCH).unwrap() + 1)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
+                 node, occurrence_id, trace_id, cause_kind, cause_id, resume_input) \
+             SELECT gen_random_uuid(), $1, $2, 1, p.id, 'held', 'w', gen_random_uuid(), \
+                    gen_random_uuid(), 'api', 't', '{\"input\": \"start\"}'::jsonb \
+             FROM people p WHERE p.workspace_id = $1",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(flow)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        // The first full page, in the order the batches read, holds an input that does not parse.
+        let broken = sqlx::query(
+            "UPDATE enrollments SET resume_input = '{\"input\": \"bogus\"}'::jsonb \
+             WHERE id IN (SELECT id FROM enrollments WHERE flow_id = $1 \
+                          ORDER BY person_id, id LIMIT $2)",
+        )
+        .bind(flow)
+        .bind(i64::try_from(LIFECYCLE_BATCH).unwrap())
+        .execute(&env.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(broken, 500);
+
+        let mut connection = env.pool.acquire().await.unwrap();
+        enqueue_lifecycle(
+            &mut connection,
+            env.ws,
+            flow,
+            LifecycleAction::Resume,
+            &operator(),
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        assert_eq!(lifecycle_jobs(&env).await, 2, "a second round follows");
+
+        let states: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT state, count(*) FROM enrollments WHERE flow_id = $1 GROUP BY state \
+             ORDER BY state",
+        )
+        .bind(flow)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            states,
+            [("active".to_owned(), 1), ("failed".to_owned(), 500)],
+            "nothing stays held: the 501st resumed and the others failed with their error"
+        );
+        let unexplained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM enrollments WHERE flow_id = $1 AND state = 'failed' \
+               AND (error IS NULL OR resume_input IS NOT NULL)",
+        )
+        .bind(flow)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(unexplained, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_the_engine_did_not_place_at_a_node_can_be_retried_but_not_skipped(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let flow = env.flow("Wait", parked()).await;
+        let person = env.person("ada@example.com", json!({})).await;
+        let id = env.enroll(flow, 1, &[person]).await.enrolled[0].enrollment;
+        let graph: Value = sqlx::query_scalar("SELECT graph FROM flow_versions WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+        // The versions are immutable; this per-test database may bend that to corrupt one.
+        sqlx::query("ALTER TABLE flow_versions DISABLE TRIGGER USER")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE flow_versions SET graph = '{\"v\": 99}' WHERE flow_id = $1")
+            .bind(flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.run_due().await;
+        let failed = env.enrollment(id).await;
+        assert_eq!(failed.status, EnrollmentStatus::Failed);
+        assert_eq!(
+            failed.failed_node.as_deref(),
+            Some(failed.node.as_str()),
+            "the failure is stored at the enrollment's own node"
+        );
+        let trace = operator();
+
+        let skip = operate(&env, flow, id, true, &trace).await;
+        assert!(matches!(skip, Err(ControlError::SkipUnavailable)));
+        assert_eq!(decisions_of(&env, &trace, "skipped").await, 0);
+        sqlx::query("UPDATE flow_versions SET graph = $2 WHERE flow_id = $1")
+            .bind(flow)
+            .bind(&graph)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        operate(&env, flow, id, false, &trace).await.unwrap();
+        env.run_due().await;
+
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
+        assert_eq!(decisions_of(&env, &trace, "retried").await, 1);
     }
 }
