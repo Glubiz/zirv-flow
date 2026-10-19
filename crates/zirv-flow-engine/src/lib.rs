@@ -5,6 +5,7 @@
 
 mod error;
 mod hash;
+mod settle;
 #[cfg(test)]
 mod sim;
 mod state;
@@ -12,7 +13,8 @@ mod step;
 mod time;
 
 pub use error::EngineError;
-pub use hash::{effect_key, split_bucket, step_key, wake_key};
+pub use hash::{effect_key, settings_goal_key, split_bucket, step_key, wake_key};
+pub use settle::{Matched, settle};
 pub use state::{
     ArrivedEvent, Effect, EffectKind, EnrollmentState, ExitReason, Failure, Outcome, Status,
     StepContext, StepInput, Transition, Visit, WaitChange, Wake,

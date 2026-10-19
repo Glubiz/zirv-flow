@@ -16,6 +16,13 @@ pub fn effect_key(enrollment_id: Uuid, node: &str, kind: &str) -> String {
     format!("{}:{kind}", step_key(enrollment_id, node))
 }
 
+/// The idempotency key of the conversion the flow settings record, `{enrollment_id}:settings.goal`:
+/// one per enrollment, whichever node it was at, so a goal reached again is not a second
+/// conversion.
+pub fn settings_goal_key(enrollment_id: Uuid) -> String {
+    format!("{enrollment_id}:settings.goal")
+}
+
 /// The unique key of the timer job of a wait, `wake:{enrollment_id}:{state_version}`.
 pub fn wake_key(enrollment_id: Uuid, state_version: u64) -> String {
     format!("wake:{enrollment_id}:{state_version}")

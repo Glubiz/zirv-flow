@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen"]
 resolver = "3"
 
 [workspace.package]
-version = "0.61.0"
+version = "0.62.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -72,6 +72,7 @@ zirv-flow-ai = { path = "crates/zirv-flow-ai" }
 zirv-flow-api = { path = "crates/zirv-flow-api" }
 zirv-flow-connectors = { path = "crates/zirv-flow-connectors" }
 zirv-flow-core = { path = "crates/zirv-flow-core" }
+zirv-flow-engine = { path = "crates/zirv-flow-engine" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
 zirv-flow-segments = { path = "crates/zirv-flow-segments" }

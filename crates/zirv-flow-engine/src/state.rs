@@ -157,8 +157,12 @@ pub enum WaitChange {
 /// Why an enrollment left through the graph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitReason {
-    /// A `goal` node with `exit`.
+    /// A `goal` node with `exit`, or the flow's goal reached with `exit_on_goal`.
     Goal,
+    /// The flow's goal was reached and a `goal_reached` exit criterion ends the enrollment.
+    GoalCriterion,
+    /// An event exit criterion occurred.
+    ExitEvent,
 }
 
 /// Why a node failed. An operator can retry or skip it.
@@ -189,6 +193,8 @@ pub enum Outcome {
         node: String,
         failure: Failure,
     },
+    /// The flow's goal was reached and recorded; the enrollment goes on unchanged.
+    Converted,
     /// The input was for an older state: nothing to commit, the first commit won.
     Stale,
 }

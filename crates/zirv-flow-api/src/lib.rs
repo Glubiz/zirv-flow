@@ -216,6 +216,10 @@ fn routes() -> Router<AppState> {
             post(flows::publish::archive),
         )
         .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/test",
+            post(flows::test_mode::test),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/flows/{id}/versions",
             get(flows::crud::versions),
         )

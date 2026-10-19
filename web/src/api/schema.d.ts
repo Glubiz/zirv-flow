@@ -934,6 +934,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Walks one person through a flow on a virtual clock, with nothing executed and nothing
+         *     written.
+         * @description The graph is the saved draft, or `version`, or an inline `graph` (a graph that fails the
+         *     structural publish checks is 422 `flow_invalid`). The person is `person_id` (read only, newest
+         *     events first up to the explain cap; needs the right to see personal values) or a `snapshot`,
+         *     synthetic or the one a previous response returned. The walk starts at `start_at` (the database
+         *     time by default) and applies the `script`: `{"advance_to": T}` moves the clock and fires
+         *     every due timer, `{"inject": {name, properties, at}}` delivers an event, which satisfies the
+         *     wait it names when its filters match and is added to the snapshot's events either way.
+         *     Branch conditions are decided by the reference evaluator over the snapshot with the walk's
+         *     own internal effects overlaid. A condition on an event name the snapshot capped stops the
+         *     walk with `halted.reason = unable_to_evaluate`, naming the condition and the cap, and the
+         *     partial path is returned. Webhook effects show the envelope that would be sent, never a
+         *     secret or a signature. The response is a pure function of the request and the data read, so
+         *     re-posting `snapshot` with the same `start_at`, `enrollment_id` and `script` gives the same
+         *     response.
+         */
+        post: operations["test_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/flows/{id}/validate": {
         parameters: {
             query?: never;
@@ -2797,6 +2831,13 @@ export interface components {
             /** @description Applied in order to the cell before it reaches the target; at most 10. */
             transforms?: components["schemas"]["TransformBody"][];
         };
+        /** @description How one condition of a branch came out. */
+        ConditionBody: {
+            index: number;
+            observed: components["schemas"]["FlowObservedBody"][];
+            /** @description `pass`, `fail`, `unknown`, or `not_evaluated` for a condition after the first that passed. */
+            outcome: string;
+        };
         ConflictBody: {
             /** Format: date-time */
             created_at: string;
@@ -3476,6 +3517,23 @@ export interface components {
             status: number;
             title: string;
         };
+        /** @description A captured effect. Nothing is executed. */
+        EffectBody: {
+            /** Format: date-time */
+            at: string;
+            /**
+             * @description What the node asked for. A webhook shows the `url` and the `envelope` that would be sent
+             *     (never the signing secret or a signature).
+             */
+            detail: Record<string, never>;
+            /** @description The key an external effect carries to its destination; null for internal ones. */
+            effect_key?: string | null;
+            /** @description `update_trait`, `list`, `goal` or `webhook`. */
+            kind: string;
+            node: string;
+            /** @description The step idempotency key, `{enrollment_id}:{node_id}`. */
+            step_key: string;
+        };
         ErasureBody: {
             /** Format: date-time */
             completed_at?: string | null;
@@ -3838,6 +3896,23 @@ export interface components {
             /** @description True for a credential field: render a password input and never prefill it. */
             secret: boolean;
         };
+        /** @description Where the enrollment ended up. */
+        FinalStateBody: {
+            awaiting?: string | null;
+            /**
+             * Format: date-time
+             * @description The virtual clock when the walk ended.
+             */
+            clock: string;
+            /** @description The node the enrollment is at or stopped at. */
+            node: string;
+            /** Format: int64 */
+            state_version: number;
+            /** @description `active`, `awaiting_conditions`, `waiting`, `completed`, `exited` or `failed`. */
+            status: string;
+            /** Format: date-time */
+            wake_at?: string | null;
+        };
         /** @description Adds a person to a list or removes them. Port `next`. */
         FlowActionListNode: {
             /** @enum {string} */
@@ -4024,6 +4099,18 @@ export interface components {
         };
         /** @description One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused. */
         FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
+        /** @description What a leaf condition saw, flattened out of the evaluation tree. */
+        FlowObservedBody: {
+            /**
+             * @description `{"value": ..}` for a trait, `{"missing": true}`, `{"count": n}` or `{"value": .., "count": n}`
+             *     for events, `{"present": bool}` for a list, segment, consent or identifier.
+             */
+            observed: Record<string, never>;
+            /** @description `pass`, `fail` or `unknown` (a capped event name). */
+            outcome: string;
+            /** @description The JSON pointer of the leaf in the condition. */
+            pointer: string;
+        };
         /** @description Whether a person may enter again. */
         FlowReentry: {
             /** @enum {string} */
@@ -4076,6 +4163,83 @@ export interface components {
             id: string;
             /** @enum {string} */
             type: "split.random";
+        };
+        /** @description The result of a walk. */
+        FlowTestBody: {
+            /** Format: uuid */
+            enrollment_id: string;
+            external_effects: components["schemas"]["EffectBody"][];
+            final_state: components["schemas"]["FinalStateBody"];
+            /** Format: uuid */
+            flow_id: string;
+            halted?: null | components["schemas"]["HaltBody"];
+            internal_effects: components["schemas"]["EffectBody"][];
+            /** Format: uuid */
+            merged_from?: string | null;
+            /**
+             * @description Settings the walk cannot trigger, because a script has no segment membership changes:
+             *     `goal_segment` (a goal of entering a segment), `exit_leaves_segment` (the criterion) and
+             *     `exit_goal_reached_by_segment` (a `goal_reached` criterion when the goal is a segment).
+             */
+            not_simulated: string[];
+            path: components["schemas"]["PathStepBody"][];
+            person_after: components["schemas"]["PersonAfterBody"];
+            /**
+             * Format: uuid
+             * @description The person walked: the survivor when `person_id` was merged into another, or the person a
+             *     posted snapshot names; null for a synthetic one.
+             */
+            person_id?: string | null;
+            script: components["schemas"]["ScriptResultBody"][];
+            /** @description The snapshot the walk started from. Re-post it as `snapshot` to replay. */
+            snapshot: components["schemas"]["SnapshotBody"];
+            /** @description `draft`, `version` or `inline`. */
+            source: string;
+            /** Format: date-time */
+            start_at: string;
+            /**
+             * Format: int32
+             * @description The version walked; null for the draft and an inline graph.
+             */
+            version?: number | null;
+            waits: components["schemas"]["WaitBody"][];
+            wakes: components["schemas"]["WakeBody"][];
+        };
+        /**
+         * @description The request of `POST .../flows/{id}/test`.
+         *
+         *     The graph is the flow's draft unless `version` or `graph` is given (not both). The person is
+         *     `person_id` or `snapshot` (exactly one).
+         */
+        FlowTestRequest: {
+            /**
+             * Format: uuid
+             * @description The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the
+             *     default is derived from the flow and the person, so a call is repeatable.
+             */
+            enrollment_id?: string | null;
+            graph?: components["schemas"]["FlowGraph"];
+            /**
+             * Format: uuid
+             * @description A real person, whose bounded snapshot is read (read only) and returned. Needs the right
+             *     to see personal values (workspace admin, owner or an `admin` key), because the snapshot
+             *     holds them.
+             */
+            person_id?: string | null;
+            /** @description Steps applied in order after the first run; at most 50, times never going back. */
+            script?: components["schemas"]["ScriptStepBody"][];
+            snapshot?: null | components["schemas"]["SnapshotBody"];
+            /**
+             * Format: date-time
+             * @description The virtual time the walk starts at; the database's time when omitted. Microsecond
+             *     precision.
+             */
+            start_at?: string | null;
+            /**
+             * Format: int32
+             * @description Walk this published version instead of the draft.
+             */
+            version?: number | null;
         };
         FlowTraitChange: {
             /** @enum {string} */
@@ -4184,6 +4348,25 @@ export interface components {
              *     stale (no explicit threshold and no schedule).
              */
             threshold_seconds?: number | null;
+        };
+        /** @description Why the walk stopped before the graph or the script ended. */
+        HaltBody: {
+            /** @description The most events one load keeps (`unable_to_evaluate` only). */
+            cap?: number | null;
+            /** @description The capped event names the condition reads. */
+            capped_events: string[];
+            /** @description The index of the condition in the branch. */
+            condition?: number | null;
+            message: string;
+            node?: string | null;
+            /** @description The JSON pointer inside the condition. */
+            pointer?: string | null;
+            /**
+             * @description `unable_to_evaluate` (a condition reads an event name the snapshot capped),
+             *     `invalid_condition` (a condition or filter that does not validate against the
+             *     workspace), `step_failed` (an effect could not apply) or `engine_error`.
+             */
+            reason: string;
         };
         HistoryBody: {
             /** @description Newest first. */
@@ -4387,6 +4570,12 @@ export interface components {
             next_before?: string | null;
             /** @description Newest first. */
             rejects: components["schemas"]["IngestRejectBody"][];
+        };
+        InjectBody: {
+            /** Format: date-time */
+            at: string;
+            name: string;
+            properties?: Record<string, never>;
         };
         InvalidRowBody: {
             /**
@@ -4673,6 +4862,39 @@ export interface components {
             lag: number;
             /** Format: int32 */
             partition: number;
+        };
+        /** @description A node the walk ran. */
+        PathStepBody: {
+            /** Format: date-time */
+            at: string;
+            /** @description The branch's conditions, in order. */
+            branch?: components["schemas"]["ConditionBody"][] | null;
+            node: string;
+            /**
+             * @description `passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,
+             *     `failed`, `unable_to_evaluate`, or for a step of type `settings.goal` / `settings.exit`
+             *     (the flow settings, not a node) `converted` / `exited`.
+             */
+            outcome: string;
+            /**
+             * @description The output port the walk left through; null when it stopped here or the port is not
+             *     unambiguous from the edges.
+             */
+            port?: string | null;
+            /** @description The node type, such as `wait.duration`. */
+            type: string;
+            /**
+             * Format: date-time
+             * @description When a wait node woke.
+             */
+            woke_at?: string | null;
+            /** @description `timer`, `event` or `timeout`. */
+            woke_by?: string | null;
+        };
+        /** @description The person's traits and lists after the walk's internal effects. */
+        PersonAfterBody: {
+            lists: string[];
+            traits: Record<string, never>;
         };
         PersonHitBody: {
             display?: null | components["schemas"]["DisplayBody"];
@@ -5228,6 +5450,30 @@ export interface components {
             /** Format: int32 */
             version: number;
         };
+        /** @description What a script step did. */
+        ScriptResultBody: {
+            /** Format: date-time */
+            at: string;
+            index: number;
+            /** @description `advance_to` or `inject`. */
+            kind: string;
+            /**
+             * @description `advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match
+             *     a wait), `event_ignored` (the filters did not match), `goal_reached` (the flow goal, recorded as a
+             *     conversion; the enrollment goes on), `goal_exit` or `exit_criterion` (the settings ended the
+             *     enrollment as exited) or `skipped` (the walk had stopped).
+             */
+            outcome: string;
+        };
+        /** @description One step of the script: exactly one of `advance_to` and `inject`. */
+        ScriptStepBody: {
+            /**
+             * Format: date-time
+             * @description Move the virtual clock to this time, firing every timer due by then.
+             */
+            advance_to?: string | null;
+            inject?: null | components["schemas"]["InjectBody"];
+        };
         SearchBody: {
             /**
              * Format: uuid
@@ -5578,6 +5824,65 @@ export interface components {
             /** @example owner@example.com */
             email: string;
             password: string;
+        };
+        /**
+         * @description What the reference evaluator reads about one person. `capped_events` and
+         *     `events_complete_after` carry the caps of a real load, and a synthetic snapshot can set them
+         *     to see a walk stop with `unable_to_evaluate`.
+         */
+        SnapshotBody: {
+            /**
+             * @description Event names whose events were cut off when the snapshot was loaded.
+             * @default []
+             */
+            capped_events: string[];
+            /** @default [] */
+            consent: components["schemas"]["SnapshotConsentBody"][];
+            /** @default [] */
+            events: components["schemas"]["SnapshotEventBody"][];
+            /**
+             * Format: date-time
+             * @default null
+             */
+            events_complete_after: string | null;
+            /**
+             * @description `email`, `phone`, `anonymous_id` or `external:<namespace>`; never values.
+             * @default []
+             */
+            identifier_kinds: string[];
+            /** @default [] */
+            lists: string[];
+            /**
+             * Format: uuid
+             * @description The person the snapshot was read from. A real-person walk fills it in, so the webhook
+             *     envelope of a replay names the same person.
+             * @default null
+             */
+            person_id: string | null;
+            /**
+             * @description The segments the person is an open member of.
+             * @default []
+             */
+            segments: string[];
+            /** @description Stored trait values by key. */
+            traits?: Record<string, never>;
+        };
+        SnapshotConsentBody: {
+            /** @description `email`. */
+            channel: string;
+            /** @description `subscribed`, `unsubscribed`, `pending_confirmation` or `unknown`. */
+            status: string;
+            /**
+             * Format: uuid
+             * @description The topic id; null is the channel itself.
+             */
+            topic?: string | null;
+        };
+        SnapshotEventBody: {
+            name: string;
+            /** Format: date-time */
+            occurred_at: string;
+            properties?: Record<string, never>;
         };
         SourceBody: {
             /** @description The plain settings. Never holds a credential. */
@@ -6103,6 +6408,32 @@ export interface components {
         VersionBody: {
             /** @description The running zirv-flow version. */
             version: string;
+        };
+        /** @description A wait the walk went into. */
+        WaitBody: {
+            /** @description The event name a `wait.until_event` waits for. */
+            awaiting?: string | null;
+            node: string;
+            /** @description `open`, `timer`, `event`, `timeout`, or `exit` (the flow settings ended the enrollment). */
+            resolved: string;
+            /** Format: date-time */
+            started_at: string;
+            type: string;
+            /**
+             * Format: date-time
+             * @description The time the timer fires (the timeout, for `wait.until_event`).
+             */
+            wake_at: string;
+        };
+        /** @description A timer the engine asked for. */
+        WakeBody: {
+            /** Format: date-time */
+            at: string;
+            /** @description Whether the walk reached `at` and fired it. */
+            fired: boolean;
+            /** @description The unique key of the `flow.step` job the runtime would enqueue. */
+            key: string;
+            node: string;
         };
         WebhookAccepted: {
             /** @description Payloads appended to the inbox: always 1. They are durable, not yet applied. */
@@ -9968,6 +10299,80 @@ export interface operations {
             };
             /** @description The flow is not paused (`code` is `flow_state`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlowTestRequest"];
+            };
+        };
+        responses: {
+            /** @description The walk */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowTestBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, a missing CSRF token, or a real person for a caller who may not see personal values (`flow_test_values_forbidden`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow, version or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A request that is not one person and one graph (`flow_test_request_invalid`), a graph that is not a flow document (`flow_malformed`) or fails the structural checks (`flow_invalid`), or a bound: `flow_test_script_too_long`, `flow_test_script_invalid`, `flow_test_step_limit`, `flow_test_snapshot_too_large` */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Reading the person ran past its time limit (`flow_test_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

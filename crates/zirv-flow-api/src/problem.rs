@@ -477,6 +477,36 @@ impl ApiError {
             )
         }
     }
+
+    /// A test-mode request that is refused for its shape or a bound: `code` is one of the stable
+    /// `flow_test_*` codes.
+    pub(crate) fn flow_test_refused(code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A test-mode read of a real person that ran past its time limit and was cancelled.
+    pub(crate) fn flow_test_timeout() -> Self {
+        Self {
+            code: Some("flow_test_timeout"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the test took too long reading the person; try again",
+            )
+        }
+    }
+
+    /// A test of a real person by a caller who may not see personal values.
+    pub(crate) fn flow_test_values_forbidden() -> Self {
+        Self {
+            code: Some("flow_test_values_forbidden"),
+            ..Self::forbidden(
+                "testing a real person returns their values; ask a workspace admin, or post a snapshot",
+            )
+        }
+    }
 }
 
 impl ApiError {
