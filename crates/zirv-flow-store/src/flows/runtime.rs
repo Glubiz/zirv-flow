@@ -197,6 +197,24 @@ pub async fn count_in_flight_enrollments(
     .map_err(StoreError::query)
 }
 
+/// The time zones a step reads: the workspace's, and the person's `timezone` trait as written
+/// (it may not be a zone; the engine falls back from an invalid one).
+pub async fn step_zones(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+) -> Result<(String, Option<String>), StoreError> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT w.timezone, p.traits ->> 'timezone' FROM workspaces w \n         LEFT JOIN people p ON p.workspace_id = w.id AND p.id = $2 WHERE w.id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.unwrap_or_else(|| ("UTC".to_owned(), None)))
+}
+
 /// The state an enrollment moves to.
 #[derive(Clone, Debug)]
 pub struct EnrollmentUpdate<'a> {
@@ -733,6 +751,33 @@ mod tests {
         assert_eq!(
             wait_filters(&mut connection, id, "order").await.unwrap(),
             None
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_zones_are_the_workspaces_and_the_persons_trait_as_written(pool: PgPool) {
+        let ws = workspace(&pool, "zones").await;
+        let person = person(&pool, ws).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let plain = step_zones(&mut connection, ws, person).await.unwrap();
+        sqlx::query("UPDATE workspaces SET timezone = 'Europe/Copenhagen' WHERE id = $1")
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET traits = '{\"timezone\": \"Not/AZone\"}' WHERE id = $1")
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let set = step_zones(&mut connection, ws, person).await.unwrap();
+
+        assert_eq!(plain, ("UTC".to_owned(), None));
+        assert_eq!(
+            set,
+            ("Europe/Copenhagen".to_owned(), Some("Not/AZone".to_owned()))
         );
     }
 

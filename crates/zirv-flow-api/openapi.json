@@ -19872,7 +19872,7 @@
           "enrollments_staying_on_older_versions": {
             "type": "integer",
             "format": "int64",
-            "description": "Active enrollments that stay on the version they entered when the new version goes live\n(ruling 469cfc51: in-flight enrollments are never migrated). It is 0 until the runtime\nwrites enrollments."
+            "description": "Active enrollments that stay on the version they entered when the new version goes live\n(ruling 469cfc51: in-flight enrollments are never migrated): the flow's active, waiting and\nfailed enrollments."
           },
           "issues": {
             "type": "array",

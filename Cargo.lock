@@ -5412,6 +5412,7 @@ dependencies = [
  "uuid",
  "zirv-flow-connectors",
  "zirv-flow-core",
+ "zirv-flow-engine",
  "zirv-flow-segments",
  "zirv-flow-store",
 ]

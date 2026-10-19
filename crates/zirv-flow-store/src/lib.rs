@@ -97,8 +97,8 @@ pub use flows::{
     count_in_flight_enrollments, create_flow, enroll, fail_step, find_enrollment,
     find_event_of_person, find_flow, find_flow_version, flow_source, has_webhook_signing_secret,
     list_flow_versions, list_flows, lock_enrollment, lock_flow, pause_flow, publish_flow,
-    record_steps, register_wait, resume_flow, save_enrollment, settle_wait_step, unhealthy_inputs,
-    update_flow_draft, wait_filters,
+    record_steps, register_wait, resume_flow, save_enrollment, settle_wait_step, step_zones,
+    unhealthy_inputs, update_flow_draft, wait_filters,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

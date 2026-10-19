@@ -29,7 +29,7 @@ pub use runtime::{
     Enrollment, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait, STEP_JOB_KIND,
     StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND, clear_waits,
     count_in_flight_enrollments, fail_step, find_enrollment, lock_enrollment, record_steps,
-    register_wait, save_enrollment, settle_wait_step, wait_filters,
+    register_wait, save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
 pub use state::{FlowAction, FlowState};
 
