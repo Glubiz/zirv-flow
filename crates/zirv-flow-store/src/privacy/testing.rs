@@ -245,6 +245,40 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .unwrap();
     commit(tx).await.unwrap();
 
+    // A flow the person is enrolled in, asleep at an event wait, with its entry.
+    let flow = Uuid::now_v7();
+    let enrollment = Uuid::now_v7();
+    let mut tx = begin(pool).await.unwrap();
+    for statement in [
+        "INSERT INTO flows (id, workspace_id, name, state, draft_graph, draft_settings, \
+            current_version) VALUES ($1, $2, 'Seeded', 'published', '{}', '{}', 1)",
+        "INSERT INTO flow_versions (workspace_id, flow_id, version, graph, settings, trace_id) \
+         VALUES ($2, $1, 1, '{}', '{}', gen_random_uuid())",
+        "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
+            node, occurrence_id, state_version, trace_id, cause_kind, cause_id) \
+         VALUES ($3, $2, $1, 1, $4, 'waiting', 'n', gen_random_uuid(), 1, gen_random_uuid(), \
+            'api', 't')",
+        "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome) \
+         VALUES (gen_random_uuid(), $2, $3, 'n', 'waiting')",
+        "INSERT INTO enrollment_waits (workspace_id, enrollment_id, person_id, event_name, \
+            wake_version, timeout_at) VALUES ($2, $3, $4, 'seen', 1, now())",
+        "INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, last_entered_at) \
+         VALUES ($2, $1, $4, 1, now())",
+        "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'seed:step', 'api', 't', \n            gen_random_uuid())",
+        "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'webhook.call', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:hook', 'api', 't', gen_random_uuid())",
+        "INSERT INTO jobs (id, workspace_id, kind, payload, state, lease_token, lease_expires_at, \n            attempts, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'running', gen_random_uuid(), \n            now() + interval '1 hour', 1, 'seed:running', 'api', 't', gen_random_uuid())",
+    ] {
+        sqlx::query(statement)
+            .bind(flow)
+            .bind(ws.as_uuid())
+            .bind(enrollment)
+            .bind(person)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    commit(tx).await.unwrap();
+
     // A conflict between the bystander and the person.
     let bystander_record: Uuid = sqlx::query_scalar(
         "SELECT id FROM source_records WHERE workspace_id = $1 AND record_key = '2'",

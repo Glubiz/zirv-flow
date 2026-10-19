@@ -31,6 +31,7 @@ use super::schemas::{
     EventPolicy, PublishedSchema, find_published_schema, find_published_schemas, get_event_policy,
 };
 use crate::bounded::begin_snapshot_for;
+use crate::flows::{Arrival, enqueue_arrivals};
 use crate::{NewDecision, NewJob, PgPool, StoreError, append_decision, begin, commit, enqueue};
 
 /// The most rejects one replay request may cover.
@@ -760,6 +761,15 @@ async fn store_replayed(
         },
     )
     .await?;
+    // Only a replay that emits triggers may wake an enrollment waiting for the event.
+    if emit_triggers {
+        let arrival = Arrival {
+            event_id,
+            person_id,
+            name: name.to_owned(),
+        };
+        enqueue_arrivals(connection, workspace, &[arrival]).await?;
+    }
     crate::changes::request_reevaluation(connection, workspace).await?;
     mark_replayed(connection, workspace, reject.id, event_id).await?;
     // A replayed event is an outcome like any other: watched viewers see it.
@@ -1025,6 +1035,42 @@ mod tests {
                 .unwrap();
         assert!(flags.contains(&"replayed".to_owned()));
         assert!(!flags.contains(&"no_triggers".to_owned()));
+    }
+
+    /// Replays a reject for a person with an enrollment waiting for the event and counts the
+    /// `flow.step` jobs that follow.
+    async fn step_jobs_after_a_replay(pool: &PgPool, emit_triggers: bool) -> i64 {
+        use crate::flows::tests_support::{create, publish as publish_flow, waiting_enrollment};
+        let (ws, reject) = rejected(pool).await;
+        fix_the_schema(pool, ws).await;
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM event_dedupe LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let flow = create(pool, ws, "Flow").await;
+        publish_flow(pool, ws, flow.id).await.unwrap();
+        waiting_enrollment(pool, ws, flow.id, person, "order").await;
+
+        replay_rejects(pool, ws, &key(), &[reject], &manual_trace(), emit_triggers)
+            .await
+            .unwrap();
+
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_that_emits_triggers_wakes_a_waiting_enrollment(pool: PgPool) {
+        assert_eq!(step_jobs_after_a_replay(&pool, true).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_flagged_no_triggers_wakes_nobody(pool: PgPool) {
+        assert_eq!(step_jobs_after_a_replay(&pool, false).await, 0);
     }
 
     #[sqlx::test]

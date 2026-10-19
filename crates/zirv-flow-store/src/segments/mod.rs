@@ -37,7 +37,8 @@ pub(crate) use members::{close_on_merge, forget_people};
 #[cfg(any(test, feature = "test-support"))]
 pub use preview::run_segment_ids;
 pub use preview::{
-    SampleRow, SqlParam, SqlQuery, begin_segment_snapshot, run_segment_preview, snapshot_now,
+    SampleRow, SqlParam, SqlQuery, begin_segment_snapshot, run_person_batch, run_segment_preview,
+    snapshot_now,
 };
 pub(crate) use reevaluate::lock_segments_of_people;
 pub use reevaluate::{

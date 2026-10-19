@@ -284,6 +284,13 @@ impl FlowGraph {
     pub fn node(&self, id: &str) -> Option<&FlowNode> {
         self.nodes.iter().find(|node| node.id == id)
     }
+
+    /// The entry node: the first node no edge leads to.
+    pub fn entry(&self) -> Option<&FlowNode> {
+        self.nodes
+            .iter()
+            .find(|node| self.edges.iter().all(|edge| edge.to != node.id))
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +508,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_entry_is_the_first_node_no_edge_leads_to() {
+        let node = |id: &str, kind| FlowNode {
+            id: id.into(),
+            kind,
+        };
+        let graph = FlowGraph {
+            v: GRAPH_VERSION,
+            nodes: vec![
+                node("end", NodeKind::Exit {}),
+                node("wait", NodeKind::WaitDuration { seconds: 5 }),
+            ],
+            edges: vec![Edge {
+                id: "e".into(),
+                from: "wait".into(),
+                port: PORT_NEXT.into(),
+                to: "end".into(),
+            }],
+        };
+        assert_eq!(graph.entry().map(|n| n.id.as_str()), Some("wait"));
+        let empty = FlowGraph {
+            v: GRAPH_VERSION,
+            nodes: vec![],
+            edges: vec![],
+        };
+        assert!(empty.entry().is_none());
     }
 }
