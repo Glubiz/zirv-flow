@@ -159,6 +159,8 @@ pub enum ExitReason {
     GoalCriterion,
     /// An event exit criterion occurred.
     ExitEvent,
+    /// The person left the trigger segment and a `leaves_segment` criterion ends the enrollment.
+    LeftSegment,
 }
 
 /// Why a node failed. An operator can retry or skip it.

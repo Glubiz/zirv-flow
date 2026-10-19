@@ -766,7 +766,15 @@ impl Walker<'_> {
         if self.halted.is_some() {
             return Settled::Nothing;
         }
-        let Some(transition) = settle(settings, &self.state, Matched { goal, exit_event }) else {
+        let Some(transition) = settle(
+            settings,
+            &self.state,
+            Matched {
+                goal,
+                exit_event,
+                left_segment: false,
+            },
+        ) else {
             return Settled::Nothing;
         };
         for effect in &transition.effects {
@@ -775,7 +783,7 @@ impl Walker<'_> {
         }
         let ended = match &transition.outcome {
             Outcome::Exited { reason } => Some(match reason {
-                ExitReason::ExitEvent => "exit_criterion",
+                ExitReason::ExitEvent | ExitReason::LeftSegment => "exit_criterion",
                 ExitReason::Goal | ExitReason::GoalCriterion => "goal_exit",
             }),
             _ => None,

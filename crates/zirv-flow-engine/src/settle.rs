@@ -16,6 +16,9 @@ pub struct Matched {
     pub goal: bool,
     /// The input is one of the event exit criteria.
     pub exit_event: bool,
+    /// The person left the trigger segment by a cause other than a definition change (the
+    /// caller leaves those out).
+    pub left_segment: bool,
 }
 
 /// The transition the settings cause, or `None` when they do nothing: nothing matched, the
@@ -25,7 +28,8 @@ pub struct Matched {
 /// A reached goal records a conversion (an internal [`EffectKind::GoalConversion`] whose step
 /// key is [`settings_goal_key`], one per enrollment: the caller records the conversion once, and
 /// a goal reached again carries the same key) and, with `exit_on_goal` or a `goal_reached` criterion, ends the enrollment as
-/// exited. A matched event criterion ends it too. A goal alone leaves the state as it is
+/// exited. A matched event criterion, or leaving the trigger segment under a `leaves_segment`
+/// criterion, ends it too. A goal alone leaves the state as it is
 /// ([`Outcome::Converted`]). An exit grows `state_version`, so any timer or event for the older
 /// state is stale, and clears an event wait.
 pub fn settle(
@@ -44,6 +48,8 @@ pub fn settle(
         Some(ExitReason::GoalCriterion)
     } else if matched.exit_event && has(|c| matches!(c, ExitCriterion::Event(_))) {
         Some(ExitReason::ExitEvent)
+    } else if matched.left_segment && has(|c| matches!(c, ExitCriterion::LeavesSegment {})) {
+        Some(ExitReason::LeftSegment)
     } else {
         None
     };
@@ -135,10 +141,17 @@ mod tests {
     const GOAL: Matched = Matched {
         goal: true,
         exit_event: false,
+        left_segment: false,
     };
     const EXIT: Matched = Matched {
         goal: false,
         exit_event: true,
+        left_segment: false,
+    };
+    const LEFT: Matched = Matched {
+        goal: false,
+        exit_event: false,
+        left_segment: true,
     };
 
     #[test]
@@ -202,6 +215,25 @@ mod tests {
             }
         );
         assert!(moved.effects.is_empty());
+    }
+
+    #[test]
+    fn leaving_the_segment_ends_the_enrollment_only_under_a_leaves_segment_criterion() {
+        let active = state(Status::Active, None);
+        let with = settings(false, false, vec![ExitCriterion::LeavesSegment {}]);
+        let moved = settle(&with, &active, LEFT).unwrap();
+        assert_eq!(
+            moved.outcome,
+            Outcome::Exited {
+                reason: ExitReason::LeftSegment
+            }
+        );
+        assert!(moved.effects.is_empty());
+        assert_eq!(moved.state.state_version, 5);
+
+        assert!(settle(&settings(false, false, vec![]), &active, LEFT).is_none());
+        let by_event = settings(false, false, vec![ExitCriterion::Event(event("left"))]);
+        assert!(settle(&by_event, &active, LEFT).is_none());
     }
 
     #[test]
