@@ -36,7 +36,8 @@ struct Match {
 /// Enqueues a `flow.step` for every enrollment waiting for one of `arrivals`, with one query for
 /// the whole batch. Property filters are not applied here: the store cannot read the segment AST,
 /// so the step job applies them to the stored event before it moves the enrollment. Returns the
-/// number of jobs enqueued.
+/// number of jobs enqueued. Only waiting enrollments wake: a failed one keeps its waits but takes no
+/// event.
 pub(crate) async fn enqueue_arrivals(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -54,7 +55,7 @@ pub(crate) async fn enqueue_arrivals(
          FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS t(event_id, person_id, name) \
          JOIN enrollment_waits w \
            ON w.workspace_id = $1 AND w.person_id = t.person_id AND w.event_name = t.name \
-         JOIN enrollments e ON e.id = w.enrollment_id",
+         JOIN enrollments e ON e.id = w.enrollment_id AND e.state = 'waiting'",
     )
     .bind(workspace.as_uuid())
     .bind(&events)
@@ -229,5 +230,26 @@ mod tests {
         assert_eq!(found.name, "order");
         assert_eq!(found.properties, json!({"total": 9}));
         assert!(other.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_enrollment_with_a_wait_is_not_woken(pool: PgPool) {
+        let ws = workspace(&pool, "failed").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let (enrollment, person) = waiting(&pool, ws, flow.id, "order").await;
+        sqlx::query("UPDATE enrollments SET state = 'failed', error = 'boom', failed_node = 'draft' WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let enqueued = enqueue_arrivals(&mut connection, ws, &[arrival(person, "order")])
+            .await
+            .unwrap();
+
+        assert_eq!(enqueued, 0);
     }
 }

@@ -149,17 +149,47 @@ const ENROLLMENT_COLUMNS: &str = "e.id, e.flow_id, e.flow_version, e.person_id, 
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
+///
+/// Lock order: the person row first (`FOR NO KEY UPDATE`, the lock an `UPDATE people` takes, so a
+/// trait write in the same step does not upgrade it), then the enrollment. Person erasure locks
+/// the person before it deletes the enrollment and the jobs, so a step and an erasure never wait
+/// for each other in a cycle, and an erasure that waits for a step sees the jobs the step
+/// enqueued. The person is found with an unlocked read and locked in a statement of its own (a
+/// join does not fix the order rows are locked in); the enrollment is then locked and its
+/// person re-checked. An enrollment that is gone, or moved to another person, reads as missing.
 pub async fn lock_enrollment(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<Enrollment>, StoreError> {
+    let person: Option<Uuid> =
+        sqlx::query_scalar("SELECT person_id FROM enrollments WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    let Some(person) = person else {
+        return Ok(None);
+    };
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR NO KEY UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if locked.is_none() {
+        return Ok(None);
+    }
     let row: Option<EnrollmentRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ENROLLMENT_COLUMNS} FROM enrollments e \
-         WHERE e.workspace_id = $1 AND e.id = $2 FOR UPDATE OF e"
+         WHERE e.workspace_id = $1 AND e.id = $2 AND e.person_id = $3 FOR UPDATE OF e"
     )))
     .bind(workspace.as_uuid())
     .bind(id)
+    .bind(person)
     .fetch_optional(connection)
     .await
     .map_err(StoreError::query)?;
@@ -801,5 +831,77 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasure_waits_for_a_running_step_and_deletes_the_job_it_enqueued(pool: PgPool) {
+        let ws = workspace(&pool, "lock-order").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let enrollment = enrollment_row(&pool, ws, flow.id, person).await;
+
+        // A step holds the enrollment (and, by the lock order, the person) and has enqueued its
+        // next job, uncommitted.
+        let mut step = pool.begin().await.unwrap();
+        lock_enrollment(&mut step, ws, enrollment)
+            .await
+            .unwrap()
+            .unwrap();
+        let payload = StepJobPayload {
+            workspace: ws,
+            enrollment,
+            state_version: 1,
+            input: StepJobInput::Wake,
+        };
+        let key = format!("wake:{enrollment}:1");
+        crate::enqueue(&mut *step, &payload.job(&trace(), None, key))
+            .await
+            .unwrap();
+
+        let erasing = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.unwrap();
+                let deleted = crate::delete_person(
+                    &mut tx,
+                    ws,
+                    person,
+                    crate::DeleteReason::Erasure,
+                    &trace(),
+                )
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+                deleted
+            })
+        };
+        // Erasure must be blocked on the step's lock, not finished, before the step commits.
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            assert!(!erasing.is_finished(), "erasure finished without waiting");
+            tokio::task::yield_now().await;
+        }
+        step.commit().await.unwrap();
+        assert!(erasing.await.unwrap());
+
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE kind = 'flow.step' AND payload ->> 'enrollment_id' = $1",
+        )
+        .bind(enrollment.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0, "the job the step enqueued survived the erasure");
     }
 }
