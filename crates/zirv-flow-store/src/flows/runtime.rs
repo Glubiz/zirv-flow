@@ -7,8 +7,8 @@
 //! rule that the first commit wins.
 
 use serde_json::{Value, json};
-use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
+use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
@@ -182,16 +182,28 @@ const LOCK_ROUNDS: usize = 8;
 /// keeps every one of them on the same order.
 ///
 /// The person is found with an unlocked read and locked in a statement of its own (a join does
-/// not fix the order rows are locked in). If a merge or a repoint committed while the lock was
-/// waited for, the group or the enrollment's person is no longer the one read: the enrollment is
-/// read again and the new group locked, rather than the step dropped. An enrollment that is gone
-/// (erased) reads as missing.
+/// not fix the order rows are locked in), inside a nested transaction (a savepoint). If a merge or a repoint committed
+/// while the lock was waited for, the group or the enrollment's person is no longer the one
+/// read: the round is rolled back, which releases its locks, and the enrollment is
+/// read again and the new group locked from nothing, in id order, rather than the step dropped
+/// or the new group (a survivor can have a lower id) locked after the old one. An enrollment
+/// that is gone (erased) reads as missing.
 pub async fn lock_enrollment(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<Enrollment>, StoreError> {
-    for _ in 0..LOCK_ROUNDS {
+    lock_enrollment_within(connection, workspace, id, LOCK_ROUNDS).await
+}
+
+/// [`lock_enrollment`] with its number of rounds given; a retryable race when they run out.
+async fn lock_enrollment_within(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    rounds: usize,
+) -> Result<Option<Enrollment>, StoreError> {
+    for _ in 0..rounds {
         let read: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
             "SELECT e.person_id, p.merged_into FROM enrollments e \
              LEFT JOIN people p ON p.workspace_id = e.workspace_id AND p.id = e.person_id \
@@ -207,37 +219,44 @@ pub async fn lock_enrollment(
         };
         let survivor = merged_into.unwrap_or(person);
         let group = [person, survivor];
+        // A (nested) transaction for the round: rolling it back releases the round's locks.
+        let mut round = connection.begin().await.map_err(StoreError::query)?;
         let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
             "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
              ORDER BY id FOR UPDATE",
         )
         .bind(workspace.as_uuid())
         .bind(&group[..])
-        .fetch_all(&mut *connection)
+        .fetch_all(&mut *round)
         .await
         .map_err(StoreError::query)?;
         let Some((_, now_merged)) = locked.iter().find(|(locked, _)| *locked == person) else {
             // Erased: the enrollment went with the person.
+            round.commit().await.map_err(StoreError::query)?;
             return Ok(None);
         };
-        if now_merged.unwrap_or(person) != survivor {
-            // Merged (or merged again) while the lock was waited for: lock the new group.
-            continue;
-        }
-        let row: Option<EnrollmentRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT {ENROLLMENT_COLUMNS} FROM enrollments e \
-             WHERE e.workspace_id = $1 AND e.id = $2 AND e.person_id = $3 FOR UPDATE OF e"
-        )))
-        .bind(workspace.as_uuid())
-        .bind(id)
-        .bind(person)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+        let row = if now_merged.unwrap_or(person) == survivor {
+            sqlx::query_as::<_, EnrollmentRow>(sqlx::AssertSqlSafe(format!(
+                "SELECT {ENROLLMENT_COLUMNS} FROM enrollments e \
+                 WHERE e.workspace_id = $1 AND e.id = $2 AND e.person_id = $3 FOR UPDATE OF e"
+            )))
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .bind(person)
+            .fetch_optional(&mut *round)
+            .await
+            .map_err(StoreError::query)?
+        } else {
+            // Merged (or merged again) while the lock was waited for.
+            None
+        };
         if let Some(row) = row {
+            round.commit().await.map_err(StoreError::query)?;
             return row.into_enrollment().map(Some);
         }
-        // Moved to another person, or gone: the next round reads which.
+        // The group changed, or the enrollment moved to another person, or it is gone: let go of
+        // this round's locks and read which in the next.
+        round.rollback().await.map_err(StoreError::query)?;
     }
     Err(StoreError::retryable_race())
 }
@@ -1114,5 +1133,138 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    /// Waits until the backend `pid` is blocked by the backend `by`.
+    async fn wait_until_blocked_by(pool: &PgPool, pid: i32, by: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+                .bind(pid)
+                .bind(by)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if blocked {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the step never waited for the lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_lock_that_finds_the_person_merged_releases_its_lock_before_locking_the_survivor(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "out-of-order").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        // The survivor has the lower id, so the group's order is survivor, then person.
+        let survivor = person(&pool, ws).await;
+        let loser = person(&pool, ws).await;
+        assert!(survivor < loser);
+        let enrollment = enrollment_row(&pool, ws, flow.id, loser).await;
+
+        // A merge is under way: it holds the person and points them at the survivor.
+        let mut merge = pool.begin().await.unwrap();
+        let merge_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(loser)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        // Another transaction holds the survivor (a strength that lets the merge's foreign key in).
+        let mut holder = pool.begin().await.unwrap();
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(survivor)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let step_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let step = tokio::spawn(async move {
+            let found = lock_enrollment(&mut tx, ws, enrollment).await.unwrap();
+            tx.commit().await.unwrap();
+            found
+        });
+        // The step waits for the person first, then, the merge committed, for the survivor.
+        wait_until_blocked_by(&pool, step_pid, merge_pid).await;
+        merge.commit().await.unwrap();
+        wait_until_blocked_by(&pool, step_pid, holder_pid).await;
+
+        // While it waits for the survivor, the step holds nothing of the person's.
+        let free = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(loser)
+            .fetch_one(&pool)
+            .await;
+        assert!(
+            free.is_ok(),
+            "the step kept the person's lock while it waited for a lower id: {free:?}"
+        );
+        holder.commit().await.unwrap();
+        let found = step.await.unwrap().expect("the step is not dropped");
+        assert_eq!((found.id, found.person_id), (enrollment, loser));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_lock_whose_rounds_run_out_gives_the_step_back_as_a_retryable_race(pool: PgPool) {
+        let ws = workspace(&pool, "rounds").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let survivor = person(&pool, ws).await;
+        let loser = person(&pool, ws).await;
+        let enrollment = enrollment_row(&pool, ws, flow.id, loser).await;
+
+        let mut merge = pool.begin().await.unwrap();
+        let merge_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(loser)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let step_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        // One round only: the merge that lands while the step waits uses it up.
+        let step =
+            tokio::spawn(async move { lock_enrollment_within(&mut tx, ws, enrollment, 1).await });
+        wait_until_blocked_by(&pool, step_pid, merge_pid).await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        merge.commit().await.unwrap();
+
+        let error = step.await.unwrap().expect_err("the rounds ran out");
+        assert!(error.is_retryable());
     }
 }
