@@ -4783,7 +4783,8 @@ export interface components {
             node: string;
             /**
              * @description `passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,
-             *     `failed` or `unable_to_evaluate`.
+             *     `failed`, `unable_to_evaluate`, or for a step of type `settings.goal` / `settings.exit`
+             *     (the flow settings, not a node) `converted` / `exited`.
              */
             outcome: string;
             /**
@@ -5369,7 +5370,9 @@ export interface components {
             kind: string;
             /**
              * @description `advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match
-             *     a wait), `event_ignored` (the filters did not match) or `skipped` (the walk had stopped).
+             *     a wait), `event_ignored` (the filters did not match), `goal_reached` (the flow goal, recorded as a
+             *     conversion; the enrollment goes on), `goal_exit` or `exit_criterion` (the settings ended the
+             *     enrollment as exited) or `skipped` (the walk had stopped).
              */
             outcome: string;
         };
@@ -5760,6 +5763,13 @@ export interface components {
             identifier_kinds: string[];
             /** @default [] */
             lists: string[];
+            /**
+             * Format: uuid
+             * @description The person the snapshot was read from. A real-person walk fills it in, so the webhook
+             *     envelope of a replay names the same person.
+             * @default null
+             */
+            person_id: string | null;
             /**
              * @description The segments the person is an open member of.
              * @default []
@@ -6351,7 +6361,7 @@ export interface components {
             /** @description The event name a `wait.until_event` waits for. */
             awaiting?: string | null;
             node: string;
-            /** @description `open`, `timer`, `event` or `timeout`. */
+            /** @description `open`, `timer`, `event`, `timeout`, or `exit` (the flow settings ended the enrollment). */
             resolved: string;
             /** Format: date-time */
             started_at: string;

@@ -21130,7 +21130,7 @@
           },
           "outcome": {
             "type": "string",
-            "description": "`passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,\n`failed` or `unable_to_evaluate`."
+            "description": "`passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,\n`failed`, `unable_to_evaluate`, or for a step of type `settings.goal` / `settings.exit`\n(the flow settings, not a node) `converted` / `exited`."
           },
           "port": {
             "type": [
@@ -22631,7 +22631,7 @@
           },
           "outcome": {
             "type": "string",
-            "description": "`advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match\na wait), `event_ignored` (the filters did not match) or `skipped` (the walk had stopped)."
+            "description": "`advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match\na wait), `event_ignored` (the filters did not match), `goal_reached` (the flow goal, recorded as a\nconversion; the enrollment goes on), `goal_exit` or `exit_criterion` (the settings ended the\nenrollment as exited) or `skipped` (the walk had stopped)."
           }
         }
       },
@@ -23848,6 +23848,15 @@
               "format": "uuid"
             },
             "default": []
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person the snapshot was read from. A real-person walk fills it in, so the webhook\nenvelope of a replay names the same person.",
+            "default": null
           },
           "segments": {
             "type": "array",
@@ -25532,7 +25541,7 @@
           },
           "resolved": {
             "type": "string",
-            "description": "`open`, `timer`, `event` or `timeout`."
+            "description": "`open`, `timer`, `event`, `timeout`, or `exit` (the flow settings ended the enrollment)."
           },
           "started_at": {
             "type": "string",
