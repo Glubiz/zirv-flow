@@ -47,7 +47,7 @@ pub struct AppState {
     pub(crate) explorer: ExplorerLimits,
     /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
     pub(crate) segment_preview_timeout: Duration,
-    /// The clock segment paths read: the database's, or a test's.
+    /// The clock segment paths and the webhook signature window read; a test fixes it.
     pub(crate) clock: Clock,
     /// The shared listener and the viewers of the event debugger.
     pub(crate) debugger: DebuggerHub,
