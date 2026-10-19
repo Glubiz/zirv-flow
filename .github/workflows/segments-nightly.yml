@@ -93,7 +93,7 @@ jobs:
       # `cargo test`, not nextest: one test runs all the cases, and nextest's slow-test
       # timeout would end it.
       - name: Evaluator Properties
-        run: cargo test -p zirv-flow-segments --lib generate:: -- --nocapture
+        run: cargo test -p zirv-flow-segments --lib 'generate::' -- --nocapture
 
       - name: Compare The SQL With The Evaluator
         run: >-

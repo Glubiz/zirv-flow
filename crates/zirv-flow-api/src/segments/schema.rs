@@ -17,7 +17,7 @@ pub(crate) const NODE: &str = "SegmentNode";
 pub(crate) const OP: &str = "SegmentOp";
 pub(crate) const AGG_FN: &str = "SegmentAggFn";
 pub(crate) const ISSUE: &str = "SegmentIssue";
-const PROPERTY_FILTER: &str = "SegmentPropertyFilter";
+pub(crate) const PROPERTY_FILTER: &str = "SegmentPropertyFilter";
 const AGGREGATE: &str = "SegmentAggregate";
 const WINDOW: &str = "SegmentWindow";
 

@@ -9,6 +9,7 @@ use crate::events::{
     IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
     SchemaVersionBody, UpdateEventSchemaRequest,
 };
+use crate::flows::{self, FlowSchemas};
 use crate::health::{self, StatusBody};
 use crate::imports;
 use crate::ingest::{
@@ -21,7 +22,9 @@ use crate::members::{self, MemberBody, RoleBody, SetRoleRequest};
 use crate::oidc;
 use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
 use crate::privacy::{self, erasures, exports};
-use crate::problem::{ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem};
+use crate::problem::{
+    FlowIssueProblem, ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem,
+};
 use crate::segments::{self, SegmentSchemas};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
@@ -30,7 +33,7 @@ use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
 use crate::webhooks;
-use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
+use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, WorkspaceBody};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -56,6 +59,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         workspaces::list,
         workspaces::create,
         workspaces::get,
+        workspaces::update,
         members::list,
         members::set,
         members::remove,
@@ -117,6 +121,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         lists::import::import,
         lists::person::lists,
         lists::person::history,
+        flows::crud::list,
+        flows::crud::create,
+        flows::crud::get,
+        flows::crud::update,
+        flows::crud::validate,
+        flows::crud::versions,
+        flows::crud::version,
+        flows::publish::publish,
+        flows::publish::pause,
+        flows::publish::resume,
+        flows::publish::archive,
         segments::crud::list,
         segments::crud::create,
         segments::crud::get,
@@ -210,6 +225,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         UserBody,
         CreateUserRequest,
         CreateWorkspaceRequest,
+        UpdateWorkspaceRequest,
         WorkspaceBody,
         MemberBody,
         SetRoleRequest,
@@ -315,6 +331,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         segments::explain::ExplainNodeBody,
         segments::explain::ObservedBody,
         segments::explain::OutcomeBody,
+        flows::crud::FlowBody,
+        flows::crud::FlowDetailBody,
+        flows::crud::FlowVersionBody,
+        flows::crud::CreateFlowRequest,
+        flows::crud::UpdateFlowRequest,
+        flows::crud::ValidationBody,
+        flows::publish::ImpactBody,
+        flows::publish::PublishedBody,
+        flows::publish::AudienceBody,
+        flows::publish::UnhealthyInputBody,
+        FlowIssueProblem,
         segments::crud::SegmentBody,
         segments::crud::SegmentVersionBody,
         segments::crud::SegmentDetailBody,
@@ -434,7 +461,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, WorkspaceBody};
         exports::ExportsBody,
         privacy::settings::PrivacySettingsBody,
     )),
-    modifiers(&SecuritySchemes, &SegmentSchemas)
+    modifiers(&SecuritySchemes, &SegmentSchemas, &FlowSchemas)
 )]
 struct ApiDoc;
 

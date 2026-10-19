@@ -11,6 +11,7 @@ mod consent;
 mod contacts;
 mod decisions;
 mod events;
+mod flows;
 mod identities;
 mod imports;
 mod ingest;
@@ -86,6 +87,12 @@ pub use events::{
     list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
     publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
     set_event_policy, touch_debugger_watch, update_event_schema,
+};
+pub use flows::{
+    Flow, FlowAction, FlowError, FlowPatch, FlowState, FlowVersion, LockedFlow, NewFlow,
+    UnhealthyInput, archive_flow, create_flow, find_flow, find_flow_version,
+    has_webhook_signing_secret, list_flow_versions, list_flows, lock_flow, pause_flow,
+    publish_flow, resume_flow, unhealthy_inputs, update_flow_draft,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -209,7 +216,7 @@ pub use webhooks::{
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,
     list_members, list_workspaces_for_user, membership_role, orphan_policy, remove_membership,
-    set_membership, set_orphan_policy,
+    set_membership, set_orphan_policy, set_workspace_timezone,
 };
 /// The operator master key, its derived keys and the sealing of secrets, re-exported so the
 /// binary reaches them through the store.
