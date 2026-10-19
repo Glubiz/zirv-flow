@@ -23,8 +23,8 @@ use zirv_flow_segments::{
 use zirv_flow_store::{
     AudienceSource, ENROLL_JOB_KIND, EnrollEntries, EnrollEntry, EnrollJobPayload, EnrollOutcome,
     EnrollWork, FlowState, MAX_ENROLL_PEOPLE, TriggerEvent, TriggerKind, audience_page,
-    enroll_entries, find_events, find_flow, find_flow_version, occurrence_of, resolve_survivors,
-    segment_catalog,
+    enroll_entries, enroll_page_key, find_events, find_flow, find_flow_version, occurrence_of,
+    resolve_survivors, segment_catalog,
 };
 
 use super::segment_refresh::catalog_of;
@@ -245,7 +245,7 @@ async fn run_audience(
                 entered_by,
             },
         };
-        let key = format!("flow.enroll:page:{}:{occurrence}:{last}", job.flow);
+        let key = enroll_page_key(job.flow, occurrence, Some(*last));
         let trace = ctx.trace().clone();
         ctx.enqueue(&next.job(&trace, key)).await?;
     }

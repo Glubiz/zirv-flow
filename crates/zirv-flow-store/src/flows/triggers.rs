@@ -227,6 +227,16 @@ impl EnrollJobPayload {
     }
 }
 
+/// The unique key of the audience page that starts after `after` (the first page with `None`).
+/// The job kind that queues a page and the erasure that rewrites a cursor both build the key
+/// here, so a key never names an id the payload does not.
+pub fn enroll_page_key(flow: Uuid, occurrence: Uuid, after: Option<Uuid>) -> String {
+    match after {
+        Some(after) => format!("flow.enroll:page:{flow}:{occurrence}:{after}"),
+        None => format!("flow.enroll:page:{flow}:{occurrence}:start"),
+    }
+}
+
 /// An occurrence id that depends only on `scope`: the same text always gives the same id, so a
 /// slot or a request key that arrives twice is one occurrence.
 pub fn occurrence_of(scope: &str) -> Uuid {
