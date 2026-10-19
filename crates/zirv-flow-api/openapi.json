@@ -5412,6 +5412,118 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/flows/{id}/test": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Walks one person through a flow on a virtual clock, with nothing executed and nothing\nwritten.",
+        "description": "The graph is the saved draft, or `version`, or an inline `graph` (a graph that fails the\nstructural publish checks is 422 `flow_invalid`). The person is `person_id` (read only, newest\nevents first up to the explain cap; needs the right to see personal values) or a `snapshot`,\nsynthetic or the one a previous response returned. The walk starts at `start_at` (the database\ntime by default) and applies the `script`: `{\"advance_to\": T}` moves the clock and fires\nevery due timer, `{\"inject\": {name, properties, at}}` delivers an event, which satisfies the\nwait it names when its filters match and is added to the snapshot's events either way.\nBranch conditions are decided by the reference evaluator over the snapshot with the walk's\nown internal effects overlaid. A condition on an event name the snapshot capped stops the\nwalk with `halted.reason = unable_to_evaluate`, naming the condition and the cap, and the\npartial path is returned. Webhook effects show the envelope that would be sent, never a\nsecret or a signature. The response is a pure function of the request and the data read, so\nre-posting `snapshot` with the same `start_at`, `enrollment_id` and `script` gives the same\nresponse.",
+        "operationId": "test_flow",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The walk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, a missing CSRF token, or a real person for a caller who may not see personal values (`flow_test_values_forbidden`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow, version or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A request that is not one person and one graph (`flow_test_request_invalid`), a graph that is not a flow document (`flow_malformed`) or fails the structural checks (`flow_invalid`), or a bound: `flow_test_script_too_long`, `flow_test_script_invalid`, `flow_test_step_limit`, `flow_test_snapshot_too_large`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Reading the person ran past its time limit (`flow_test_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/flows/{id}/validate": {
       "post": {
         "tags": [
@@ -16036,6 +16148,31 @@
         },
         "additionalProperties": false
       },
+      "ConditionBody": {
+        "type": "object",
+        "description": "How one condition of a branch came out.",
+        "required": [
+          "index",
+          "outcome",
+          "observed"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "observed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservedBody"
+            }
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`pass`, `fail`, `unknown`, or `not_evaluated` for a condition after the first that passed."
+          }
+        }
+      },
       "ConflictBody": {
         "type": "object",
         "required": [
@@ -17569,6 +17706,45 @@
           }
         }
       },
+      "EffectBody": {
+        "type": "object",
+        "description": "A captured effect. Nothing is executed.",
+        "required": [
+          "node",
+          "at",
+          "step_key",
+          "kind",
+          "detail"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "type": "object",
+            "description": "What the node asked for. A webhook shows the `url` and the `envelope` that would be sent\n(never the signing secret or a signature)."
+          },
+          "effect_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key an external effect carries to its destination; null for internal ones."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`update_trait`, `list`, `goal` or `webhook`."
+          },
+          "node": {
+            "type": "string"
+          },
+          "step_key": {
+            "type": "string",
+            "description": "The step idempotency key, `{enrollment_id}:{node_id}`."
+          }
+        }
+      },
       "ErasureBody": {
         "type": "object",
         "required": [
@@ -18392,6 +18568,49 @@
           "secret": {
             "type": "boolean",
             "description": "True for a credential field: render a password input and never prefill it."
+          }
+        }
+      },
+      "FinalStateBody": {
+        "type": "object",
+        "description": "Where the enrollment ended up.",
+        "required": [
+          "status",
+          "node",
+          "state_version",
+          "clock"
+        ],
+        "properties": {
+          "awaiting": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clock": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The virtual clock when the walk ended."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the enrollment is at or stopped at."
+          },
+          "state_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "`active`, `awaiting_conditions`, `waiting`, `completed`, `exited` or `failed`."
+          },
+          "wake_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         }
       },
@@ -19606,6 +19825,60 @@
           }
         }
       },
+      "HaltBody": {
+        "type": "object",
+        "description": "Why the walk stopped before the graph or the script ended.",
+        "required": [
+          "reason",
+          "capped_events",
+          "message"
+        ],
+        "properties": {
+          "cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The most events one load keeps (`unable_to_evaluate` only).",
+            "minimum": 0
+          },
+          "capped_events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The capped event names the condition reads."
+          },
+          "condition": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The index of the condition in the branch.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pointer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The JSON pointer inside the condition."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`unable_to_evaluate` (a condition reads an event name the snapshot capped),\n`invalid_condition` (a condition or filter that does not validate against the\nworkspace), `step_failed` (an effect could not apply) or `engine_error`."
+          }
+        }
+      },
       "HistoryBody": {
         "type": "object",
         "required": [
@@ -20116,6 +20389,26 @@
             "description": "Newest first."
           }
         }
+      },
+      "InjectBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
       },
       "InvalidRowBody": {
         "type": "object",
@@ -20805,6 +21098,85 @@
           "partition": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "PathStepBody": {
+        "type": "object",
+        "description": "A node the walk ran.",
+        "required": [
+          "node",
+          "type",
+          "at",
+          "outcome"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "branch": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ConditionBody"
+            },
+            "description": "The branch's conditions, in order."
+          },
+          "node": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`passed`, `waiting` (asleep at the end of the walk), `branched`, `completed`, `exited`,\n`failed` or `unable_to_evaluate`."
+          },
+          "port": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The output port the walk left through; null when it stopped here or the port is not\nunambiguous from the edges."
+          },
+          "type": {
+            "type": "string",
+            "description": "The node type, such as `wait.duration`."
+          },
+          "woke_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a wait node woke."
+          },
+          "woke_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`timer`, `event` or `timeout`."
+          }
+        }
+      },
+      "PersonAfterBody": {
+        "type": "object",
+        "description": "The person's traits and lists after the walk's internal effects.",
+        "required": [
+          "traits",
+          "lists"
+        ],
+        "properties": {
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "traits": {
+            "type": "object"
           }
         }
       },
@@ -22235,6 +22607,60 @@
           }
         }
       },
+      "ScriptResultBody": {
+        "type": "object",
+        "description": "What a script step did.",
+        "required": [
+          "index",
+          "kind",
+          "at",
+          "outcome"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "`advance_to` or `inject`."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`advanced`, `event_delivered` (it satisfied the wait), `event_recorded` (it did not match\na wait), `event_ignored` (the filters did not match) or `skipped` (the walk had stopped)."
+          }
+        }
+      },
+      "ScriptStepBody": {
+        "type": "object",
+        "description": "One step of the script: exactly one of `advance_to` and `inject`.",
+        "properties": {
+          "advance_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Move the virtual clock to this time, firing every timer due by then."
+          },
+          "inject": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InjectBody",
+                "description": "Deliver an event at a time."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "SearchBody": {
         "type": "object",
         "required": [
@@ -23373,6 +23799,118 @@
           }
         }
       },
+      "SnapshotBody": {
+        "type": "object",
+        "description": "What the reference evaluator reads about one person. `capped_events` and\n`events_complete_after` carry the caps of a real load, and a synthetic snapshot can set them\nto see a walk stop with `unable_to_evaluate`.",
+        "properties": {
+          "capped_events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Event names whose events were cut off when the snapshot was loaded.",
+            "default": []
+          },
+          "consent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotConsentBody"
+            },
+            "default": []
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotEventBody"
+            },
+            "default": []
+          },
+          "events_complete_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "default": null
+          },
+          "identifier_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`email`, `phone`, `anonymous_id` or `external:<namespace>`; never values.",
+            "default": []
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "default": []
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The segments the person is an open member of.",
+            "default": []
+          },
+          "traits": {
+            "type": "object",
+            "description": "Stored trait values by key."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SnapshotConsentBody": {
+        "type": "object",
+        "required": [
+          "channel",
+          "status"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "`email`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`subscribed`, `unsubscribed`, `pending_confirmation` or `unknown`."
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The topic id; null is the channel itself."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SnapshotEventBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "occurred_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
       "SourceBody": {
         "type": "object",
         "required": [
@@ -23903,6 +24441,66 @@
             "description": "Whether the connection works."
           }
         }
+      },
+      "TestRequest": {
+        "type": "object",
+        "description": "The request of `POST .../flows/{id}/test`.\n\nThe graph is the flow's draft unless `version` or `graph` is given (not both). The person is\n`person_id` or `snapshot` (exactly one).",
+        "properties": {
+          "enrollment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The enrollment id the walk runs under. It fixes `split.random` and the effect keys; the\ndefault is derived from the flow and the person, so a call is repeatable."
+          },
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A real person, whose bounded snapshot is read (read only) and returned. Needs the right\nto see personal values (workspace admin, owner or an `admin` key), because the snapshot\nholds them."
+          },
+          "script": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptStepBody"
+            },
+            "description": "Steps applied in order after the first run; at most 50, times never going back."
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotBody",
+                "description": "A synthetic person, or the snapshot a previous call returned."
+              }
+            ]
+          },
+          "start_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The virtual time the walk starts at; the database's time when omitted. Microsecond\nprecision."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Walk this published version instead of the draft."
+          }
+        },
+        "additionalProperties": false
       },
       "TimelineBody": {
         "type": "object",
@@ -24908,6 +25506,72 @@
           "version": {
             "type": "string",
             "description": "The running zirv-flow version."
+          }
+        }
+      },
+      "WaitBody": {
+        "type": "object",
+        "description": "A wait the walk went into.",
+        "required": [
+          "node",
+          "type",
+          "started_at",
+          "wake_at",
+          "resolved"
+        ],
+        "properties": {
+          "awaiting": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The event name a `wait.until_event` waits for."
+          },
+          "node": {
+            "type": "string"
+          },
+          "resolved": {
+            "type": "string",
+            "description": "`open`, `timer`, `event` or `timeout`."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "type": {
+            "type": "string"
+          },
+          "wake_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The time the timer fires (the timeout, for `wait.until_event`)."
+          }
+        }
+      },
+      "WakeBody": {
+        "type": "object",
+        "description": "A timer the engine asked for.",
+        "required": [
+          "node",
+          "at",
+          "key",
+          "fired"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fired": {
+            "type": "boolean",
+            "description": "Whether the walk reached `at` and fired it."
+          },
+          "key": {
+            "type": "string",
+            "description": "The unique key of the `flow.step` job the runtime would enqueue."
+          },
+          "node": {
+            "type": "string"
           }
         }
       },
