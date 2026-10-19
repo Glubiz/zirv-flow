@@ -17,12 +17,13 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use zirv_flow_core::flow::SIGNING_GRACE_SECONDS;
 use zirv_flow_core::signature::generate_secret;
-use zirv_flow_core::{SecretBytes, SecretPurpose, WorkspaceId};
+use zirv_flow_core::{SecretPurpose, WorkspaceId};
 
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
+use crate::webhooks::ops::plaintext;
 
 /// Whether the workspace has a signing secret, without the secret.
 #[derive(Serialize, ToSchema)]
@@ -93,7 +94,7 @@ async fn issue(
         keyring,
         workspace,
         SecretPurpose::WebhookSigning,
-        &SecretBytes::new(secret.expose().as_bytes().to_vec()),
+        &plaintext(&secret),
     )
     .await?;
     let previous_valid_until = if rotate {

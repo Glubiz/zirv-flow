@@ -219,7 +219,7 @@ fn keyring(state: &AppState) -> Result<&std::sync::Arc<zirv_flow_core::Keyring>,
     })
 }
 
-fn plaintext(secret: &SecretString) -> SecretBytes {
+pub(crate) fn plaintext(secret: &SecretString) -> SecretBytes {
     SecretBytes::new(secret.expose().as_bytes().to_vec())
 }
 

@@ -7,12 +7,9 @@ use serde_json::Value;
 use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::{Freshness, WorkspaceId};
+use zirv_flow_core::{Freshness, SecretPurpose, WorkspaceId};
 
 use crate::{StoreError, segment_data_age, stream_freshness};
-
-/// The stored purpose of the per-workspace secret a webhook action signs with.
-const WEBHOOK_SIGNING_PURPOSE: &str = "webhook_signing";
 
 /// Whether the workspace has a webhook signing secret. The secret itself is created and rotated
 /// by the webhook action's own endpoint; a publish only needs to know it exists.
@@ -24,7 +21,7 @@ pub async fn has_webhook_signing_secret(
         "SELECT EXISTS (SELECT 1 FROM encrypted_secrets WHERE workspace_id = $1 AND purpose = $2)",
     )
     .bind(workspace.as_uuid())
-    .bind(WEBHOOK_SIGNING_PURPOSE)
+    .bind(SecretPurpose::WebhookSigning.as_str())
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)
