@@ -1238,6 +1238,91 @@ mod tests {
         );
     }
 
+    /// The (enrollment, person) pairs of a flow in keyset order.
+    async fn in_cursor_order(pool: &PgPool, flow: Uuid) -> Vec<(Uuid, Uuid)> {
+        sqlx::query_as(
+            "SELECT id, person_id FROM enrollments WHERE flow_id = $1 ORDER BY person_id, id",
+        )
+        .bind(flow)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn state_of(pool: &PgPool, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT state FROM enrollments WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_exit_batch_touches_exactly_the_people_after_its_cursor(pool: PgPool) {
+        let ws = workspace(&pool, "exit-cursor").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        sleepers(&pool, ws, flow.id, 5).await;
+        let ordered = in_cursor_order(&pool, flow.id).await;
+        let action = trace();
+        let batch = ExitBatch {
+            workspace: ws,
+            flow: flow.id,
+            version: None,
+            reason: "manual",
+            trace: &action,
+            after: Some(ordered[2].1),
+        };
+        let mut connection = pool.acquire().await.unwrap();
+
+        let done = exit_batch(&mut connection, &batch, OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!((done.read, done.changed), (2, 2));
+        assert_eq!(done.last, Some(ordered[4].1));
+        for (index, (id, _)) in ordered.iter().enumerate() {
+            let expected = if index > 2 { "exited" } else { "waiting" };
+            assert_eq!(state_of(&pool, *id).await, expected, "enrollment {index}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_batch_touches_exactly_the_people_after_its_cursor(pool: PgPool) {
+        let ws = workspace(&pool, "resume-cursor").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let ids = sleepers(&pool, ws, flow.id, 5).await;
+        let mut connection = pool.acquire().await.unwrap();
+        for id in &ids {
+            hold_enrollment(&mut connection, ws, *id, &StepJobInput::Wake)
+                .await
+                .unwrap();
+        }
+        let ordered = in_cursor_order(&pool, flow.id).await;
+        let action = trace();
+
+        let done = resume_batch(
+            &mut connection,
+            ws,
+            flow.id,
+            &action,
+            Some(ordered[2].1),
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((done.read, done.changed), (2, 2));
+        assert_eq!(done.last, Some(ordered[4].1));
+        for (index, (id, _)) in ordered.iter().enumerate() {
+            let expected = if index > 2 { "waiting" } else { "held" };
+            assert_eq!(state_of(&pool, *id).await, expected, "enrollment {index}");
+        }
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_resume_runs_held_enrollments_in_batches_with_a_job_and_a_decision_each(
