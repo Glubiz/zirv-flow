@@ -10,7 +10,7 @@
 //! one enrollment, done in the caller's transaction.
 //!
 //! Lock order, as everywhere in the flow runtime: the person row before the enrollment, and the
-//! people of a batch in id order (`FOR NO KEY UPDATE`, the lock [`super::lock_enrollment`] takes).
+//! people of a batch in id order (`FOR UPDATE`, the lock [`super::lock_enrollment`] takes).
 
 use std::fmt;
 
@@ -146,7 +146,7 @@ async fn lock_people(
     let people: Vec<Uuid> = found.iter().map(|(_, person)| *person).collect();
     sqlx::query(
         "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id \
-         FOR NO KEY UPDATE",
+         FOR UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(&people)
@@ -248,6 +248,58 @@ pub async fn exit_batch(
         changed: ended.len(),
         last,
     })
+}
+
+/// Exits every in-flight enrollment (active, waiting, held and failed) of `people` with
+/// `reason`, in the caller's transaction, which holds those people (a merge locks its group). Each
+/// is set `exited` with its `state_version` grown, so a timer or an event queued for the older
+/// state finds it stale; its waits are removed and a `flow.enrollment` decision under `trace`
+/// records it. Returns how many it ended. Lock order: the people are the caller's, so this takes
+/// only the enrollments, the last of the order.
+pub(crate) async fn exit_people(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+    reason: &'static str,
+    trace: &TraceContext,
+) -> Result<usize, StoreError> {
+    let ended: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
+             state_version = state_version + 1, wake_at = NULL, error = NULL, \
+             failed_node = NULL, failure_placed = false, resume_input = NULL, ended_at = now(), \
+             updated_at = now() \
+         WHERE workspace_id = $1 AND person_id = ANY($2) AND state IN {IN_FLIGHT} \
+         RETURNING id, person_id, flow_id"
+    )))
+    .bind(workspace.as_uuid())
+    .bind(people)
+    .bind(reason)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if ended.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = ended.iter().map(|(id, _, _)| *id).collect();
+    sqlx::query("DELETE FROM enrollment_waits WHERE enrollment_id = ANY($1)")
+        .bind(&ids)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    let decisions: Vec<NewDecision> = ended
+        .iter()
+        .map(|(id, person, flow)| NewDecision {
+            workspace_id: workspace,
+            trace: trace.clone(),
+            action: "flow.enrollment",
+            outcome: "exited",
+            reason: Some(reason),
+            subject_ids: vec![("flow", *flow), ("enrollment", *id), ("person", *person)],
+            job: None,
+        })
+        .collect();
+    append_decisions(connection, &decisions).await?;
+    Ok(ended.len())
 }
 
 #[derive(FromRow)]

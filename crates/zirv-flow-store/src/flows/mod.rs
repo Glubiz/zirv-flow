@@ -19,7 +19,7 @@ mod triggers;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
 pub use arrivals::{StoredEvent, find_event_of_person};
-pub(crate) use control::enqueue_segment_settles;
+pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use control::{
     ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
