@@ -150,9 +150,8 @@ fn is_stale(enrollment: &Enrollment, job: &StepJobPayload) -> bool {
 /// batch has not reached the enrollment. The enrollment goes back from `held` to the state it was
 /// held from and the job runs its own input (the caller checked the `state_version`); the batch
 /// then finds it no longer held. The release records the `resumed` decision the batch would have.
-/// `None` leaves it held for the batch: the job is not for the state
-/// the enrollment was held from, or it is a timer and an event is stored (a timer never replaces
-/// an event).
+/// `None` leaves it held for the batch: the job is not for the state the enrollment was held
+/// from, or it is a timer and an event is stored (a timer never replaces an event).
 async fn release(
     conn: &mut PgConnection,
     job: &StepJobPayload,

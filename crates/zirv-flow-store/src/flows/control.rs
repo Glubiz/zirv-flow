@@ -175,7 +175,9 @@ pub struct ExitBatch<'a> {
 /// the caller's transaction: the people are locked in id order, then each enrollment is set
 /// `exited` with its reason, its waits are removed and its `state_version` grows, so a timer or an
 /// event for the older state finds it stale. Each gets a `flow.enrollment` decision. Returns how
-/// many it looked at and how many it ended; call it again while it reads a full batch.
+/// many it looked at and how many it ended; call it again while it reads a full batch. A bulk exit
+/// is point-in-time: it ends the in-flight enrollments it meets, so a delayed `flow.enroll` job
+/// that inserts one for a person the cursor has passed is not exited.
 pub async fn exit_batch(
     connection: &mut PgConnection,
     batch: &ExitBatch<'_>,
