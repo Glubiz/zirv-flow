@@ -361,11 +361,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_post_sends_its_headers_and_exact_body_and_is_checked_like_a_get() {
+        /// The test header and the body a request carried.
+        type Seen = (Option<String>, Vec<u8>);
+
         use axum::http::HeaderMap;
         use axum::routing::post;
         use std::sync::Mutex;
 
-        let seen: Arc<Mutex<Option<(Option<String>, Vec<u8>)>>> = Arc::default();
+        let seen: Arc<Mutex<Option<Seen>>> = Arc::default();
         let sink = Arc::clone(&seen);
         let router = Router::new().route(
             "/echo",
