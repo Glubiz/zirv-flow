@@ -1039,10 +1039,17 @@ mod tests {
 
         // Connection B publishes after the refresh stamped the new member.
         env.clock.advance(time::Duration::seconds(5));
+        let (backend_tx, backend_rx) = tokio::sync::oneshot::channel::<i32>();
         let publisher = {
             let (pool, clock, ws) = (env.pool.clone(), env.clock(), env.ws);
             tokio::spawn(async move {
                 let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                // The backend that publishes, so the test can ask whether it is the one waiting.
+                let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                backend_tx.send(backend).unwrap();
                 let locked = zirv_flow_store::lock_flow(&mut tx, ws, flow).await.unwrap();
                 let trace = TraceContext::root(Cause::api("publish"));
                 zirv_flow_store::publish_flow(&mut tx, &clock, ws, &locked, None, &trace)
@@ -1051,15 +1058,20 @@ mod tests {
                 zirv_flow_store::commit(tx).await.unwrap();
             })
         };
+        let backend = backend_rx.await.expect("the publisher reports its backend");
         let deadline = Instant::now() + Duration::from_secs(30);
         let finished = loop {
             if publisher.is_finished() {
                 break true;
             }
-            let waiting = env
-                .count("SELECT count(*) FROM pg_locks WHERE NOT granted")
-                .await;
-            if waiting > 0 {
+            // The publisher's own backend, not any waiter on the server: other tests lock in
+            // databases of their own at the same time.
+            let blockers: i32 = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1))")
+                .bind(backend)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            if blockers > 0 {
                 break false;
             }
             assert!(
