@@ -12,12 +12,18 @@
 //! - **A 408, a 429, a 5xx, a timeout or a transport error is retried** with the worker's
 //!   backoff, or after the `Retry-After` the destination named when that is longer. The job's
 //!   last attempt records a failure instead of dying with the enrollment never told.
-//! - **Anything else fails at once:** any other 4xx (and any unexpected 1xx or 3xx), a destination
+//! - **Anything else fails at once:** any other 4xx (and any unexpected 1xx or 3xx; a redirect is
+//!   never followed), a destination
 //!   the egress policy refuses, and a workspace with no signing secret. Retrying cannot help.
 //!
 //! Succeeding and failing both end the job as done and write an outcome event
 //! (`webhook.succeeded` or `webhook.failed`) with a decision, so a flow can wait on either. The
 //! response body is never read, logged or stored; only the status code is.
+//!
+//! The person is read without a lock before the call and locked `FOR KEY SHARE` only for the
+//! outcome write, which is skipped when the enrollment was erased in between. A signing secret the
+//! worker cannot open is retried like a transport error and recorded as `webhook.failed`
+//! (`signing_secret_unavailable`) on the last attempt.
 //!
 //! The call is at-least-once: a lease lost between the response and the commit sends it again
 //! with the same idempotency key, which is the receiver's cue to treat it as a repeat.
@@ -34,9 +40,10 @@ use zirv_flow_core::flow::{
     Envelope, IDEMPOTENCY_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature_value,
 };
 use zirv_flow_core::{Keyring, SecretPurpose, TraceId, WorkspaceId};
+use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
-    SigningKey, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookResult, WebhookSubject, live_signing_keys,
-    lock_webhook_subject, record_webhook_outcome, secrets,
+    SigningKey, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
+    live_signing_keys, lock_webhook_person, read_webhook_subject, record_webhook_outcome, secrets,
 };
 
 use crate::{JobContext, JobError, JobKind};
@@ -177,20 +184,18 @@ impl JobKind for WebhookCall {
         }
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        let (person, traits) = match lock_webhook_subject(
+        // Read with no lock: the call below can take up to 30 s per hop, and nothing an ingest
+        // batch or an erasure needs may be held for that long.
+        let Some(WebhookSubject { person, traits }) = read_webhook_subject(
             ctx.conn(),
             call.workspace,
             call.enrollment,
             &call.trait_keys,
         )
         .await?
-        {
-            WebhookSubject::Present { person, traits } => (person, traits),
+        else {
             // Erased with the person: there is nobody to call about, and nothing to retry.
-            WebhookSubject::Gone => return Ok(()),
-            WebhookSubject::Moved => {
-                return Err(JobError::new("the enrollment moved to another person"));
-            }
+            return Ok(());
         };
 
         let envelope = Envelope {
@@ -233,6 +238,16 @@ impl JobKind for WebhookCall {
         if result == WebhookResult::Failed {
             warn!(status, attempt = attempts, reason, "webhook call failed");
         }
+        // The person is locked only now, for the short outcome write, and the enrollment checked
+        // again: an erasure that committed during the call leaves no event and no decision. A call
+        // already on the wire when it committed was allowed to complete.
+        match lock_webhook_person(ctx.conn(), call.workspace, call.enrollment, person).await? {
+            WebhookPerson::Held => {}
+            WebhookPerson::Gone => return Ok(()),
+            WebhookPerson::Moved => {
+                return Err(JobError::new("the enrollment moved to another person"));
+            }
+        }
         let trace = ctx.trace().clone();
         let job = (ctx.job_id(), attempts);
         record_webhook_outcome(
@@ -270,10 +285,9 @@ async fn deliver(
             reason: "no_signing_secret",
         });
     };
-    let keyring = ctx
-        .keyring()
-        .cloned()
-        .ok_or_else(|| JobError::new("the worker has no master key to open the signing secret"))?;
+    let Some(keyring) = ctx.keyring().cloned() else {
+        return Ok(signing_secret_unavailable());
+    };
     let timestamp = now.unix_timestamp();
     let mut signatures = Vec::with_capacity(2);
     // The current secret must open; a previous one that does not is skipped, since the receiver
@@ -283,10 +297,10 @@ async fn deliver(
         .flatten()
         .enumerate()
     {
-        match open_signature(ctx, &keyring, call.workspace, key, timestamp, body).await {
-            Ok(signature) => signatures.push(signature),
-            Err(error) if index == 0 => return Err(error),
-            Err(_) => {}
+        match open_signature(ctx, &keyring, call.workspace, key, timestamp, body).await? {
+            Some(signature) => signatures.push(signature),
+            None if index == 0 => return Ok(signing_secret_unavailable()),
+            None => {}
         }
     }
 
@@ -301,7 +315,14 @@ async fn deliver(
             .iter()
             .map(|signature| (SIGNATURE_HEADER, signature.as_str())),
     );
-    let client = GuardedClient::new(ctx.egress().clone(), HttpLimits::default())
+    // No redirects: a 301, 302 or 303 would turn the POST into a GET without the body, and the
+    // call would be judged by the answer to something that was never the call. The 3xx itself is
+    // judged, and is terminal.
+    let limits = HttpLimits {
+        max_redirects: 0,
+        ..HttpLimits::default()
+    };
+    let client = GuardedClient::new(ctx.egress().clone(), limits)
         .map_err(|_| JobError::new("the outbound client could not be built"))?;
     match client.post(&call.url, &headers, body.to_vec()).await {
         Ok(response) => {
@@ -317,7 +338,20 @@ async fn deliver(
     }
 }
 
-/// Opens one signing secret and signs `body` with it.
+/// The current signing secret cannot be opened (the worker has no keyring, or a wrong one). It is
+/// retried, and on the last attempt it is recorded as a failure, so a flow waiting on
+/// `webhook.failed` is told instead of the job dying unseen.
+fn signing_secret_unavailable() -> Verdict {
+    Verdict::Retry {
+        status: None,
+        reason: "signing_secret_unavailable",
+        message: "the signing secret could not be opened",
+        retry_after: None,
+    }
+}
+
+/// Opens one signing secret and signs `body` with it. None when it does not open; only a
+/// database error is an error.
 async fn open_signature(
     ctx: &mut JobContext<'_>,
     keyring: &Keyring,
@@ -325,8 +359,8 @@ async fn open_signature(
     key: SigningKey,
     timestamp: i64,
     body: &[u8],
-) -> Result<String, JobError> {
-    let secret = secrets::open_json(
+) -> Result<Option<String>, JobError> {
+    match secrets::open_json(
         ctx.conn(),
         keyring,
         workspace,
@@ -334,8 +368,11 @@ async fn open_signature(
         SecretPurpose::WebhookSigning,
     )
     .await
-    .map_err(|_| JobError::new("the signing secret could not be opened"))?;
-    Ok(signature_value(secret.expose(), timestamp, body))
+    {
+        Ok(secret) => Ok(Some(signature_value(secret.expose(), timestamp, body))),
+        Err(OpenError::Store(error)) => Err(error.into()),
+        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -354,7 +391,7 @@ mod tests {
     use sqlx::PgPool;
     use time::Duration as Span;
     use time::macros::datetime;
-    use tokio::sync::watch;
+    use tokio::sync::{Notify, watch};
     use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::flow::SIGNING_GRACE_SECONDS;
     use zirv_flow_core::people::{Precedence, TraitType};
@@ -509,8 +546,8 @@ mod tests {
                 .collect()
         }
 
-        /// Whether one of the signature headers verifies with `secret` over the bytes received,
-        /// by the same scheme an inbound hook uses.
+        /// Whether the request verifies with `secret` over the bytes received, through the verifier
+        /// an inbound hook uses, which accepts a request when any one signature value verifies.
         fn verifies_with(&self, secret: &str, now: i64) -> bool {
             let scheme = Scheme {
                 signature_header: SIGNATURE_HEADER,
@@ -518,16 +555,8 @@ mod tests {
                 timestamp_header: Some(TIMESTAMP_HEADER),
                 tolerance_seconds: 300,
             };
-            self.all(SIGNATURE_HEADER).into_iter().any(|signature| {
-                let lookup = |name: &str| {
-                    if name.eq_ignore_ascii_case(SIGNATURE_HEADER) {
-                        Some(signature)
-                    } else {
-                        self.header(name)
-                    }
-                };
-                verify(&scheme, secret.as_bytes(), &lookup, &self.body, now).is_ok()
-            })
+            let lookup = |name: &str| self.all(name);
+            verify(&scheme, secret.as_bytes(), &lookup, &self.body, now).is_ok()
         }
     }
 
@@ -538,16 +567,35 @@ mod tests {
         retry_after: Option<&'static str>,
     }
 
+    /// Holds the next answer until the test lets it go.
+    #[derive(Clone)]
+    struct Gate {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
     /// A destination that records what it receives and answers from a script, then 200.
     #[derive(Clone, Default)]
     struct Mock {
         hits: Arc<Mutex<Vec<Hit>>>,
         script: Arc<Mutex<VecDeque<Answer>>>,
+        gate: Arc<Mutex<Option<Gate>>>,
     }
 
     impl Mock {
         fn hits(&self) -> Vec<Hit> {
             self.hits.lock().unwrap().clone()
+        }
+
+        /// Makes the next request wait after it is recorded; the gate says when it arrived and
+        /// lets it be answered.
+        fn hold(&self) -> Gate {
+            let gate = Gate {
+                entered: Arc::default(),
+                release: Arc::default(),
+            };
+            *self.gate.lock().unwrap() = Some(gate.clone());
+            gate
         }
 
         fn answer(&self, status: u16, retry_after: Option<&'static str>) {
@@ -571,6 +619,11 @@ mod tests {
                 .collect(),
             body: body.to_vec(),
         });
+        let gate = mock.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let answer = mock.script.lock().unwrap().pop_front().unwrap_or(Answer {
             status: 200,
             retry_after: None,
@@ -588,6 +641,10 @@ mod tests {
     async fn serve(mock: &Mock) -> u16 {
         let router = Router::new()
             .route("/hook", post(receive))
+            .route(
+                "/moved",
+                post(|| async { (StatusCode::FOUND, [(header::LOCATION, "/hook")]) }),
+            )
             .with_state(mock.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -606,6 +663,8 @@ mod tests {
         ws: zirv_flow_core::WorkspaceId,
         clock: ManualClock,
         keyring: Arc<Keyring>,
+        /// The keyring the worker holds; the workspace's secrets are sealed with `keyring`.
+        worker_keyring: Option<Arc<Keyring>>,
         egress: Arc<EgressPolicy>,
         mock: Mock,
         port: u16,
@@ -628,11 +687,13 @@ mod tests {
                 .id;
             let mock = Mock::default();
             let port = serve(&mock).await;
+            let keyring = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
             let env = Self {
                 pool,
                 ws,
                 clock: ManualClock::new(datetime!(2031-05-06 07:08:09 UTC)),
-                keyring: Arc::new(Keyring::new(MasterKey::generate(), None).unwrap()),
+                worker_keyring: Some(keyring.clone()),
+                keyring,
                 egress,
                 mock,
                 port,
@@ -795,6 +856,11 @@ mod tests {
 
         /// Queues the job `flow.step` would.
         async fn queue(&self, enrolled: &Enrolled, person: Uuid, max_attempts: i32) {
+            self.queue_to(enrolled, person, max_attempts, &self.url())
+                .await;
+        }
+
+        async fn queue_to(&self, enrolled: &Enrolled, person: Uuid, max_attempts: i32, url: &str) {
             let key = format!("{}:hook:webhook", enrolled.enrollment);
             let mut job = NewJob::new(WEBHOOK_JOB_KIND, enrolled.trace.clone());
             job.workspace_id = Some(self.ws);
@@ -810,7 +876,7 @@ mod tests {
                 "trace_id": enrolled.trace.trace_id,
                 "idempotency_key": key,
                 "occurred_at": "2031-05-06T07:08:09Z",
-                "url": self.url(),
+                "url": url,
                 "trait_keys": ["plan", "age"],
             });
             zirv_flow_store::enqueue(&self.pool, &job).await.unwrap();
@@ -836,7 +902,7 @@ mod tests {
                 let mut ctx = JobContext::new(&mut tx, &claimed)
                     .with_clock(Clock::Manual(self.clock.clone()))
                     .with_outbound(
-                        Some(self.keyring.clone()),
+                        self.worker_keyring.clone(),
                         self.egress.clone(),
                         Arc::default(),
                     );
@@ -1285,6 +1351,144 @@ mod tests {
             0
         );
         assert!(env.decisions(&enrolled.trace).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_person_is_not_locked_while_the_call_is_in_flight_and_an_erasure_during_it_writes_nothing(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        env.queue(&enrolled, person, 5).await;
+        let gate = env.mock.hold();
+        let leased = env.claim().await.expect("the job is leased");
+
+        let run = env.execute(leased);
+        let meanwhile = async {
+            gate.entered.notified().await;
+            // The call is on the wire. An ingest-style row lock must not wait for it.
+            let mut other = env.pool.acquire().await.unwrap();
+            sqlx::query("SET lock_timeout = '300ms'")
+                .execute(&mut *other)
+                .await
+                .unwrap();
+            let locked = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+                .bind(person)
+                .fetch_optional(&mut *other)
+                .await;
+            // Erased while the destination is answering.
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            assert!(
+                zirv_flow_store::delete_person(
+                    &mut tx,
+                    env.ws,
+                    person,
+                    zirv_flow_store::DeleteReason::Erasure,
+                    &TraceContext::root(Cause::api("erase")),
+                )
+                .await
+                .unwrap()
+            );
+            zirv_flow_store::commit(tx).await.unwrap();
+            gate.release.notify_one();
+            locked
+        };
+        let (result, locked) = tokio::join!(run, meanwhile);
+
+        assert!(
+            locked.is_ok(),
+            "an ingest-style lock on the person is not blocked by the call"
+        );
+        result.unwrap();
+        assert_eq!(env.mock.hits().len(), 1, "the call on the wire completed");
+        assert_eq!(env.jobs_left().await, 0, "the job ended as done");
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE name LIKE 'webhook.%'")
+                .await,
+            0
+        );
+        assert!(env.decisions(&enrolled.trace).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_redirect_is_never_followed_and_fails_the_call_without_a_retry(pool: PgPool) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        let moved = format!("http://127.0.0.1:{}/moved", env.port);
+        env.queue_to(&enrolled, person, 5, &moved).await;
+
+        env.attempt().await.unwrap();
+
+        assert!(
+            env.mock.hits().is_empty(),
+            "the redirect target is never called"
+        );
+        assert_eq!(env.jobs_left().await, 0, "done, not retried");
+        assert!(env.events("webhook.succeeded").await.is_empty());
+        assert_eq!(
+            env.events("webhook.failed").await,
+            [
+                json!({"node_id": "hook", "enrollment_id": enrolled.enrollment,
+                    "status": 302, "attempts": 1})
+            ]
+        );
+        assert_eq!(
+            env.decisions(&enrolled.trace).await,
+            [("failed".to_owned(), Some("http_status".to_owned()))]
+        );
+    }
+
+    /// A worker holding `worker_keyring` instead of the workspace's, over two attempts.
+    async fn last_attempt_without_a_usable_keyring(pool: PgPool, wrong: bool) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        env.worker_keyring =
+            wrong.then(|| Arc::new(Keyring::new(MasterKey::generate(), None).unwrap()));
+        let (person, enrolled) = env.enrolled().await;
+        env.queue(&enrolled, person, 2).await;
+
+        let first = env.attempt().await;
+        let events_after_first = env.events("webhook.failed").await.len();
+        let last = env.attempt().await;
+
+        assert_eq!(
+            first.unwrap_err().message(),
+            "the signing secret could not be opened"
+        );
+        assert_eq!(events_after_first, 0, "an early attempt retries");
+        last.unwrap();
+        assert!(env.mock.hits().is_empty());
+        assert_eq!(env.jobs_left().await, 0, "done, not dead");
+        assert_eq!(
+            env.events("webhook.failed").await,
+            [
+                json!({"node_id": "hook", "enrollment_id": enrolled.enrollment,
+                    "status": null, "attempts": 2})
+            ]
+        );
+        assert_eq!(
+            env.decisions(&enrolled.trace).await,
+            [(
+                "failed".to_owned(),
+                Some("signing_secret_unavailable".to_owned())
+            )]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_without_a_keyring_tells_the_flow_on_the_last_attempt(pool: PgPool) {
+        last_attempt_without_a_usable_keyring(pool, false).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_with_a_wrong_master_key_tells_the_flow_on_the_last_attempt(pool: PgPool) {
+        last_attempt_without_a_usable_keyring(pool, true).await;
     }
 
     #[sqlx::test]

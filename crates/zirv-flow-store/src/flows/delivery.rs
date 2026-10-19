@@ -1,6 +1,7 @@
 //! What a `webhook.call` job reads and writes besides the call itself (architecture 9.1): the
-//! person and traits to send, and the outcome event with its decision. Every function runs in the
-//! job's transaction.
+//! person and traits to send, read without a lock before the call, and the outcome event with its
+//! decision, written after it under a short lock on the person. Every function runs in the job's
+//! transaction.
 
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
@@ -15,58 +16,29 @@ use crate::{NewDecision, StoreError, append_decision, find_enrollment, find_pers
 /// The source of the events a flow writes.
 const FLOWS_SOURCE: &str = "flows";
 
-/// The person a webhook call is for, read under a lock that keeps them from being erased until
-/// the transaction ends.
+/// The person a webhook call is for and the traits to send.
 #[derive(Clone, Debug, PartialEq)]
-pub enum WebhookSubject {
-    /// The enrollment and its person exist. `traits` holds each requested key at the person's
-    /// effective value, `null` when they have none.
-    Present {
-        person: Uuid,
-        traits: Map<String, Value>,
-    },
-    /// The enrollment is gone: its person was erased, and the call must not be made.
-    Gone,
-    /// The enrollment moved to another person while this read ran (a merge); a retry reads it
-    /// again.
-    Moved,
+pub struct WebhookSubject {
+    pub person: Uuid,
+    /// Each requested key at the person's effective value, `null` when they have none.
+    pub traits: Map<String, Value>,
 }
 
-/// Locks the person of `enrollment` with `FOR KEY SHARE` and reads `trait_keys`.
-///
-/// The lock conflicts with the delete of person erasure and with nothing else a step does, so an
-/// erasure waits for the call and a trait write does not. It is taken on the person alone, the
-/// first of the person-then-enrollment order (#159); the enrollment is only read, so a step of the
-/// same enrollment never waits for a call in flight.
-pub async fn lock_webhook_subject(
+/// Reads the person of `enrollment` and `trait_keys`, taking no row lock, so the HTTP call that
+/// follows holds nothing an ingest batch or an erasure could wait for. None when the enrollment
+/// or its person is gone: erased, and the call must not be made.
+pub async fn read_webhook_subject(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     enrollment: Uuid,
     trait_keys: &[String],
-) -> Result<WebhookSubject, StoreError> {
+) -> Result<Option<WebhookSubject>, StoreError> {
     let Some(found) = find_enrollment(connection, workspace, enrollment).await? else {
-        return Ok(WebhookSubject::Gone);
+        return Ok(None);
     };
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(found.person_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    if locked.is_none() {
-        return Ok(WebhookSubject::Gone);
-    }
-    // The erasure that won the lock before us deleted the enrollment; one that comes later waits.
-    match find_enrollment(connection, workspace, enrollment).await? {
-        None => return Ok(WebhookSubject::Gone),
-        Some(again) if again.person_id != found.person_id => return Ok(WebhookSubject::Moved),
-        Some(_) => {}
-    }
-    let person = find_person(&mut *connection, workspace, found.person_id)
-        .await?
-        .ok_or_else(|| StoreError::query(sqlx::Error::RowNotFound))?;
+    let Some(person) = find_person(&mut *connection, workspace, found.person_id).await? else {
+        return Ok(None);
+    };
     let held = person.traits.as_object();
     let traits = trait_keys
         .iter()
@@ -75,10 +47,58 @@ pub async fn lock_webhook_subject(
             (key.clone(), value.unwrap_or(Value::Null))
         })
         .collect();
-    Ok(WebhookSubject::Present {
+    Ok(Some(WebhookSubject {
         person: found.person_id,
         traits,
-    })
+    }))
+}
+
+/// Whether the enrollment is still the person's, as seen under the lock of
+/// [`lock_webhook_person`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebhookPerson {
+    /// The person exists and the enrollment is still theirs; the lock is held to the end of the
+    /// transaction.
+    Held,
+    /// The person or the enrollment is gone: erased while the call was in flight. No outcome may
+    /// be written.
+    Gone,
+    /// The enrollment moved to another person (a merge); a retry reads it again.
+    Moved,
+}
+
+/// After the call, locks `person` with `FOR KEY SHARE` and checks that `enrollment` still exists
+/// for them.
+///
+/// The lock conflicts with the delete of person erasure and with nothing else a step does, so an
+/// erasure waits for the short outcome write and a trait write does not. It is taken on the
+/// person alone, the first of the person-then-enrollment order (#159); the enrollment is only
+/// read, so a step of the same enrollment never waits.
+pub async fn lock_webhook_person(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+    person: Uuid,
+) -> Result<WebhookPerson, StoreError> {
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if locked.is_none() {
+        return Ok(WebhookPerson::Gone);
+    }
+    // The erasure that won the lock before us deleted the enrollment; one that comes later waits.
+    Ok(
+        match find_enrollment(connection, workspace, enrollment).await? {
+            None => WebhookPerson::Gone,
+            Some(found) if found.person_id != person => WebhookPerson::Moved,
+            Some(_) => WebhookPerson::Held,
+        },
+    )
 }
 
 /// How a webhook call ended.
@@ -226,15 +246,16 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
 
         let subject =
-            lock_webhook_subject(&mut connection, ws, enrollment, &keys(&["plan", "age"]))
+            read_webhook_subject(&mut connection, ws, enrollment, &keys(&["plan", "age"]))
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("the person exists");
 
-        let WebhookSubject::Present { person, traits } = subject else {
-            panic!("the person exists");
-        };
-        assert_eq!(person, id);
-        assert_eq!(Value::Object(traits), json!({"plan": "pro", "age": null}));
+        assert_eq!(subject.person, id);
+        assert_eq!(
+            Value::Object(subject.traits),
+            json!({"plan": "pro", "age": null})
+        );
     }
 
     #[sqlx::test]
@@ -246,7 +267,7 @@ mod tests {
         let enrollment = enrolled(&pool, ws, id, "never").await;
         let mut connection = pool.acquire().await.unwrap();
 
-        let foreign = lock_webhook_subject(&mut connection, other, enrollment, &[])
+        let foreign = read_webhook_subject(&mut connection, other, enrollment, &[])
             .await
             .unwrap();
         sqlx::query("DELETE FROM enrollment_waits WHERE enrollment_id = $1")
@@ -259,30 +280,40 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let erased = lock_webhook_subject(&mut connection, ws, enrollment, &[])
+        let erased = read_webhook_subject(&mut connection, ws, enrollment, &[])
+            .await
+            .unwrap();
+        let locked = lock_webhook_person(&mut connection, ws, enrollment, id)
             .await
             .unwrap();
 
-        assert_eq!(
-            (foreign, erased),
-            (WebhookSubject::Gone, WebhookSubject::Gone)
-        );
+        assert_eq!((foreign, erased), (None, None));
+        assert_eq!(locked, WebhookPerson::Gone);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_person_lock_makes_an_erasure_wait_and_a_trait_write_not(pool: PgPool) {
+    async fn reading_the_subject_takes_no_lock_and_the_person_lock_makes_an_erasure_wait_only(
+        pool: PgPool,
+    ) {
         let ws = workspace(&pool, "one").await;
         let id = person(&pool, ws, json!({})).await;
         let enrollment = enrolled(&pool, ws, id, "never").await;
         let mut holder = crate::begin(&pool).await.unwrap();
-        lock_webhook_subject(&mut holder, ws, enrollment, &[])
+        read_webhook_subject(&mut holder, ws, enrollment, &[])
             .await
             .unwrap();
-
         let mut writer = pool.acquire().await.unwrap();
         sqlx::query("SET lock_timeout = '300ms'")
             .execute(&mut *writer)
+            .await
+            .unwrap();
+        let during_read = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *writer)
+            .await;
+
+        let held = lock_webhook_person(&mut holder, ws, enrollment, id)
             .await
             .unwrap();
         let write = sqlx::query("UPDATE people SET traits = '{\"plan\":\"x\"}' WHERE id = $1")
@@ -294,8 +325,10 @@ mod tests {
             .execute(&mut *writer)
             .await;
 
-        assert!(write.is_ok(), "a trait write does not wait for the call");
-        assert!(erase.is_err(), "an erasure waits until the call ends");
+        assert!(during_read.is_ok(), "a read holds no lock");
+        assert_eq!(held, WebhookPerson::Held);
+        assert!(write.is_ok(), "a trait write does not wait for the outcome");
+        assert!(erase.is_err(), "an erasure waits until the outcome commits");
     }
 
     #[sqlx::test]

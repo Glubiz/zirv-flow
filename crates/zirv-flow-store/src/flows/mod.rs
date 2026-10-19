@@ -23,7 +23,8 @@ pub use crud::{
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
 };
 pub use delivery::{
-    WebhookOutcome, WebhookResult, WebhookSubject, lock_webhook_subject, record_webhook_outcome,
+    WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, lock_webhook_person,
+    read_webhook_subject, record_webhook_outcome,
 };
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
 pub use enroll::{
