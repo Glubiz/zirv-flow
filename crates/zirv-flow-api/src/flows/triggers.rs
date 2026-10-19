@@ -275,6 +275,7 @@ pub(crate) async fn start(
             source,
             occurrence: Some(occurrence),
             after: None,
+            entered_by: None,
         },
     };
     let unique = format!("flow.enroll:manual:{}:{occurrence}", flow.id);

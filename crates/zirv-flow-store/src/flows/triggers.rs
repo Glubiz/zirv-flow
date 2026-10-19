@@ -12,6 +12,7 @@ use hashbrown::HashMap;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::flow::{Audience, FlowSettings, SegmentChange, Trigger};
 use zirv_flow_core::schedule::next_after;
@@ -21,7 +22,7 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 use super::arrivals::Arrival;
 use super::enroll::MAX_ENROLL_PEOPLE;
 use crate::segments::{SegmentMembershipChange, SegmentMembershipChanges};
-use crate::{NewJob, StoreError, enqueue};
+use crate::{Clock, NewJob, StoreError, enqueue};
 
 /// The kind of the job that enrolls people in a flow.
 pub const ENROLL_JOB_KIND: &str = "flow.enroll";
@@ -111,11 +112,15 @@ pub enum EnrollWork {
     /// These people, each with the occurrence they enter for.
     People(Vec<(Uuid, Uuid)>),
     /// A page of an audience: the people after `after` in id order, all for one occurrence. A
-    /// schedule's job has no occurrence yet; the job makes it from its slot.
+    /// schedule's job has no occurrence yet; the job makes it from its slot. `entered_by` is set by
+    /// a publish fan-out to the publish time: a segment page then holds only the members whose
+    /// current membership began at or before it, and a later joiner enters through their own
+    /// `segment.entered` occurrence. Schedule and manual fan-outs leave it unset.
     Audience {
         source: AudienceSource,
         occurrence: Option<Uuid>,
         after: Option<Uuid>,
+        entered_by: Option<OffsetDateTime>,
     },
 }
 
@@ -153,6 +158,7 @@ impl EnrollJobPayload {
                 source,
                 occurrence,
                 after,
+                entered_by,
             } => {
                 payload["audience"] = source.to_value();
                 if let Some(occurrence) = occurrence {
@@ -160,6 +166,11 @@ impl EnrollJobPayload {
                 }
                 if let Some(after) = after {
                     payload["after"] = json!(after);
+                }
+                if let Some(entered_by) = entered_by
+                    && let Ok(text) = entered_by.format(&Rfc3339)
+                {
+                    payload["entered_by"] = json!(text);
                 }
             }
         }
@@ -186,6 +197,10 @@ impl EnrollJobPayload {
                 source: AudienceSource::parse(payload.get("audience")?)?,
                 occurrence: uuid("occurrence"),
                 after: uuid("after"),
+                entered_by: match text("entered_by") {
+                    Some(text) => Some(OffsetDateTime::parse(text, &Rfc3339).ok()?),
+                    None => None,
+                },
             }
         };
         let version = match payload.get("version") {
@@ -444,12 +459,15 @@ pub async fn find_events(
 }
 
 /// The next page of an audience: up to [`MAX_ENROLL_PEOPLE`] people with an id after `after`, in
-/// id order. A person merged into another is never in a page.
+/// id order. A person merged into another is never in a page. With `entered_by` set, a segment
+/// page holds only the members whose current membership began at or before it (a publish
+/// fan-out's snapshot); the other sources ignore it.
 pub async fn audience_page(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     source: AudienceSource,
     after: Option<Uuid>,
+    entered_by: Option<OffsetDateTime>,
 ) -> Result<Vec<Uuid>, StoreError> {
     let limit = i64::try_from(MAX_ENROLL_PEOPLE).unwrap_or(1000);
     let page = match source {
@@ -471,12 +489,14 @@ pub async fn audience_page(
                 "SELECT person_id FROM segment_members \
                  WHERE workspace_id = $1 AND segment_id = $2 AND exited_at IS NULL \
                    AND ($3::uuid IS NULL OR person_id > $3) \
+                   AND ($5::timestamptz IS NULL OR entered_at <= $5) \
                  ORDER BY person_id LIMIT $4",
             )
             .bind(workspace.as_uuid())
             .bind(segment)
             .bind(after)
             .bind(limit)
+            .bind(entered_by)
             .fetch_all(connection)
             .await
         }
@@ -529,6 +549,7 @@ pub(crate) async fn sync_flow_schedule(
             source: (*audience).into(),
             occurrence: None,
             after: None,
+            entered_by: None,
         },
     }
     .to_value();
@@ -601,9 +622,12 @@ pub async fn reconcile_flow_schedules(connection: &mut PgConnection) -> Result<u
 }
 
 /// Enqueues the audience fan-out of a segment trigger with `enroll_current`, for the version
-/// being published. The publish is the occurrence: its trace id.
+/// being published. The publish is the occurrence: its trace id. The fan-out carries the publish
+/// time, read from the store's clock (the one that stamps `segment_members.entered_at`), so it
+/// enrolls only the members present at the publish.
 pub(crate) async fn enqueue_publish_fan_out(
     connection: &mut PgConnection,
+    clock: &Clock,
     workspace: WorkspaceId,
     flow: Uuid,
     version: i32,
@@ -618,6 +642,7 @@ pub(crate) async fn enqueue_publish_fan_out(
     else {
         return Ok(());
     };
+    let published_at = clock.now(connection).await?;
     let payload = EnrollJobPayload {
         workspace,
         flow,
@@ -627,6 +652,7 @@ pub(crate) async fn enqueue_publish_fan_out(
             source: AudienceSource::Segment(*segment_id),
             occurrence: Some(trace.trace_id.as_uuid()),
             after: None,
+            entered_by: Some(published_at),
         },
     };
     let unique = format!("flow.enroll:publish:{flow}:{version}");
@@ -660,15 +686,22 @@ mod tests {
 
     #[test]
     fn a_payload_of_an_audience_round_trips_with_and_without_an_occurrence() {
-        for (source, occurrence, after, version) in [
-            (AudienceSource::Everyone, None, None, None),
+        for (source, occurrence, after, version, entered_by) in [
+            (AudienceSource::Everyone, None, None, None, None),
             (
                 AudienceSource::Segment(Uuid::from_u128(8)),
                 Some(Uuid::from_u128(9)),
                 Some(Uuid::from_u128(10)),
                 Some(2),
+                Some(time::macros::datetime!(2030-01-02 03:04:05.678901 UTC)),
             ),
-            (AudienceSource::List(Uuid::from_u128(11)), None, None, None),
+            (
+                AudienceSource::List(Uuid::from_u128(11)),
+                None,
+                None,
+                None,
+                None,
+            ),
         ] {
             let payload = EnrollJobPayload {
                 workspace: unit_workspace(),
@@ -679,6 +712,7 @@ mod tests {
                     source,
                     occurrence,
                     after,
+                    entered_by,
                 },
             };
 
@@ -965,7 +999,8 @@ mod tests {
             EnrollWork::Audience {
                 source: AudienceSource::Everyone,
                 occurrence: None,
-                after: None
+                after: None,
+                entered_by: None
             }
         );
 
@@ -1203,7 +1238,7 @@ mod tests {
             let mut all = Vec::new();
             let mut after = None;
             loop {
-                let page = audience_page(&mut connection, ws, source, after)
+                let page = audience_page(&mut connection, ws, source, after, None)
                     .await
                     .unwrap();
                 assert!(page.len() <= MAX_ENROLL_PEOPLE);

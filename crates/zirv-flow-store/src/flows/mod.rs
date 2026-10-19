@@ -91,7 +91,15 @@ pub(crate) mod tests_support {
     ) -> Result<(Flow, FlowVersion), FlowError> {
         let mut tx = begin(pool).await?;
         let locked = lock_flow(&mut tx, ws, id).await?;
-        let published = publish_flow(&mut tx, ws, &locked, None, &trace()).await?;
+        let published = publish_flow(
+            &mut tx,
+            &crate::Clock::default(),
+            ws,
+            &locked,
+            None,
+            &trace(),
+        )
+        .await?;
         commit(tx).await?;
         Ok(published)
     }

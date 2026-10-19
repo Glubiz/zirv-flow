@@ -179,6 +179,7 @@ async fn publish_now(
     }
     let (flow, version) = zirv_flow_store::publish_flow(
         &mut tx,
+        &state.clock,
         workspace,
         &locked,
         principal.user_id(),

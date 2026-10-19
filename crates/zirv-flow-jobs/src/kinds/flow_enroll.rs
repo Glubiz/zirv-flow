@@ -67,9 +67,11 @@ impl JobKind for FlowEnroll {
                 source,
                 occurrence,
                 after,
+                entered_by,
             } => {
                 let occurrence = occurrence.unwrap_or_else(|| slot_occurrence(ctx, job.flow));
-                run_audience(ctx, &job, version, (*source, occurrence, *after), now).await?;
+                let page = (*source, occurrence, *after, *entered_by);
+                run_audience(ctx, &job, version, page, now).await?;
             }
         }
         Ok(())
@@ -198,10 +200,15 @@ async fn run_audience(
     ctx: &mut JobContext<'_>,
     job: &EnrollJobPayload,
     version: i32,
-    (source, occurrence, after): (AudienceSource, Uuid, Option<Uuid>),
+    (source, occurrence, after, entered_by): (
+        AudienceSource,
+        Uuid,
+        Option<Uuid>,
+        Option<OffsetDateTime>,
+    ),
     now: OffsetDateTime,
 ) -> Result<(), JobError> {
-    let page = audience_page(ctx.conn(), job.workspace, source, after).await?;
+    let page = audience_page(ctx.conn(), job.workspace, source, after, entered_by).await?;
     let entries: Vec<EnrollEntry> = page
         .iter()
         .map(|person| EnrollEntry {
@@ -223,6 +230,7 @@ async fn run_audience(
                 source,
                 occurrence: Some(occurrence),
                 after: Some(*last),
+                entered_by,
             },
         };
         let key = format!("flow.enroll:page:{}:{occurrence}:{last}", job.flow);
@@ -459,10 +467,16 @@ mod tests {
                 .await
                 .unwrap();
             let trace = TraceContext::root(Cause::api("publish"));
-            let (_, version) =
-                zirv_flow_store::publish_flow(&mut tx, self.ws, &locked, None, &trace)
-                    .await
-                    .unwrap();
+            let (_, version) = zirv_flow_store::publish_flow(
+                &mut tx,
+                &self.clock(),
+                self.ws,
+                &locked,
+                None,
+                &trace,
+            )
+            .await
+            .unwrap();
             zirv_flow_store::commit(tx).await.unwrap();
             version.version
         }
@@ -673,6 +687,17 @@ mod tests {
                 "SELECT person_id FROM enrollments WHERE flow_id = $1 ORDER BY person_id",
             )
             .bind(flow)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// The live members of a segment, sorted.
+        async fn members(&self, segment: Uuid) -> Vec<Uuid> {
+            sqlx::query_scalar(
+                "SELECT person_id FROM segment_members                  WHERE segment_id = $1 AND exited_at IS NULL ORDER BY person_id",
+            )
+            .bind(segment)
             .fetch_all(&self.pool)
             .await
             .unwrap()
@@ -894,6 +919,62 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_who_joins_after_the_publish_is_not_enrolled_for_the_publish(pool: PgPool) {
+        let env = Env::new(pool).await;
+        env.define_plan().await;
+        env.people(1_200, "pro").await;
+        let segment = env.segment("Pros", plan_is("pro")).await;
+        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+            .await;
+        let trigger = json!({
+            "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
+        });
+        let flow = env.flow("Welcome", settings(trigger, once())).await;
+        let at_publish = env.members(segment).await;
+        assert_eq!(at_publish.len(), 1_200);
+
+        // The first page runs, then a person whose id is after its cursor joins the segment.
+        let claimed = claim_job(
+            &env.pool,
+            "test",
+            &[ENROLL_JOB_KIND],
+            Duration::from_secs(120),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        execute(&env.pool, &env.clock(), claimed).await.unwrap();
+        env.clock.advance(time::Duration::seconds(5));
+        let joiner = Uuid::from_u128(u128::MAX);
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(joiner)
+            .bind(env.ws.as_uuid())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO segment_members (workspace_id, segment_id, person_id, version,                  entered_at, entered_trace_id, entered_cause)              VALUES ($1, $2, $3, 1, $4, gen_random_uuid(), 'time')",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(segment)
+        .bind(joiner)
+        .bind(env.clock.now())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(env.drain(1).await, 1, "the second page");
+
+        let enrolled = env.enrolled(flow).await;
+        assert!(
+            !enrolled.contains(&joiner),
+            "the joiner is not a publish enrollment"
+        );
+        assert_eq!(enrolled, at_publish, "every member at the publish, once");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_trigger_enrolls_the_people_whose_event_passes_its_filters(pool: PgPool) {
         let env = Env::new(pool).await;
         env.define_order().await;
@@ -1062,6 +1143,7 @@ mod tests {
                     source: AudienceSource::List(list),
                     occurrence: Some(occurrence),
                     after: None,
+                    entered_by: None,
                 },
             },
             &TraceContext::root(Cause::api("start")),
@@ -1219,6 +1301,7 @@ mod tests {
                     source: AudienceSource::Everyone,
                     occurrence: None,
                     after: None,
+                    entered_by: None,
                 },
             },
             &trace,
@@ -1346,10 +1429,10 @@ mod tests {
             env.decisions("skipped", Some("already_entered")).await,
             100_000
         );
+        assert!(finished < Duration::from_secs(150), "{finished:?}");
         eprintln!(
             "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
              re-entry refused {finished:?}"
         );
-        assert!(finished < Duration::from_secs(150), "{finished:?}");
     }
 }

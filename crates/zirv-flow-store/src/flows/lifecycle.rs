@@ -14,7 +14,7 @@ use super::crud::{
 };
 use super::state::{FlowAction, FlowState};
 use super::triggers::{enqueue_publish_fan_out, remove_flow_schedule, sync_flow_schedule};
-use crate::{NewDecision, StoreError, append_decision};
+use crate::{Clock, NewDecision, StoreError, append_decision};
 
 /// The state `action` leads to from the locked flow, or the refusal.
 fn next_state(locked: &LockedFlow, action: FlowAction) -> Result<FlowState, FlowError> {
@@ -52,6 +52,7 @@ async fn record(
 /// or paused flow keeps its state. An archived flow is refused.
 pub async fn publish_flow(
     connection: &mut PgConnection,
+    clock: &Clock,
     workspace: WorkspaceId,
     locked: &LockedFlow,
     published_by: Option<UserId>,
@@ -99,7 +100,10 @@ pub async fn publish_flow(
     // A draft that does not parse was never validated, and the API refuses to publish one.
     if let Ok(settings) = serde_json::from_value::<FlowSettings>(flow.draft_settings.clone()) {
         sync_flow_schedule(connection, workspace, flow.id, &settings).await?;
-        enqueue_publish_fan_out(connection, workspace, flow.id, version, &settings, trace).await?;
+        enqueue_publish_fan_out(
+            connection, clock, workspace, flow.id, version, &settings, trace,
+        )
+        .await?;
     }
     Ok((row.into_flow()?, published))
 }
@@ -298,7 +302,7 @@ mod tests {
         // draft has issues; a transaction that fails after the publish behaves the same.
         let mut tx = begin(&pool).await.unwrap();
         let locked = lock_flow(&mut tx, ws, flow.id).await.unwrap();
-        publish_flow(&mut tx, ws, &locked, None, &trace())
+        publish_flow(&mut tx, &Clock::default(), ws, &locked, None, &trace())
             .await
             .unwrap();
         drop(tx);
@@ -326,9 +330,10 @@ mod tests {
                 let locked = lock_flow(&mut tx, ws, id).await.unwrap();
                 // Hold the lock while the other publish arrives and waits.
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                let (_, version) = publish_flow(&mut tx, ws, &locked, None, &trace())
-                    .await
-                    .unwrap();
+                let (_, version) =
+                    publish_flow(&mut tx, &Clock::default(), ws, &locked, None, &trace())
+                        .await
+                        .unwrap();
                 commit(tx).await.unwrap();
                 version.version
             }
