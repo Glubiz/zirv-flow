@@ -60,8 +60,8 @@ pub(crate) struct ImpactBody {
     /// trigger, and when the segment does not exist.
     audience: Option<AudienceBody>,
     /// Active enrollments that stay on the version they entered when the new version goes live
-    /// (ruling 469cfc51: in-flight enrollments are never migrated). It is 0 until the runtime
-    /// writes enrollments.
+    /// (ruling 469cfc51: in-flight enrollments are never migrated): the flow's active, waiting and
+    /// failed enrollments.
     enrollments_staying_on_older_versions: i64,
     /// Sources that feed what the flow reads and are stale or failing. They are recorded for the
     /// operator and never pause the flow (ruling 5c679ecb).
@@ -139,13 +139,14 @@ async fn impact(
     let audience = audience_of(&mut tx, workspace, &settings).await?;
     let unhealthy =
         zirv_flow_store::unhealthy_inputs(&mut tx, workspace, &checked.reads, now).await?;
+    let staying = zirv_flow_store::count_in_flight_enrollments(&mut tx, workspace, id).await?;
     drop(tx);
     Ok(ImpactBody {
         valid: checked.issues.is_empty(),
         issues: issue_problems(&checked.issues),
         next_version: flow.current_version.unwrap_or(0) + 1,
         audience,
-        enrollments_staying_on_older_versions: 0,
+        enrollments_staying_on_older_versions: staying,
         unhealthy_inputs: unhealthy
             .into_iter()
             .map(|input| UnhealthyInputBody {

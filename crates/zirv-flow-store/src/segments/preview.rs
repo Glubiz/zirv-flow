@@ -154,6 +154,29 @@ pub async fn run_segment_ids(
     .map_err(StoreError::query)
 }
 
+/// Runs a compiled `batch_sql` query (`CompiledSegment::batch_sql`) for `people` and returns the
+/// ones it selects: who among them is in the segment. The batch is bound as the last parameter.
+/// The query reads the live tables, so it sees what the caller's transaction wrote.
+pub async fn run_person_batch(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    query: &SqlQuery,
+    people: &[Uuid],
+) -> Result<Vec<Uuid>, StoreError> {
+    let mut params = query.params.clone();
+    params.push(SqlParam::UuidArray(people.to_vec()));
+    // The SQL comes from the compiler, which binds every value.
+    bind_all(
+        sqlx::query_scalar(sqlx::AssertSqlSafe(query.sql.clone())),
+        workspace,
+        &params,
+    )
+    .persistent(false)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -324,5 +347,39 @@ mod tests {
         assert!(snapshot_now(&mut tx).await.is_ok());
         let write = sqlx::query("DELETE FROM people").execute(&mut *tx).await;
         assert!(write.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_batch_selects_the_people_a_query_matches_in_the_open_transaction(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let pro = person(&pool, ws, "a@example.com", "pro").await;
+        let free = person(&pool, ws, "b@example.com", "free").await;
+        let batch = query(
+            "p.traits ->> 'plan' = $2",
+            " AND p.id = ANY($3::uuid[])",
+            vec![SqlParam::Text("pro".into())],
+        );
+        let mut tx = crate::begin(&pool).await.unwrap();
+
+        let before = run_person_batch(&mut tx, ws, &batch, &[pro, free])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET traits = '{\"plan\": \"pro\"}' WHERE id = $1")
+            .bind(free)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let mut after = run_person_batch(&mut tx, ws, &batch, &[pro, free])
+            .await
+            .unwrap();
+        after.sort();
+
+        let mut both = vec![pro, free];
+        both.sort();
+        assert_eq!(before, [pro]);
+        assert_eq!(after, both, "the write of this transaction is visible");
     }
 }

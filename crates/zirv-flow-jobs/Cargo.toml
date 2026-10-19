@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 getrandom.workspace = true
 hashbrown.workspace = true
@@ -19,6 +21,7 @@ tracing.workspace = true
 uuid.workspace = true
 zirv-flow-connectors.workspace = true
 zirv-flow-core.workspace = true
+zirv-flow-engine.workspace = true
 zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
 

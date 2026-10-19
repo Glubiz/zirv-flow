@@ -8,6 +8,7 @@ use crate::{ErasedKind, JobError};
 
 mod ai_transcripts;
 mod events_retention;
+mod flow_step;
 mod import_dry_run;
 mod import_rows;
 mod import_run;
@@ -43,6 +44,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &kafka_consume::KafkaConsume,
     &segment_refresh::SegmentRefresh,
     &segment_reevaluate::SegmentReevaluate,
+    &flow_step::FlowStep,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

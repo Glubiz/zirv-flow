@@ -107,6 +107,11 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
+    // Pending flow jobs carry the person's ids in their payloads. A running job keeps its lease.
+    "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ( \n        (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \n            (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \n        OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)))",
+    "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -212,6 +217,16 @@ mod tests {
 
         assert!(deleted);
         assert_eq!(rows_referencing_person(&pool, person).await, []);
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE unique_key LIKE 'seed:%'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            ["seed:running"],
+            "pending flow jobs go, a running lease stays"
+        );
         assert_eq!(rows_referencing_person(&pool, merged).await, []);
         // The other person is untouched.
         assert!(

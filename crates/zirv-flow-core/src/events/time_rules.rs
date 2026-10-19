@@ -13,9 +13,9 @@ pub enum EventFlag {
     Replayed,
     /// Event triggers must skip this event: a replay stored it with `emit_triggers` off.
     ///
-    /// The event-trigger path that M5 adds MUST skip an event carrying this flag, so
-    /// replaying a backlog of rejects never starts flows for events that are long past. No
-    /// flow reads events yet, so nothing consumes the flag today.
+    /// The event-trigger path MUST skip an event carrying this flag, so replaying a backlog of
+    /// rejects never starts flows for events that are long past. The matching of events against
+    /// the event waits of enrollments (`zirv-flow-store`, `flows`) skips them too.
     NoTriggers,
 }
 

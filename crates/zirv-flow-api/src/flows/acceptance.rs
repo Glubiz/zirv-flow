@@ -747,10 +747,29 @@ mod tests {
             "{:?}",
             published.body
         );
+        // A person in flight on version 1 stays there when version 2 goes live.
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(f.ws.as_uuid())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollments \n                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \n                 trace_id, cause_kind, cause_id) \n             SELECT $1, $2, id, 1, $3, 'waiting', 'n', $1, $1, 'api', 't' \n             FROM flows WHERE id::text = $4",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws.as_uuid())
+        .bind(person)
+        .bind(&id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
         let after = f
             .lead("POST", &format!("/{id}/publish?dry_run=true"), None)
             .await;
         assert_eq!(after.body["next_version"], 2);
+        assert_eq!(after.body["enrollments_staying_on_older_versions"], 1);
         assert_eq!(f.written().await.0, 1);
     }
 

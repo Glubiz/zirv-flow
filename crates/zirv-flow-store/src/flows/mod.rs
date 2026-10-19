@@ -4,17 +4,33 @@
 //! This crate never sees the validator: the API validates the draft it read under the lock and
 //! passes the same locked flow to the publish.
 
+mod arrivals;
 mod crud;
+mod effects;
+mod enroll;
 mod inputs;
 mod lifecycle;
+mod runtime;
 mod state;
 
+pub(crate) use arrivals::{Arrival, enqueue_arrivals};
+pub use arrivals::{StoredEvent, find_event_of_person};
 pub use crud::{
     Flow, FlowError, FlowPatch, FlowVersion, LockedFlow, NewFlow, create_flow, find_flow,
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
 };
+pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
+pub use enroll::{
+    EnrollError, EnrollOutcome, EnrollRequest, Enrolled, MAX_ENROLL_PEOPLE, Occurrence, enroll,
+};
 pub use inputs::{UnhealthyInput, has_webhook_signing_secret, unhealthy_inputs};
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
+pub use runtime::{
+    Enrollment, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait, STEP_JOB_KIND,
+    StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND, clear_waits,
+    count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps, register_wait,
+    save_enrollment, settle_wait_step, step_zones, wait_filters,
+};
 pub use state::{FlowAction, FlowState};
 
 #[cfg(test)]
@@ -81,6 +97,40 @@ pub(crate) mod tests_support {
         update_flow_draft(&mut connection, ws, id, &patch)
             .await
             .unwrap()
+    }
+
+    /// A published flow's enrollment asleep at an event wait for `person`, at `state_version` 3.
+    pub(crate) async fn waiting_enrollment(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        flow: Uuid,
+        person: Uuid,
+        event: &str,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO enrollments \n                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \n                 state_version, trace_id, cause_kind, cause_id, wake_at) \n             VALUES ($1, $2, $3, 1, $4, 'waiting', 'draft', $5, 3, $6, 'api', 't', now())",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .bind(person)
+        .bind(Uuid::now_v7())
+        .bind(trace().trace_id.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollment_waits \n                (workspace_id, enrollment_id, person_id, event_name, wake_version, timeout_at) \n             VALUES ($1, $2, $3, $4, 3, now())",
+        )
+        .bind(ws.as_uuid())
+        .bind(id)
+        .bind(person)
+        .bind(event)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
     }
 
     pub(crate) async fn decisions(pool: &PgPool, ws: WorkspaceId, action: &str) -> i64 {
