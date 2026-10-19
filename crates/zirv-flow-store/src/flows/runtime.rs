@@ -27,6 +27,8 @@ pub enum EnrollmentStatus {
     Active,
     /// Asleep at a wait node.
     Waiting,
+    /// Its step fell due while the flow was paused; it runs again when the flow resumes.
+    Held,
     Completed,
     Exited,
     /// Stopped at its node until an operator retries or skips it.
@@ -38,6 +40,7 @@ impl EnrollmentStatus {
         match self {
             Self::Active => "active",
             Self::Waiting => "waiting",
+            Self::Held => "held",
             Self::Completed => "completed",
             Self::Exited => "exited",
             Self::Failed => "failed",
@@ -48,6 +51,7 @@ impl EnrollmentStatus {
         [
             Self::Active,
             Self::Waiting,
+            Self::Held,
             Self::Completed,
             Self::Exited,
             Self::Failed,
@@ -81,6 +85,10 @@ pub struct Enrollment {
     pub error: Option<String>,
     /// The node a failure stopped at; `node` is where the failed step started.
     pub failed_node: Option<String>,
+    /// The `flow.step` input a held enrollment runs again on resume, and the input of the attempt
+    /// that failed for a failed one (none for a failure the engine reported), in the form of
+    /// [`StepJobInput::to_stored`].
+    pub resume_input: Option<Value>,
     /// The trace of this enrollment's journey and the cause of the trigger that enrolled it.
     pub trace: TraceContext,
     pub created_at: OffsetDateTime,
@@ -102,6 +110,7 @@ struct EnrollmentRow {
     exit_reason: Option<String>,
     error: Option<String>,
     failed_node: Option<String>,
+    resume_input: Option<Value>,
     trace_id: Uuid,
     cause_kind: String,
     cause_id: String,
@@ -131,6 +140,7 @@ impl EnrollmentRow {
             exit_reason: self.exit_reason,
             error: self.error,
             failed_node: self.failed_node,
+            resume_input: self.resume_input,
             trace: TraceContext {
                 trace_id: TraceId::from_uuid(self.trace_id),
                 cause: Cause::from_stored(kind, self.cause_id),
@@ -145,7 +155,7 @@ const ENROLLMENT_COLUMNS: &str = "e.id, e.flow_id, e.flow_version, e.person_id, 
      e.context, e.wake_at, e.state_version, \
      (SELECT w.event_name FROM enrollment_waits w WHERE w.enrollment_id = e.id LIMIT 1) \
          AS awaiting, \
-     e.exit_reason, e.error, e.failed_node, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
+     e.exit_reason, e.error, e.failed_node, e.resume_input, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
@@ -222,7 +232,7 @@ pub async fn count_in_flight_enrollments(
 ) -> Result<i64, StoreError> {
     sqlx::query_scalar(
         "SELECT count(*) FROM enrollments \
-         WHERE workspace_id = $1 AND flow_id = $2 AND state IN ('active', 'waiting', 'failed')",
+         WHERE workspace_id = $1 AND flow_id = $2 AND state IN ('active', 'waiting', 'held', 'failed')",
     )
     .bind(workspace.as_uuid())
     .bind(flow)
@@ -261,6 +271,9 @@ pub struct EnrollmentUpdate<'a> {
     pub error: Option<&'a str>,
     /// The node a failure stopped at; set exactly when `error` is.
     pub failed_node: Option<&'a str>,
+    /// The input a failed enrollment stopped on, for an operator retry; null in every other
+    /// state (see [`Enrollment::resume_input`]).
+    pub resume_input: Option<&'a Value>,
     pub now: OffsetDateTime,
 }
 
@@ -275,7 +288,7 @@ pub async fn save_enrollment(
 ) -> Result<bool, StoreError> {
     let done = sqlx::query(
         "UPDATE enrollments SET state = $4, node = $5, state_version = $6, wake_at = $7, \
-             exit_reason = $8, error = $9, failed_node = $11, updated_at = now(), \
+             exit_reason = $8, error = $9, failed_node = $11, resume_input = $12, updated_at = now(), \
              ended_at = CASE WHEN $4 IN ('completed', 'exited') THEN $10 ELSE NULL END \
          WHERE workspace_id = $1 AND id = $2 AND state_version = $3",
     )
@@ -290,6 +303,7 @@ pub async fn save_enrollment(
     .bind(next.error)
     .bind(next.now)
     .bind(next.failed_node)
+    .bind(next.resume_input)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -469,6 +483,52 @@ pub enum StepJobInput {
     Wake,
     /// An event arrived that the enrollment's wait names.
     Event { event_id: Uuid, name: String },
+    /// An operator retries (`skip: false`) or skips (`skip: true`) the node a failed enrollment
+    /// stopped at.
+    Resume { skip: bool },
+}
+
+impl StepJobInput {
+    /// The input as a payload and a stored `resume_input` carry it: `{"input": "start"}`,
+    /// `{"input": "wake"}`, `{"input": "event", "event_id": .., "event": ..}` or
+    /// `{"input": "resume", "skip": ..}`.
+    pub fn to_stored(&self) -> Value {
+        match self {
+            Self::Start => json!({"input": "start"}),
+            Self::Wake => json!({"input": "wake"}),
+            Self::Event { event_id, name } => {
+                json!({"input": "event", "event_id": event_id, "event": name})
+            }
+            Self::Resume { skip } => json!({"input": "resume", "skip": skip}),
+        }
+    }
+
+    /// The input of a payload or a stored `resume_input`.
+    pub fn from_stored(value: &Value) -> Option<Self> {
+        let text = |key: &str| value.get(key).and_then(Value::as_str);
+        Some(match text("input")? {
+            "start" => Self::Start,
+            "wake" => Self::Wake,
+            "event" => Self::Event {
+                event_id: Uuid::parse_str(text("event_id")?).ok()?,
+                name: text("event")?.to_owned(),
+            },
+            "resume" => Self::Resume {
+                skip: value.get("skip")?.as_bool()?,
+            },
+            _ => return None,
+        })
+    }
+
+    /// The status an enrollment that stopped on this input was in before: `start` runs an active
+    /// enrollment, the rest a waiting one.
+    pub const fn status_before(&self) -> EnrollmentStatus {
+        match self {
+            Self::Start => EnrollmentStatus::Active,
+            Self::Wake | Self::Event { .. } => EnrollmentStatus::Waiting,
+            Self::Resume { .. } => EnrollmentStatus::Failed,
+        }
+    }
 }
 
 /// The payload of a `flow.step` job: which enrollment, in which state it expects to find it, and
@@ -488,34 +548,21 @@ impl StepJobPayload {
             "enrollment_id": self.enrollment,
             "state_version": self.state_version,
         });
-        match &self.input {
-            StepJobInput::Start => payload["input"] = json!("start"),
-            StepJobInput::Wake => payload["input"] = json!("wake"),
-            StepJobInput::Event { event_id, name } => {
-                payload["input"] = json!("event");
-                payload["event_id"] = json!(event_id);
-                payload["event"] = json!(name);
-            }
+        if let (Some(target), Value::Object(input)) =
+            (payload.as_object_mut(), self.input.to_stored())
+        {
+            target.extend(input);
         }
         payload
     }
 
     pub fn parse(payload: &Value) -> Option<Self> {
         let text = |key: &str| payload.get(key).and_then(Value::as_str);
-        let input = match text("input")? {
-            "start" => StepJobInput::Start,
-            "wake" => StepJobInput::Wake,
-            "event" => StepJobInput::Event {
-                event_id: Uuid::parse_str(text("event_id")?).ok()?,
-                name: text("event")?.to_owned(),
-            },
-            _ => return None,
-        };
         Some(Self {
             workspace: text("workspace_id")?.parse().ok()?,
             enrollment: Uuid::parse_str(text("enrollment_id")?).ok()?,
             state_version: payload.get("state_version")?.as_i64()?,
-            input,
+            input: StepJobInput::from_stored(payload)?,
         })
     }
 
@@ -549,6 +596,7 @@ mod tests {
         for status in [
             EnrollmentStatus::Active,
             EnrollmentStatus::Waiting,
+            EnrollmentStatus::Held,
             EnrollmentStatus::Completed,
             EnrollmentStatus::Exited,
             EnrollmentStatus::Failed,
@@ -566,6 +614,8 @@ mod tests {
         for input in [
             StepJobInput::Start,
             StepJobInput::Wake,
+            StepJobInput::Resume { skip: false },
+            StepJobInput::Resume { skip: true },
             StepJobInput::Event {
                 event_id: Uuid::from_u128(9),
                 name: "order".into(),
@@ -650,6 +700,7 @@ mod tests {
             exit_reason: None,
             error: None,
             failed_node: None,
+            resume_input: None,
             now,
         };
 
@@ -814,6 +865,7 @@ mod tests {
                 exit_reason: Some("goal"),
                 error: None,
                 failed_node: None,
+                resume_input: None,
                 now: OffsetDateTime::now_utc(),
             },
         )

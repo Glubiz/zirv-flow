@@ -32,12 +32,13 @@ use zirv_flow_segments::{
     parse_and_validate,
 };
 use zirv_flow_store::{
-    EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowTraitWrite, NewDecision,
-    NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome,
-    StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait,
-    clear_waits, enqueue, find_event_of_person, find_flow_version, lock_enrollment, record_steps,
-    register_wait, run_person_batch, save_enrollment, segment_catalog, settle_wait_step,
-    step_zones, unhealthy_inputs, wait_filters,
+    EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
+    NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput, StepJobPayload,
+    StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list,
+    apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
+    find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment, record_steps,
+    register_wait, reopen_failed_step, run_person_batch, save_enrollment, segment_catalog,
+    settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -68,12 +69,31 @@ impl JobKind for FlowStep {
         let last_attempt = ctx.attempts() >= ctx.max_attempts();
         let conn = ctx.conn();
         let now = clock.now(conn).await?;
-        let Some(enrollment) = lock_enrollment(conn, job.workspace, job.enrollment).await? else {
+        let Some(known) = find_enrollment(conn, job.workspace, job.enrollment).await? else {
             // Erased with the person: nothing is left to advance.
+            return Ok(());
+        };
+        // The flow's state is read first, and held until this transaction ends, so a resume
+        // either sees the enrollment this step holds or the step sees the flow resumed. The
+        // flow, then the person, then the enrollment: the order a resume locks them in.
+        let flow_state = flow_state_for_step(conn, job.workspace, known.flow_id).await?;
+        let Some(enrollment) = lock_enrollment(conn, job.workspace, job.enrollment).await? else {
             return Ok(());
         };
         if is_stale(&enrollment, &job) {
             return Ok(());
+        }
+        match (flow_state, &job.input) {
+            // An archived flow changes no more; its archive job exits what is in flight.
+            (Some(FlowState::Archived) | None, _) => return Ok(()),
+            // An operator's retry or skip is deliberate, whatever the flow is doing.
+            (_, StepJobInput::Resume { .. }) => {}
+            (Some(FlowState::Paused), _) => {
+                return hold(conn, &job, &enrollment, at).await;
+            }
+            // A held enrollment of a flow that is not paused was resumed already.
+            _ if enrollment.status == EnrollmentStatus::Held => return Ok(()),
+            _ => {}
         }
         if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at)
             && due > now
@@ -113,11 +133,49 @@ impl JobKind for FlowStep {
 /// A job whose version is not the enrollment's, or that asks for what the enrollment is no
 /// longer doing, is stale: the first commit won.
 fn is_stale(enrollment: &Enrollment, job: &StepJobPayload) -> bool {
-    let wanted = match job.input {
-        StepJobInput::Start => EnrollmentStatus::Active,
-        StepJobInput::Wake | StepJobInput::Event { .. } => EnrollmentStatus::Waiting,
-    };
-    enrollment.state_version != job.state_version || enrollment.status != wanted
+    let wanted = job.input.status_before();
+    let held = enrollment.status == EnrollmentStatus::Held
+        && !matches!(job.input, StepJobInput::Resume { .. });
+    enrollment.state_version != job.state_version || (enrollment.status != wanted && !held)
+}
+
+/// The flow is paused: the step that fell due is held, not run. The enrollment keeps its node,
+/// timer, waits and version, and the input it is held for; the flow's resume runs it. An event
+/// replaces a held timer (it would have won the race), and a timer never replaces an event.
+async fn hold(
+    conn: &mut PgConnection,
+    job: &StepJobPayload,
+    enrollment: &Enrollment,
+    at: (Uuid, i32),
+) -> Result<(), JobError> {
+    let already = enrollment.status == EnrollmentStatus::Held;
+    let stored = enrollment
+        .resume_input
+        .as_ref()
+        .and_then(|v| v.get("input"));
+    let replaces = matches!(job.input, StepJobInput::Event { .. })
+        && stored.and_then(Value::as_str) != Some("event");
+    if already && !replaces {
+        return Ok(());
+    }
+    hold_enrollment(conn, job.workspace, enrollment.id, &job.input).await?;
+    if !already {
+        let decision = NewDecision {
+            workspace_id: job.workspace,
+            trace: enrollment.trace.clone(),
+            action: "flow.enrollment",
+            outcome: "held",
+            reason: Some("flow_paused"),
+            subject_ids: vec![
+                ("flow", enrollment.flow_id),
+                ("enrollment", enrollment.id),
+                ("person", enrollment.person_id),
+            ],
+            job: Some(at),
+        };
+        append_decisions(conn, &[decision]).await?;
+    }
+    Ok(())
 }
 
 /// Why a step failed, and the node it failed at when that is known.
@@ -316,6 +374,7 @@ async fn first_input(
         StepJobInput::Wake => StepInput::TimerDue {
             wake_version: version,
         },
+        StepJobInput::Resume { skip } => StepInput::Resume { skip: *skip },
         StepJobInput::Event { event_id, name } => {
             if walk.enrollment.awaiting.as_deref() != Some(name.as_str()) {
                 return Ok(None);
@@ -356,10 +415,25 @@ async fn event_matches(
     }
     let now = walk.now;
     let (catalog, _) = walk.catalog(conn).await?;
+    Ok(filters_pass(catalog, name, filters, event, now))
+}
+
+/// Whether `event` satisfies the property filters named `name` carries, over a snapshot that
+/// holds just that event. Something the filters read that was archived since the publish cannot
+/// match. The goal and exit criteria of a flow (`flow.settle`) are matched the same way.
+pub(super) fn filters_pass(
+    catalog: &Catalog,
+    name: &str,
+    filters: &[Value],
+    event: &StoredEvent,
+    now: OffsetDateTime,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
     let wire = json!({"v": 1, "event": name, "where": filters});
     let Ok(definition) = parse_and_validate(&wire, catalog) else {
-        // Something the filters read was archived since the publish: it cannot match.
-        return Ok(false);
+        return false;
     };
     let snapshot = PersonSnapshot {
         events: vec![SnapshotEvent {
@@ -369,7 +443,7 @@ async fn event_matches(
         }],
         ..PersonSnapshot::default()
     };
-    Ok(evaluate(&definition, catalog, &snapshot, now).outcome == Verdict::Pass)
+    evaluate(&definition, catalog, &snapshot, now).outcome == Verdict::Pass
 }
 
 /// The engine's view of a stored enrollment.
@@ -378,6 +452,7 @@ fn engine_state(enrollment: &Enrollment) -> Result<EnrollmentState, JobError> {
         EnrollmentStatus::Active => Status::Active,
         EnrollmentStatus::Waiting => Status::Waiting,
         EnrollmentStatus::Failed => Status::Failed,
+        EnrollmentStatus::Held => return Err(JobError::new("the enrollment is held")),
         EnrollmentStatus::Completed | EnrollmentStatus::Exited => {
             return Err(JobError::new("the enrollment has ended"));
         }
@@ -401,6 +476,13 @@ async fn wake(
 ) -> Result<(), StepFailure> {
     let outcome = match (&job.input, node_of(walk, &walk.enrollment.node)) {
         (StepJobInput::Start, _) => return Ok(()),
+        (StepJobInput::Resume { skip }, _) => {
+            // A retry runs the failed node again, so its row of the failure must not hold it.
+            if let (false, Some(node)) = (skip, &walk.enrollment.failed_node) {
+                reopen_failed_step(&mut *conn, walk.enrollment.id, node).await?;
+            }
+            return Ok(());
+        }
         (StepJobInput::Event { .. }, _) => "event",
         (StepJobInput::Wake, Some(NodeKind::WaitUntilEvent { .. })) => "timeout",
         (StepJobInput::Wake, _) => "timer",
@@ -772,11 +854,7 @@ async fn finish(
         Outcome::Completed => (EnrollmentStatus::Completed, None, None),
         Outcome::Exited { reason } => (
             EnrollmentStatus::Exited,
-            Some(match reason {
-                ExitReason::Goal => "goal",
-                ExitReason::GoalCriterion => "goal_criterion",
-                ExitReason::ExitEvent => "exit_event",
-            }),
+            Some(exit_reason_text(*reason)),
             None,
         ),
         Outcome::Failed { failure, .. } => {
@@ -802,6 +880,7 @@ async fn finish(
             exit_reason,
             error,
             failed_node: error.map(|_| state.node.as_str()),
+            resume_input: None,
             now: walk.now,
         },
     )
@@ -842,6 +921,11 @@ async fn fail_enrollment(
 ) -> Result<(), JobError> {
     let failed_node = failure.node.as_deref().unwrap_or(&enrollment.node);
     let message = failure.error.message();
+    // The input to run again on a retry. A failed retry keeps what the enrollment stopped on.
+    let resume_input = match job.input {
+        StepJobInput::Resume { .. } => enrollment.resume_input.clone(),
+        _ => Some(job.input.to_stored()),
+    };
     let saved = save_enrollment(
         &mut *conn,
         job.workspace,
@@ -855,6 +939,7 @@ async fn fail_enrollment(
             exit_reason: None,
             error: Some(message),
             failed_node: Some(failed_node),
+            resume_input: resume_input.as_ref(),
             now,
         },
     )
@@ -879,6 +964,16 @@ async fn fail_enrollment(
     Ok(())
 }
 
+/// The text an enrollment stores for the reason it exited.
+pub(super) const fn exit_reason_text(reason: ExitReason) -> &'static str {
+    match reason {
+        ExitReason::Goal => "goal",
+        ExitReason::GoalCriterion => "goal_criterion",
+        ExitReason::ExitEvent => "exit_event",
+        ExitReason::LeftSegment => "left_segment",
+    }
+}
+
 /// What an operator reads of a failure the engine reported.
 const fn describe(failure: Failure) -> &'static str {
     match failure {
@@ -889,7 +984,7 @@ const fn describe(failure: Failure) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::time::Duration;
 
     use serde_json::json;
@@ -958,6 +1053,7 @@ mod tests {
             exit_reason: None,
             error: None,
             failed_node: None,
+            resume_input: None,
             trace: TraceContext::root(Cause::api("t")),
             created_at: OffsetDateTime::UNIX_EPOCH,
             ended_at: None,
@@ -988,14 +1084,14 @@ mod tests {
     }
 
     /// One workspace, one clock and a worker that runs `flow.step` jobs by hand.
-    struct Env {
-        pool: PgPool,
-        ws: WorkspaceId,
-        clock: ManualClock,
+    pub(crate) struct Env {
+        pub(crate) pool: PgPool,
+        pub(crate) ws: WorkspaceId,
+        pub(crate) clock: ManualClock,
     }
 
     impl Env {
-        async fn new(pool: PgPool) -> Self {
+        pub(crate) async fn new(pool: PgPool) -> Self {
             zirv_flow_store::migrate(&pool).await.unwrap();
             let name = WorkspaceName::parse("ours").unwrap();
             let slug = Slug::parse("ours").unwrap();
@@ -1012,11 +1108,11 @@ mod tests {
             }
         }
 
-        fn advance(&self, seconds: i64) {
+        pub(crate) fn advance(&self, seconds: i64) {
             self.clock.advance(Span::seconds(seconds));
         }
 
-        async fn define_trait(&self, key: &str, kind: TraitType) {
+        pub(crate) async fn define_trait(&self, key: &str, kind: TraitType) {
             zirv_flow_store::create_trait_definition(
                 &self.pool,
                 self.ws,
@@ -1035,7 +1131,7 @@ mod tests {
             .unwrap();
         }
 
-        async fn define_event(&self, name: &str) {
+        pub(crate) async fn define_event(&self, name: &str) {
             zirv_flow_store::create_event_schema(
                 &self.pool,
                 self.ws,
@@ -1057,7 +1153,7 @@ mod tests {
                 .unwrap();
         }
 
-        async fn person(&self, email: &str, traits: Value) -> Uuid {
+        pub(crate) async fn person(&self, email: &str, traits: Value) -> Uuid {
             let record = ProfileRecord {
                 source: "crm".into(),
                 stream: "contacts".into(),
@@ -1079,7 +1175,7 @@ mod tests {
             }
         }
 
-        async fn list(&self, name: &str) -> Uuid {
+        pub(crate) async fn list(&self, name: &str) -> Uuid {
             zirv_flow_store::create_list(&self.pool, self.ws, name, "", None)
                 .await
                 .unwrap()
@@ -1087,7 +1183,7 @@ mod tests {
         }
 
         /// Creates a flow and publishes its first version.
-        async fn flow(&self, name: &str, graph: Value) -> Uuid {
+        pub(crate) async fn flow(&self, name: &str, graph: Value) -> Uuid {
             let id = Uuid::now_v7();
             let mut connection = self.pool.acquire().await.unwrap();
             zirv_flow_store::create_flow(
@@ -1108,7 +1204,190 @@ mod tests {
             id
         }
 
-        async fn publish(&self, id: Uuid) -> i32 {
+        /// Creates a flow with these settings and publishes its first version.
+        pub(crate) async fn flow_with(&self, name: &str, graph: Value, settings: Value) -> Uuid {
+            let id = Uuid::now_v7();
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::create_flow(
+                &mut connection,
+                self.ws,
+                &NewFlow {
+                    id,
+                    name: name.into(),
+                    graph,
+                    settings,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            drop(connection);
+            self.publish(id).await;
+            id
+        }
+
+        /// Runs every ready job of one kind, as a worker does, and returns how many ran.
+        pub(crate) async fn run_kind<K: JobKind>(&self, kind: &'static str, handler: &K) -> usize {
+            let mut ran = 0;
+            while let Some(claimed) = zirv_flow_store::claim_job(
+                &self.pool,
+                "test",
+                &[kind],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap()
+            {
+                let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+                let result = {
+                    let mut ctx = JobContext::new(&mut tx, &claimed)
+                        .with_clock(Clock::Manual(self.clock.clone()));
+                    handler.run(&mut ctx, claimed.payload.clone()).await
+                };
+                result.unwrap();
+                zirv_flow_store::complete_job(&mut *tx, claimed.id, claimed.lease_token)
+                    .await
+                    .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+                ran += 1;
+            }
+            ran
+        }
+
+        pub(crate) async fn pause(&self, flow: Uuid) {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let trace = TraceContext::root(Cause::api("pause"));
+            zirv_flow_store::pause_flow(&mut tx, self.ws, flow, &trace)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+
+        /// Resumes the flow under a trace caused by `manual`, as the API does for a user.
+        pub(crate) async fn resume(&self, flow: Uuid) -> TraceContext {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let trace = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
+                Uuid::new_v4(),
+            )));
+            zirv_flow_store::resume_flow(&mut tx, self.ws, flow, &trace)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            trace
+        }
+
+        pub(crate) async fn archive(&self, flow: Uuid) -> TraceContext {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let trace = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
+                Uuid::new_v4(),
+            )));
+            zirv_flow_store::archive_flow(&mut tx, self.ws, flow, &trace)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            trace
+        }
+
+        /// The saved content of a segment of the people whose `plan` trait is `plan`.
+        async fn plan_version(&self, plan: &str) -> zirv_flow_store::NewSegmentVersion {
+            let definition = json!({"op": "eq", "trait": "plan", "value": plan, "v": 1});
+            let mut connection = self.pool.acquire().await.unwrap();
+            let (catalog, storage) =
+                catalog_of(segment_catalog(&mut connection, self.ws).await.unwrap());
+            let parsed = parse_and_validate(&definition, &catalog).unwrap();
+            let compiled =
+                zirv_flow_segments::compile(&parsed, &catalog, &storage, OffsetDateTime::now_utc())
+                    .unwrap();
+            zirv_flow_store::NewSegmentVersion {
+                definition,
+                normalized: zirv_flow_segments::normalize(parsed).to_value(),
+                deps: compiled.deps.to_value(),
+                time_sensitive: compiled.time_sensitive,
+            }
+        }
+
+        /// A segment of the people whose `plan` trait is `plan`.
+        pub(crate) async fn plan_segment(&self, name: &str, plan: &str) -> Uuid {
+            let content = self.plan_version(plan).await;
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            zirv_flow_store::lock_segments(&mut tx, self.ws)
+                .await
+                .unwrap();
+            let (segment, _) = zirv_flow_store::create_segment(
+                &mut tx,
+                self.ws,
+                &zirv_flow_store::NewSegment {
+                    id: Uuid::now_v7(),
+                    name: name.into(),
+                    description: String::new(),
+                    cadence_minutes: 60,
+                },
+                &content,
+                None,
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            segment.id
+        }
+
+        /// Saves a new definition of the segment: the people with this `plan`.
+        pub(crate) async fn resave_plan_segment(&self, segment: Uuid, plan: &str) {
+            let content = self.plan_version(plan).await;
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            zirv_flow_store::lock_segments(&mut tx, self.ws)
+                .await
+                .unwrap();
+            zirv_flow_store::update_segment(
+                &mut tx,
+                self.ws,
+                segment,
+                &zirv_flow_store::SegmentPatch {
+                    version: Some(content),
+                    ..zirv_flow_store::SegmentPatch::default()
+                },
+                None,
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+
+        /// Refreshes a segment as its job does, under `trace`.
+        pub(crate) async fn refresh(&self, segment: Uuid, trigger: &str, trace: TraceContext) {
+            sqlx::query("DELETE FROM jobs WHERE kind = 'segment.refresh'")
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            let mut job = NewJob::new(zirv_flow_store::REFRESH_JOB_KIND, trace);
+            job.workspace_id = Some(self.ws);
+            job.payload =
+                json!({"workspace_id": self.ws, "segment_id": segment, "trigger": trigger});
+            job.unique_key = Some(format!("test:{}", Uuid::new_v4()));
+            enqueue(&self.pool, &job).await.unwrap();
+            self.run_kind(
+                zirv_flow_store::REFRESH_JOB_KIND,
+                &crate::kinds::segment_refresh::SegmentRefresh,
+            )
+            .await;
+        }
+
+        /// Sets a person's `plan` trait directly, as a data change the next refresh sees.
+        pub(crate) async fn set_plan(&self, person: Uuid, plan: &str) {
+            sqlx::query(
+                "UPDATE people SET traits = jsonb_build_object('plan', $2::text) WHERE id = $1",
+            )
+            .bind(person)
+            .bind(plan)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        pub(crate) async fn publish(&self, id: Uuid) -> i32 {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let locked = zirv_flow_store::lock_flow(&mut tx, self.ws, id)
                 .await
@@ -1129,7 +1408,7 @@ mod tests {
         }
 
         /// Replaces the draft graph and publishes it as the next version.
-        async fn republish(&self, id: Uuid, graph: Value) -> i32 {
+        pub(crate) async fn republish(&self, id: Uuid, graph: Value) -> i32 {
             let mut connection = self.pool.acquire().await.unwrap();
             zirv_flow_store::update_flow_draft(
                 &mut connection,
@@ -1146,7 +1425,12 @@ mod tests {
             self.publish(id).await
         }
 
-        async fn enroll(&self, flow: Uuid, version: i32, people: &[Uuid]) -> EnrollOutcome {
+        pub(crate) async fn enroll(
+            &self,
+            flow: Uuid,
+            version: i32,
+            people: &[Uuid],
+        ) -> EnrollOutcome {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let outcome = zirv_flow_store::enroll(
                 &mut tx,
@@ -1171,7 +1455,7 @@ mod tests {
 
         /// Pushes the jobs that do not match far into the future and makes the ones that do
         /// due: a timer once the clock reached its time, a start or an event at once.
-        async fn hold_others(&self, input: Option<&str>, enrollment: Option<Uuid>) {
+        pub(crate) async fn hold_others(&self, input: Option<&str>, enrollment: Option<Uuid>) {
             sqlx::query(
                 "UPDATE jobs SET run_at = run_at + interval '100 years' \
                  WHERE kind = 'flow.step' AND state = 'ready' \
@@ -1195,7 +1479,7 @@ mod tests {
             .unwrap();
         }
 
-        async fn release(&self) {
+        pub(crate) async fn release(&self) {
             sqlx::query(
                 "UPDATE jobs SET run_at = run_at - interval '100 years' \
                  WHERE kind = 'flow.step' AND run_at > now() + interval '50 years'",
@@ -1205,7 +1489,7 @@ mod tests {
             .unwrap();
         }
 
-        async fn claim(&self) -> Option<ClaimedJob> {
+        pub(crate) async fn claim(&self) -> Option<ClaimedJob> {
             zirv_flow_store::claim_job(
                 &self.pool,
                 "test",
@@ -1219,7 +1503,7 @@ mod tests {
 
         /// Runs one claimed job as a worker does: its work commits with its completion, and an
         /// error rolls it back and puts the job up for another attempt.
-        async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
+        pub(crate) async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let result = {
                 let mut ctx = JobContext::new(&mut tx, &claimed)
@@ -1251,7 +1535,11 @@ mod tests {
         }
 
         /// Claims the due jobs that match and runs them, until none is left.
-        async fn run_matching(&self, input: Option<&str>, enrollment: Option<Uuid>) -> usize {
+        pub(crate) async fn run_matching(
+            &self,
+            input: Option<&str>,
+            enrollment: Option<Uuid>,
+        ) -> usize {
             let mut ran = 0;
             loop {
                 self.hold_others(input, enrollment).await;
@@ -1266,11 +1554,11 @@ mod tests {
         }
 
         /// Runs every job that is due, including the ones those jobs make due.
-        async fn run_due(&self) -> usize {
+        pub(crate) async fn run_due(&self) -> usize {
             self.run_matching(None, None).await
         }
 
-        async fn enrollment(&self, id: Uuid) -> Enrollment {
+        pub(crate) async fn enrollment(&self, id: Uuid) -> Enrollment {
             let mut connection = self.pool.acquire().await.unwrap();
             find_enrollment(&mut connection, self.ws, id)
                 .await
@@ -1278,7 +1566,7 @@ mod tests {
                 .unwrap()
         }
 
-        async fn traits(&self, person: Uuid) -> Value {
+        pub(crate) async fn traits(&self, person: Uuid) -> Value {
             sqlx::query_scalar("SELECT traits FROM people WHERE id = $1")
                 .bind(person)
                 .fetch_one(&self.pool)
@@ -1287,7 +1575,7 @@ mod tests {
         }
 
         /// The (action, outcome) of every decision on a trace, sorted.
-        async fn decisions(&self, trace: &TraceContext) -> Vec<(String, String)> {
+        pub(crate) async fn decisions(&self, trace: &TraceContext) -> Vec<(String, String)> {
             let mut rows: Vec<(String, String)> = sqlx::query_as(
                 "SELECT action, outcome FROM decision_records \
                  WHERE workspace_id = $1 AND trace_id = $2",
@@ -1301,14 +1589,14 @@ mod tests {
             rows
         }
 
-        async fn count(&self, sql: &str) -> i64 {
+        pub(crate) async fn count(&self, sql: &str) -> i64 {
             sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
                 .fetch_one(&self.pool)
                 .await
                 .unwrap()
         }
 
-        async fn apply_event(&self, email: &str, name: &str, properties: Value) {
+        pub(crate) async fn apply_event(&self, email: &str, name: &str, properties: Value) {
             let key =
                 HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
             let record = EventRecord {
@@ -1328,7 +1616,7 @@ mod tests {
         }
     }
 
-    fn edge(id: &str, from: &str, port: &str, to: &str) -> Value {
+    pub(crate) fn edge(id: &str, from: &str, port: &str, to: &str) -> Value {
         json!({"id": id, "from": from, "port": port, "to": to})
     }
 

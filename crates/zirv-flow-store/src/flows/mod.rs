@@ -5,6 +5,7 @@
 //! passes the same locked flow to the publish.
 
 mod arrivals;
+mod control;
 mod crud;
 mod delivery;
 mod effects;
@@ -18,6 +19,13 @@ mod triggers;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
 pub use arrivals::{StoredEvent, find_event_of_person};
+pub(crate) use control::enqueue_segment_settles;
+pub use control::{
+    ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
+    LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
+    exit_batch, flow_state_for_step, hold_enrollment, reopen_failed_step, resume_batch,
+    resume_failed, segment_is_watched,
+};
 pub use crud::{
     Flow, FlowError, FlowPatch, FlowVersion, LockedFlow, NewFlow, create_flow, find_flow,
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
