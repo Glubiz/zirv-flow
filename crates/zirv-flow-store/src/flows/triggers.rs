@@ -559,7 +559,8 @@ pub async fn lock_audience_page(
             .await
             .map_err(StoreError::query)?;
         let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2)              ORDER BY id FOR KEY SHARE",
+            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
+             ORDER BY id FOR KEY SHARE",
         )
         .bind(workspace.as_uuid())
         .bind(&people)
