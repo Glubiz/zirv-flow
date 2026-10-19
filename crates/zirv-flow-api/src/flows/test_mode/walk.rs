@@ -27,7 +27,7 @@ use zirv_flow_segments::{
 };
 
 use super::body::{
-    ConditionBody, EffectBody, FinalStateBody, HaltBody, ObservedBody, PathStepBody,
+    ConditionBody, EffectBody, FinalStateBody, FlowObservedBody, HaltBody, PathStepBody,
     PersonAfterBody, ScriptResultBody, WaitBody, WakeBody,
 };
 
@@ -157,6 +157,7 @@ pub(crate) fn walk(input: Walk<'_>) -> Result<Walked, Refusal> {
         wakes: Vec::new(),
         results: Vec::new(),
         halted: None,
+        converted: false,
     };
     walker.advance(StepInput::Start)?;
     for (index, scripted) in input.script.iter().enumerate() {
@@ -223,6 +224,8 @@ struct Walker<'a> {
     wakes: Vec<WakeBody>,
     results: Vec<ScriptResultBody>,
     halted: Option<HaltBody>,
+    /// Whether the settings goal has recorded its conversion: one per enrollment.
+    converted: bool,
 }
 
 fn halt(reason: &'static str, node: Option<&str>, message: impl Into<String>) -> HaltBody {
@@ -267,9 +270,9 @@ fn observed_value(seen: &Observed) -> Value {
 }
 
 /// The leaves of an evaluation tree with what each saw.
-fn leaves(node: &EvalNode, into: &mut Vec<ObservedBody>) {
+fn leaves(node: &EvalNode, into: &mut Vec<FlowObservedBody>) {
     if node.children.is_empty() {
-        into.push(ObservedBody {
+        into.push(FlowObservedBody {
             pointer: node.pointer.clone(),
             outcome: verdict_name(node.outcome),
             observed: match (&node.observed, node.outcome) {
@@ -365,12 +368,28 @@ impl Walker<'_> {
     fn absorb(&mut self, transition: Transition) {
         let at = to_time(self.clock);
         let mut failed_at = None;
+        let before = (
+            self.snapshot.traits.clone(),
+            self.snapshot.lists.clone(),
+            self.internal.len(),
+            self.external.len(),
+        );
         for effect in &transition.effects {
             self.apply(effect);
             if self.halted.is_some() {
                 failed_at = Some(effect.node.clone());
                 break;
             }
+        }
+        if failed_at.is_some() {
+            // The runtime rolls the whole step back: every effect of it is dropped, and only the
+            // failing one stays, as the record of why.
+            let failure = self.internal.pop();
+            self.snapshot.traits = before.0;
+            self.snapshot.lists = before.1;
+            self.internal.truncate(before.2);
+            self.external.truncate(before.3);
+            self.internal.extend(failure);
         }
         let kept = failed_at.as_ref().map_or(transition.visited.len(), |node| {
             transition
@@ -730,7 +749,9 @@ impl Walker<'_> {
         let settings = self.input.settings;
         let named = |wanted: &EventMatch| wanted.name == event.name;
         let goal = match &settings.goal {
-            Some(Goal::Event(wanted)) if named(wanted) => self.matches(wanted, event.clone()),
+            Some(Goal::Event(wanted)) if named(wanted) && !self.converted => {
+                self.matches(wanted, event.clone())
+            }
             _ => false,
         };
         let mut exit_event = false;
@@ -750,6 +771,7 @@ impl Walker<'_> {
         };
         for effect in &transition.effects {
             self.apply(effect);
+            self.converted = true;
         }
         let ended = match &transition.outcome {
             Outcome::Exited { reason } => Some(match reason {
@@ -1213,13 +1235,20 @@ mod tests {
         let graph = graph(
             json!([
                 {"id": "w", "type": "wait.duration", "seconds": 5},
+                {"id": "set", "type": "action.update_trait", "key": "visits",
+                 "change": {"op": "set", "value": 9}},
+                {"id": "join", "type": "action.list", "list_id": LIST, "change": "add"},
+                {"id": "hook", "type": "action.webhook", "url": "https://example.com/hook"},
                 {"id": "inc", "type": "action.update_trait", "key": "plan",
                  "change": {"op": "increment", "by": 1}},
                 {"id": "w2", "type": "wait.duration", "seconds": 5},
                 {"id": "end", "type": "exit"}
             ]),
             &[
-                ("w", "next", "inc"),
+                ("w", "next", "set"),
+                ("set", "next", "join"),
+                ("join", "next", "hook"),
+                ("hook", "next", "inc"),
                 ("inc", "next", "w2"),
                 ("w2", "next", "end"),
             ],
@@ -1233,8 +1262,23 @@ mod tests {
         assert_eq!(halted.reason, "step_failed");
         assert_eq!(halted.node.as_deref(), Some("inc"));
         assert_eq!(walked.internal_effects[0].detail["error"], halted.message);
-        // The path ends at the failing node, and nothing after it (the second wait) is recorded.
-        assert_eq!(nodes_of(&walked), [("w", "passed"), ("inc", "failed")]);
+        assert_eq!(
+            nodes_of(&walked),
+            [
+                ("w", "passed"),
+                ("set", "passed"),
+                ("join", "passed"),
+                ("hook", "passed"),
+                ("inc", "failed")
+            ]
+        );
+        // The step rolls back whole: the update, the list and the webhook before the failure are
+        // gone from the effects and from the person, and only the failure is recorded.
+        assert_eq!(walked.internal_effects.len(), 1);
+        assert!(walked.external_effects.is_empty());
+        assert!(!walked.person_after.traits.contains_key("visits"));
+        assert_eq!(walked.person_after.traits["plan"], "pro");
+        assert!(walked.person_after.lists.is_empty());
         assert_eq!(walked.waits.len(), 1);
         assert_eq!(walked.wakes.len(), 1);
         // The state is the one before the node, failed.
@@ -1381,8 +1425,44 @@ mod tests {
         // The conversion is captured with the settings step key.
         let conversion = walked.internal_effects.last().unwrap();
         assert_eq!(conversion.kind, "goal");
-        assert!(conversion.step_key.ends_with(":ev:settings.goal"));
+        assert!(conversion.step_key.ends_with(":settings.goal"));
         assert!(walked.not_simulated.is_empty());
+    }
+
+    #[test]
+    fn the_settings_goal_converts_an_enrollment_once_wherever_it_is_reached_again() {
+        let settings = settings(json!({"goal": {"type": "event", "event": "order",
+            "filters": big_order()["filters"]}}));
+        // Reached asleep at the first wait, then again at the event wait.
+        let walked = run_under(
+            &journey(),
+            &settings,
+            PersonSnapshot::default(),
+            &[
+                inject("order", json!({"total": 500}), 10),
+                inject("order", json!({"total": 600}), 180),
+            ],
+            MAX_STEPS,
+        )
+        .unwrap();
+
+        assert_eq!(walked.script[0].outcome, "goal_reached");
+        assert_eq!(walked.script[1].outcome, "event_delivered");
+        let conversions: Vec<&str> = walked
+            .internal_effects
+            .iter()
+            .filter(|effect| effect.step_key.ends_with(":settings.goal"))
+            .map(|effect| effect.step_key.as_str())
+            .collect();
+        assert_eq!(
+            conversions,
+            [format!("{}:settings.goal", subject().enrollment_id)]
+        );
+        let steps = walked
+            .path
+            .iter()
+            .filter(|s| s.node_type == "settings.goal");
+        assert_eq!(steps.count(), 1);
     }
 
     #[test]

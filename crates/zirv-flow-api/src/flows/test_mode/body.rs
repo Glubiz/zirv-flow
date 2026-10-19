@@ -26,7 +26,7 @@ fn graph_schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
 /// `person_id` or `snapshot` (exactly one).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TestRequest {
+pub(crate) struct FlowTestRequest {
     /// Walk this published version instead of the draft.
     pub(crate) version: Option<i32>,
     /// Walk this graph instead of the saved draft. It is checked as a publish checks structure.
@@ -196,7 +196,7 @@ impl SnapshotBody {
 
 /// What a leaf condition saw, flattened out of the evaluation tree.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
-pub(crate) struct ObservedBody {
+pub(crate) struct FlowObservedBody {
     /// The JSON pointer of the leaf in the condition.
     pub(crate) pointer: String,
     /// `pass`, `fail` or `unknown` (a capped event name).
@@ -213,7 +213,7 @@ pub(crate) struct ConditionBody {
     pub(crate) index: usize,
     /// `pass`, `fail`, `unknown`, or `not_evaluated` for a condition after the first that passed.
     pub(crate) outcome: &'static str,
-    pub(crate) observed: Vec<ObservedBody>,
+    pub(crate) observed: Vec<FlowObservedBody>,
 }
 
 /// A node the walk ran.
@@ -357,7 +357,7 @@ pub(crate) struct PersonAfterBody {
 
 /// The result of a walk.
 #[derive(Debug, PartialEq, Serialize, ToSchema)]
-pub(crate) struct TestBody {
+pub(crate) struct FlowTestBody {
     pub(crate) flow_id: Uuid,
     /// `draft`, `version` or `inline`.
     pub(crate) source: &'static str,

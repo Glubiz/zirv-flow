@@ -341,16 +341,16 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         flows::publish::ImpactBody,
         flows::publish::PublishedBody,
         flows::publish::AudienceBody,
-        flows::test_mode::body::TestRequest,
+        flows::test_mode::body::FlowTestRequest,
         flows::test_mode::body::ScriptStepBody,
         flows::test_mode::body::InjectBody,
         flows::test_mode::body::SnapshotBody,
         flows::test_mode::body::SnapshotEventBody,
         flows::test_mode::body::SnapshotConsentBody,
-        flows::test_mode::body::TestBody,
+        flows::test_mode::body::FlowTestBody,
         flows::test_mode::body::PathStepBody,
         flows::test_mode::body::ConditionBody,
-        flows::test_mode::body::ObservedBody,
+        flows::test_mode::body::FlowObservedBody,
         flows::test_mode::body::EffectBody,
         flows::test_mode::body::WaitBody,
         flows::test_mode::body::WakeBody,
@@ -531,6 +531,40 @@ mod tests {
         );
     }
 
+    /// Two registered types with one name overwrite each other in `components.schemas`, and only
+    /// one survives. These three pairs predate the check (segments and sources both define
+    /// them); no new type may join them.
+    const KNOWN_DUPLICATES: [&str; 3] = ["PreviewBody", "PreviewRequest", "SampleBody"];
+
+    #[test]
+    fn no_two_registered_schemas_share_a_name() {
+        let source = include_str!("openapi.rs");
+        let list = source
+            .split("schemas(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    ),").next())
+            .expect("the schemas list");
+        let mut seen = std::collections::BTreeMap::<&str, &str>::new();
+        for entry in list.lines().map(str::trim) {
+            let Some(path) = entry.strip_suffix(',') else {
+                continue;
+            };
+            if path.is_empty()
+                || !path
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+            {
+                continue;
+            }
+            let name = path.rsplit("::").next().unwrap();
+            if let Some(first) = seen.insert(name, path)
+                && !KNOWN_DUPLICATES.contains(&name)
+            {
+                panic!("schema {name} is registered by {first} and {path}");
+            }
+        }
+        assert!(seen.len() > 100, "the list was not read");
+    }
     #[test]
     fn every_operation_id_is_unique() {
         let document = serde_json::to_value(openapi()).unwrap();

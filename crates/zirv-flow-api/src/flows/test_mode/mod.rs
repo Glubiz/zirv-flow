@@ -25,7 +25,7 @@ use zirv_flow_segments::Catalog;
 use zirv_flow_segments::event_lower_bounds;
 use zirv_flow_store::{EXPLAIN_EVENT_CAP, ExplainEventScope, StoreError};
 
-use self::body::{ScriptStepBody, SnapshotBody, TestBody, TestRequest};
+use self::body::{FlowTestBody, FlowTestRequest, ScriptStepBody, SnapshotBody};
 use self::walk::{
     MAX_SCRIPT_STEPS, MAX_STEPS, Refusal, Step, Subject, Walk, parse_condition, to_chrono, to_time,
 };
@@ -155,9 +155,9 @@ fn derived_enrollment(flow: Uuid, person: Option<Uuid>) -> Uuid {
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Flow id")
     ),
-    request_body = TestRequest,
+    request_body = FlowTestRequest,
     responses(
-        (status = 200, description = "The walk", body = TestBody),
+        (status = 200, description = "The walk", body = FlowTestBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, a missing CSRF token, or a real person for a caller who may not see personal values (`flow_test_values_forbidden`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow, version or person, or no access", body = Problem, content_type = "application/problem+json"),
@@ -170,8 +170,8 @@ pub(crate) async fn test(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
-    ApiJson(body): ApiJson<TestRequest>,
-) -> Result<Json<TestBody>, ApiError> {
+    ApiJson(body): ApiJson<FlowTestRequest>,
+) -> Result<Json<FlowTestBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
     let flow_id: Uuid = path_id(&id)?;
     let script = script_of(&body.script)?;
@@ -292,7 +292,7 @@ pub(crate) async fn test(
         ),
         Refusal::NoEntry => ApiError::flow_invalid(Vec::new()),
     })?;
-    Ok(Json(TestBody {
+    Ok(Json(FlowTestBody {
         flow_id,
         source,
         version,
