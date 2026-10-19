@@ -27,6 +27,7 @@ use super::schemas::{
     EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
 };
 use crate::changes::mark_person;
+use crate::flows::{Arrival, enqueue_arrivals};
 use crate::people::{find_known_person, normalize_identifiers, record_resolution, resolve_person};
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
@@ -113,16 +114,21 @@ pub(crate) struct EventBatch {
     watched: Option<bool>,
     /// Feed rows were written, so [`EventBatch::finish`] must notify.
     fed: bool,
+    /// The accepted events that may wake a waiting enrollment, matched once in `finish`.
+    arrivals: Vec<Arrival>,
 }
 
 impl EventBatch {
-    /// Ends the batch: one notification for the debugger if it wrote feed rows. Call it once
-    /// after the last record, in the transaction that holds them.
+    /// Ends the batch: one query matches the accepted events against the event waits of
+    /// enrollments (a `flow.step` job per match), and one notification goes to the debugger if it
+    /// wrote feed rows. Call it once after the last record, in the transaction that holds them.
     pub(crate) async fn finish(
         &mut self,
         connection: &mut PgConnection,
         workspace: WorkspaceId,
     ) -> Result<(), StoreError> {
+        let arrivals = std::mem::take(&mut self.arrivals);
+        enqueue_arrivals(connection, workspace, &arrivals).await?;
         if std::mem::take(&mut self.fed) {
             notify_feed(connection, workspace).await?;
         }
@@ -188,6 +194,20 @@ pub(crate) async fn apply_event_record(
     record: &EventRecord,
 ) -> Result<EventOutcome, StoreError> {
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
+    if let EventOutcome::Accepted {
+        event_id,
+        person_id,
+        flags,
+        ..
+    } = &outcome
+        && !flags.contains(&EventFlag::NoTriggers)
+    {
+        batch.arrivals.push(Arrival {
+            event_id: *event_id,
+            person_id: *person_id,
+            name: record.name.clone(),
+        });
+    }
     if batch.watched(connection, workspace).await? {
         feed_outcome(connection, workspace, key, batch, record, &outcome).await?;
         batch.fed = true;
@@ -841,6 +861,63 @@ mod tests {
             .await
             .unwrap()
             .remove(0)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_accepted_event_wakes_the_enrollments_waiting_for_it_once_per_batch(pool: PgPool) {
+        use crate::flows::tests_support::{create, publish as publish_flow, waiting_enrollment};
+        let ws = workspace(&pool, "waits").await;
+        let key = key();
+        apply_event_batch(&pool, ws, &key, &[event("order", json!({}))])
+            .await
+            .unwrap();
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let flow = create(&pool, ws, "Flow").await;
+        publish_flow(&pool, ws, flow.id).await.unwrap();
+        let waiting = waiting_enrollment(&pool, ws, flow.id, person, "order").await;
+        let other = create(&pool, ws, "Other").await;
+        publish_flow(&pool, ws, other.id).await.unwrap();
+        let idle = waiting_enrollment(&pool, ws, other.id, person, "refund").await;
+
+        let outcomes = apply_event_batch(
+            &pool,
+            ws,
+            &key,
+            &[event("order", json!({})), event("order", json!({}))],
+        )
+        .await
+        .unwrap();
+
+        let jobs: Vec<Value> =
+            sqlx::query_scalar("SELECT payload FROM jobs WHERE kind = 'flow.step'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs.len(), 2, "one job per accepted event that matches");
+        for payload in &jobs {
+            assert_eq!(payload["enrollment_id"], waiting.to_string());
+            assert_eq!(payload["state_version"], 3);
+            assert_ne!(payload["enrollment_id"], idle.to_string());
+        }
+        let events: Vec<String> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                EventOutcome::Accepted { event_id, .. } => Some(event_id.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut named: Vec<String> = jobs
+            .iter()
+            .map(|payload| payload["event_id"].as_str().unwrap().to_owned())
+            .collect();
+        named.sort();
+        let mut accepted = events;
+        accepted.sort();
+        assert_eq!(named, accepted);
     }
 
     #[test]

@@ -46,11 +46,7 @@ pub struct EnrollmentState {
 impl EnrollmentState {
     /// A new enrollment at the graph's entry node (the first node no edge leads to), version 0.
     pub fn new(enrollment_id: Uuid, graph: &FlowGraph) -> Result<Self, EngineError> {
-        let entry = graph
-            .nodes
-            .iter()
-            .find(|node| graph.edges.iter().all(|edge| edge.to != node.id))
-            .ok_or(EngineError::NoEntry)?;
+        let entry = graph.entry().ok_or(EngineError::NoEntry)?;
         Ok(Self {
             enrollment_id,
             node: entry.id.clone(),

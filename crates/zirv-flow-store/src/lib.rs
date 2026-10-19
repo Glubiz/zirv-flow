@@ -89,10 +89,16 @@ pub use events::{
     set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use flows::{
-    Flow, FlowAction, FlowError, FlowPatch, FlowState, FlowVersion, LockedFlow, NewFlow,
-    UnhealthyInput, archive_flow, create_flow, find_flow, find_flow_version,
-    has_webhook_signing_secret, list_flow_versions, list_flows, lock_flow, pause_flow,
-    publish_flow, resume_flow, unhealthy_inputs, update_flow_draft,
+    EffectError, EnrollError, EnrollOutcome, EnrollRequest, Enrolled, Enrollment, EnrollmentStatus,
+    EnrollmentUpdate, Flow, FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite,
+    FlowVersion, LockedFlow, MAX_ENROLL_PEOPLE, NewFlow, NewStepExecution, NewWait, Occurrence,
+    STEP_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
+    UnhealthyInput, WEBHOOK_JOB_KIND, apply_flow_list, apply_flow_trait, archive_flow, clear_waits,
+    count_in_flight_enrollments, create_flow, enroll, fail_step, find_enrollment,
+    find_event_of_person, find_flow, find_flow_version, flow_source, has_webhook_signing_secret,
+    list_flow_versions, list_flows, lock_enrollment, lock_flow, pause_flow, publish_flow,
+    record_steps, register_wait, resume_flow, save_enrollment, settle_wait_step, unhealthy_inputs,
+    update_flow_draft, wait_filters,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -167,8 +173,8 @@ pub use segments::{
     explain_clear_fields, find_segment, find_segment_version, list_segment_versions, list_segments,
     load_explain_person, lock_reevaluation, lock_segment_refresh, lock_segments, membership_cause,
     membership_trace, read_segment_catalog, reconcile_segment_schedules, reevaluation_order,
-    run_segment_preview, segment_catalog, segment_catalog_details, segment_cron, segment_data_age,
-    segment_history_page, segment_members_page, snapshot_now, update_segment,
+    run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
+    segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
 };
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
