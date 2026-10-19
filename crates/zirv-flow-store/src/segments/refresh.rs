@@ -11,7 +11,9 @@ use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::preview::{SqlQuery, bind_all_as};
-use crate::flows::{enqueue_segment_enrolls, segment_trigger_flows};
+use crate::flows::{
+    enqueue_segment_enrolls, enqueue_segment_settles, segment_is_watched, segment_trigger_flows,
+};
 use crate::{NewJob, StoreError, enqueue};
 
 /// The kind of the job that refreshes one segment.
@@ -504,7 +506,11 @@ pub async fn apply_refresh(
 ) -> Result<RefreshOutcome, StoreError> {
     // The flows this segment triggers decide whether the statement hands back its changes.
     let triggered = segment_trigger_flows(connection, apply.workspace, apply.segment).await?;
-    let statement = refresh_statement(apply.members, Scope::Segment, !triggered.is_empty());
+    // A segment that is a flow's goal, or the trigger segment of a `leaves_segment` exit criterion,
+    // hands back its changes too: the enrollments in flight settle on them.
+    let watched = segment_is_watched(connection, apply.workspace, apply.segment).await?;
+    let capture = !triggered.is_empty() || watched;
+    let statement = refresh_statement(apply.members, Scope::Segment, capture);
     // A segment of a hundred thousand people is diffed in one statement, and the plan has to be
     // a pair of hash joins. Before the tables are analyzed the planner thinks `segment_members`
     // is tiny and may probe it once per person, and a probe that scans the table also scans the
@@ -547,9 +553,14 @@ pub async fn apply_refresh(
             .map_err(StoreError::query)?;
     }
     let outcome = captured.outcome();
-    if !triggered.is_empty() {
-        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
-            .await?;
+    if capture {
+        let changes = captured.changes();
+        if !triggered.is_empty() {
+            enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
+        }
+        if watched {
+            enqueue_segment_settles(connection, apply.workspace, apply.segment, &changes).await?;
+        }
     }
 
     sqlx::query(

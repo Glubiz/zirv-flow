@@ -9,6 +9,8 @@ use crate::{ErasedKind, JobError};
 mod ai_transcripts;
 mod events_retention;
 mod flow_enroll;
+mod flow_lifecycle;
+mod flow_settle;
 mod flow_step;
 mod import_dry_run;
 mod import_rows;
@@ -48,6 +50,8 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &segment_reevaluate::SegmentReevaluate,
     &flow_step::FlowStep,
     &flow_enroll::FlowEnroll,
+    &flow_settle::FlowSettle,
+    &flow_lifecycle::FlowLifecycle,
     &webhook_call::WebhookCall,
 ];
 

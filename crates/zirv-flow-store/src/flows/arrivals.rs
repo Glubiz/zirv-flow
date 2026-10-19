@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
+use super::control::enqueue_event_settles;
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::triggers::enqueue_event_enrolls;
 use crate::{StoreError, enqueue};
@@ -50,6 +51,8 @@ pub(crate) async fn enqueue_arrivals(
     }
     // The flows an event starts, from the same batch of events.
     enqueue_event_enrolls(connection, workspace, arrivals).await?;
+    // The goal and exit criteria of the enrollments in flight, matched the same way.
+    enqueue_event_settles(connection, workspace, arrivals).await?;
     let events: Vec<Uuid> = arrivals.iter().map(|a| a.event_id).collect();
     let people: Vec<Uuid> = arrivals.iter().map(|a| a.person_id).collect();
     let names: Vec<&str> = arrivals.iter().map(|a| a.name.as_str()).collect();
@@ -59,7 +62,7 @@ pub(crate) async fn enqueue_arrivals(
          FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS t(event_id, person_id, name) \
          JOIN enrollment_waits w \
            ON w.workspace_id = $1 AND w.person_id = t.person_id AND w.event_name = t.name \
-         JOIN enrollments e ON e.id = w.enrollment_id AND e.state = 'waiting'",
+         JOIN enrollments e ON e.id = w.enrollment_id AND e.state IN ('waiting', 'held')",
     )
     .bind(workspace.as_uuid())
     .bind(&events)

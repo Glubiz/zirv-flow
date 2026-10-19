@@ -440,11 +440,27 @@ impl ApiError {
         }
     }
 
+    /// A retry or skip of an enrollment that is not failed, or whose failure it cannot reach.
+    pub(crate) fn enrollment_state(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("enrollment_state"),
+            ..Self::new(StatusCode::CONFLICT, detail)
+        }
+    }
+
     /// A write to an archived flow.
     pub(crate) fn flow_archived() -> Self {
         Self {
             code: Some("flow_archived"),
             ..Self::new(StatusCode::CONFLICT, "the flow is archived")
+        }
+    }
+
+    /// An operator control on a paused flow: a step would be held, so the flow is resumed first.
+    pub(crate) fn flow_paused() -> Self {
+        Self {
+            code: Some("flow_paused"),
+            ..Self::new(StatusCode::CONFLICT, "the flow is paused; resume it first")
         }
     }
 

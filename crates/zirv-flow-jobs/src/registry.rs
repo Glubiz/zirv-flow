@@ -126,6 +126,8 @@ mod tests {
                 "segment.reevaluate",
                 "flow.step",
                 "flow.enroll",
+                "flow.settle",
+                "flow.lifecycle",
                 "webhook.call"
             ]
         );
@@ -172,6 +174,8 @@ mod tests {
                 "segment.reevaluate",
                 "flow.step",
                 "flow.enroll",
+                "flow.settle",
+                "flow.lifecycle",
                 "webhook.call",
                 "test.first",
                 "test.second"

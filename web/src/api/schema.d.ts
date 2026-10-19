@@ -896,6 +896,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retries a failed enrollment: the step that failed runs again from the state it started from.
+         *     Refused while the flow is archived or paused. Records a `flow.enrollment` decision (`retried`)
+         *     and is audited as `flow.enrollment_retried`.
+         */
+        post: operations["retry_flow_enrollment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Skips the node a failed enrollment stopped at: it leaves along the node's `next` port. Only a
+         *     failure the engine placed at its node can be skipped; any other is retried. Refused while the
+         *     flow is archived or paused. Records a
+         *     `flow.enrollment` decision (`skipped`) and is audited as `flow.enrollment_skipped`.
+         */
+        post: operations["skip_flow_enrollment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/flows/{id}/pause": {
         parameters: {
             query?: never;
@@ -1061,6 +1104,28 @@ export interface paths {
         get: operations["get_flow_version"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ends every in-flight enrollment pinned to an older version of the flow, in batches (ruling
+         *     469cfc51). Each exits with reason `manual` and gets its own decision. The version must be older
+         *     than the flow's current one. A paused or archived flow refuses it. Audited as
+         *     `flow.enrollments_exited`.
+         */
+        post: operations["exit_flow_version_enrollments"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3638,6 +3703,18 @@ export interface components {
              */
             person_id?: string | null;
         };
+        /** @description A retry or a skip that was queued. */
+        EnrollmentActionBody: {
+            /** @description `retry` or `skip`. */
+            action: string;
+            /** Format: uuid */
+            enrollment_id: string;
+            /**
+             * Format: uuid
+             * @description The trace the operator's decision is recorded under.
+             */
+            trace_id: string;
+        };
         ErasureBody: {
             /** Format: date-time */
             completed_at?: string | null;
@@ -3757,6 +3834,19 @@ export interface components {
             schema: components["schemas"]["EventSchemaBody"];
             /** @description Published versions, newest first. A version never changes. */
             versions: components["schemas"]["SchemaVersionBody"][];
+        };
+        /** @description A bulk exit that was queued. */
+        ExitVersionBody: {
+            /**
+             * Format: uuid
+             * @description The trace each enrollment's decision is recorded under.
+             */
+            trace_id: string;
+            /**
+             * Format: int32
+             * @description The version whose in-flight enrollments are ended.
+             */
+            version: number;
         };
         ExplainBody: {
             /**
@@ -10344,6 +10434,132 @@ export interface operations {
             };
         };
     };
+    retry_flow_enrollment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Enrollment id */
+                enrollment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The retry was queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollmentActionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or enrollment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The enrollment is not failed (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    skip_flow_enrollment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Enrollment id */
+                enrollment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The skip was queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollmentActionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or enrollment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     pause_flow: {
         parameters: {
             query?: never;
@@ -10854,6 +11070,69 @@ export interface operations {
             };
             /** @description No such workspace, flow or version, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    exit_flow_version_enrollments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Version number; older than the current version */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The exit was queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExitVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

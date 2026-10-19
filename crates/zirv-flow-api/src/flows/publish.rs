@@ -15,7 +15,7 @@ use zirv_flow_core::flow::{FlowSettings, Trigger};
 use zirv_flow_store::{Flow, FlowAction, FlowVersion};
 
 use super::crud::{FlowBody, FlowDetailBody, FlowVersionBody, check_flow, issues_schema};
-use super::{draft_of, flow_error, issue_problems};
+use super::{draft_of, flow_error, issue_problems, operator_trace};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -256,7 +256,7 @@ async fn lifecycle(
     id: Uuid,
     action: FlowAction,
 ) -> Result<Flow, ApiError> {
-    let trace = request_trace();
+    let trace = operator_trace(principal);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let (flow, audited) = match action {
         FlowAction::Pause => (

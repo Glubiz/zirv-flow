@@ -9,6 +9,7 @@ use uuid::Uuid;
 use zirv_flow_core::flow::FlowSettings;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
+use super::control::{LifecycleAction, enqueue_lifecycle};
 use super::crud::{
     Flow, FlowError, FlowRow, FlowVersion, LockedFlow, flow_columns, lock_flow, version_columns,
 };
@@ -131,8 +132,17 @@ async fn transition(
     .await
     .map_err(StoreError::query)?;
     record(connection, workspace, id, trace, decision.0, decision.1).await?;
-    if action == FlowAction::Archive {
-        remove_flow_schedule(connection, workspace, id).await?;
+    match action {
+        // Every in-flight enrollment exits, in batches of a job of their own.
+        FlowAction::Archive => {
+            remove_flow_schedule(connection, workspace, id).await?;
+            enqueue_lifecycle(connection, workspace, id, LifecycleAction::Archive, trace).await?;
+        }
+        // Every enrollment a step was held for runs again, in batches.
+        FlowAction::Resume => {
+            enqueue_lifecycle(connection, workspace, id, LifecycleAction::Resume, trace).await?;
+        }
+        FlowAction::Publish | FlowAction::Pause => {}
     }
     Ok(row.into_flow()?)
 }

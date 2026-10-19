@@ -16,7 +16,9 @@ use super::preview::{SqlQuery, bind_all_as};
 use super::refresh::{
     Captured, MembershipCause, RefreshOutcome, Scope, lock_segment_refresh, refresh_statement,
 };
-use crate::flows::{enqueue_segment_enrolls, segment_trigger_flows};
+use crate::flows::{
+    enqueue_segment_enrolls, enqueue_segment_settles, segment_is_watched, segment_trigger_flows,
+};
 use crate::{DirtyPerson, StoreError};
 
 /// A claimed batch as the parallel arrays the diff statement unnests: each person with the
@@ -304,7 +306,11 @@ pub async fn apply_reevaluation(
     apply: &ReevaluateApply<'_>,
 ) -> Result<RefreshOutcome, StoreError> {
     let triggered = segment_trigger_flows(connection, apply.workspace, apply.segment).await?;
-    let statement = refresh_statement(apply.members, Scope::Batch, !triggered.is_empty());
+    // A segment that is a flow's goal, or the trigger segment of a `leaves_segment` exit criterion,
+    // hands back its changes too: the enrollments in flight settle on them.
+    let watched = segment_is_watched(connection, apply.workspace, apply.segment).await?;
+    let capture = !triggered.is_empty() || watched;
+    let statement = refresh_statement(apply.members, Scope::Batch, capture);
     let batch = apply.batch;
     // A custom plan for a segment that is missing from the `segment_members` statistics (new, or
     // not yet analyzed) estimates one row for its id, so the diff scans every open row of the
@@ -339,9 +345,14 @@ pub async fn apply_reevaluation(
         .await
         .map_err(StoreError::query)?;
     let outcome = captured.outcome();
-    if !triggered.is_empty() {
-        enqueue_segment_enrolls(connection, apply.workspace, &triggered, &captured.changes())
-            .await?;
+    if capture {
+        let changes = captured.changes();
+        if !triggered.is_empty() {
+            enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
+        }
+        if watched {
+            enqueue_segment_settles(connection, apply.workspace, apply.segment, &changes).await?;
+        }
     }
     if outcome.entered != outcome.exited {
         sqlx::query(

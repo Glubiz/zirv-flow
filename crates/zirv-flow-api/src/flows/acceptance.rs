@@ -1248,4 +1248,313 @@ mod tests {
             .await;
         assert_eq!(audits, 3);
     }
+
+    /// An enrollment of `flow` for a new person, in `state`. A failed one stopped at `failed_node`
+    /// and kept the input `start`, as a failed first step does.
+    async fn enrollment_in(
+        f: &Fixture,
+        flow: &str,
+        state: &str,
+        node: &str,
+        failed_node: Option<&str>,
+    ) -> String {
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(f.ws.as_uuid())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id, error, failed_node, failure_placed, resume_input) \
+             SELECT $1, $2, id, 1, $3, $5, $6, $1, $1, 'api', 't', \
+                    CASE WHEN $5 = 'failed' THEN 'boom' END, $7, $7 IS NOT NULL, \
+                    CASE WHEN $5 = 'failed' THEN '{\"input\": \"start\"}'::jsonb END \
+             FROM flows WHERE id::text = $4",
+        )
+        .bind(id)
+        .bind(f.ws.as_uuid())
+        .bind(person)
+        .bind(flow)
+        .bind(state)
+        .bind(node)
+        .bind(failed_node)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        id.to_string()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_operator_controls_need_admin_refuse_the_wrong_state_and_are_audited(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = f.create("Welcome", simple_graph(), manual()).await;
+        let exit_older = |version: i32| format!("/{flow}/versions/{version}/exit-enrollments");
+
+        // A draft has no enrollments.
+        let draft = f.lead("POST", &exit_older(1), None).await;
+        assert_eq!(draft.status, StatusCode::CONFLICT);
+        assert_eq!(draft.body["code"], "flow_state");
+
+        let published = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(published.status, StatusCode::CREATED);
+        f.lead(
+            "PATCH",
+            &format!("/{flow}"),
+            Some(json!({"graph": {"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]}})),
+        )
+        .await;
+        let second = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(second.body["version"]["version"], 2);
+        let failed = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
+        let also_failed = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
+        let late = enrollment_in(&f, &flow, "failed", "wait", Some("end")).await;
+        let waiting = enrollment_in(&f, &flow, "waiting", "wait", None).await;
+        let retry = |id: &str| format!("/{flow}/enrollments/{id}/retry");
+        let skip = |id: &str| format!("/{flow}/enrollments/{id}/skip");
+
+        // Only a workspace admin, by session or by key, may use them.
+        let routes = [
+            ("retry", retry(&failed)),
+            ("skip", skip(&failed)),
+            ("exit", exit_older(1)),
+        ];
+        for (label, tail) in &routes {
+            for (who, auth, expected) in [
+                ("anonymous", Auth::Anonymous, StatusCode::UNAUTHORIZED),
+                ("read key", Auth::Key(&f.read), StatusCode::FORBIDDEN),
+                ("write key", Auth::Key(&f.write), StatusCode::FORBIDDEN),
+                ("member", Auth::Session(&f.member), StatusCode::FORBIDDEN),
+                (
+                    "other workspace's admin key",
+                    Auth::Key(&f.other_admin),
+                    StatusCode::NOT_FOUND,
+                ),
+            ] {
+                let reply = f.call("POST", &f.flows(tail), None, auth).await;
+                assert_eq!(reply.status, expected, "{label} as {who}");
+            }
+        }
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action LIKE 'flow.enrollment%'")
+                .await,
+            0,
+            "a refusal writes nothing"
+        );
+
+        // The wrong state is a 409 with its own code; nothing there is not found.
+        for (label, tail) in [
+            ("retry a waiting one", retry(&waiting)),
+            ("skip a waiting one", skip(&waiting)),
+            ("skip a late failure", skip(&late)),
+        ] {
+            let reply = f.lead("POST", &tail, None).await;
+            assert_eq!(reply.status, StatusCode::CONFLICT, "{label}");
+            assert_eq!(reply.body["code"], "enrollment_state", "{label}");
+        }
+        let unknown = f
+            .lead("POST", &retry(&Uuid::now_v7().to_string()), None)
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        let current = f.lead("POST", &exit_older(2), None).await;
+        assert_eq!(current.status, StatusCode::CONFLICT);
+        assert_eq!(current.body["code"], "flow_state");
+        let no_version = f.lead("POST", &exit_older(9), None).await;
+        assert_eq!(no_version.status, StatusCode::NOT_FOUND);
+
+        // The accepted ones queue their work, record a decision under a trace of their own and
+        // audit the action with that trace.
+        let retried = f.lead("POST", &retry(&failed), None).await;
+        let skipped = f.lead("POST", &skip(&also_failed), None).await;
+        let exited = f.lead("POST", &exit_older(1), None).await;
+        assert_eq!(retried.status, StatusCode::ACCEPTED, "{:?}", retried.body);
+        assert_eq!(skipped.status, StatusCode::ACCEPTED, "{:?}", skipped.body);
+        assert_eq!(exited.status, StatusCode::ACCEPTED, "{:?}", exited.body);
+        assert_eq!(retried.body["action"], "retry");
+        assert_eq!(skipped.body["action"], "skip");
+        assert_eq!(exited.body["version"], 1);
+        let trace_of = |reply: &Reply| reply.body["trace_id"].as_str().unwrap().to_owned();
+        for (reply, outcome) in [(&retried, "retried"), (&skipped, "skipped")] {
+            let (cause, subjects): (String, Value) = sqlx::query_as(
+                "SELECT cause_kind, subject_ids FROM decision_records \
+                 WHERE trace_id::text = $1 AND outcome = $2",
+            )
+            .bind(trace_of(reply))
+            .bind(outcome)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(cause, "manual");
+            assert_eq!(subjects["enrollment"], reply.body["enrollment_id"]);
+        }
+        let audits: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT action, summary FROM audit_log WHERE action LIKE 'flow.enrollment%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            audits.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
+            [
+                "flow.enrollment_retried",
+                "flow.enrollment_skipped",
+                "flow.enrollments_exited"
+            ]
+        );
+        assert_eq!(audits[0].1["trace_id"], retried.body["trace_id"]);
+        assert_eq!(audits[2].1["trace_id"], exited.body["trace_id"]);
+        let queued: Vec<Value> = sqlx::query_scalar(
+            "SELECT payload FROM jobs WHERE kind = 'flow.lifecycle' ORDER BY created_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0]["action"], "exit_version");
+        assert_eq!(queued[0]["version"], 1);
+        assert_eq!(
+            f.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                .await,
+            2,
+            "the retry and the skip are jobs"
+        );
+
+        // An archived flow takes no bulk exit.
+        let archived = f.lead("POST", &format!("/{flow}/archive"), None).await;
+        assert_eq!(archived.status, StatusCode::OK);
+        let after = f.lead("POST", &exit_older(1), None).await;
+        assert_eq!(after.status, StatusCode::CONFLICT);
+        assert_eq!(after.body["code"], "flow_archived");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_operator_control_works_on_a_paused_or_an_archived_flow_and_none_writes_anything(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let flow = f.live("Welcome", manual()).await;
+        f.lead(
+            "PATCH",
+            &format!("/{flow}"),
+            Some(json!({"graph": {"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]}})),
+        )
+        .await;
+        let second = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(second.status, StatusCode::CREATED);
+        let failed = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
+        let controls = [
+            format!("/{flow}/enrollments/{failed}/retry"),
+            format!("/{flow}/enrollments/{failed}/skip"),
+            format!("/{flow}/versions/1/exit-enrollments"),
+        ];
+
+        for (action, code) in [("pause", "flow_paused"), ("archive", "flow_archived")] {
+            let moved = f.lead("POST", &format!("/{flow}/{action}"), None).await;
+            assert_eq!(moved.status, StatusCode::OK, "{action}: {:?}", moved.body);
+            let written = "SELECT (SELECT count(*) FROM audit_log \
+                                   WHERE action LIKE 'flow.enrollment%') \
+                          + (SELECT count(*) FROM decision_records \
+                                   WHERE action = 'flow.enrollment') \
+                          + (SELECT count(*) FROM jobs)";
+            let before = f.count(written).await;
+            for tail in &controls {
+                let reply = f.lead("POST", tail, None).await;
+                assert_eq!(reply.status, StatusCode::CONFLICT, "{action} {tail}");
+                assert_eq!(reply.body["code"], code, "{action} {tail}");
+            }
+            assert_eq!(
+                f.count(written).await,
+                before,
+                "{action}: a refusal writes no audit entry, decision or job"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bulk_exit_that_waits_on_a_pausing_flow_is_refused_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = f.live("Welcome", manual()).await;
+        f.lead(
+            "PATCH",
+            &format!("/{flow}"),
+            Some(json!({"graph": {"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]}})),
+        )
+        .await;
+        let second = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(second.status, StatusCode::CREATED);
+        let flow_id: Uuid = flow.parse().unwrap();
+
+        // A pause that has the flow row locked and has not committed yet.
+        let mut pausing = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::lock_flow(&mut pausing, f.ws, flow_id)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(flow_id)
+            .execute(&mut *pausing)
+            .await
+            .unwrap();
+
+        let exit = {
+            let router = f.router.clone();
+            let uri = f.flows(&format!("/{flow}/versions/1/exit-enrollments"));
+            let login = Login {
+                cookie: f.lead.cookie.clone(),
+                csrf: f.lead.csrf.clone(),
+            };
+            tokio::spawn(
+                async move { send(&router, "POST", &uri, None, Auth::Session(&login)).await },
+            )
+        };
+        // Wait until the exit is blocked on the flow row.
+        let mut blocked = false;
+        for _ in 0..200 {
+            if exit.is_finished() {
+                break;
+            }
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity                  WHERE datname = current_database() AND pid <> pg_backend_pid()                    AND wait_event_type = 'Lock' AND query ILIKE '%FROM flows%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(blocked, "the bulk exit should wait for the flow row");
+        zirv_flow_store::commit(pausing).await.unwrap();
+
+        let reply = exit.await.unwrap();
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "flow_paused");
+        assert_eq!(f.count("SELECT count(*) FROM jobs").await, 0);
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'flow.enrollments_exited'")
+                .await,
+            0
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM decision_records WHERE action = 'flow.enrollment'")
+                .await,
+            0
+        );
+    }
 }

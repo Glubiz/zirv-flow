@@ -5,6 +5,7 @@
 //! publishes, pauses, resumes and archives.
 
 pub(crate) mod crud;
+pub(crate) mod operator;
 pub(crate) mod publish;
 mod schema;
 pub(crate) mod signing;
@@ -14,14 +15,29 @@ mod validation;
 
 use serde_json::Value;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, Issue};
+use zirv_flow_core::{Cause, TraceContext, TraceId};
 use zirv_flow_store::{Flow, FlowError, StoreError};
 
+use crate::auth::Principal;
 use crate::problem::{ApiError, FlowIssueProblem};
+use crate::trace::request_trace;
 
 pub(crate) use schema::FlowSchemas;
 
 /// The longest text of a parse error returned to the caller.
 const MAX_PARSE_ERROR_CHARS: usize = 300;
+
+/// The trace of an operator's action on a flow: a trace of its own, caused by the signed-in user
+/// (`manual`) or, for an API key, by the request. The decisions of the action are recorded under
+/// it and the audit entry names it.
+pub(crate) fn operator_trace(principal: &Principal) -> TraceContext {
+    TraceContext {
+        trace_id: TraceId::new(),
+        cause: principal
+            .user_id()
+            .map_or_else(|| request_trace().cause, Cause::manual),
+    }
+}
 
 /// The empty graph a new flow starts with.
 fn empty_graph() -> Value {

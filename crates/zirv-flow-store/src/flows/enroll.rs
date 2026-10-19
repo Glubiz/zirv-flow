@@ -403,7 +403,7 @@ async fn in_flight_of(
 ) -> Result<HashSet<Uuid>, StoreError> {
     let rows: Vec<Uuid> = sqlx::query_scalar(
         "SELECT person_id FROM enrollments \
-         WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'failed')",
+         WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')",
     )
     .bind(request.flow)
     .bind(people)
