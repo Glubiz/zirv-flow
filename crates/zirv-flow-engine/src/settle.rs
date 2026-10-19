@@ -4,7 +4,7 @@
 
 use zirv_flow_core::flow::{ExitCriterion, FlowSettings};
 
-use crate::hash::step_key;
+use crate::hash::settings_goal_key;
 use crate::state::{
     Effect, EffectKind, EnrollmentState, ExitReason, Outcome, Status, Transition, WaitChange,
 };
@@ -19,11 +19,12 @@ pub struct Matched {
 }
 
 /// The transition the settings cause, or `None` when they do nothing: nothing matched, the
-/// settings have no such goal or criterion, or the enrollment has already ended.
+/// settings have no such goal or criterion, or the enrollment is not active or waiting (a failed
+/// one waits for an operator, an awaiting one is inside a step, an ended one is over).
 ///
 /// A reached goal records a conversion (an internal [`EffectKind::GoalConversion`] whose step
-/// key is the current node's with `:settings.goal` appended, which no graph node can collide
-/// with) and, with `exit_on_goal` or a `goal_reached` criterion, ends the enrollment as
+/// key is [`settings_goal_key`], one per enrollment: the caller records the conversion once, and
+/// a goal reached again carries the same key) and, with `exit_on_goal` or a `goal_reached` criterion, ends the enrollment as
 /// exited. A matched event criterion ends it too. A goal alone leaves the state as it is
 /// ([`Outcome::Converted`]). An exit grows `state_version`, so any timer or event for the older
 /// state is stale, and clears an event wait.
@@ -32,7 +33,7 @@ pub fn settle(
     state: &EnrollmentState,
     matched: Matched,
 ) -> Option<Transition> {
-    if matches!(state.status, Status::Completed | Status::Exited) {
+    if !matches!(state.status, Status::Active | Status::Waiting) {
         return None;
     }
     let goal = matched.goal && settings.goal.is_some();
@@ -52,10 +53,7 @@ pub fn settle(
     let effects = if goal {
         vec![Effect {
             node: state.node.clone(),
-            step_key: format!(
-                "{}:settings.goal",
-                step_key(state.enrollment_id, &state.node)
-            ),
+            step_key: settings_goal_key(state.enrollment_id),
             effect_key: None,
             kind: EffectKind::GoalConversion,
         }]
@@ -154,7 +152,7 @@ mod tests {
         assert_eq!(moved.effects[0].kind, EffectKind::GoalConversion);
         assert_eq!(
             moved.effects[0].step_key,
-            format!("{}:n:settings.goal", Uuid::from_u128(1))
+            format!("{}:settings.goal", Uuid::from_u128(1))
         );
         assert!(!moved.effects[0].is_external() && moved.waits.is_empty());
     }
@@ -206,6 +204,38 @@ mod tests {
         assert!(moved.effects.is_empty());
     }
 
+    #[test]
+    fn only_an_active_or_waiting_enrollment_is_settled() {
+        let full = settings(true, true, vec![ExitCriterion::Event(event("left"))]);
+        for status in [Status::Active, Status::Waiting] {
+            assert!(settle(&full, &state(status, None), GOAL).is_some());
+            assert!(settle(&full, &state(status, None), EXIT).is_some());
+        }
+        for status in [Status::Failed, Status::AwaitingConditions] {
+            assert!(settle(&full, &state(status, None), GOAL).is_none());
+            assert!(settle(&full, &state(status, None), EXIT).is_none());
+        }
+    }
+
+    #[test]
+    fn the_conversion_key_is_one_per_enrollment_whatever_the_node() {
+        let plain = settings(true, false, vec![]);
+        let mut elsewhere = state(Status::Waiting, None);
+        elsewhere.node = "other".into();
+
+        let first = settle(&plain, &state(Status::Active, None), GOAL).unwrap();
+        let again = settle(&plain, &elsewhere, GOAL).unwrap();
+
+        assert_eq!(first.effects[0].step_key, again.effects[0].step_key);
+        assert_eq!(
+            first.effects[0].step_key,
+            settings_goal_key(Uuid::from_u128(1))
+        );
+        assert_ne!(
+            first.effects[0].step_key,
+            settings_goal_key(Uuid::from_u128(2))
+        );
+    }
     #[test]
     fn nothing_happens_without_a_match_a_setting_or_a_live_enrollment() {
         let active = state(Status::Active, None);
