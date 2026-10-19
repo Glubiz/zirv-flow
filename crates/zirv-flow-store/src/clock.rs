@@ -66,6 +66,16 @@ impl Clock {
             Self::Manual(clock) => Ok(clock.now()),
         }
     }
+
+    /// The current instant for a path that checks a request against the process's wall time and
+    /// reads no database: the wall clock for [`Clock::Database`], the test's instant for
+    /// [`Clock::Manual`].
+    pub fn now_in_process(&self) -> OffsetDateTime {
+        match self {
+            Self::Database => OffsetDateTime::now_utc(),
+            Self::Manual(clock) => clock.now(),
+        }
+    }
 }
 
 #[cfg(test)]

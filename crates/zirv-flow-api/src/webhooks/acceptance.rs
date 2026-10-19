@@ -142,8 +142,11 @@ mod tests {
         }
         let (ws, other_ws) = (workspaces[0], workspaces[1]);
         plan_trait(pool, ws).await;
-        let mut state =
-            AppState::new(pool.clone(), Arc::new(String::new)).with_ingest_limits(limits);
+        let mut state = AppState::new(pool.clone(), Arc::new(String::new))
+            .with_ingest_limits(limits)
+            .with_clock(zirv_flow_store::Clock::Manual(
+                zirv_flow_store::ManualClock::new(FIXED_NOW),
+            ));
         if let Some(keyring) = keyring {
             let root = HmacRoot::bootstrap_from(keyring.current()).to_secret_bytes();
             let sealed = seal(
@@ -339,8 +342,12 @@ mod tests {
         .unwrap();
     }
 
+    /// The instant every fixture's webhook clock is fixed at, so a request signed at the edge of
+    /// the tolerance window cannot age past it while the test works.
+    const FIXED_NOW: time::OffsetDateTime = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+
     fn now() -> i64 {
-        time::OffsetDateTime::now_utc().unix_timestamp()
+        FIXED_NOW.unix_timestamp()
     }
 
     fn order(id: &str, plan: &str) -> Vec<u8> {
@@ -575,8 +582,15 @@ mod tests {
         // The edge of the window passes.
         let edge = signed(&hook.secret, at - 300, &body);
         assert_eq!(
-            post_hook(&fx.router, &hook.id, &edge, body).await.status,
+            post_hook(&fx.router, &hook.id, &edge, body.clone())
+                .await
+                .status,
             StatusCode::ACCEPTED
+        );
+        let past = signed(&hook.secret, at - 301, &body);
+        assert_eq!(
+            post_hook(&fx.router, &hook.id, &past, body).await.status,
+            StatusCode::UNAUTHORIZED
         );
     }
 
