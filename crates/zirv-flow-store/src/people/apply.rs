@@ -382,7 +382,14 @@ pub(crate) async fn apply_profile_record(
         Err(reason) => return Ok(ProfileOutcome::Rejected { reason }),
     };
     let (updates, dropped) = prepare_traits(connection, workspace, &record.traits).await?;
-    let hash = content_hash(&identifiers, &updates);
+    // A flow's write is a new contribution each time it is made: the time is part of its hash, so
+    // writing the same value again after another source won still takes part in latest-wins.
+    // Other sources keep deduplicating a replay, whatever its `observed_at`.
+    let stamp = record
+        .source
+        .starts_with("flow:")
+        .then_some(record.observed_at);
+    let hash = content_hash(&identifiers, &updates, stamp);
 
     let existing = find_ledger_row(connection, workspace, record).await?;
     if let Some(row) = &existing
@@ -679,8 +686,13 @@ fn to_json(value: &TraitValue) -> Value {
 }
 
 /// SHA-256 of the canonical JSON of the normalized identifiers and trait values. Times are
-/// left out so a replay with a new `observed_at` is still a no-op.
-fn content_hash(identifiers: &[Identifier], updates: &[(String, Option<Value>)]) -> Vec<u8> {
+/// left out so a replay with a new `observed_at` is still a no-op, unless the caller passes
+/// `written_at` (a flow write, which is a new contribution each time).
+fn content_hash(
+    identifiers: &[Identifier],
+    updates: &[(String, Option<Value>)],
+    written_at: Option<OffsetDateTime>,
+) -> Vec<u8> {
     let identifiers: Vec<[String; 2]> = identifiers
         .iter()
         .map(|i| [i.kind().as_text(), i.value().to_owned()])
@@ -689,7 +701,10 @@ fn content_hash(identifiers: &[Identifier], updates: &[(String, Option<Value>)])
         .iter()
         .map(|(key, value)| (key.as_str(), value))
         .collect();
-    let canonical = serde_json::json!({ "identifiers": identifiers, "traits": traits });
+    let mut canonical = serde_json::json!({ "identifiers": identifiers, "traits": traits });
+    if let Some(at) = written_at {
+        canonical["at"] = serde_json::json!(at.unix_timestamp_nanos().to_string());
+    }
     sha256(&canonical.to_string()).to_vec()
 }
 
@@ -1379,12 +1394,12 @@ mod tests {
         let other = vec![("a".to_owned(), Some(json!(2))), ("b".to_owned(), None)];
 
         assert_eq!(
-            content_hash(&identifiers, &one),
-            content_hash(&identifiers, &swapped)
+            content_hash(&identifiers, &one, None),
+            content_hash(&identifiers, &swapped, None)
         );
         assert_ne!(
-            content_hash(&identifiers, &one),
-            content_hash(&identifiers, &other)
+            content_hash(&identifiers, &one, None),
+            content_hash(&identifiers, &other, None)
         );
     }
 

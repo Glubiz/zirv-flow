@@ -27,6 +27,9 @@ CREATE TABLE enrollments (
     -- Why the enrollment ended other than by reaching an exit node, and the error of a failure.
     exit_reason   text,
     error         text,
+    -- The node a failure stopped at. `node` stays where the failed step started from, so an
+    -- operator retry runs the whole step again.
+    failed_node   text,
     trace_id      uuid NOT NULL,
     cause_kind    text NOT NULL
                   CHECK (cause_kind IN ('event', 'trait_change', 'schedule', 'manual', 'api',
@@ -39,7 +42,7 @@ CREATE TABLE enrollments (
     FOREIGN KEY (flow_id, flow_version) REFERENCES flow_versions (flow_id, version)
         ON DELETE CASCADE,
     CHECK ((state IN ('completed', 'exited')) = (ended_at IS NOT NULL)),
-    CHECK (state <> 'failed' OR error IS NOT NULL)
+    CHECK (state <> 'failed' OR (error IS NOT NULL AND failed_node IS NOT NULL))
 );
 
 -- One in-flight enrollment per flow and person. A failed one still holds the person: an operator
@@ -86,6 +89,8 @@ CREATE TABLE enrollment_waits (
 );
 
 CREATE INDEX enrollment_waits_match_idx ON enrollment_waits (workspace_id, person_id, event_name);
+-- Erasure and merges find a person's waits by person alone.
+CREATE INDEX enrollment_waits_person_idx ON enrollment_waits (person_id);
 
 -- How often a person entered a flow and when last: the `once` and `always` re-entry rules.
 CREATE TABLE flow_entries (
@@ -97,3 +102,6 @@ CREATE TABLE flow_entries (
     PRIMARY KEY (flow_id, person_id),
     FOREIGN KEY (workspace_id, flow_id) REFERENCES flows (workspace_id, id) ON DELETE CASCADE
 );
+
+-- Erasure and merges find a person's entries by person alone.
+CREATE INDEX flow_entries_person_idx ON flow_entries (person_id);

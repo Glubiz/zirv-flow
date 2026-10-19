@@ -94,11 +94,11 @@ pub use flows::{
     FlowVersion, LockedFlow, MAX_ENROLL_PEOPLE, NewFlow, NewStepExecution, NewWait, Occurrence,
     STEP_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
     UnhealthyInput, WEBHOOK_JOB_KIND, apply_flow_list, apply_flow_trait, archive_flow, clear_waits,
-    count_in_flight_enrollments, create_flow, enroll, fail_step, find_enrollment,
-    find_event_of_person, find_flow, find_flow_version, flow_source, has_webhook_signing_secret,
-    list_flow_versions, list_flows, lock_enrollment, lock_flow, pause_flow, publish_flow,
-    record_steps, register_wait, resume_flow, save_enrollment, settle_wait_step, step_zones,
-    unhealthy_inputs, update_flow_draft, wait_filters,
+    count_in_flight_enrollments, create_flow, enroll, find_enrollment, find_event_of_person,
+    find_flow, find_flow_version, flow_source, has_webhook_signing_secret, list_flow_versions,
+    list_flows, lock_enrollment, lock_flow, pause_flow, publish_flow, record_steps, register_wait,
+    resume_flow, save_enrollment, settle_wait_step, step_zones, unhealthy_inputs,
+    update_flow_draft, wait_filters,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

@@ -35,9 +35,9 @@ use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowTraitWrite, NewDecision,
     NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome,
     StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait,
-    clear_waits, enqueue, fail_step, find_event_of_person, find_flow_version, lock_enrollment,
-    record_steps, register_wait, run_person_batch, save_enrollment, segment_catalog,
-    settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
+    clear_waits, enqueue, find_event_of_person, find_flow_version, lock_enrollment, record_steps,
+    register_wait, run_person_batch, save_enrollment, segment_catalog, settle_wait_step,
+    step_zones, unhealthy_inputs, wait_filters,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -64,6 +64,7 @@ impl JobKind for FlowStep {
         }
         let clock = ctx.clock().clone();
         let at = (ctx.job_id(), ctx.attempts());
+        let job_id = ctx.job_id();
         let last_attempt = ctx.attempts() >= ctx.max_attempts();
         let conn = ctx.conn();
         let now = clock.now(conn).await?;
@@ -74,8 +75,20 @@ impl JobKind for FlowStep {
         if is_stale(&enrollment, &job) {
             return Ok(());
         }
-        if job.input == StepJobInput::Wake && enrollment.wake_at.is_some_and(|due| due > now) {
-            return Err(JobError::new("the timer is not due yet"));
+        if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at)
+            && due > now
+        {
+            // This clock is behind the timer. Retrying would burn attempts and could lose the timer
+            // on the last one, so the job ends cleanly and a fresh wake takes its place. The running
+            // job holds the wake key, so the new key carries this job's id; it runs no sooner than
+            // the timer and no sooner than a few seconds from now.
+            let key = format!(
+                "wake:{}:{}:early:{}",
+                job.enrollment, job.state_version, job_id
+            );
+            let run_at = due.max(now + time::Duration::seconds(5));
+            enqueue(conn, &job.job(&enrollment.trace, Some(run_at), key)).await?;
+            return Ok(());
         }
 
         let mut savepoint = conn.begin().await?;
@@ -782,6 +795,7 @@ async fn finish(
             wake_at,
             exit_reason,
             error,
+            failed_node: error.map(|_| state.node.as_str()),
             now: walk.now,
         },
     )
@@ -808,8 +822,10 @@ async fn finish(
     Ok(())
 }
 
-/// The last attempt failed: the enrollment becomes `failed` with the error stored, and an
-/// operator can read it.
+/// The last attempt failed. The savepoint already took the step's effects and rows back, so the
+/// enrollment keeps the state the job started from (its node, waits, timer and version) and is
+/// marked `failed` with the node that failed and the error stored. No step row is written for
+/// the failing node, so a retry runs the whole step again, effects included.
 async fn fail_enrollment(
     conn: &mut PgConnection,
     job: &StepJobPayload,
@@ -818,22 +834,8 @@ async fn fail_enrollment(
     now: OffsetDateTime,
     at: (Uuid, i32),
 ) -> Result<(), JobError> {
-    let node = failure.node.as_deref().unwrap_or(&enrollment.node);
+    let failed_node = failure.node.as_deref().unwrap_or(&enrollment.node);
     let message = failure.error.message();
-    let step = fail_step(
-        &mut *conn,
-        job.workspace,
-        enrollment.id,
-        node,
-        message,
-        at.1,
-    )
-    .await?;
-    clear_waits(&mut *conn, enrollment.id, None).await?;
-    let version = enrollment
-        .state_version
-        .checked_add(1)
-        .ok_or_else(|| JobError::new("the state version is exhausted"))?;
     let saved = save_enrollment(
         &mut *conn,
         job.workspace,
@@ -841,11 +843,12 @@ async fn fail_enrollment(
         enrollment.state_version,
         &EnrollmentUpdate {
             status: EnrollmentStatus::Failed,
-            node,
-            state_version: version,
-            wake_at: None,
+            node: &enrollment.node,
+            state_version: enrollment.state_version,
+            wake_at: enrollment.wake_at,
             exit_reason: None,
             error: Some(message),
+            failed_node: Some(failed_node),
             now,
         },
     )
@@ -853,28 +856,20 @@ async fn fail_enrollment(
     if !saved {
         return Err(JobError::new("the enrollment moved under its lock"));
     }
-    let decide = |action, outcome| NewDecision {
+    let decision = NewDecision {
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
-        action,
-        outcome,
+        action: "flow.enrollment",
+        outcome: "failed",
         reason: Some(message),
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
             ("person", enrollment.person_id),
-            ("step_execution", step),
         ],
         job: Some(at),
     };
-    append_decisions(
-        &mut *conn,
-        &[
-            decide("flow.step", "failed"),
-            decide("flow.enrollment", "failed"),
-        ],
-    )
-    .await?;
+    append_decisions(&mut *conn, &[decision]).await?;
     Ok(())
 }
 
@@ -956,6 +951,7 @@ mod tests {
             awaiting: None,
             exit_reason: None,
             error: None,
+            failed_node: None,
             trace: TraceContext::root(Cause::api("t")),
             created_at: OffsetDateTime::UNIX_EPOCH,
             ended_at: None,
@@ -1760,26 +1756,19 @@ mod tests {
         );
         assert_eq!(steps_after_first, 0, "the first attempt left nothing");
         assert_eq!(attempts, 2);
-        assert!(second.is_ok(), "the last attempt records the failure");
+        assert!(
+            second.is_ok(),
+            "the last attempt records the failure: {second:?}"
+        );
         let failed = env.enrollment(id).await;
         assert_eq!(failed.status, EnrollmentStatus::Failed);
-        assert_eq!(failed.node, "bump");
-        assert_eq!(failed.state_version, 1);
+        assert_eq!(failed.node, "bump", "the node the step started from");
+        assert_eq!(failed.failed_node.as_deref(), Some("bump"));
+        assert_eq!(failed.state_version, 0, "the version the job started from");
         assert_eq!(failed.error.as_deref(), Some(MESSAGE));
-        let (outcome, error, tries): (String, String, i32) = sqlx::query_as(
-            "SELECT outcome, error, attempts FROM step_executions WHERE enrollment_id = $1",
-        )
-        .bind(id)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            (outcome.as_str(), error.as_str(), tries),
-            ("failed", MESSAGE, 2)
-        );
+        assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
         let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
         assert!(decisions.contains(&("flow.enrollment".into(), "failed".into())));
-        assert!(decisions.contains(&("flow.step".into(), "failed".into())));
         assert_eq!(
             env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
                 .await,
@@ -1787,6 +1776,87 @@ mod tests {
         );
         let again = env.enroll(flow, 1, &[ada]).await;
         assert_eq!(again.skipped, [(ada, "already_active")]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_late_in_a_chain_keeps_the_state_the_step_started_from(pool: PgPool) {
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        env.define_trait("tier", TraitType::String).await;
+        let list = env.list("Golden").await;
+        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "a", "type": "action.update_trait", "key": "tier",
+             "change": {"op": "set", "value": "gold"}},
+            {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
+            {"id": "inc", "type": "action.update_trait", "key": "plan",
+             "change": {"op": "increment", "by": 1.0}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [
+            edge("e1", "a", "next", "l"),
+            edge("e2", "l", "next", "inc"),
+            edge("e3", "inc", "next", "end")
+        ]});
+        let flow = env.flow("Chain", graph).await;
+        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+        sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.run_due().await;
+
+        let failed = env.enrollment(id).await;
+        assert_eq!(failed.status, EnrollmentStatus::Failed);
+        assert_eq!(failed.node, "a", "the step started at the entry node");
+        assert_eq!(failed.failed_node.as_deref(), Some("inc"));
+        assert_eq!(failed.state_version, 0);
+        assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
+        assert_eq!(env.count("SELECT count(*) FROM list_members").await, 0);
+        assert_eq!(env.traits(ada).await["tier"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_timer_that_fires_before_this_clock_reaches_it_is_deferred_not_failed_or_lost(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let ada = env.person("ada@example.com", json!({})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "end")]});
+        let flow = env.flow("Early", graph).await;
+        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+        env.run_due().await;
+        let asleep = env.enrollment(id).await;
+        sqlx::query("UPDATE jobs SET run_at = now() - interval '1 second', max_attempts = 1")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        let early = env.claim().await.unwrap();
+        let early = env.execute(early).await;
+
+        assert!(early.is_ok(), "an early wake ends cleanly");
+        assert_eq!(env.enrollment(id).await, asleep, "nothing moved");
+        let (jobs, attempts, due): (i64, i32, OffsetDateTime) = sqlx::query_as(
+            "SELECT count(*), max(attempts), min(run_at) FROM jobs WHERE kind = 'flow.step'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (jobs, attempts),
+            (1, 0),
+            "a fresh wake replaces the old one"
+        );
+        assert!(due >= asleep.wake_at.unwrap());
+        env.advance(61);
+        env.run_due().await;
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
     }
 
     #[sqlx::test]

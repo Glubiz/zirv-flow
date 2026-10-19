@@ -395,4 +395,53 @@ mod tests {
             .unwrap();
         assert_eq!(source, "flow");
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_value_written_again_after_another_source_won_wins_again(pool: PgPool) {
+        let ws = workspace(&pool, "rewrite").await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        let ada = person(&pool, ws, "ada@example.com", json!({})).await;
+        let flow = Uuid::now_v7();
+        let base = OffsetDateTime::now_utc();
+        let set_plan = |value: &'static str, at: OffsetDateTime| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                apply_flow_trait(
+                    &mut tx,
+                    &FlowTraitWrite {
+                        workspace: ws,
+                        flow,
+                        person: ada,
+                        key: "plan",
+                        change: &TraitChange::Set {
+                            value: json!(value),
+                        },
+                        now: at,
+                        trace: &trace(),
+                    },
+                )
+                .await
+                .unwrap();
+                crate::commit(tx).await.unwrap();
+            }
+        };
+
+        set_plan("pro", base).await;
+        let crm = Record {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: "ada@example.com".into(),
+            identifiers: vec![("email".into(), "ada@example.com".into())],
+            traits: json!({"plan": "free"}).as_object().cloned().unwrap(),
+            observed_at: base + time::Duration::seconds(10),
+            trace: trace(),
+        };
+        crate::apply_profile_batch(&pool, ws, &[crm]).await.unwrap();
+        assert_eq!(traits_of(&pool, ada).await["plan"], json!("free"));
+        set_plan("pro", base + time::Duration::seconds(20)).await;
+
+        assert_eq!(traits_of(&pool, ada).await["plan"], json!("pro"));
+    }
 }

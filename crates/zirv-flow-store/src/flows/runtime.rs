@@ -79,6 +79,8 @@ pub struct Enrollment {
     pub awaiting: Option<String>,
     pub exit_reason: Option<String>,
     pub error: Option<String>,
+    /// The node a failure stopped at; `node` is where the failed step started.
+    pub failed_node: Option<String>,
     /// The trace of this enrollment's journey and the cause of the trigger that enrolled it.
     pub trace: TraceContext,
     pub created_at: OffsetDateTime,
@@ -99,6 +101,7 @@ struct EnrollmentRow {
     awaiting: Option<String>,
     exit_reason: Option<String>,
     error: Option<String>,
+    failed_node: Option<String>,
     trace_id: Uuid,
     cause_kind: String,
     cause_id: String,
@@ -127,6 +130,7 @@ impl EnrollmentRow {
             awaiting: self.awaiting,
             exit_reason: self.exit_reason,
             error: self.error,
+            failed_node: self.failed_node,
             trace: TraceContext {
                 trace_id: TraceId::from_uuid(self.trace_id),
                 cause: Cause::from_stored(kind, self.cause_id),
@@ -141,7 +145,7 @@ const ENROLLMENT_COLUMNS: &str = "e.id, e.flow_id, e.flow_version, e.person_id, 
      e.context, e.wake_at, e.state_version, \
      (SELECT w.event_name FROM enrollment_waits w WHERE w.enrollment_id = e.id LIMIT 1) \
          AS awaiting, \
-     e.exit_reason, e.error, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
+     e.exit_reason, e.error, e.failed_node, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
@@ -225,6 +229,8 @@ pub struct EnrollmentUpdate<'a> {
     pub wake_at: Option<OffsetDateTime>,
     pub exit_reason: Option<&'static str>,
     pub error: Option<&'a str>,
+    /// The node a failure stopped at; set exactly when `error` is.
+    pub failed_node: Option<&'a str>,
     pub now: OffsetDateTime,
 }
 
@@ -239,7 +245,7 @@ pub async fn save_enrollment(
 ) -> Result<bool, StoreError> {
     let done = sqlx::query(
         "UPDATE enrollments SET state = $4, node = $5, state_version = $6, wake_at = $7, \
-             exit_reason = $8, error = $9, updated_at = now(), \
+             exit_reason = $8, error = $9, failed_node = $11, updated_at = now(), \
              ended_at = CASE WHEN $4 IN ('completed', 'exited') THEN $10 ELSE NULL END \
          WHERE workspace_id = $1 AND id = $2 AND state_version = $3",
     )
@@ -253,6 +259,7 @@ pub async fn save_enrollment(
     .bind(next.exit_reason)
     .bind(next.error)
     .bind(next.now)
+    .bind(next.failed_node)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -344,34 +351,6 @@ pub async fn settle_wait_step(
     .bind(enrollment)
     .bind(node)
     .fetch_optional(connection)
-    .await
-    .map_err(StoreError::query)
-}
-
-/// Marks the node an enrollment failed at, with the error an operator reads.
-pub async fn fail_step(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    enrollment: Uuid,
-    node: &str,
-    error: &str,
-    attempt: i32,
-) -> Result<Uuid, StoreError> {
-    sqlx::query_scalar(
-        "INSERT INTO step_executions \
-            (id, workspace_id, enrollment_id, node_id, outcome, error, attempts) \
-         VALUES ($1, $2, $3, $4, 'failed', $5, $6) \
-         ON CONFLICT (enrollment_id, node_id) DO UPDATE SET \
-             outcome = 'failed', error = EXCLUDED.error, attempts = EXCLUDED.attempts \
-         RETURNING id",
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace.as_uuid())
-    .bind(enrollment)
-    .bind(node)
-    .bind(error)
-    .bind(attempt)
-    .fetch_one(connection)
     .await
     .map_err(StoreError::query)
 }
@@ -640,6 +619,7 @@ mod tests {
             wake_at: None,
             exit_reason: None,
             error: None,
+            failed_node: None,
             now,
         };
 
@@ -803,6 +783,7 @@ mod tests {
                 wake_at: None,
                 exit_reason: Some("goal"),
                 error: None,
+                failed_node: None,
                 now: OffsetDateTime::now_utc(),
             },
         )
