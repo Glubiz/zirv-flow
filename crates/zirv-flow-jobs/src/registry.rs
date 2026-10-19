@@ -124,7 +124,8 @@ mod tests {
                 "kafka.consume",
                 "segment.refresh",
                 "segment.reevaluate",
-                "flow.step"
+                "flow.step",
+                "flow.enroll"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -169,6 +170,7 @@ mod tests {
                 "segment.refresh",
                 "segment.reevaluate",
                 "flow.step",
+                "flow.enroll",
                 "test.first",
                 "test.second"
             ]

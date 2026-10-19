@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 use sqlx::PgConnection;
 use sqlx::postgres::PgArguments;
-use sqlx::query::QueryScalar;
+use sqlx::query::{QueryAs, QueryScalar};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -73,27 +73,43 @@ pub async fn snapshot_now(connection: &mut PgConnection) -> Result<OffsetDateTim
         .map_err(StoreError::bounded)
 }
 
+/// Binds the workspace and then the compiled values, in order, to a query of either kind.
+macro_rules! bind_compiled {
+    ($query:expr, $workspace:expr, $params:expr) => {{
+        let mut query = $query.bind($workspace.as_uuid());
+        for param in $params {
+            query = match param {
+                SqlParam::Text(value) => query.bind(value.as_str()),
+                SqlParam::TextArray(values) => query.bind(values.as_slice()),
+                SqlParam::Float(value) => query.bind(*value),
+                SqlParam::FloatArray(values) => query.bind(values.as_slice()),
+                SqlParam::Int(value) => query.bind(*value),
+                SqlParam::Timestamp(value) => query.bind(*value),
+                SqlParam::Uuid(value) => query.bind(*value),
+                SqlParam::UuidArray(values) => query.bind(values.as_slice()),
+                SqlParam::Bool(value) => query.bind(*value),
+                SqlParam::Jsonb(value) => query.bind(value),
+            };
+        }
+        query
+    }};
+}
+
 pub(super) fn bind_all<'q, O>(
-    mut query: QueryScalar<'q, sqlx::Postgres, O, PgArguments>,
+    query: QueryScalar<'q, sqlx::Postgres, O, PgArguments>,
     workspace: WorkspaceId,
     params: &'q [SqlParam],
 ) -> QueryScalar<'q, sqlx::Postgres, O, PgArguments> {
-    query = query.bind(workspace.as_uuid());
-    for param in params {
-        query = match param {
-            SqlParam::Text(value) => query.bind(value.as_str()),
-            SqlParam::TextArray(values) => query.bind(values.as_slice()),
-            SqlParam::Float(value) => query.bind(*value),
-            SqlParam::FloatArray(values) => query.bind(values.as_slice()),
-            SqlParam::Int(value) => query.bind(*value),
-            SqlParam::Timestamp(value) => query.bind(*value),
-            SqlParam::Uuid(value) => query.bind(*value),
-            SqlParam::UuidArray(values) => query.bind(values.as_slice()),
-            SqlParam::Bool(value) => query.bind(*value),
-            SqlParam::Jsonb(value) => query.bind(value),
-        };
-    }
-    query
+    bind_compiled!(query, workspace, params)
+}
+
+/// [`bind_all`] for a query that reads several columns.
+pub(super) fn bind_all_as<'q, O>(
+    query: QueryAs<'q, sqlx::Postgres, O, PgArguments>,
+    workspace: WorkspaceId,
+    params: &'q [SqlParam],
+) -> QueryAs<'q, sqlx::Postgres, O, PgArguments> {
+    bind_compiled!(query, workspace, params)
 }
 
 /// Runs the count and the sample, and finds each sampled person's display identifier. A statement

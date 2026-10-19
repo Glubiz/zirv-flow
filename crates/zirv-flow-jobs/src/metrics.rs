@@ -37,6 +37,43 @@ pub(crate) fn record_attempt(kind: &str, outcome: Outcome, seconds: f64) {
         .record(seconds);
 }
 
+/// Counts what a `flow.enroll` did: `zirv_flow_flow_enrollments_total{trigger,outcome}` for the
+/// people enrolled and the ones an occurrence had already enrolled, and
+/// `zirv_flow_flow_enroll_skips_total{trigger,reason}` for each refusal, by its reason.
+pub(crate) fn record_enroll(trigger: &'static str, outcome: &zirv_flow_store::EnrollOutcome) {
+    let counts = [
+        ("enrolled", outcome.enrolled.len()),
+        ("replayed", outcome.replayed),
+    ];
+    for (label, count) in counts {
+        if count > 0 {
+            metrics::counter!(
+                "zirv_flow_flow_enrollments_total",
+                "trigger" => trigger,
+                "outcome" => label,
+            )
+            .increment(count as u64);
+        }
+    }
+    let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for (_, reason) in &outcome.skipped {
+        *skipped.entry(reason).or_default() += 1;
+    }
+    for (reason, count) in skipped {
+        record_enroll_skips(trigger, reason, count);
+    }
+}
+
+/// Counts `count` refusals for one reason.
+pub(crate) fn record_enroll_skips(trigger: &'static str, reason: &'static str, count: u64) {
+    metrics::counter!(
+        "zirv_flow_flow_enroll_skips_total",
+        "trigger" => trigger,
+        "reason" => reason,
+    )
+    .increment(count);
+}
+
 pub(crate) fn record_claim_lag(kind: &str, seconds: f64) {
     metrics::histogram!("zirv_flow_job_claim_lag_seconds", "kind" => kind.to_owned())
         .record(seconds);
@@ -310,6 +347,45 @@ mod tests {
             output.contains("zirv_flow_job_duration_seconds"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn an_enroll_counts_its_people_and_every_refusal_by_reason() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let person = Uuid::nil();
+        let outcome = zirv_flow_store::EnrollOutcome {
+            enrolled: Vec::new(),
+            skipped: vec![
+                (person, "flow_paused"),
+                (person, "flow_paused"),
+                (person, "already_entered"),
+            ],
+            replayed: 4,
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            record_enroll("segment", &outcome);
+            record_enroll_skips("schedule", "flow_paused", 1);
+        });
+        let output = handle.render();
+
+        assert!(
+            output.contains(
+                "zirv_flow_flow_enroll_skips_total{trigger=\"segment\",reason=\"flow_paused\"} 2"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("reason=\"already_entered\"} 1"), "{output}");
+        assert!(
+            output.contains("trigger=\"schedule\",reason=\"flow_paused\"} 1"),
+            "{output}"
+        );
+        assert!(
+            output.contains("trigger=\"segment\",outcome=\"replayed\"} 4"),
+            "{output}"
+        );
+        assert!(!output.contains("outcome=\"enrolled\""), "{output}");
     }
 
     #[test]

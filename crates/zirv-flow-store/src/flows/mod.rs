@@ -12,6 +12,7 @@ mod inputs;
 mod lifecycle;
 mod runtime;
 mod state;
+mod triggers;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
 pub use arrivals::{StoredEvent, find_event_of_person};
@@ -21,7 +22,8 @@ pub use crud::{
 };
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
 pub use enroll::{
-    EnrollError, EnrollOutcome, EnrollRequest, Enrolled, MAX_ENROLL_PEOPLE, Occurrence, enroll,
+    EnrollEntries, EnrollEntry, EnrollError, EnrollOutcome, EnrollRequest, Enrolled,
+    MAX_ENROLL_PEOPLE, Occurrence, enroll, enroll_entries,
 };
 pub use inputs::{UnhealthyInput, has_webhook_signing_secret, unhealthy_inputs};
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
@@ -32,6 +34,12 @@ pub use runtime::{
     save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
 pub use state::{FlowAction, FlowState};
+pub(crate) use triggers::enqueue_segment_enrolls;
+pub use triggers::{
+    AudienceSource, ENROLL_JOB_KIND, EnrollJobPayload, EnrollWork, TriggerEvent, TriggerKind,
+    TriggeredFlow, audience_page, find_events, occurrence_of, reconcile_flow_schedules,
+    segment_trigger_flows,
+};
 
 #[cfg(test)]
 pub(crate) mod tests_support {
