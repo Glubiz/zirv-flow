@@ -87,6 +87,8 @@ pub async fn delete_person(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+    // Last, so a cursor can fall back to a person who is still there.
+    strip_pending_enrolls(connection, workspace, &people).await?;
 
     append_decision(
         connection,
@@ -107,9 +109,11 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
-    // Pending flow jobs carry the person's ids in their payloads. A running job keeps its lease.
+    // Pending flow jobs carry the person's ids in their payloads (`flow.enroll` ones are stripped
+    // after the people are gone, below). A running job keeps its lease.
     "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ( \n        (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \n            (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \n        OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)))",
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -129,6 +133,119 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM source_records WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM identities WHERE workspace_id = $1 AND person_id = ANY($2)",
 ];
+
+/// Removes `people` from the pending `flow.enroll` jobs of the workspace, after the people are
+/// deleted. A running job keeps its lease, as for the other flow jobs.
+///
+/// - A per-person job (`people`: `(person, occurrence)` pairs) loses the pairs of the erased
+///   people; a job left with no pair is deleted.
+/// - An audience page carries an `after` cursor, which can be an erased id. The page reads the
+///   people with an id greater than it, so the cursor becomes the greatest id that is still a
+///   person in the workspace and is below the erased one: the page then starts at the same
+///   person. With no such person the cursor is dropped and the audience pages from the start.
+async fn strip_pending_enrolls(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    let erased: Vec<String> = people.iter().map(Uuid::to_string).collect();
+    sqlx::query(
+        "UPDATE jobs j SET payload = jsonb_set(j.payload, '{people}', \
+             COALESCE((SELECT jsonb_agg(pair) FROM jsonb_array_elements(j.payload -> 'people') pair \
+                       WHERE pair ->> 0 <> ALL($2)), '[]'::jsonb)) \
+         WHERE j.workspace_id = $1 AND j.kind = 'flow.enroll' AND j.state <> 'running' \
+           AND jsonb_typeof(j.payload -> 'people') = 'array' \
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.payload -> 'people') pair \
+                       WHERE pair ->> 0 = ANY($2))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&erased)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    sqlx::query(
+        "DELETE FROM jobs WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
+           AND payload -> 'people' = '[]'::jsonb",
+    )
+    .bind(workspace.as_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    // The cursor of a page job is the erased id; the job's unique key names it too, so both are
+    // rewritten together, with the same helper that built the key.
+    let pages: Vec<(Uuid, serde_json::Value, Option<String>)> = sqlx::query_as(
+        "SELECT id, payload, unique_key FROM jobs \
+         WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
+           AND payload ->> 'after' = ANY($2) ORDER BY id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&erased)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    for (id, payload, key) in pages {
+        let Some(mut job) = crate::EnrollJobPayload::parse(&payload) else {
+            continue;
+        };
+        let crate::EnrollWork::Audience {
+            occurrence, after, ..
+        } = &mut job.work
+        else {
+            continue;
+        };
+        let Some(old) = *after else { continue };
+        let previous: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM people WHERE workspace_id = $1 AND id < $2 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(workspace.as_uuid())
+        .bind(old)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        *after = previous;
+        // A page queued by the audience job carries the key of its cursor; any other key (the
+        // first page's trigger key) names no cursor and stays.
+        let new_key = match (&key, *occurrence) {
+            (Some(key), Some(occurrence))
+                if *key == crate::enroll_page_key(job.flow, occurrence, Some(old)) =>
+            {
+                Some(crate::enroll_page_key(job.flow, occurrence, previous))
+            }
+            _ => None,
+        };
+        if let Some(new_key) = &new_key {
+            // The page that starts at the fallback cursor is already queued: this one is the
+            // same work, and the unique key allows one.
+            let taken: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM jobs WHERE unique_key = $1 AND id <> $2 \
+                   AND state IN ('ready', 'running'))",
+            )
+            .bind(new_key)
+            .bind(id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+            if taken {
+                sqlx::query("DELETE FROM jobs WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
+                continue;
+            }
+        }
+        sqlx::query(
+            "UPDATE jobs SET payload = $2, unique_key = COALESCE($3, unique_key) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(job.to_value())
+        .bind(new_key)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
+    Ok(())
+}
 
 /// Removes the people from their lists and keeps each list's member count exact. The lists
 /// are locked in id order first, like a merge does.
@@ -328,5 +445,313 @@ mod tests {
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0].reason.as_deref(), Some("orphan"));
         assert_eq!(deleted[0].subject_ids, serde_json::json!({}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_removes_every_flow_row_of_the_group_and_none_of_the_bystanders(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let flow: Uuid = sqlx::query_scalar("SELECT id FROM flows")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // The bystander has a full set of flow rows too.
+        let enrollment = Uuid::now_v7();
+        for statement in [
+            "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
+                node, occurrence_id, state_version, trace_id, cause_kind, cause_id) \
+             VALUES ($3, $2, $1, 1, $4, 'waiting', 'n', gen_random_uuid(), 1, \
+                gen_random_uuid(), 'api', 't')",
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome) \
+             VALUES (gen_random_uuid(), $2, $3, 'n', 'waiting')",
+            "INSERT INTO enrollment_waits (workspace_id, enrollment_id, person_id, event_name, \
+                wake_version, timeout_at) VALUES ($2, $3, $4, 'seen', 1, now())",
+            "INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, \
+                last_entered_at) VALUES ($2, $1, $4, 1, now())",
+        ] {
+            sqlx::query(statement)
+                .bind(flow)
+                .bind(ws.as_uuid())
+                .bind(enrollment)
+                .bind(bystander)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        for table in [
+            "enrollments",
+            "step_executions",
+            "enrollment_waits",
+            "flow_entries",
+        ] {
+            let left: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 1, "{table}: only the bystander's row is left");
+        }
+    }
+
+    fn enroll_payload(ws: WorkspaceId, work: crate::EnrollWork) -> serde_json::Value {
+        crate::EnrollJobPayload {
+            workspace: ws,
+            flow: Uuid::from_u128(77),
+            version: Some(1),
+            trigger: crate::TriggerKind::Api,
+            work,
+        }
+        .to_value()
+    }
+
+    async fn queue_enroll(pool: &PgPool, ws: WorkspaceId, key: &str, payload: serde_json::Value) {
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, \
+                trace_id) \
+             VALUES (gen_random_uuid(), $1, 'flow.enroll', $2, $3, 'api', 't', gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(payload)
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn queued_enroll(pool: &PgPool, key: &str) -> Option<crate::EnrollJobPayload> {
+        let payload: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT payload FROM jobs WHERE unique_key = $1")
+                .bind(key)
+                .fetch_optional(pool)
+                .await
+                .unwrap();
+        payload.map(|payload| crate::EnrollJobPayload::parse(&payload).unwrap())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_strips_the_person_from_pending_enroll_jobs_and_leaves_the_others(
+        pool: PgPool,
+    ) {
+        use crate::{AudienceSource, EnrollWork};
+        let Seeded {
+            ws,
+            person,
+            merged,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        // A person older than everyone seeded: the id an erased cursor falls back to.
+        let older = Uuid::from_u128(1);
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(older)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let occurrence = Uuid::from_u128(5);
+        queue_enroll(
+            &pool,
+            ws,
+            "mixed",
+            enroll_payload(
+                ws,
+                EnrollWork::People(vec![
+                    (person, occurrence),
+                    (bystander, occurrence),
+                    (merged, occurrence),
+                ]),
+            ),
+        )
+        .await;
+        queue_enroll(
+            &pool,
+            ws,
+            "only-erased",
+            enroll_payload(ws, EnrollWork::People(vec![(person, occurrence)])),
+        )
+        .await;
+        let audience = |after| EnrollWork::Audience {
+            source: AudienceSource::Everyone,
+            occurrence: Some(occurrence),
+            after,
+            entered_by: None,
+        };
+        queue_enroll(
+            &pool,
+            ws,
+            "cursor-erased",
+            enroll_payload(ws, audience(Some(person))),
+        )
+        .await;
+        queue_enroll(
+            &pool,
+            ws,
+            "cursor-other",
+            enroll_payload(ws, audience(Some(bystander))),
+        )
+        .await;
+        queue_enroll(&pool, ws, "cursor-none", enroll_payload(ws, audience(None))).await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let mixed = queued_enroll(&pool, "mixed").await.unwrap();
+        assert_eq!(
+            mixed.work,
+            EnrollWork::People(vec![(bystander, occurrence)])
+        );
+        assert!(
+            queued_enroll(&pool, "only-erased").await.is_none(),
+            "a job left with nobody is removed"
+        );
+        let erased_cursor = queued_enroll(&pool, "cursor-erased").await.unwrap();
+        assert_eq!(
+            erased_cursor.work,
+            audience(Some(older)),
+            "the cursor falls back to the last person before the erased one, which pages the same"
+        );
+        assert_eq!(
+            queued_enroll(&pool, "cursor-other").await.unwrap().work,
+            audience(Some(bystander))
+        );
+        assert_eq!(
+            queued_enroll(&pool, "cursor-none").await.unwrap().work,
+            audience(None)
+        );
+        let named: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' \
+               AND (payload::text LIKE '%' || $1::text || '%' \
+                    OR payload::text LIKE '%' || $2::text || '%')",
+        )
+        .bind(person)
+        .bind(merged)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(named, 0, "no pending enroll names the erased group");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erased_cursor_with_nobody_before_it_is_dropped_so_the_audience_pages_from_the_start(
+        pool: PgPool,
+    ) {
+        use crate::{AudienceSource, EnrollWork};
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        queue_enroll(
+            &pool,
+            ws,
+            "first",
+            enroll_payload(
+                ws,
+                EnrollWork::Audience {
+                    source: AudienceSource::Everyone,
+                    occurrence: None,
+                    after: Some(person),
+                    entered_by: None,
+                },
+            ),
+        )
+        .await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let after = match queued_enroll(&pool, "first").await.unwrap().work {
+            EnrollWork::Audience { after, .. } => after,
+            EnrollWork::People(_) => panic!("an audience page"),
+        };
+        assert_eq!(after, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_rewrites_the_unique_key_of_a_page_with_its_cursor(pool: PgPool) {
+        use crate::{AudienceSource, EnrollWork, enroll_page_key};
+        let Seeded {
+            ws,
+            person,
+            merged,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let older = Uuid::from_u128(1);
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(older)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let flow = Uuid::from_u128(77);
+        let occurrence = Uuid::from_u128(5);
+        let page = |after| EnrollWork::Audience {
+            source: AudienceSource::Everyone,
+            occurrence: Some(occurrence),
+            after,
+            entered_by: None,
+        };
+        // A page named by the erased person, one by their merged person (the cursor falls back
+        // to the same person, so the two pages are one) and one by a bystander.
+        for after in [person, merged, bystander] {
+            queue_enroll(
+                &pool,
+                ws,
+                &enroll_page_key(flow, occurrence, Some(after)),
+                enroll_payload(ws, page(Some(after))),
+            )
+            .await;
+        }
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let named: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' \
+               AND (payload::text LIKE '%' || $1::text || '%' \
+                    OR unique_key LIKE '%' || $1::text || '%' \
+                    OR payload::text LIKE '%' || $2::text || '%' \
+                    OR unique_key LIKE '%' || $2::text || '%')",
+        )
+        .bind(person)
+        .bind(merged)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(named, 0, "no pending enroll names the erased group");
+        let rewritten = queued_enroll(&pool, &enroll_page_key(flow, occurrence, Some(older))).await;
+        assert_eq!(
+            rewritten.map(|payload| payload.work),
+            Some(page(Some(older))),
+            "the key follows the cursor, and the duplicate page is gone"
+        );
+        let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(keys, 2, "the rewritten page and the bystander's page");
     }
 }

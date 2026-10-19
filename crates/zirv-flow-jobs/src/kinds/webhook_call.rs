@@ -194,7 +194,9 @@ impl JobKind for WebhookCall {
         )
         .await?
         else {
-            // Erased with the person: there is nobody to call about, and nothing to retry.
+            // Erased with the person, exited (a goal, an operator, a merge) or merged away:
+            // there is nobody to call about, and nothing to retry. The call is not sent for the
+            // survivor of a merge, who was never the person this enrollment was about.
             return Ok(());
         };
 
@@ -244,9 +246,9 @@ impl JobKind for WebhookCall {
         match lock_webhook_person(ctx.conn(), call.workspace, call.enrollment, person).await? {
             WebhookPerson::Held => {}
             WebhookPerson::Gone => return Ok(()),
-            WebhookPerson::Moved => {
-                return Err(JobError::new("the enrollment moved to another person"));
-            }
+            // Merged away during the call, which was already on the wire: nothing is written for
+            // an id that is no longer the person, and a retry would only read the same.
+            WebhookPerson::Moved => return Ok(()),
         }
         let trace = ctx.trace().clone();
         let job = (ctx.job_id(), attempts);
@@ -1583,6 +1585,75 @@ mod tests {
             traits["path"], "delivered",
             "the event path ran, not the timeout"
         );
+        assert_eq!(env.events("webhook.succeeded").await.len(), 1);
+    }
+
+    /// A call queued for an enrollment that is then exited, or whose person is then merged into
+    /// another, ends done: nothing is sent, the job is not retried and no outcome is written.
+    async fn no_call_after(pool: PgPool, merged: bool) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        env.queue(&enrolled, person, 5).await;
+        if merged {
+            let survivor = env.person("survivor@example.com", json!({})).await;
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(person)
+                .bind(survivor)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query(
+                "UPDATE enrollments SET state = 'exited', exit_reason = 'goal', \
+                    state_version = state_version + 1, ended_at = now() WHERE id = $1",
+            )
+            .bind(enrolled.enrollment)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        }
+
+        env.attempt().await.expect("the job ends done, not retried");
+
+        assert!(env.mock.hits().is_empty(), "no call was made");
+        assert_eq!(env.jobs_left().await, 0, "the job ended as done");
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE name LIKE 'webhook.%'")
+                .await,
+            0
+        );
+        assert!(env.decisions(&enrolled.trace).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_for_an_exited_enrollment_ends_done_without_a_call(pool: PgPool) {
+        no_call_after(pool, false).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_for_a_merged_away_person_ends_done_without_a_call(pool: PgPool) {
+        no_call_after(pool, true).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_for_an_enrollment_that_completed_is_still_sent(pool: PgPool) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        env.queue(&enrolled, person, 5).await;
+        sqlx::query("UPDATE enrollments SET state = 'completed', ended_at = now() WHERE id = $1")
+            .bind(enrolled.enrollment)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.mock.hits().len(), 1, "the flow ended after the node");
         assert_eq!(env.events("webhook.succeeded").await.len(), 1);
     }
 }

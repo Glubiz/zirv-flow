@@ -23,7 +23,8 @@ use zirv_flow_segments::{
 use zirv_flow_store::{
     AudienceSource, ENROLL_JOB_KIND, EnrollEntries, EnrollEntry, EnrollJobPayload, EnrollOutcome,
     EnrollWork, FlowState, MAX_ENROLL_PEOPLE, TriggerEvent, TriggerKind, audience_page,
-    enroll_entries, find_events, find_flow, find_flow_version, occurrence_of, segment_catalog,
+    enroll_entries, enroll_page_key, find_events, find_flow, find_flow_version, lock_audience_page,
+    occurrence_of, resolve_survivors, segment_catalog,
 };
 
 use super::segment_refresh::catalog_of;
@@ -117,6 +118,9 @@ async fn run_people(
     if pairs.len() > MAX_ENROLL_PEOPLE {
         return Err(JobError::new("a flow enroll takes at most 1000 people"));
     }
+    // The entries keep the ids the job names: `enroll_entries` resolves a person merged into
+    // another since the job was queued to the survivor, and tells a redelivery from a new
+    // occurrence by the named id as well as the survivor's.
     let mut entries: Vec<EnrollEntry> = pairs
         .iter()
         .map(|(person, occurrence)| EnrollEntry {
@@ -165,6 +169,14 @@ async fn matching_events(
             Err(_) => return Ok(Vec::new()),
         }
     };
+    // The entries name the survivor; an event may still name the person it was recorded for,
+    // until the merge's rewrite job re-points it. Both sides are compared as the survivor.
+    let recorded_for: Vec<Uuid> = events
+        .iter()
+        .map(|event| event.person_id)
+        .chain(entries.iter().map(|entry| entry.person))
+        .collect();
+    let survivors = resolve_survivors(ctx.conn(), job.workspace, &recorded_for).await?;
     let passing: hashbrown::HashSet<(Uuid, Uuid)> = events
         .iter()
         .filter(|event| event.name == wanted.name)
@@ -177,11 +189,17 @@ async fn matching_events(
                 evaluate(definition, &catalog, &snapshot, now).outcome == Verdict::Pass
             })
         })
-        .map(|event| (event.person_id, event.id))
+        .map(|event| {
+            let person = survivors.get(&event.person_id).copied();
+            (person.unwrap_or(event.person_id), event.id)
+        })
         .collect();
     Ok(entries
         .into_iter()
-        .filter(|entry| passing.contains(&(entry.person, entry.occurrence)))
+        .filter(|entry| {
+            let person = survivors.get(&entry.person).copied();
+            passing.contains(&(person.unwrap_or(entry.person), entry.occurrence))
+        })
         .collect())
 }
 
@@ -195,7 +213,9 @@ fn snapshot_event(event: &TriggerEvent) -> SnapshotEvent {
 
 /// One page of an audience, and the job for the next page when this one was full. The next job
 /// carries the occurrence and the version, so every page enrolls for one occurrence into one
-/// version, and its key names the cursor, so a page queued twice is one job.
+/// version, and its key names the cursor, so a page queued twice is one job. The page locks the
+/// people it read (`lock_audience_page`) before it enrolls them, and the next cursor is the last
+/// person that lock found, so an erasure never leaves its erased id in a queued page.
 async fn run_audience(
     ctx: &mut JobContext<'_>,
     job: &EnrollJobPayload,
@@ -208,7 +228,16 @@ async fn run_audience(
     ),
     now: OffsetDateTime,
 ) -> Result<(), JobError> {
-    let page = audience_page(ctx.conn(), job.workspace, source, after, entered_by).await?;
+    let read = audience_page(ctx.conn(), job.workspace, source, after, entered_by).await?;
+    // The people are locked before they are enrolled and before the cursor is chosen: an
+    // erasure waits for this page and then strips the next page's cursor, and one that already
+    // committed has left the people it erased out of `page`.
+    let page = lock_audience_page(ctx.conn(), job.workspace, job.flow, &read).await?;
+    let full = read.len() >= MAX_ENROLL_PEOPLE;
+    if full && page.is_empty() {
+        // Every person of a full page was erased while it waited: read the range again.
+        return Err(JobError::new("the audience page was erased while it ran"));
+    }
     let entries: Vec<EnrollEntry> = page
         .iter()
         .map(|person| EnrollEntry {
@@ -218,9 +247,7 @@ async fn run_audience(
         })
         .collect();
     enroll(ctx, job, version, &entries, now).await?;
-    if page.len() >= MAX_ENROLL_PEOPLE
-        && let Some(last) = page.last()
-    {
+    if full && let Some(last) = page.last() {
         let next = EnrollJobPayload {
             workspace: job.workspace,
             flow: job.flow,
@@ -233,7 +260,7 @@ async fn run_audience(
                 entered_by,
             },
         };
-        let key = format!("flow.enroll:page:{}:{occurrence}:{last}", job.flow);
+        let key = enroll_page_key(job.flow, occurrence, Some(*last));
         let trace = ctx.trace().clone();
         ctx.enqueue(&next.job(&trace, key)).await?;
     }
@@ -1039,10 +1066,17 @@ mod tests {
 
         // Connection B publishes after the refresh stamped the new member.
         env.clock.advance(time::Duration::seconds(5));
+        let (backend_tx, backend_rx) = tokio::sync::oneshot::channel::<i32>();
         let publisher = {
             let (pool, clock, ws) = (env.pool.clone(), env.clock(), env.ws);
             tokio::spawn(async move {
                 let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                // The backend that publishes, so the test can ask whether it is the one waiting.
+                let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                backend_tx.send(backend).unwrap();
                 let locked = zirv_flow_store::lock_flow(&mut tx, ws, flow).await.unwrap();
                 let trace = TraceContext::root(Cause::api("publish"));
                 zirv_flow_store::publish_flow(&mut tx, &clock, ws, &locked, None, &trace)
@@ -1051,15 +1085,20 @@ mod tests {
                 zirv_flow_store::commit(tx).await.unwrap();
             })
         };
+        let backend = backend_rx.await.expect("the publisher reports its backend");
         let deadline = Instant::now() + Duration::from_secs(30);
         let finished = loop {
             if publisher.is_finished() {
                 break true;
             }
-            let waiting = env
-                .count("SELECT count(*) FROM pg_locks WHERE NOT granted")
-                .await;
-            if waiting > 0 {
+            // The publisher's own backend, not any waiter on the server: other tests lock in
+            // databases of their own at the same time.
+            let blockers: i32 = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1))")
+                .bind(backend)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            if blockers > 0 {
                 break false;
             }
             assert!(
@@ -1543,6 +1582,335 @@ mod tests {
         eprintln!(
             "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
              re-entry refused {finished:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_meeting_an_erased_person_writes_no_decision_naming_them_and_counts_the_skip(
+        pool: PgPool,
+    ) {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool).await;
+        let ann = env.person("a").await;
+        // Erased after the job was queued: no row, no id to write down.
+        let erased = Uuid::now_v7();
+        let flow = env
+            .flow("By api", settings(json!({"type": "api"}), once()))
+            .await;
+
+        env.run(
+            &EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (erased, Uuid::now_v7())]),
+            },
+            &TraceContext::root(Cause::api("req")),
+        )
+        .await;
+
+        assert_eq!(env.enrolled(flow).await, [ann]);
+        let naming = env
+            .count(&format!(
+                "SELECT count(*) FROM decision_records WHERE subject_ids::text LIKE '%{erased}%'"
+            ))
+            .await;
+        assert_eq!(naming, 0, "no decision names the erased person");
+        assert_eq!(env.decisions("skipped", Some("no_such_person")).await, 0);
+        let output = handle.render();
+        assert!(
+            output.contains(
+                "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"no_such_person\"} 1"
+            ),
+            "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_naming_a_merged_away_person_enrolls_the_survivor_once(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let (survivor, loser, other) = (
+            env.person("a").await,
+            env.person("b").await,
+            env.person("c").await,
+        );
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let only_loser = env
+            .flow("Loser only", settings(json!({"type": "api"}), once()))
+            .await;
+        let both = env
+            .flow("Both", settings(json!({"type": "api"}), once()))
+            .await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let job = |flow, pairs| EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::People(pairs),
+        };
+
+        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+            .await;
+        env.run(
+            &job(
+                both,
+                vec![
+                    (loser, Uuid::now_v7()),
+                    (survivor, Uuid::now_v7()),
+                    (other, Uuid::now_v7()),
+                ],
+            ),
+            &trace,
+        )
+        .await;
+
+        assert_eq!(env.enrolled(only_loser).await, [survivor]);
+        let mut expected = vec![survivor, other];
+        expected.sort_unstable();
+        assert_eq!(env.enrolled(both).await, expected, "the survivor once");
+        // The re-entry rule decides: the survivor is already in the flow, so a second job is refused.
+        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+            .await;
+        assert_eq!(env.enrolled(only_loser).await, [survivor]);
+        assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_job_for_a_merged_away_person_enrolls_the_survivor_whether_or_not_the_event_moved(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.define_order().await;
+        let flow = env
+            .flow(
+                "Orders",
+                settings(
+                    json!({"type": "event", "event": "order", "filters": []}),
+                    once(),
+                ),
+            )
+            .await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let record = |email: &str| EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), email.into())],
+            name: "order".into(),
+            properties: json!({"total": 5}).as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: env.clock.now(),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("event")),
+        };
+        zirv_flow_store::apply_event_batch(
+            &env.pool,
+            env.ws,
+            &key,
+            &[record("ada@example.com"), record("bea@example.com")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(env.enroll_jobs().await, 1);
+        let person_of = |email: &'static str| {
+            let pool = env.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT person_id FROM identities WHERE kind = 'email' AND value = $1",
+                )
+                .bind(email)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (ada, bea) = (
+            person_of("ada@example.com").await,
+            person_of("bea@example.com").await,
+        );
+        let (ada_survivor, bea_survivor) = (env.person("x").await, env.person("y").await);
+        // Both are merged after the job was queued. Ada's event was re-pointed to the survivor
+        // by the rewrite job; Bea's was not yet.
+        for (loser, survivor) in [(ada, ada_survivor), (bea, bea_survivor)] {
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(loser)
+                .bind(survivor)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE events SET person_id = $2 WHERE person_id = $1")
+            .bind(ada)
+            .bind(ada_survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(env.drain(1).await, 1);
+
+        let mut expected = vec![ada_survivor, bea_survivor];
+        expected.sort_unstable();
+        assert_eq!(env.enrolled(flow).await, expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_redelivered_occurrence_after_a_merge_is_a_replay_under_the_losers_id(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let (survivor, loser) = (env.person("a").await, env.person("b").await);
+        let flow = env
+            .flow(
+                "By api",
+                settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
+            )
+            .await;
+        let occurrence = Uuid::now_v7();
+        let trace = TraceContext::root(Cause::api("req"));
+        let job = EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::People(vec![(loser, occurrence)]),
+        };
+        env.run(&job, &trace).await;
+        assert_eq!(env.enrolled(flow).await, [loser]);
+
+        // The merge exits the loser's enrollment and points the loser at the survivor.
+        sqlx::query("UPDATE enrollments SET state = 'exited', ended_at = now() WHERE flow_id = $1")
+            .bind(flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.run(&job, &trace).await;
+
+        assert_eq!(
+            env.enrolled(flow).await,
+            [loser],
+            "the redelivery enrolls nobody new"
+        );
+        assert_eq!(env.decisions("enrolled", None).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_ending_in_a_refused_person_erased_while_it_runs_queues_no_job_naming_them(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.people(MAX_ENROLL_PEOPLE as i32, "a").await;
+        let last: Uuid = sqlx::query_scalar(
+            "SELECT id FROM people WHERE workspace_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(env.ws.as_uuid())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let flow = env
+            .flow("By api", settings(json!({"type": "api"}), once()))
+            .await;
+        let trace = TraceContext::root(Cause::api("req"));
+        // The last person of the page entered before, so the page refuses them: no insert locks
+        // their row.
+        env.run(
+            &EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(last, Uuid::now_v7())]),
+            },
+            &trace,
+        )
+        .await;
+        env.end_enrollments(flow).await;
+        let page = EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::Audience {
+                source: AudienceSource::Everyone,
+                occurrence: Some(Uuid::now_v7()),
+                after: None,
+                entered_by: None,
+            },
+        };
+        enqueue(&env.pool, &page.job(&trace, "test:page".into()))
+            .await
+            .unwrap();
+
+        // The erasure holds the person (and has stripped the queue) while the page runs.
+        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::delete_person(
+            &mut erasure,
+            env.ws,
+            last,
+            zirv_flow_store::DeleteReason::Erasure,
+            &trace,
+        )
+        .await
+        .unwrap();
+        let claimed = claim_job(
+            &env.pool,
+            "test",
+            &[ENROLL_JOB_KIND],
+            Duration::from_secs(120),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pool = env.pool.clone();
+        let clock = env.clock();
+        let running = tokio::spawn(async move { execute(&pool, &clock, claimed).await.unwrap() });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let blocked: i64 = env
+                .count(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+                       AND cardinality(pg_blocking_pids(pid)) > 0",
+                )
+                .await;
+            if blocked > 0 || running.is_finished() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the page neither ran nor waited");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        zirv_flow_store::commit(erasure).await.unwrap();
+        running.await.unwrap();
+
+        let naming = env
+            .count(&format!(
+                "SELECT count(*) FROM jobs WHERE payload::text LIKE '%{last}%' \
+                   OR unique_key LIKE '%{last}%'"
+            ))
+            .await;
+        assert_eq!(naming, 0, "no job names the erased person");
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' AND state = 'ready'")
+                .await,
+            1,
+            "the full page still queues the next one"
         );
     }
 }

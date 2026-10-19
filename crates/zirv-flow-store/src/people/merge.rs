@@ -170,6 +170,35 @@ pub(super) async fn merge_people(
         enqueue(&mut *connection, &job).await?;
     }
 
+    // What the merged-away people were in the middle of ends with them: the survivor's own
+    // enrollments are not touched, and a merged-away person is never enrolled again (an enroll
+    // follows `merged_into`). The enrollments are the last rows of the lock order (flow row,
+    // people in id order, enrollments), after the people the caller locked.
+    crate::flows::exit_people(connection, workspace, losers, "merge", trace).await?;
+    // The losers' flow entries join the survivor's here, with the group locked, and not in the
+    // rewrite job: until the job ran, a `once` flow (or `always` inside its minimum interval)
+    // would have enrolled the survivor again. Entries are summed and the later entry kept; the
+    // statement deletes the losers' rows, so a person who is merged again has none left to fold.
+    sqlx::query(
+        "WITH moved AS ( \
+             DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2) \
+             RETURNING flow_id, entries, last_entered_at), \
+         summed AS ( \
+             SELECT flow_id, sum(entries)::integer AS entries, max(last_entered_at) AS last_entered_at \
+             FROM moved GROUP BY flow_id) \
+         INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, last_entered_at) \
+         SELECT $1, flow_id, $3, entries, last_entered_at FROM summed \
+         ON CONFLICT (flow_id, person_id) DO UPDATE SET \
+             entries = flow_entries.entries + EXCLUDED.entries, \
+             last_entered_at = GREATEST(flow_entries.last_entered_at, EXCLUDED.last_entered_at)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(losers)
+    .bind(survivor)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+
     // Conflicts between the people that are now one person have nothing left to review.
     let mut group = losers.to_vec();
     group.push(survivor);
@@ -246,6 +275,21 @@ async fn close_conflicts_the_move_would_duplicate(
 /// second run moves none. Conflicts that end up between the survivor and itself are closed
 /// as merged. Appends a `person.merge.rewrite` decision once the person is
 /// merged and every batch is done; a person that was not merged is left alone.
+///
+/// The flow tables, one by one:
+/// - `flow_entries` is **folded** into the survivor's row for the same flow in the merge
+///   transaction ([`merge_people`]), not here: the two were one human, so a `once` flow that
+///   either entered stays entered from the moment of the merge. The rewrite writes no flow row
+///   of that table.
+/// - `enrollments` is **kept on the old id**. The in-flight ones were exited in the merge
+///   transaction (reason `merge`) and later enrolls follow `merged_into`, so what is left are
+///   ended enrollments, which are history of the person that was enrolled, and re-pointing them
+///   could collide with the survivor's on the in-flight and occurrence unique indexes. They go
+///   with the group when it is erased.
+/// - `step_executions` has no person column and follows its enrollment.
+/// - `enrollment_waits` is **deleted** in the merge transaction with the enrollment that held it:
+///   a wait left on the old id would never match an event, which resolves to the survivor, while
+///   its timer could still run.
 pub async fn rewrite_merged_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -1146,5 +1190,280 @@ mod tests {
         assert_eq!((person, other_person), (survivor, survivor));
         assert!(resolved);
         assert_eq!(resolution.as_deref(), Some("merged"));
+    }
+
+    /// One enrollment of `person` in a flow of its own, in `state`, with a wait when it sleeps.
+    async fn enroll_in(pool: &PgPool, ws: WorkspaceId, person: Uuid, state: &str) -> Uuid {
+        use crate::flows::tests_support::{create, publish, waiting_enrollment};
+        let flow = create(pool, ws, &format!("Flow {state} {person}")).await;
+        publish(pool, ws, flow.id).await.unwrap();
+        let enrollment = waiting_enrollment(pool, ws, flow.id, person, "seen").await;
+        sqlx::query(
+            "UPDATE enrollments SET state = $2::text, \n                ended_at = CASE WHEN $2::text IN ('completed', 'exited') THEN now() END, \n                resume_input = CASE WHEN $2::text = 'held' THEN '{}'::jsonb END, \n                error = CASE WHEN $2::text = 'failed' THEN 'boom' END, \n                failed_node = CASE WHEN $2::text = 'failed' THEN 'draft' END \n             WHERE id = $1",
+        )
+            .bind(enrollment)
+            .bind(state)
+            .execute(pool)
+            .await
+            .unwrap();
+        if state == "completed" {
+            sqlx::query("DELETE FROM enrollment_waits WHERE enrollment_id = $1")
+                .bind(enrollment)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        enrollment
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_exits_the_merged_away_enrollments_with_merge_and_leaves_the_survivors(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:user_id", "u")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("web", "2", &[("anonymous_id", "a")], json!({})),
+        )
+        .await;
+        let mut in_flight = Vec::new();
+        for state in ["active", "waiting", "held", "failed"] {
+            in_flight.push(enroll_in(&pool, ws, loser, state).await);
+        }
+        let completed = enroll_in(&pool, ws, loser, "completed").await;
+        let kept = enroll_in(&pool, ws, survivor, "waiting").await;
+        let both = record(
+            "app",
+            "3",
+            &[("external:user_id", "u"), ("anonymous_id", "a")],
+            json!({}),
+        );
+
+        let merged = apply_one(&pool, ws, both.clone()).await;
+
+        assert_eq!(merged, survivor);
+        assert_eq!(merged_into(&pool, loser).await, Some(survivor));
+        let state_of = |id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (String, Option<String>, i64)>(
+                    "SELECT state, exit_reason, state_version FROM enrollments WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        for id in &in_flight {
+            let (state, reason, version) = state_of(*id).await;
+            assert_eq!(
+                (state.as_str(), reason.as_deref(), version),
+                ("exited", Some("merge"), 4)
+            );
+        }
+        assert_eq!(state_of(completed).await.0, "completed");
+        assert_eq!(state_of(kept).await, ("waiting".to_owned(), None, 3));
+        let waits: Vec<Uuid> = sqlx::query_scalar("SELECT enrollment_id FROM enrollment_waits")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(waits, [kept], "only the survivor's wait is left");
+        let (decisions, _) = list_trace(&pool, ws, both.trace.trace_id, 50)
+            .await
+            .unwrap();
+        let exits: Vec<_> = decisions
+            .iter()
+            .filter(|d| d.action == "flow.enrollment")
+            .collect();
+        assert_eq!(exits.len(), in_flight.len(), "one decision per exit");
+        for decision in exits {
+            assert_eq!(decision.outcome, "exited");
+            assert_eq!(decision.reason.as_deref(), Some("merge"));
+            assert_eq!(decision.subject_ids["person"], loser.to_string());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_folds_flow_entries_into_the_survivor_and_the_rewrite_keeps_ended_enrollments(
+        pool: PgPool,
+    ) {
+        use crate::flows::tests_support::{create, publish};
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:user_id", "u")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("web", "2", &[("anonymous_id", "a")], json!({})),
+        )
+        .await;
+        let both_entered = create(&pool, ws, "Both").await;
+        let loser_entered = create(&pool, ws, "Loser").await;
+        for flow in [both_entered.id, loser_entered.id] {
+            publish(&pool, ws, flow).await.unwrap();
+        }
+        for (flow, person, entries, at) in [
+            (both_entered.id, survivor, 1, "2030-01-01T00:00:00Z"),
+            (both_entered.id, loser, 2, "2030-03-01T00:00:00Z"),
+            (loser_entered.id, loser, 1, "2030-02-01T00:00:00Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, \
+                    last_entered_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
+            )
+            .bind(ws.as_uuid())
+            .bind(flow)
+            .bind(person)
+            .bind(entries)
+            .bind(at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // An ended enrollment of the loser: history, kept on the old id.
+        let ended = enroll_in(&pool, ws, loser, "completed").await;
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "app",
+                "3",
+                &[("external:user_id", "u"), ("anonymous_id", "a")],
+                json!({}),
+            ),
+        )
+        .await;
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let first = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        let second = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let rows: Vec<(Uuid, Uuid, i32, bool)> = sqlx::query_as(
+            "SELECT flow_id, person_id, entries, \
+                    last_entered_at = '2030-03-01T00:00:00Z'::timestamptz \
+             FROM flow_entries ORDER BY entries DESC",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (both_entered.id, survivor, 3, true),
+                (loser_entered.id, survivor, 1, false)
+            ]
+        );
+        assert_eq!(
+            first, 0,
+            "the merge folded the entries; the rewrite writes no flow row"
+        );
+        assert_eq!(second, 0, "a second run moves nothing");
+        let kept: Uuid = sqlx::query_scalar("SELECT person_id FROM enrollments WHERE id = $1")
+            .bind(ended)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, loser, "ended enrollments stay on the old id");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_folds_the_losers_flow_entries_before_the_rewrite_job_runs(pool: PgPool) {
+        use crate::flows::tests_support::{create, publish};
+        use crate::flows::{FlowPatch, update_flow_draft};
+        use crate::{EnrollRequest, Occurrence, enroll};
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:user_id", "u")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("web", "2", &[("anonymous_id", "a")], json!({})),
+        )
+        .await;
+        let flow = create(&pool, ws, "Once").await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &FlowPatch {
+                settings: Some(json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}})),
+                ..FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        publish(&pool, ws, flow.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, last_entered_at) \
+             VALUES ($1, $2, $3, 1, now())",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow.id)
+        .bind(loser)
+        .execute(&pool)
+        .await
+        .unwrap();
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "app",
+                "3",
+                &[("external:user_id", "u"), ("anonymous_id", "a")],
+                json!({}),
+            ),
+        )
+        .await;
+
+        // The rewrite job has not run: the merge transaction alone moved the entry.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let outcome = enroll(
+            &mut tx,
+            &EnrollRequest {
+                workspace: ws,
+                flow: flow.id,
+                version: 1,
+                people: &[survivor],
+                occurrence: Occurrence {
+                    trigger: "manual",
+                    id: Uuid::now_v7(),
+                },
+                now: time::OffsetDateTime::now_utc(),
+                trace: &TraceContext::root(Cause::api("enroll")),
+            },
+        )
+        .await
+        .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        assert!(outcome.enrolled.is_empty());
+        assert_eq!(outcome.skipped, [(survivor, "already_entered")]);
     }
 }

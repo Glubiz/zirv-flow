@@ -22,6 +22,10 @@ use crate::{NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 /// The most people one enroll takes (the size of a `flow.enroll` job).
 pub const MAX_ENROLL_PEOPLE: usize = 1000;
 
+/// The reason a person with no row is refused for. It has no decision: the person is gone, and a
+/// decision would write their id back.
+const NO_SUCH_PERSON: &str = "no_such_person";
+
 /// What made the enrollment: the trigger kind and the id of its occurrence (an event id, a
 /// segment event id, a schedule slot or the id of a manual or API request). Enrolling the same
 /// person for the same occurrence twice changes nothing.
@@ -168,7 +172,10 @@ pub struct EnrollEntries<'a> {
 ///
 /// An entry whose `(flow, person, occurrence)` already enrolled is a replay and changes nothing.
 /// A person who appears twice enters once, by their first entry. People are written in id order,
-/// so two enrolls that touch the same people take their rows in the same order.
+/// so two enrolls that touch the same people take their rows in the same order. The people are
+/// locked `FOR KEY SHARE` first (see [`lock_people`]), so a merge or an erasure cannot commit
+/// between the checks and the writes: a person merged meanwhile enters as the survivor and one
+/// erased meanwhile is refused as `no_such_person`.
 pub async fn enroll_entries(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,
@@ -184,19 +191,36 @@ pub async fn enroll_entries(
         .id
         .clone();
 
+    // A person merged into another since the work was queued enters as the survivor, so the
+    // re-entry rule decides for the one person they now are. The people are locked before
+    // anything is read about them or written for them; a person with no row (erased) keeps the
+    // id they were named by and is refused below.
+    let (resolved, existing) = lock_people(connection, request).await?;
+
     let mut seen = HashSet::new();
-    let mut entries: Vec<&EnrollEntry> = request
-        .entries
+    let mut by_person: Vec<&(EnrollEntry, Uuid)> = resolved
         .iter()
-        .filter(|entry| seen.insert(entry.person))
+        .filter(|(entry, _)| seen.insert(entry.person))
         .collect();
-    entries.sort_unstable_by_key(|entry| entry.person);
+    by_person.sort_unstable_by_key(|(entry, _)| entry.person);
+    let entries: Vec<&EnrollEntry> = by_person.iter().map(|(entry, _)| entry).collect();
     let people: Vec<Uuid> = entries.iter().map(|entry| entry.person).collect();
-    let occurrences: Vec<Uuid> = entries.iter().map(|entry| entry.occurrence).collect();
-    let existing = existing_people(connection, request, &people).await?;
     let entered = entries_of(connection, request, &people).await?;
     let in_flight = in_flight_of(connection, request, &people).await?;
-    let replayed = replayed_of(connection, request, &people, &occurrences).await?;
+    // An enrollment made before the merge sits under the id the entry was named by.
+    let pairs: Vec<(Uuid, Uuid)> = by_person
+        .iter()
+        .flat_map(|(entry, named)| [(entry.person, entry.occurrence), (*named, entry.occurrence)])
+        .collect();
+    let replayed_pairs = replayed_of(connection, request, &pairs).await?;
+    let replayed: HashSet<Uuid> = by_person
+        .iter()
+        .filter(|(entry, named)| {
+            replayed_pairs.contains(&(entry.person, entry.occurrence))
+                || replayed_pairs.contains(&(*named, entry.occurrence))
+        })
+        .map(|(entry, _)| entry.person)
+        .collect();
 
     let mut outcome = EnrollOutcome::default();
     let mut accepted = Vec::new();
@@ -220,9 +244,12 @@ pub async fn enroll_entries(
         }
     }
 
+    // A person with no row was erased: nothing is written that names them. The skip is still in
+    // `outcome.skipped`, where the caller counts it.
     let mut decisions: Vec<NewDecision> = outcome
         .skipped
         .iter()
+        .filter(|(_, reason)| *reason != NO_SUCH_PERSON)
         .map(|(person, reason)| NewDecision {
             workspace_id: request.workspace,
             trace: request.trace.clone(),
@@ -307,7 +334,7 @@ fn refusal(
         FlowState::Draft | FlowState::Archived => return Some("flow_not_live"),
     }
     if !exists {
-        return Some("no_such_person");
+        return Some(NO_SUCH_PERSON);
     }
     if in_flight {
         return Some("already_active");
@@ -329,7 +356,10 @@ fn refusal(
     }
 }
 
-async fn lock_enrolls(connection: &mut PgConnection, flow: Uuid) -> Result<(), StoreError> {
+pub(super) async fn lock_enrolls(
+    connection: &mut PgConnection,
+    flow: Uuid,
+) -> Result<(), StoreError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text, 0))")
         .bind(flow)
         .execute(connection)
@@ -359,23 +389,6 @@ async fn read_version(
     let settings =
         serde_json::from_value(settings).map_err(|_| EnrollError::Corrupt("the settings"))?;
     Ok((state, graph, settings))
-}
-
-/// The people that exist and have not been merged into another.
-async fn existing_people(
-    connection: &mut PgConnection,
-    request: &EnrollEntries<'_>,
-    people: &[Uuid],
-) -> Result<HashSet<Uuid>, StoreError> {
-    let found: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) AND merged_into IS NULL",
-    )
-    .bind(request.workspace.as_uuid())
-    .bind(people)
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(found.into_iter().collect())
 }
 
 /// When each of `people` last entered the flow.
@@ -413,23 +426,118 @@ async fn in_flight_of(
     Ok(rows.into_iter().collect())
 }
 
-/// The people whose own occurrence has already enrolled them. `occurrences` is parallel to
-/// `people`.
+/// The `(person, occurrence)` pairs of `pairs` that already have an enrollment.
 async fn replayed_of(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,
-    people: &[Uuid],
-    occurrences: &[Uuid],
-) -> Result<HashSet<Uuid>, StoreError> {
-    let rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT e.person_id FROM enrollments e \
+    pairs: &[(Uuid, Uuid)],
+) -> Result<HashSet<(Uuid, Uuid)>, StoreError> {
+    let people: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
+    let occurrences: Vec<Uuid> = pairs.iter().map(|(_, occurrence)| *occurrence).collect();
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT e.person_id, e.occurrence_id FROM enrollments e \
          JOIN unnest($2::uuid[], $3::uuid[]) AS t(person_id, occurrence_id) \
            ON e.person_id = t.person_id AND e.occurrence_id = t.occurrence_id \
          WHERE e.flow_id = $1",
     )
     .bind(request.flow)
+    .bind(&people)
+    .bind(&occurrences)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// How many times [`lock_people`] resolves the people again because a merge committed while it
+/// waited for their locks, before it gives the enroll back as a retryable race.
+pub(super) const LOCK_ROUNDS: usize = 4;
+
+/// Resolves the entries' people to the people they are now and locks those rows `FOR KEY SHARE`,
+/// in id order: a merge or an erasure, which lock a merged group `FOR UPDATE` in id order, then
+/// wait for this transaction or are waited for, and the checks and the insert that follow see
+/// the people they were made for. Returns each entry resolved (with the id it was named by) and
+/// the people that exist and are not merged away.
+///
+/// A person merged (or merged again) while the lock was waited for resolves to the survivor in
+/// the next round. The round's locks are released first, with a savepoint rollback, so the
+/// survivor is never locked after a higher id. A person erased meanwhile has no row and is not in
+/// the returned set. After [`LOCK_ROUNDS`] rounds the enroll is a retryable race.
+///
+/// An audience page (`lock_audience_page`) has locked its people and their survivors already, in
+/// one id-ordered statement, so for those people this takes rows the transaction holds; only a
+/// merge that committed after the page was locked can name a survivor not held yet.
+async fn lock_people(
+    connection: &mut PgConnection,
+    request: &EnrollEntries<'_>,
+) -> Result<(Vec<(EnrollEntry, Uuid)>, HashSet<Uuid>), EnrollError> {
+    let named: Vec<Uuid> = request.entries.iter().map(|entry| entry.person).collect();
+    for _ in 0..LOCK_ROUNDS {
+        let survivors = resolve_survivors(connection, request.workspace, &named).await?;
+        let resolved: Vec<(EnrollEntry, Uuid)> = request
+            .entries
+            .iter()
+            .map(|entry| {
+                let person = survivors
+                    .get(&entry.person)
+                    .copied()
+                    .unwrap_or(entry.person);
+                (
+                    EnrollEntry {
+                        person,
+                        ..entry.clone()
+                    },
+                    entry.person,
+                )
+            })
+            .collect();
+        let mut people: Vec<Uuid> = resolved.iter().map(|(entry, _)| entry.person).collect();
+        people.sort_unstable();
+        people.dedup();
+        sqlx::query("SAVEPOINT enroll_people")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
+             ORDER BY id FOR KEY SHARE",
+        )
+        .bind(request.workspace.as_uuid())
+        .bind(&people)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        if locked.iter().any(|(_, merged_into)| merged_into.is_some()) {
+            sqlx::query("ROLLBACK TO SAVEPOINT enroll_people")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+            continue;
+        }
+        sqlx::query("RELEASE SAVEPOINT enroll_people")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        let existing = locked.into_iter().map(|(id, _)| id).collect();
+        return Ok((resolved, existing));
+    }
+    Err(StoreError::retryable_race().into())
+}
+
+/// The person each of `people` currently is: the survivor of one merged into another (merges are
+/// compressed, so one hop is the whole chain). A person who is not merged, and one with no row,
+/// are not in the map.
+pub async fn resolve_survivors(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<HashMap<Uuid, Uuid>, StoreError> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, merged_into FROM people \
+         WHERE workspace_id = $1 AND id = ANY($2) AND merged_into IS NOT NULL",
+    )
+    .bind(workspace.as_uuid())
     .bind(people)
-    .bind(occurrences)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
@@ -847,5 +955,172 @@ mod tests {
 
         assert_eq!(one.enrolled.len() + two.enrolled.len(), 1);
         assert_eq!(one.skipped.len() + two.skipped.len(), 1);
+    }
+
+    /// Waits until the backend `pid` is blocked on a lock, by polling `pg_blocking_pids`.
+    async fn wait_until_blocked(pool: &PgPool, pid: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(pid)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if blocked {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the enroll never waited for the merge"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_enroll_that_resolved_a_person_merged_before_its_insert_enrolls_the_survivor(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "merge-race").await;
+        let flow = flow(&pool, ws, json!({"mode": "once_at_a_time"})).await;
+        let (loser, survivor) = (person(&pool, ws).await, person(&pool, ws).await);
+
+        // The merge holds the loser while it points it at the survivor, as `merge` does.
+        let mut merge = crate::begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+            .bind(vec![loser, survivor])
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+
+        // The enroll resolves the loser from committed rows: not merged yet.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let enroller = tokio::spawn(async move {
+            let outcome = enroll(
+                &mut tx,
+                &EnrollRequest {
+                    workspace: ws,
+                    flow,
+                    version: 1,
+                    people: &[loser],
+                    occurrence: Occurrence {
+                        trigger: "manual",
+                        id: Uuid::now_v7(),
+                    },
+                    now: NOW,
+                    trace: &TraceContext::root(Cause::api("enroll")),
+                },
+            )
+            .await
+            .unwrap();
+            crate::commit(tx).await.unwrap();
+            outcome
+        });
+        wait_until_blocked(&pool, pid).await;
+        crate::commit(merge).await.unwrap();
+        let outcome = enroller.await.unwrap();
+
+        let on_loser: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM enrollments WHERE person_id = $1 \
+               AND state IN ('active', 'waiting', 'held', 'failed')",
+        )
+        .bind(loser)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(on_loser, 0, "nothing in flight on the merged-away person");
+        let entries_on_loser: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM flow_entries WHERE person_id = $1")
+                .bind(loser)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(entries_on_loser, 0);
+        let on_survivor: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM enrollments WHERE person_id = $1")
+                .bind(survivor)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(on_survivor, 1, "the survivor is enrolled once");
+        assert_eq!(
+            outcome
+                .enrolled
+                .iter()
+                .map(|e| e.person)
+                .collect::<Vec<_>>(),
+            [survivor]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_enroll_that_resolved_a_person_erased_before_its_insert_skips_them(pool: PgPool) {
+        let ws = workspace(&pool, "erase-race").await;
+        let flow = flow(&pool, ws, json!({"mode": "once_at_a_time"})).await;
+        let (gone, stays) = (person(&pool, ws).await, person(&pool, ws).await);
+
+        let mut erase = crate::begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(gone)
+            .execute(&mut *erase)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM people WHERE id = $1")
+            .bind(gone)
+            .execute(&mut *erase)
+            .await
+            .unwrap();
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let enroller = tokio::spawn(async move {
+            let outcome = enroll(
+                &mut tx,
+                &EnrollRequest {
+                    workspace: ws,
+                    flow,
+                    version: 1,
+                    people: &[gone, stays],
+                    occurrence: Occurrence {
+                        trigger: "manual",
+                        id: Uuid::now_v7(),
+                    },
+                    now: NOW,
+                    trace: &TraceContext::root(Cause::api("enroll")),
+                },
+            )
+            .await
+            .unwrap();
+            crate::commit(tx).await.unwrap();
+            outcome
+        });
+        wait_until_blocked(&pool, pid).await;
+        crate::commit(erase).await.unwrap();
+        let outcome = enroller.await.unwrap();
+
+        assert_eq!(outcome.skipped, [(gone, NO_SUCH_PERSON)]);
+        assert_eq!(
+            outcome
+                .enrolled
+                .iter()
+                .map(|e| e.person)
+                .collect::<Vec<_>>(),
+            [stays]
+        );
     }
 }
