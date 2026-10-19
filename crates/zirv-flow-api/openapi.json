@@ -14896,6 +14896,257 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/webhook-signing-secret": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Whether the workspace has a webhook signing secret and when a rotation's previous secret\nstops signing. Never returns a secret. Workspace admins only.",
+        "operationId": "get_webhook_signing_secret",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The signing secret's state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SigningSecretBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Creates the workspace's webhook signing secret and returns it once. Workspace admins only.\nAudited as `webhook_signing.created`.",
+        "operationId": "create_webhook_signing_secret",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The new secret, shown only now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedSigningSecretBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace already has a signing secret, or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the secret",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Issues a new signing secret and returns it once. The previous secret keeps signing for the\ngrace window; an earlier retired secret stops at once. Workspace admins only. Audited as\n`webhook_signing.rotated`.",
+        "operationId": "rotate_webhook_signing_secret",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The new secret, shown only now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedSigningSecretBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace has no signing secret yet, or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the secret",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/webhooks": {
       "get": {
         "tags": [
@@ -20908,6 +21159,38 @@
           }
         }
       },
+      "IssuedSigningSecretBody": {
+        "type": "object",
+        "description": "A signing secret, shown once.",
+        "required": [
+          "secret",
+          "created_at",
+          "grace_seconds"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "grace_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a rotation keeps the previous secret signing, in seconds."
+          },
+          "previous_valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the previous secret stops signing; null for a new secret that replaced nothing."
+          },
+          "secret": {
+            "type": "string",
+            "description": "The signing secret. Shown only in this response; keep it."
+          }
+        }
+      },
       "ItemProblem": {
         "type": "object",
         "description": "One invalid field of one item of an ingestion request.",
@@ -24291,6 +24574,41 @@
           },
           "password": {
             "type": "string"
+          }
+        }
+      },
+      "SigningSecretBody": {
+        "type": "object",
+        "description": "Whether the workspace has a signing secret, without the secret.",
+        "required": [
+          "configured",
+          "grace_seconds"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether a signing secret exists. A flow with a webhook node cannot be published without\none."
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the current secret was made."
+          },
+          "grace_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a rotation keeps the previous secret signing, in seconds."
+          },
+          "previous_valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the previous secret stops signing; null when no rotation left one inside its window."
           }
         }
       },
