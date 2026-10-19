@@ -118,14 +118,13 @@ async fn run_people(
     if pairs.len() > MAX_ENROLL_PEOPLE {
         return Err(JobError::new("a flow enroll takes at most 1000 people"));
     }
-    // A person merged into another since the job was queued is the survivor now: they are
-    // enrolled as that person, and the re-entry rule decides.
-    let named: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
-    let survivors = resolve_survivors(ctx.conn(), job.workspace, &named).await?;
+    // The entries keep the ids the job names: `enroll_entries` resolves a person merged into
+    // another since the job was queued to the survivor, and tells a redelivery from a new
+    // occurrence by the named id as well as the survivor's.
     let mut entries: Vec<EnrollEntry> = pairs
         .iter()
         .map(|(person, occurrence)| EnrollEntry {
-            person: survivors.get(person).copied().unwrap_or(*person),
+            person: *person,
             occurrence: *occurrence,
             // An event starts a flow on its own cause; the other triggers share the job's.
             cause: (job.trigger == TriggerKind::Event).then(|| Cause::event(*occurrence)),
@@ -172,7 +171,11 @@ async fn matching_events(
     };
     // The entries name the survivor; an event may still name the person it was recorded for,
     // until the merge's rewrite job re-points it. Both sides are compared as the survivor.
-    let recorded_for: Vec<Uuid> = events.iter().map(|event| event.person_id).collect();
+    let recorded_for: Vec<Uuid> = events
+        .iter()
+        .map(|event| event.person_id)
+        .chain(entries.iter().map(|entry| entry.person))
+        .collect();
     let survivors = resolve_survivors(ctx.conn(), job.workspace, &recorded_for).await?;
     let passing: hashbrown::HashSet<(Uuid, Uuid)> = events
         .iter()
@@ -193,7 +196,10 @@ async fn matching_events(
         .collect();
     Ok(entries
         .into_iter()
-        .filter(|entry| passing.contains(&(entry.person, entry.occurrence)))
+        .filter(|entry| {
+            let person = survivors.get(&entry.person).copied();
+            passing.contains(&(person.unwrap_or(entry.person), entry.occurrence))
+        })
         .collect())
 }
 
@@ -1747,5 +1753,51 @@ mod tests {
         let mut expected = vec![ada_survivor, bea_survivor];
         expected.sort_unstable();
         assert_eq!(env.enrolled(flow).await, expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_redelivered_occurrence_after_a_merge_is_a_replay_under_the_losers_id(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let (survivor, loser) = (env.person("a").await, env.person("b").await);
+        let flow = env
+            .flow(
+                "By api",
+                settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
+            )
+            .await;
+        let occurrence = Uuid::now_v7();
+        let trace = TraceContext::root(Cause::api("req"));
+        let job = EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::People(vec![(loser, occurrence)]),
+        };
+        env.run(&job, &trace).await;
+        assert_eq!(env.enrolled(flow).await, [loser]);
+
+        // The merge exits the loser's enrollment and points the loser at the survivor.
+        sqlx::query("UPDATE enrollments SET state = 'exited', ended_at = now() WHERE flow_id = $1")
+            .bind(flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.run(&job, &trace).await;
+
+        assert_eq!(
+            env.enrolled(flow).await,
+            [loser],
+            "the redelivery enrolls nobody new"
+        );
+        assert_eq!(env.decisions("enrolled", None).await, 1);
     }
 }
