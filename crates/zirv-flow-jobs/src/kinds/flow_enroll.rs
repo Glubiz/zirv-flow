@@ -23,8 +23,8 @@ use zirv_flow_segments::{
 use zirv_flow_store::{
     AudienceSource, ENROLL_JOB_KIND, EnrollEntries, EnrollEntry, EnrollJobPayload, EnrollOutcome,
     EnrollWork, FlowState, MAX_ENROLL_PEOPLE, TriggerEvent, TriggerKind, audience_page,
-    enroll_entries, enroll_page_key, find_events, find_flow, find_flow_version, occurrence_of,
-    resolve_survivors, segment_catalog,
+    enroll_entries, enroll_page_key, find_events, find_flow, find_flow_version, lock_audience_page,
+    occurrence_of, resolve_survivors, segment_catalog,
 };
 
 use super::segment_refresh::catalog_of;
@@ -213,7 +213,9 @@ fn snapshot_event(event: &TriggerEvent) -> SnapshotEvent {
 
 /// One page of an audience, and the job for the next page when this one was full. The next job
 /// carries the occurrence and the version, so every page enrolls for one occurrence into one
-/// version, and its key names the cursor, so a page queued twice is one job.
+/// version, and its key names the cursor, so a page queued twice is one job. The page locks the
+/// people it read (`lock_audience_page`) before it enrolls them, and the next cursor is the last
+/// person that lock found, so an erasure never leaves its erased id in a queued page.
 async fn run_audience(
     ctx: &mut JobContext<'_>,
     job: &EnrollJobPayload,
@@ -226,7 +228,16 @@ async fn run_audience(
     ),
     now: OffsetDateTime,
 ) -> Result<(), JobError> {
-    let page = audience_page(ctx.conn(), job.workspace, source, after, entered_by).await?;
+    let read = audience_page(ctx.conn(), job.workspace, source, after, entered_by).await?;
+    // The people are locked before they are enrolled and before the cursor is chosen: an
+    // erasure waits for this page and then strips the next page's cursor, and one that already
+    // committed has left the people it erased out of `page`.
+    let page = lock_audience_page(ctx.conn(), job.workspace, job.flow, &read).await?;
+    let full = read.len() >= MAX_ENROLL_PEOPLE;
+    if full && page.is_empty() {
+        // Every person of a full page was erased while it waited: read the range again.
+        return Err(JobError::new("the audience page was erased while it ran"));
+    }
     let entries: Vec<EnrollEntry> = page
         .iter()
         .map(|person| EnrollEntry {
@@ -236,9 +247,7 @@ async fn run_audience(
         })
         .collect();
     enroll(ctx, job, version, &entries, now).await?;
-    if page.len() >= MAX_ENROLL_PEOPLE
-        && let Some(last) = page.last()
-    {
+    if full && let Some(last) = page.last() {
         let next = EnrollJobPayload {
             workspace: job.workspace,
             flow: job.flow,
@@ -1799,5 +1808,109 @@ mod tests {
             "the redelivery enrolls nobody new"
         );
         assert_eq!(env.decisions("enrolled", None).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_ending_in_a_refused_person_erased_while_it_runs_queues_no_job_naming_them(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.people(MAX_ENROLL_PEOPLE as i32, "a").await;
+        let last: Uuid = sqlx::query_scalar(
+            "SELECT id FROM people WHERE workspace_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(env.ws.as_uuid())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let flow = env
+            .flow("By api", settings(json!({"type": "api"}), once()))
+            .await;
+        let trace = TraceContext::root(Cause::api("req"));
+        // The last person of the page entered before, so the page refuses them: no insert locks
+        // their row.
+        env.run(
+            &EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(last, Uuid::now_v7())]),
+            },
+            &trace,
+        )
+        .await;
+        env.end_enrollments(flow).await;
+        let page = EnrollJobPayload {
+            workspace: env.ws,
+            flow,
+            version: None,
+            trigger: TriggerKind::Api,
+            work: EnrollWork::Audience {
+                source: AudienceSource::Everyone,
+                occurrence: Some(Uuid::now_v7()),
+                after: None,
+                entered_by: None,
+            },
+        };
+        enqueue(&env.pool, &page.job(&trace, "test:page".into()))
+            .await
+            .unwrap();
+
+        // The erasure holds the person (and has stripped the queue) while the page runs.
+        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::delete_person(
+            &mut erasure,
+            env.ws,
+            last,
+            zirv_flow_store::DeleteReason::Erasure,
+            &trace,
+        )
+        .await
+        .unwrap();
+        let claimed = claim_job(
+            &env.pool,
+            "test",
+            &[ENROLL_JOB_KIND],
+            Duration::from_secs(120),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pool = env.pool.clone();
+        let clock = env.clock();
+        let running = tokio::spawn(async move { execute(&pool, &clock, claimed).await.unwrap() });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let blocked: i64 = env
+                .count(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+                       AND cardinality(pg_blocking_pids(pid)) > 0",
+                )
+                .await;
+            if blocked > 0 || running.is_finished() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the page neither ran nor waited");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        zirv_flow_store::commit(erasure).await.unwrap();
+        running.await.unwrap();
+
+        let naming = env
+            .count(&format!(
+                "SELECT count(*) FROM jobs WHERE payload::text LIKE '%{last}%' \
+                   OR unique_key LIKE '%{last}%'"
+            ))
+            .await;
+        assert_eq!(naming, 0, "no job names the erased person");
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' AND state = 'ready'")
+                .await,
+            1,
+            "the full page still queues the next one"
+        );
     }
 }

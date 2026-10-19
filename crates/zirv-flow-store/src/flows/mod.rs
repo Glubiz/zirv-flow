@@ -54,7 +54,7 @@ pub use state::{FlowAction, FlowState};
 pub(crate) use triggers::enqueue_segment_enrolls;
 pub use triggers::{
     AudienceSource, ENROLL_JOB_KIND, EnrollJobPayload, EnrollWork, TriggerEvent, TriggerKind,
-    TriggeredFlow, audience_page, enroll_page_key, find_events, occurrence_of,
+    TriggeredFlow, audience_page, enroll_page_key, find_events, lock_audience_page, occurrence_of,
     reconcile_flow_schedules, segment_trigger_flows,
 };
 

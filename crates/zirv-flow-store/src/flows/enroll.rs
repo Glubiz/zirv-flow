@@ -356,7 +356,10 @@ fn refusal(
     }
 }
 
-async fn lock_enrolls(connection: &mut PgConnection, flow: Uuid) -> Result<(), StoreError> {
+pub(super) async fn lock_enrolls(
+    connection: &mut PgConnection,
+    flow: Uuid,
+) -> Result<(), StoreError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text, 0))")
         .bind(flow)
         .execute(connection)

@@ -528,6 +528,28 @@ pub async fn audience_page(
     page.map_err(StoreError::query)
 }
 
+/// Locks the people of an audience page `FOR KEY SHARE`, in id order, and returns those still
+/// there, in id order. The flow's enroll lock comes first, as in [`super::enroll_entries`], then
+/// the people: an erasure (`FOR UPDATE` on the person) waits for the page's transaction, so its
+/// strip sees the next page the job queues, and one that committed first has taken its person
+/// out of the result, so the next page's cursor is never an erased id.
+pub async fn lock_audience_page(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    page: &[Uuid],
+) -> Result<Vec<Uuid>, StoreError> {
+    super::enroll::lock_enrolls(connection, flow).await?;
+    sqlx::query_scalar(
+        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(page)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Makes the `schedules` row of a flow match its trigger, in the caller's transaction: a schedule
 /// trigger has one row with the trigger's cron and zone, any other trigger none. A changed cron or
 /// zone moves the first slot to the next one after now; an unchanged one keeps its place.
