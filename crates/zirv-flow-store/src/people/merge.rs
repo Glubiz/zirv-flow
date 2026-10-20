@@ -278,11 +278,11 @@ const LOCK_ROUNDS: usize = 4;
 /// both `FOR UPDATE`, so it waits for the transaction that holds these locks, and this waits
 /// for an erasure already under way and then finds the rows gone.
 ///
-/// The survivor is read before it is locked, and a merge of the survivor can move `merged_into`
-/// meanwhile (a merge takes no lock that conflicts with `KEY SHARE`). So the locked read is
-/// checked against the survivor that was locked: when they differ the locks of the round are
-/// released with a savepoint rollback and the next round locks the new pair in id order. After
-/// [`LOCK_ROUNDS`] rounds it is a retryable race and the job runs again.
+/// The survivor is read before it is locked, and a merge of the survivor can commit in between
+/// and move `merged_into` (a merge locks the group `FOR UPDATE`, but only once it runs). So the
+/// locked read is checked against the survivor that was locked: when they differ the locks of
+/// the round are released with a savepoint rollback and the next round locks the new pair in id
+/// order. After [`LOCK_ROUNDS`] rounds it is a retryable race and the job runs again.
 async fn lock_merged_and_survivor(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -317,28 +317,24 @@ async fn lock_merged_and_survivor(
             .iter()
             .find(|(id, _)| *id == merged)
             .map(|(_, merged_into)| *merged_into);
-        match merged_into {
-            // The erasure of the group committed first, or the person is no longer merged.
-            None | Some(None) => {
-                sqlx::query("RELEASE SAVEPOINT rewrite_group")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
-                return Ok(None);
-            }
-            Some(Some(now)) if now == survivor && locked.len() == 2 => {
-                sqlx::query("RELEASE SAVEPOINT rewrite_group")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
-                return Ok(Some(survivor));
-            }
-            Some(Some(_)) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT rewrite_group")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
-            }
+        // `Some(result)` ends the loop: `None` when the erasure of the group committed first or
+        // the person is no longer merged, the survivor when it is the one that was locked.
+        let settled = match merged_into {
+            None | Some(None) => Some(None),
+            Some(Some(now)) if now == survivor && locked.len() == 2 => Some(Some(survivor)),
+            Some(Some(_)) => None,
+        };
+        let end = if settled.is_some() {
+            "RELEASE SAVEPOINT rewrite_group"
+        } else {
+            "ROLLBACK TO SAVEPOINT rewrite_group"
+        };
+        sqlx::query(end)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        if let Some(result) = settled {
+            return Ok(result);
         }
     }
     Err(StoreError::retryable_race())
