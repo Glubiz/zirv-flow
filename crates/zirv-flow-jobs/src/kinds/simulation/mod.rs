@@ -146,6 +146,19 @@ async fn simulate(pool: PgPool, ordinal: usize) {
             "seed {seed}: the run never exercised {mode:?}"
         );
     }
+    // The issue asks for a failure after every effect: no job runs once without one.
+    let count = |what: &str| driver.counts.get(what).copied().unwrap_or(0);
+    println!(
+        "seed {seed}: {} of {} job executions were injected before their final run",
+        count("injected executions"),
+        count("executions")
+    );
+    assert!(
+        count("executions") > 0 && count("injected executions") == count("executions"),
+        "seed {seed}: {} of {} job executions were injected",
+        count("injected executions"),
+        count("executions")
+    );
 }
 
 #[sqlx::test]

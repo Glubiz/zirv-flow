@@ -254,10 +254,11 @@ impl Driver<'_> {
             w.seed,
             &[LANE_PLAN, due.label, seconds_of(self.now), u64::from(early)],
         );
+        // At least one failure before the final run, for every kind of job: the seed picks how
+        // many and which, never none.
         let failures = match rng.below(100) {
-            0..=39 => 0,
-            40..=69 => 1,
-            70..=89 => 2,
+            0..=44 => 1,
+            45..=79 => 2,
             _ => 3,
         };
         let modes: Vec<Mode> = (0..failures)
@@ -276,6 +277,7 @@ impl Driver<'_> {
         }
 
         let mut kept: Option<(ClaimedJob, String)> = None;
+        let mut injected = 0_u32;
         for mode in modes {
             let Some(claimed) = self.claim(due).await else {
                 self.bump("job gone before its turn");
@@ -286,6 +288,7 @@ impl Driver<'_> {
             let Some(print) = self.failed_attempt(&claimed, mode).await else {
                 continue;
             };
+            injected += 1;
             if mode == Mode::CommitWithoutAck {
                 if let Some(before) = &before {
                     self.after_step(before, false).await;
@@ -298,6 +301,10 @@ impl Driver<'_> {
             self.bump("job gone before its turn");
             return;
         };
+        self.bump("executions");
+        if injected > 0 {
+            self.bump("injected executions");
+        }
         let before = self.watch(&claimed).await;
         let outcome = if concurrent {
             self.bump(format!("concurrent duplicate {}", due.kind));
