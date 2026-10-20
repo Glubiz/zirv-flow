@@ -51,7 +51,9 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 export function PublishDialog(props: PublishDialogProps) {
   const { workspaceId, flowId, flowName, graph, names, saveNow, itemsFor, onPick, publishing, onPublish, refusal, refusedIssues, onClose } = props;
   const [phase, setPhase] = useState<Phase>({ name: "loading" });
-  const [impact, setImpact] = useState<Impact | null>(null);
+  const [dryRun, setDryRun] = useState<Impact | null>(null);
+  /** The dry run, with the issues a refused publish found laid over it. */
+  const impact = dryRun && refusedIssues ? { ...dryRun, valid: false, issues: refusedIssues } : dryRun;
   const reasonId = useId();
   const closeId = useId();
   const live = useRef(true);
@@ -86,7 +88,7 @@ export function PublishDialog(props: PublishDialogProps) {
         }),
       );
       if (!alive()) return;
-      setImpact(body as Impact);
+      setDryRun(body as Impact);
       setPhase({ name: "ready" });
     } catch (error) {
       if (alive()) setPhase({ name: "failed", error: describeError(error) });
@@ -106,10 +108,6 @@ export function PublishDialog(props: PublishDialogProps) {
   useEffect(() => {
     if (publishing) document.getElementById(closeId)?.focus();
   }, [publishing, closeId]);
-
-  useEffect(() => {
-    if (refusedIssues) setImpact((current) => (current ? { ...current, valid: false, issues: refusedIssues } : current));
-  }, [refusedIssues]);
 
   const title = impact && phase.name === "ready" ? `Publish version ${impact.next_version} of ${flowName}` : `Publish ${flowName}`;
   const items = impact ? itemsFor(impact.issues) : [];
