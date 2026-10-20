@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, WS } from "../../test/flowsApi";
 import { lastGraph, mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
-import { mockApi, problem } from "../../test/mockApi";
+import { json, mockApi, problem } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
 beforeEach(() => {
@@ -163,7 +163,7 @@ describe("flow settings", () => {
   });
 
   it("moves between the views with the arrow keys", async () => {
-    mockApi(flowRoutes());
+    mockApi({ ...flowRoutes(), [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]) });
     const user = userEvent.setup();
     mount();
     const canvas = await screen.findByRole("tab", { name: "Canvas" });
@@ -173,6 +173,7 @@ describe("flow settings", () => {
     expect(screen.getByRole("tab", { name: "Flow settings" })).toHaveFocus();
     expect(screen.getByRole("tab", { name: "Flow settings", selected: true })).toBeInTheDocument();
     await user.keyboard("{ArrowRight}");
-    expect(await screen.findByText("Version history comes next")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Versions", selected: true })).toHaveFocus();
+    expect(await screen.findByText("Not published yet")).toBeInTheDocument();
   });
 });
