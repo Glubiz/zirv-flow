@@ -724,8 +724,12 @@ function EnrollmentDetail({
           <h3>Trace</h3>
           <Link to={traceHref(workspaceId, enrollment.trace_id)}>Open in Traces</Link>
         </div>
-        {path.truncated ? <p className="faint">Older decisions are left out; the newest are shown.</p> : null}
-        <TraceTree records={path.decisions} label="Decisions on the trace of this enrollment" describe={describe} />
+        <TraceTree
+          records={path.decisions}
+          label="Decisions on the trace of this enrollment"
+          describe={describe}
+          truncated={path.truncated}
+        />
       </div>
     </>
   );

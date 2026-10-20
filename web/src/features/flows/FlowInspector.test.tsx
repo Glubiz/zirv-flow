@@ -245,6 +245,17 @@ describe("the enrollment inspector", () => {
     expect(path).toHaveTextContent("Skipped by an operator");
   });
 
+  it("says earlier decisions are not shown, and does not root a truncated trace on an operator", async () => {
+    mockApi(routes({ routes: { [`GET ${FLOW}/enrollments/${E1}`]: () => json(pathBody({ decisions: DECISIONS.slice(2, 5), truncated: true })) } }));
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openFailed(user);
+
+    const tree = await within(sheet).findByRole("list", { name: "Decisions on the trace of this enrollment" });
+    expect(tree.firstElementChild?.firstElementChild).toHaveTextContent("Earlier decisions are not shown");
+    expect(tree.firstElementChild?.firstElementChild).not.toHaveTextContent("An operator");
+  });
+
   it("marks the failed step on the canvas and numbers the path", async () => {
     mockApi(routes());
     const user = userEvent.setup();

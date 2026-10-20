@@ -19,6 +19,11 @@ interface TraceTreeProps {
   label: string;
   /** What a record is about in words, such as the step it names; shown after the action. */
   describe?: (record: TraceTreeRecord) => string | null;
+  /**
+   * True when the oldest records were left out. The first record shown is then not the start of the trace, so its
+   * cause is not the root's: the tree has a neutral root and every record names its own cause.
+   */
+  truncated?: boolean;
 }
 
 const CAUSES: Record<string, string> = {
@@ -80,9 +85,25 @@ function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: T
 }
 
 /** The decisions of one trace as a tree: what started it, and under it what was decided, with each operator decision opening a branch. */
-export function TraceTree({ records, label, describe }: TraceTreeProps) {
+export function TraceTree({ records, label, describe, truncated = false }: TraceTreeProps) {
   const { root, trunk, branches } = build(records);
   if (!root) return null;
+  if (truncated) {
+    return (
+      <ul className="trace-tree" aria-label={label}>
+        <li>
+          <span className="strong">Earlier decisions are not shown</span>
+          <ul className="trace-tree">
+            {records.map((record) => (
+              <li key={record.id} className="trace-record">
+                <Line record={record} describe={describe} tag />
+              </li>
+            ))}
+          </ul>
+        </li>
+      </ul>
+    );
+  }
   return (
     <ul className="trace-tree" aria-label={label}>
       <li>
