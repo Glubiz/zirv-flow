@@ -310,10 +310,6 @@ function IssuesButton({
   );
 }
 
-function withCount(label: string, count: number | undefined): string {
-  return count === undefined ? label : `${label} · ${count.toLocaleString("en")}`;
-}
-
 /** What the overlay says about one step, as node data and as words for its accessible name. */
 function overlayFacts(overlay: Overlay | undefined, id: string) {
   const stepNumbers = overlay?.steps?.get(id) ?? [];
@@ -394,7 +390,7 @@ function Surface(props: CanvasProps) {
           mono: node.type === "action.webhook",
           ports: portsOf(node).map((port) => ({
             id: port,
-            label: withCount(portLabel(node, port), overlay?.portCounts?.get(`${id}/${port}`)),
+            label: portLabel(node, port),
             name: `${portLabel(node, port)} output of ${words.title}`,
           })),
           issueCount: count,

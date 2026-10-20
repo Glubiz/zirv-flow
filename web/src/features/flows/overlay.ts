@@ -13,7 +13,7 @@ export interface NodeTally {
   failed: number;
 }
 
-/** What is drawn over the canvas: a path with its numbers, counts per step and per output, marks. */
+/** What is drawn over the canvas: a path with its numbers, counts per step, marks. */
 export interface Overlay {
   /** The numbers a step has on the path (a step can be reached twice), by step id. */
   steps?: ReadonlyMap<string, readonly number[]>;
@@ -22,8 +22,6 @@ export interface Overlay {
   /** Dim every step that is not on the path. */
   dimOthers?: boolean;
   counts?: ReadonlyMap<string, NodeTally>;
-  /** How many took an output, by `stepId/port`. */
-  portCounts?: ReadonlyMap<string, number>;
   marks?: ReadonlyMap<string, NodeMark>;
 }
 

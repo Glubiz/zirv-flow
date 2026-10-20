@@ -141,13 +141,15 @@ describe("the enrollment inspector", () => {
     expect(within(wait).getByText("3 waiting")).toHaveClass("fl-count-lite");
     const hook = screen.getByRole("group", { name: /^Webhook.*8 entered, 0 waiting, 2 failed/ });
     expect(within(hook).getByText("2 failed")).toHaveClass("fl-count-bad");
-    // The branch's labels carry their counts.
-    expect(screen.getByText("Yes · 9")).toBeInTheDocument();
-    expect(screen.getByText("No · 8")).toBeInTheDocument();
-    // The counts are also readable as text.
+    // The counts are per step: a branch's labels carry none, as step runs are not wire traversals.
+    expect(screen.getByText("Yes")).toBeInTheDocument();
+    expect(screen.queryByText(/Yes · \d/)).not.toBeInTheDocument();
+    // The counts are also readable as text, which says what they count.
     const card = screen.getByRole("group", { name: "Counts and versions" });
     await userEvent.click(within(card).getByText("Counts as a list"));
     const table = within(card).getByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Entered (step runs)" })).toBeInTheDocument();
+    expect(within(card).getByText(/a step that was retried counts again/)).toBeInTheDocument();
     expect(within(table).getByRole("row", { name: /Wait: 1 day 20 3 0/ })).toBeInTheDocument();
 
     await user.selectOptions(within(card).getByLabelText("Counts for"), "1");

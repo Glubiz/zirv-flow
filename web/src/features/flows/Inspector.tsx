@@ -134,18 +134,6 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
     if (showCounts && tallies) {
       const byNode = new Map<string, NodeTally>(tallies.map((entry) => [entry.node_id, entry]));
       out.counts = byNode;
-      const incoming = new Map<string, number>();
-      for (const edge of shown.graph.edges) incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
-      const ports = new Map<string, number>();
-      for (const edge of shown.graph.edges) {
-        const from = shown.graph.nodes.find((node) => node.id === edge.from);
-        const manyPorts = from?.type === "branch" || from?.type === "split.random" || from?.type === "wait.until_event";
-        if (manyPorts && incoming.get(edge.to) === 1) {
-          const target = byNode.get(edge.to);
-          if (target) ports.set(`${edge.from}/${edge.port}`, target.entered);
-        }
-      }
-      out.portCounts = ports;
     }
     if (picked && picked.enrollment.version === shown.version) {
       Object.assign(
@@ -296,8 +284,8 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
             {!sheetOpen ? <Button onClick={() => setSheetOpen(true)}>Show enrollments</Button> : null}
           </div>
           <p className="faint">
-            Everyone who entered version {version}, computed when you opened this. Dark badges count entries, light ones the people waiting,
-            red ones failures.
+            Everyone who entered version {version}, computed when you opened this. Dark badges count step runs (a retried step counts
+            again), light ones the people waiting, red ones failures.
           </p>
           <Tally counts={counts} graph={shown.graph} names={names} />
           {older ? (
@@ -428,7 +416,7 @@ function Tally({
         <thead>
           <tr>
             <th scope="col">Step</th>
-            <th scope="col">Entered</th>
+            <th scope="col">Entered (step runs)</th>
             <th scope="col">Waiting</th>
             <th scope="col">Failed</th>
           </tr>
@@ -444,6 +432,7 @@ function Tally({
           ))}
         </tbody>
       </table>
+      <p className="faint">Entered counts the runs of a step, so a step that was retried counts again. It is not a count of people.</p>
     </details>
   );
 }
