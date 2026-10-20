@@ -2701,5 +2701,57 @@ pub(super) mod tests {
             walk,
             ["failed", "retried", "failed", "skipped", "completed"]
         );
+        // The person's timeline shows the same flow decisions, each with the version and node
+        // the walk wrote.
+        let timeline = zirv_flow_store::load_timeline(
+            &env.pool,
+            env.ws,
+            ada,
+            zirv_flow_store::TimelineFilter::default(),
+            100,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut on_timeline: Vec<(Uuid, Option<i64>, Option<String>)> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
+                    Some((
+                        d.id,
+                        d.subject_ids["version"].as_i64(),
+                        d.subject_ids["node"].as_str().map(str::to_owned),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        on_timeline.sort();
+        let mut written: Vec<(Uuid, Option<i64>, Option<String>)> = flow_records
+            .iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.subject_ids["version"].as_i64(),
+                    r.subject_ids["node"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        written.sort();
+        assert_eq!(on_timeline, written);
+        assert!(
+            on_timeline
+                .iter()
+                .all(|(_, version, _)| *version == Some(1)),
+            "every flow decision carries the pinned version"
+        );
+        assert!(
+            on_timeline
+                .iter()
+                .any(|(_, _, node)| node.as_deref() == Some("bump")),
+            "step decisions carry their node"
+        );
     }
 }
