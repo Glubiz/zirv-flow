@@ -117,3 +117,28 @@ describe("lifecycle actions and a publish in flight", () => {
     expect(screen.queryByText(/changed somewhere else/)).not.toBeInTheDocument();
   });
 });
+
+describe("a publish result after the editor is gone", () => {
+  it("moves no focus once the editor has unmounted", async () => {
+    const publish = deferred();
+    mockApi({ ...flowRoutes(), ...publishRoute(() => publish.pending) });
+    const user = userEvent.setup();
+    const view = mount();
+    await hangingPublish(user);
+
+    view.unmount();
+    // Another flow's page, with the same ids, is what a late focus would land on.
+    const other = document.createElement("button");
+    other.id = "flow-primary-action";
+    document.body.append(other);
+    publish.release(
+      json({ flow: flowDetail({ state: "published", current_version: 1 }), version: { version: 1 } }, 201),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(other).not.toHaveFocus();
+    other.remove();
+  });
+});

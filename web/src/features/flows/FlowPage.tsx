@@ -143,11 +143,21 @@ function Editor({
   const [notice, setNotice] = useState<string | null>(null);
   const nonce = useRef(0);
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** The editor's own element, so focus is only ever moved inside it. */
+  const pageRef = useRef<HTMLDivElement>(null);
+  /** False once the editor is gone: a late response then moves no focus and starts no timer. */
+  const mounted = useRef(false);
   /** Requests that change the flow's state are numbered as they start; a response older than one already applied is dropped. */
   const requests = useRef(0);
   const appliedRequest = useRef(0);
 
-  useEffect(() => () => clearTimeout(announceTimer.current), []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(announceTimer.current);
+    };
+  }, []);
   useEffect(() => {
     publishOpenRef.current = publishOpen;
   }, [publishOpen]);
@@ -248,8 +258,11 @@ function Editor({
 
   /** After an action the button that had focus may be gone, so focus goes to the first action or the tab in use. */
   function refocusActions() {
+    if (!mounted.current) return;
     setTimeout(() => {
-      (document.getElementById("flow-primary-action") ?? document.getElementById(`flow-tab-${tab}`))?.focus();
+      const page = pageRef.current;
+      if (!mounted.current || !page) return;
+      (page.querySelector<HTMLElement>("#flow-primary-action") ?? page.querySelector<HTMLElement>(`#flow-tab-${tab}`))?.focus();
     }, 0);
   }
 
@@ -274,6 +287,7 @@ function Editor({
 
   /** Says something to a screen reader; the region is cleared first so the same words are read again. */
   function announce(text: string) {
+    if (!mounted.current) return;
     clearTimeout(announceTimer.current);
     setAnnouncement("");
     announceTimer.current = setTimeout(() => setAnnouncement(text), 0);
@@ -364,6 +378,7 @@ function Editor({
   }
 
   function published(request: number, result: { flow: FlowBody; version: { version: number } }) {
+    if (!mounted.current) return;
     setPublishOpen(false);
     setViewing(null);
     setNotice(null);
@@ -374,6 +389,7 @@ function Editor({
 
   /** A publish was refused with a 409: the dialog goes and the flow is shown as it is now. */
   function publishConflict() {
+    if (!mounted.current) return;
     setPublishOpen(false);
     setNotice(null);
     void adoptCurrent().then(refocusActions);
@@ -443,7 +459,7 @@ function Editor({
   const version = stateLabel(life.state, life.version);
 
   return (
-    <div className="fl-page">
+    <div className="fl-page" ref={pageRef}>
       <div className="fl-head">
         <Link to={`/w/${workspaceId}/flows`}>← Flows</Link>
         {editable ? (
