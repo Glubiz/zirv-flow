@@ -508,7 +508,7 @@ impl std::error::Error for ControlError {}
 /// An operator's retry (`skip: false`) or skip (`skip: true`) of a failed enrollment, in the
 /// caller's transaction. The flow must be published: an archived or a paused flow refuses both
 /// (an operator resumes a paused flow first), and writes nothing. The enrollment is locked (person
-/// first), checked, and a decision under `trace` records the action.
+/// first), checked, and a decision records the action on the enrollment's own trace (the cause is `trace`'s) and its id is returned.
 ///
 /// A retry of a step that failed in the runtime puts the enrollment back in the state the step
 /// started from (it kept its node, timer, waits and `state_version`) and enqueues the input that
@@ -521,7 +521,7 @@ pub async fn resume_failed(
     enrollment: Uuid,
     skip: bool,
     trace: &TraceContext,
-) -> Result<(), ControlError> {
+) -> Result<TraceId, ControlError> {
     let Some(known) = find_enrollment(connection, workspace, enrollment).await? else {
         return Err(ControlError::NotFound);
     };
@@ -576,6 +576,13 @@ pub async fn resume_failed(
         if skip { "skip" } else { "retry" }
     );
     enqueue(&mut *connection, &payload.job(&locked.trace, None, key)).await?;
+    // The decision stays on the enrollment's own trace, so one trace reads from the trigger to the
+    // operator's action; its cause is the operator's.
+    let trace_id = locked.trace.trace_id;
+    let decided = TraceContext {
+        trace_id,
+        cause: trace.cause.clone(),
+    };
     let node = locked
         .failed_node
         .clone()
@@ -588,7 +595,7 @@ pub async fn resume_failed(
                 node: Some(node),
             }),
             workspace_id: workspace,
-            trace: trace.clone(),
+            trace: decided,
             action: "flow.enrollment",
             outcome: if skip { "skipped" } else { "retried" },
             reason: Some("operator"),
@@ -601,7 +608,7 @@ pub async fn resume_failed(
         }],
     )
     .await?;
-    Ok(())
+    Ok(trace_id)
 }
 
 /// What the goal or the exit criteria of an enrollment's flow noticed.

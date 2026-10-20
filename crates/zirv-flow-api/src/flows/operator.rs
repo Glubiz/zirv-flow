@@ -26,7 +26,7 @@ pub(crate) struct EnrollmentActionBody {
     enrollment_id: Uuid,
     /// `retry` or `skip`.
     action: &'static str,
-    /// The trace the operator's decision is recorded under.
+    /// The trace the operator's decision is recorded under: the enrollment's own.
     trace_id: Uuid,
 }
 
@@ -62,9 +62,11 @@ async fn act(
     let (flow, enrollment): (Uuid, Uuid) = (path_id(ids.0)?, path_id(ids.1)?);
     let trace = operator_trace(principal);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::resume_failed(&mut tx, workspace.id, flow, enrollment, skip, &trace)
-        .await
-        .map_err(control_error)?;
+    let trace_id =
+        zirv_flow_store::resume_failed(&mut tx, workspace.id, flow, enrollment, skip, &trace)
+            .await
+            .map_err(control_error)?
+            .as_uuid();
     let action = if skip { "skip" } else { "retry" };
     admin::audit(
         &mut tx,
@@ -76,7 +78,7 @@ async fn act(
             "flow.enrollment_retried"
         },
         Some(("enrollment", enrollment)),
-        json!({ "flow_id": flow, "trace_id": trace.trace_id.as_uuid() }),
+        json!({ "flow_id": flow, "trace_id": trace_id }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -85,7 +87,7 @@ async fn act(
         Json(EnrollmentActionBody {
             enrollment_id: enrollment,
             action,
-            trace_id: trace.trace_id.as_uuid(),
+            trace_id,
         }),
     ))
 }
