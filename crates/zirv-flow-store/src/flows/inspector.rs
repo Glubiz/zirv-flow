@@ -780,7 +780,9 @@ mod tests {
                      WHERE e.flow_id = '{f}' AND e.flow_version = 2 AND e.workspace_id = '{w}' \
                      GROUP BY s.node_id"
                 ),
-                "enrollments_flow_version_list_idx".to_owned(),
+                // `enrollments_flow_version_list_idx` serves it, or on PostgreSQL 18 a skip scan of
+                // `enrollments_flow_state_idx`; either way the version is an index condition.
+                format!("Index Cond: ((flow_id = '{f}'::uuid) AND (flow_version = 2))"),
             ),
             (
                 format!(
