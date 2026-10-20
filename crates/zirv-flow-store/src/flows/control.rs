@@ -508,7 +508,8 @@ impl std::error::Error for ControlError {}
 /// An operator's retry (`skip: false`) or skip (`skip: true`) of a failed enrollment, in the
 /// caller's transaction. The flow must be published: an archived or a paused flow refuses both
 /// (an operator resumes a paused flow first), and writes nothing. The enrollment is locked (person
-/// first), checked, and a decision records the action on the enrollment's own trace (the cause is `trace`'s) and its id is returned.
+/// first), checked, and a decision records the action on the enrollment's own trace (the cause is
+/// `trace`'s); that trace id is returned.
 ///
 /// A retry of a step that failed in the runtime puts the enrollment back in the state the step
 /// started from (it kept its node, timer, waits and `state_version`) and enqueues the input that

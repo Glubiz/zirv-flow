@@ -695,7 +695,7 @@ mod tests {
         .unwrap();
         // One step row per enrollment, so the counts join reads a table of a realistic size.
         sqlx::query(
-            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome) \r
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome) \
              SELECT gen_random_uuid(), workspace_id, id, 'a', 'done' FROM enrollments",
         )
         .execute(&pool)

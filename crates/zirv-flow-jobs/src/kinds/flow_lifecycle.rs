@@ -156,7 +156,9 @@ mod tests {
         outcome: &str,
     ) -> Vec<(String, Option<String>)> {
         sqlx::query_as(
-            "SELECT cause_kind, reason FROM decision_records \n             WHERE workspace_id = $1 AND trace_id = $2 AND outcome = $3 \n               AND action = 'flow.enrollment'",
+            "SELECT cause_kind, reason FROM decision_records \
+             WHERE workspace_id = $1 AND trace_id = $2 AND outcome = $3 \
+               AND action = 'flow.enrollment'",
         )
         .bind(env.ws.as_uuid())
         .bind(trace.trace_id.as_uuid())

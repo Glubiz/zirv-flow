@@ -4,9 +4,9 @@
 //! record a decision per enrollment with the cause `manual` (the signed-in user). A retry or a skip
 //! is recorded under the enrollment's own trace, so one trace reads from the trigger to the
 //! operator's action (architecture 12.4); the response and the audit entry name that trace. A bulk
-//! exit records its decisions under a trace of its own, which its response and audit entry name. A paused
-//! or an archived flow refuses all three with a 409 (`flow_paused`, `flow_archived`) and writes
-//! nothing: an operator resumes a paused flow first.
+//! exit records its decisions under a trace of its own, which its response and audit entry name. A
+//! paused or an archived flow refuses all three with a 409 (`flow_paused`, `flow_archived`) and
+//! writes nothing: an operator resumes a paused flow first.
 
 use axum::Json;
 use axum::extract::{Path, State};

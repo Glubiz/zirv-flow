@@ -756,7 +756,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO enrollments \n                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \n                 trace_id, cause_kind, cause_id) \n             SELECT $1, $2, id, 1, $3, 'waiting', 'n', $1, $1, 'api', 't' \n             FROM flows WHERE id::text = $4",
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT $1, $2, id, 1, $3, 'waiting', 'n', $1, $1, 'api', 't' \
+             FROM flows WHERE id::text = $4",
         )
         .bind(Uuid::now_v7())
         .bind(f.ws.as_uuid())
@@ -1369,8 +1373,8 @@ mod tests {
         let no_version = f.lead("POST", &exit_older(9), None).await;
         assert_eq!(no_version.status, StatusCode::NOT_FOUND);
 
-        // The accepted ones queue their work, record a decision on the enrollment's own trace (cause manual) and
-        // audit the action with that trace.
+        // The accepted ones queue their work, record a decision on the enrollment's own trace
+        // (cause manual) and audit the action with that trace.
         let retried = f.lead("POST", &retry(&failed), None).await;
         let skipped = f.lead("POST", &skip(&also_failed), None).await;
         let exited = f.lead("POST", &exit_older(1), None).await;
@@ -1383,7 +1387,8 @@ mod tests {
         let trace_of = |reply: &Reply| reply.body["trace_id"].as_str().unwrap().to_owned();
         for (reply, outcome) in [(&retried, "retried"), (&skipped, "skipped")] {
             let (cause, reason, subjects): (String, Option<String>, Value) = sqlx::query_as(
-                "SELECT cause_kind, reason, subject_ids FROM decision_records \n                 WHERE trace_id::text = $1 AND outcome = $2",
+                "SELECT cause_kind, reason, subject_ids FROM decision_records \
+                 WHERE trace_id::text = $1 AND outcome = $2",
             )
             .bind(trace_of(reply))
             .bind(outcome)

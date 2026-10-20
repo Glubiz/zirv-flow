@@ -121,6 +121,18 @@ impl DecisionRow {
     }
 }
 
+/// The first `limit` of `rows` (which were read with one more), and whether there were more.
+fn decisions_page(rows: Vec<DecisionRow>, limit: u32) -> Result<(Vec<Decision>, bool), StoreError> {
+    let limit = limit as usize;
+    let truncated = rows.len() > limit;
+    let decisions = rows
+        .into_iter()
+        .take(limit)
+        .map(DecisionRow::into_decision)
+        .collect::<Result<_, _>>()?;
+    Ok((decisions, truncated))
+}
+
 /// Appends a record. Pass the caller's transaction so the record commits with the change
 /// it describes.
 pub async fn append_decision<'e>(
@@ -208,13 +220,7 @@ pub async fn list_trace(
     .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
-    let truncated = rows.len() > limit as usize;
-    let decisions = rows
-        .into_iter()
-        .take(limit as usize)
-        .map(DecisionRow::into_decision)
-        .collect::<Result<_, _>>()?;
-    Ok((decisions, truncated))
+    decisions_page(rows, limit)
 }
 
 /// Creates the monthly partitions for the month of `today` and the next one, if they are
@@ -262,8 +268,8 @@ pub(crate) fn bound(date: Date) -> String {
     )
 }
 
-/// The records that name `enrollment` as a subject, oldest first, at most `limit`, recorded at or after
-/// `since` (the enrollment's creation, which prunes the partitions). The flag is true when more
+/// The records that name `enrollment` as a subject, oldest first, at most `limit`, recorded at or
+/// after `since` (the enrollment's creation, which prunes the partitions). The flag is true when more
 /// existed. Errors are bounded-read errors, so a timeout is reported as one.
 pub(crate) async fn list_enrollment_decisions(
     connection: &mut PgConnection,
@@ -273,11 +279,11 @@ pub(crate) async fn list_enrollment_decisions(
     limit: u32,
 ) -> Result<(Vec<Decision>, bool), StoreError> {
     let rows: Vec<DecisionRow> = sqlx::query_as(
-        "SELECT id, trace_id, recorded_at, action, outcome, reason, cause_kind, cause_id, \r
-                subject_ids, job_id, attempt \r
-         FROM decision_records \r
-         WHERE workspace_id = $1 AND subject_ids ? 'enrollment' \r
-           AND (subject_ids ->> 'enrollment') = $2 AND recorded_at >= $3 \r
+        "SELECT id, trace_id, recorded_at, action, outcome, reason, cause_kind, cause_id, \
+                subject_ids, job_id, attempt \
+         FROM decision_records \
+         WHERE workspace_id = $1 AND subject_ids ? 'enrollment' \
+           AND (subject_ids ->> 'enrollment') = $2 AND recorded_at >= $3 \
          ORDER BY recorded_at, id LIMIT $4",
     )
     .bind(workspace.as_uuid())
@@ -287,13 +293,7 @@ pub(crate) async fn list_enrollment_decisions(
     .fetch_all(connection)
     .await
     .map_err(StoreError::bounded)?;
-    let truncated = rows.len() > limit as usize;
-    let decisions = rows
-        .into_iter()
-        .take(limit as usize)
-        .map(DecisionRow::into_decision)
-        .collect::<Result<_, _>>()?;
-    Ok((decisions, truncated))
+    decisions_page(rows, limit)
 }
 
 #[cfg(test)]
