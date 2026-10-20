@@ -87,7 +87,7 @@ async fn act(
         Json(EnrollmentActionBody {
             enrollment_id: enrollment,
             action,
-            trace_id: trace_id,
+            trace_id,
         }),
     ))
 }
