@@ -369,6 +369,22 @@ describe("a connection to a step that is not there", () => {
   });
 });
 
+describe("a connection issue that names a path", () => {
+  it("still puts the problem on the source step's output", async () => {
+    const graph = sampleGraph();
+    graph.edges = graph.edges.map((edge) => (edge.id === "e4" ? { ...edge, to: "ghost" } : edge));
+    mockApi(flowRoutes({ flow: { graph }, issues: [{ code: "unknown_node", edge: "e4", at: "/to" }] }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "1 issue" }));
+    await user.click(screen.getByRole("button", { name: /A connection leads to or from a step that is not in the flow/ }));
+
+    const sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByLabelText("Next step")).toHaveAccessibleDescription(/not in the flow/);
+  });
+});
+
 describe("saving", () => {
   it("asks before leaving with changes that are not saved", async () => {
     mockApi(flowRoutes());

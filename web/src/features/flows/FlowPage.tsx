@@ -146,7 +146,7 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
     const own = placed.byNode.get(id) ?? [];
     const onWires = draft.graph.edges
       .filter((edge) => edge.from === id)
-      .flatMap((edge) => (placed.byEdge.get(edge.id) ?? []).map((issue) => ({ ...issue, at: issue.at ?? `/ports/${edge.port}` })));
+      .flatMap((edge) => (placed.byEdge.get(edge.id) ?? []).map((issue) => ({ ...issue, at: `/ports/${edge.port}` })));
     return [...own, ...onWires];
   }
 
