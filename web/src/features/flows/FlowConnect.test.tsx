@@ -1,4 +1,5 @@
 import { act, screen, waitFor } from "@testing-library/react";
+import type * as XYFlow from "@xyflow/react";
 import type { FinalConnectionState, ReactFlowProps } from "@xyflow/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,7 +13,7 @@ const captured = vi.hoisted(() => ({ props: null as ReactFlowProps | null }));
 // Wraps the real ReactFlow only to hand the test the props the canvas gives it, so the test can call
 // onConnectEnd the way xyflow does when a drag from an output lets go over a step.
 vi.mock("@xyflow/react", async (importActual) => {
-  const actual = await importActual<typeof import("@xyflow/react")>();
+  const actual = await importActual<typeof XYFlow>();
   const Real = actual.ReactFlow;
   return {
     ...actual,
