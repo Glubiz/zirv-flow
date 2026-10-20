@@ -64,23 +64,30 @@ describe("lifecycle actions and a publish in flight", () => {
   });
 
   it("does not start a publish while a lifecycle action runs", async () => {
-    const pause = deferred();
+    const archive = deferred();
     const calls = mockApi({
-      ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
-      [`POST ${WS}/flows/${FLOW_ID}/pause`]: () => pause.pending,
+      ...flowRoutes(),
+      [`POST ${WS}/flows/${FLOW_ID}/archive`]: () => archive.pending,
+      [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
     });
     const user = userEvent.setup();
     mount();
-    await user.click(await screen.findByRole("button", { name: "Pause" }));
+    await user.click(await screen.findByRole("button", { name: "Archive…" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Archive flow" }));
+    // Cancel closes the dialog while the archive is still on its way.
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
 
-    const publish = screen.getByRole("button", { name: "Publish…" });
-    expect(publish).toBeDisabled();
+    await user.click(screen.getByRole("tab", { name: "Versions" }));
+    const publish = await within(await screen.findByRole("tabpanel")).findByRole("button", { name: "Publish…" });
+    expect(publish).toHaveAttribute("aria-disabled", "true");
     await user.click(publish);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/publish"))).toHaveLength(0);
 
-    pause.release(json(flowDetail({ state: "paused", current_version: 2 })));
-    expect(await screen.findByText("Paused")).toBeInTheDocument();
+    archive.release(json(flowDetail({ state: "archived" })));
+    expect(await screen.findByText("Archived")).toBeInTheDocument();
   });
 
   it("does not let a slow refetch that arrives last overwrite a newer applied state", async () => {

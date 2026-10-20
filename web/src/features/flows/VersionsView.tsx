@@ -23,12 +23,24 @@ interface VersionsViewProps {
   canPublish: boolean;
   /** A publish is on its way: the button says so and does nothing. */
   publishing?: boolean;
+  /** A lifecycle action is on its way: the button does nothing. */
+  acting?: boolean;
   onPublish: () => void;
   onView: (version: FlowVersion) => void;
 }
 
 /** The published versions of a flow, newest first. */
-export function VersionsView({ workspaceId, flowId, state, current, canPublish, publishing = false, onPublish, onView }: VersionsViewProps) {
+export function VersionsView({
+  workspaceId,
+  flowId,
+  state,
+  current,
+  canPublish,
+  publishing = false,
+  acting = false,
+  onPublish,
+  onView,
+}: VersionsViewProps) {
   const versions = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flowId } } })),
     [workspaceId, flowId, current],
@@ -55,7 +67,7 @@ export function VersionsView({ workspaceId, flowId, state, current, canPublish, 
             title="Not published yet"
             action={
               canPublish ? (
-                <Button variant="primary" aria-disabled={publishing || undefined} onClick={onPublish}>
+                <Button variant="primary" aria-disabled={publishing || acting || undefined} onClick={onPublish}>
                   {publishing ? "Publishing…" : "Publish…"}
                 </Button>
               ) : undefined
