@@ -22,7 +22,7 @@ import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
-import { TRIGGER_EDGE, type Overlay } from "./overlay";
+import { TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import {
   connectionWire,
   entryOf,
@@ -50,8 +50,8 @@ interface StepData extends Record<string, unknown> {
   /** The numbers this step has on a path, in order; empty when it is not on one. */
   stepNumbers: readonly number[];
   dim: boolean;
-  counts: { entered: number; waiting: number; failed: number } | null;
-  mark: { tone: string; text: string } | null;
+  counts: NodeTally | null;
+  mark: NodeMark | null;
 }
 
 type StepNode = Node<StepData, "step">;

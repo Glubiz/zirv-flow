@@ -30,6 +30,7 @@ type NodeCount = components["schemas"]["NodeCountBody"];
 
 const STATES = ["active", "waiting", "held", "completed", "exited", "failed"] as const;
 const PAGE = 25;
+const CHANGED_ELSEWHERE = "This changed somewhere else. It is shown as it is now; nothing was done.";
 
 interface Props {
   workspaceId: string;
@@ -145,15 +146,14 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
       out.portCounts = ports;
     }
     if (picked && picked.enrollment.version === shown.version) {
-      const path = picked;
       Object.assign(
         out,
         pathOverlay(
           shown.graph,
-          path.steps.map((step) => ({ node: step.node_id })),
+          picked.steps.map((step) => ({ node: step.node_id })),
         ),
       );
-      out.marks = marksOf(path);
+      out.marks = marksOf(picked);
     }
     return out;
   }, [shown, showCounts, tallies, picked]);
@@ -174,8 +174,8 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
 
   /** A refusal because the enrollment or the flow changed somewhere else: shown as it is now, with a notice. */
   function conflict() {
-    setNotice("This changed somewhere else. It is shown as it is now; nothing was done.");
-    props.announce("This changed somewhere else. It is shown as it is now; nothing was done.");
+    setNotice(CHANGED_ELSEWHERE);
+    props.announce(CHANGED_ELSEWHERE);
     setRefresh((value) => value + 1);
   }
 
