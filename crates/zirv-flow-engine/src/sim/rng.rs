@@ -3,10 +3,10 @@
 
 /// A SplitMix64 generator.
 #[derive(Clone, Debug)]
-pub(super) struct Rng(u64);
+pub struct Rng(u64);
 
 /// One SplitMix64 output step over `value`: a stateless hash of a `u64`.
-pub(super) const fn mix(value: u64) -> u64 {
+pub const fn mix(value: u64) -> u64 {
     let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -14,27 +14,27 @@ pub(super) const fn mix(value: u64) -> u64 {
 }
 
 impl Rng {
-    pub(super) const fn new(seed: u64) -> Self {
+    pub const fn new(seed: u64) -> Self {
         Self(mix(seed))
     }
 
     /// A generator for one named stream of `seed`: the same parts always give the same stream,
     /// whatever else the run did first.
-    pub(super) fn derive(seed: u64, parts: &[u64]) -> Self {
+    pub fn derive(seed: u64, parts: &[u64]) -> Self {
         let state = parts
             .iter()
             .fold(mix(seed), |state, part| mix(state ^ mix(*part)));
         Self(state)
     }
 
-    pub(super) fn next_u64(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let out = mix(self.0);
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         out
     }
 
     /// A value in `0..bound` (`bound` of zero gives zero).
-    pub(super) fn below(&mut self, bound: u64) -> u64 {
+    pub fn below(&mut self, bound: u64) -> u64 {
         if bound == 0 {
             0
         } else {
@@ -43,32 +43,32 @@ impl Rng {
     }
 
     /// A value in `low..=high`.
-    pub(super) fn range(&mut self, low: u64, high: u64) -> u64 {
+    pub fn range(&mut self, low: u64, high: u64) -> u64 {
         low + self.below(high.saturating_sub(low).saturating_add(1))
     }
 
     /// An index into a list of `len` items.
-    pub(super) fn index(&mut self, len: usize) -> usize {
+    pub fn index(&mut self, len: usize) -> usize {
         usize::try_from(self.below(len as u64)).unwrap_or(0)
     }
 
     /// True `percent` times in a hundred.
-    pub(super) fn chance(&mut self, percent: u64) -> bool {
+    pub fn chance(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
 
-    pub(super) fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.index(items.len())]
     }
 
-    pub(super) fn shuffle<T>(&mut self, items: &mut [T]) {
+    pub fn shuffle<T>(&mut self, items: &mut [T]) {
         for end in (1..items.len()).rev() {
             let other = self.index(end + 1);
             items.swap(end, other);
         }
     }
 
-    pub(super) fn uuid(&mut self) -> uuid::Uuid {
+    pub fn uuid(&mut self) -> uuid::Uuid {
         let high = u128::from(self.next_u64());
         uuid::Uuid::from_u128((high << 64) | u128::from(self.next_u64()))
     }
