@@ -435,6 +435,7 @@ fn decision(
     subject_ids: Vec<(&'static str, Uuid)>,
 ) -> NewDecision {
     NewDecision {
+        graph: None,
         workspace_id: batch.workspace,
         trace: batch.trace.clone(),
         action: "sync.record",

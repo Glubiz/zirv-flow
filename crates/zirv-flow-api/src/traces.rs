@@ -6,7 +6,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::TraceId;
+use zirv_flow_core::{CauseKind, TraceId};
 use zirv_flow_store::Decision;
 
 use crate::AppState;
@@ -26,11 +26,38 @@ pub(crate) struct TraceBody {
     truncated: bool,
 }
 
+/// What kind of thing caused the work (architecture 12.4). Mirrors the core `CauseKind`, which is
+/// pure and has no schema derive; the unit test below fails to compile if a kind is added there
+/// and not here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CauseKindBody {
+    Event,
+    TraitChange,
+    Schedule,
+    Manual,
+    Api,
+    DefinitionChange,
+    SyncRun,
+}
+
+impl From<CauseKind> for CauseKindBody {
+    fn from(kind: CauseKind) -> Self {
+        match kind {
+            CauseKind::Event => Self::Event,
+            CauseKind::TraitChange => Self::TraitChange,
+            CauseKind::Schedule => Self::Schedule,
+            CauseKind::Manual => Self::Manual,
+            CauseKind::Api => Self::Api,
+            CauseKind::DefinitionChange => Self::DefinitionChange,
+            CauseKind::SyncRun => Self::SyncRun,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CauseBody {
-    /// `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
-    #[schema(example = "api")]
-    kind: String,
+    kind: CauseKindBody,
     /// What caused the work: a request id for `api`, otherwise a record id.
     id: String,
 }
@@ -55,8 +82,11 @@ pub(crate) struct DecisionBody {
 }
 
 impl CauseBody {
-    pub(crate) fn new(kind: String, id: String) -> Self {
-        Self { kind, id }
+    pub(crate) fn new(kind: CauseKind, id: String) -> Self {
+        Self {
+            kind: kind.into(),
+            id,
+        }
     }
 }
 
@@ -69,7 +99,7 @@ impl From<Decision> for DecisionBody {
             outcome: decision.outcome,
             reason: decision.reason,
             cause: CauseBody {
-                kind: decision.cause.kind.to_string(),
+                kind: decision.cause.kind.into(),
                 id: decision.cause.id,
             },
             subject_ids: decision.subject_ids,
@@ -127,6 +157,23 @@ mod tests {
     use zirv_flow_core::Cause;
 
     use super::*;
+
+    #[test]
+    fn every_core_cause_kind_maps_to_the_schema_kind_with_the_same_wire_name() {
+        let kinds = [
+            CauseKind::Event,
+            CauseKind::TraitChange,
+            CauseKind::Schedule,
+            CauseKind::Manual,
+            CauseKind::Api,
+            CauseKind::DefinitionChange,
+            CauseKind::SyncRun,
+        ];
+        for kind in kinds {
+            let wire = serde_json::to_value(CauseKindBody::from(kind)).unwrap();
+            assert_eq!(wire, serde_json::json!(kind.as_str()));
+        }
+    }
 
     #[test]
     fn a_record_is_shown_with_its_cause_and_an_rfc3339_time() {

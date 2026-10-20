@@ -36,6 +36,7 @@ async fn record(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
             action,

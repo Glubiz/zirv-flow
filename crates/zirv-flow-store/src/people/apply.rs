@@ -1053,6 +1053,7 @@ pub(super) async fn record_decision(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
             action,

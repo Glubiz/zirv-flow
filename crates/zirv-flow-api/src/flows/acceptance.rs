@@ -756,7 +756,11 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO enrollments \n                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \n                 trace_id, cause_kind, cause_id) \n             SELECT $1, $2, id, 1, $3, 'waiting', 'n', $1, $1, 'api', 't' \n             FROM flows WHERE id::text = $4",
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT $1, $2, id, 1, $3, 'waiting', 'n', $1, $1, 'api', 't' \
+             FROM flows WHERE id::text = $4",
         )
         .bind(Uuid::now_v7())
         .bind(f.ws.as_uuid())
@@ -1369,8 +1373,8 @@ mod tests {
         let no_version = f.lead("POST", &exit_older(9), None).await;
         assert_eq!(no_version.status, StatusCode::NOT_FOUND);
 
-        // The accepted ones queue their work, record a decision under a trace of their own and
-        // audit the action with that trace.
+        // The accepted ones queue their work, record a decision on the enrollment's own trace
+        // (cause manual) and audit the action with that trace.
         let retried = f.lead("POST", &retry(&failed), None).await;
         let skipped = f.lead("POST", &skip(&also_failed), None).await;
         let exited = f.lead("POST", &exit_older(1), None).await;
@@ -1382,8 +1386,8 @@ mod tests {
         assert_eq!(exited.body["version"], 1);
         let trace_of = |reply: &Reply| reply.body["trace_id"].as_str().unwrap().to_owned();
         for (reply, outcome) in [(&retried, "retried"), (&skipped, "skipped")] {
-            let (cause, subjects): (String, Value) = sqlx::query_as(
-                "SELECT cause_kind, subject_ids FROM decision_records \
+            let (cause, reason, subjects): (String, Option<String>, Value) = sqlx::query_as(
+                "SELECT cause_kind, reason, subject_ids FROM decision_records \
                  WHERE trace_id::text = $1 AND outcome = $2",
             )
             .bind(trace_of(reply))
@@ -1392,6 +1396,12 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(cause, "manual");
+            assert_eq!(reason.as_deref(), Some("operator"));
+            // The enrollment's own trace (the fixture's trace id is the enrollment id).
+            assert_eq!(
+                trace_of(reply),
+                reply.body["enrollment_id"].as_str().unwrap()
+            );
             assert_eq!(subjects["enrollment"], reply.body["enrollment_id"]);
         }
         let audits: Vec<(String, Value)> = sqlx::query_as(
@@ -1555,6 +1565,395 @@ mod tests {
             f.count("SELECT count(*) FROM decision_records WHERE action = 'flow.enrollment'")
                 .await,
             0
+        );
+    }
+
+    async fn end_enrollment(f: &Fixture, id: &str) {
+        sqlx::query(
+            "UPDATE enrollments SET state = 'completed', ended_at = now() WHERE id = $1::uuid",
+        )
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn step_row(f: &Fixture, enrollment: &str, node: &str, outcome: &str) {
+        sqlx::query(
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome, error) \
+             VALUES ($1, $2, $3::uuid, $4, $5, CASE WHEN $5 = 'failed' THEN 'boom' END)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws.as_uuid())
+        .bind(enrollment)
+        .bind(node)
+        .bind(outcome)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+
+    /// A published two-node flow (`wait`, then `end`) and its id.
+    async fn published(f: &Fixture, name: &str) -> String {
+        let flow = f.create(name, simple_graph(), manual()).await;
+        let reply = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        flow
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_inspector_routes_need_read_and_stay_in_their_workspace(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = published(&f, "Welcome").await;
+        let enrollment = enrollment_in(&f, &flow, "waiting", "wait", None).await;
+        let routes = [
+            format!("/{flow}/enrollments"),
+            format!("/{flow}/enrollments/{enrollment}"),
+            format!("/{flow}/versions/1/counts"),
+        ];
+        for tail in &routes {
+            for (who, auth, expected) in [
+                ("anonymous", Auth::Anonymous, StatusCode::UNAUTHORIZED),
+                ("read key", Auth::Key(&f.read), StatusCode::OK),
+                ("write key", Auth::Key(&f.write), StatusCode::FORBIDDEN),
+                ("member", Auth::Session(&f.member), StatusCode::OK),
+                ("workspace admin", Auth::Session(&f.lead), StatusCode::OK),
+                (
+                    "other workspace's admin key",
+                    Auth::Key(&f.other_admin),
+                    StatusCode::NOT_FOUND,
+                ),
+            ] {
+                let reply = f.call("GET", &f.flows(tail), None, auth).await;
+                assert_eq!(reply.status, expected, "{tail} as {who}: {:?}", reply.body);
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_enrollment_list_pages_without_duplicates_or_gaps_filters_and_refuses_bad_input(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let flow = published(&f, "Welcome").await;
+        let mut created = Vec::new();
+        for (state, node, failed) in [
+            ("failed", "wait", Some("end")),
+            ("waiting", "wait", None),
+            ("waiting", "wait", None),
+            ("completed", "end", None),
+            ("waiting", "end", None),
+        ] {
+            let id = enrollment_in(
+                &f,
+                &flow,
+                if state == "completed" {
+                    "active"
+                } else {
+                    state
+                },
+                node,
+                failed,
+            )
+            .await;
+            if state == "completed" {
+                end_enrollment(&f, &id).await;
+            }
+            created.push(id);
+        }
+        let list = |query: &str| format!("/{flow}/enrollments{query}");
+
+        let mut seen = Vec::new();
+        let mut query = "?limit=2".to_owned();
+        for page in 0..3 {
+            let reply = f.lead("GET", &list(&query), None).await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            let items = reply.body["enrollments"].as_array().unwrap();
+            seen.extend(
+                items
+                    .iter()
+                    .map(|item| item["id"].as_str().unwrap().to_owned()),
+            );
+            match reply.body["next_before"].as_str() {
+                Some(next) => query = format!("?limit=2&before={next}"),
+                None => {
+                    assert_eq!(page, 2, "three pages of 2, 2 and 1");
+                    break;
+                }
+            }
+        }
+        let mut newest_first = created.clone();
+        newest_first.reverse();
+        assert_eq!(seen, newest_first, "newest first, no duplicate, no gap");
+
+        let ids = |reply: &Reply| -> Vec<String> {
+            reply.body["enrollments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let waiting = f.lead("GET", &list("?state=waiting"), None).await;
+        assert_eq!(
+            ids(&waiting),
+            [created[4].clone(), created[2].clone(), created[1].clone()]
+        );
+        let at_end = f.lead("GET", &list("?node=end"), None).await;
+        let mut found = ids(&at_end);
+        found.sort();
+        let mut want = vec![created[0].clone(), created[3].clone(), created[4].clone()];
+        want.sort();
+        assert_eq!(
+            found, want,
+            "a node filter matches the node and the failed node"
+        );
+        let first = f.lead("GET", &list("?version=1&limit=200"), None).await;
+        assert_eq!(ids(&first).len(), 5);
+        let none = f.lead("GET", &list("?version=2"), None).await;
+        assert!(ids(&none).is_empty());
+        let item = &waiting.body["enrollments"][0];
+        assert_eq!(item["state"], "waiting");
+        assert_eq!(item["version"], 1);
+        assert_eq!(item["trace_id"].as_str().unwrap().len(), 32);
+
+        for bad in [
+            "?limit=0",
+            "?limit=201",
+            "?before=nonsense",
+            "?state=asleep",
+            "?version=0",
+            "?version=x",
+            "?node=",
+        ] {
+            let reply = f.lead("GET", &list(bad), None).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let unknown = f
+            .lead("GET", &format!("/{}/enrollments", Uuid::now_v7()), None)
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_enrollments_path_has_its_steps_waits_and_decisions_and_is_404_elsewhere(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::{Cause, TraceContext, TraceId};
+        use zirv_flow_store::{GraphPoint, NewDecision, append_decision};
+
+        let f = fixture(&pool).await;
+        let flow = published(&f, "Welcome").await;
+        let other_flow = published(&f, "Other").await;
+        let mine = enrollment_in(&f, &flow, "waiting", "wait", None).await;
+        let theirs = enrollment_in(&f, &other_flow, "waiting", "wait", None).await;
+        step_row(&f, &mine, "wait", "waiting").await;
+        sqlx::query(
+            "UPDATE enrollments SET wake_at = now() + interval '1 minute' WHERE id = $1::uuid",
+        )
+        .bind(&mine)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (flow_id, mine_id): (Uuid, Uuid) = (flow.parse().unwrap(), mine.parse().unwrap());
+        let trace = TraceContext {
+            trace_id: TraceId::from_uuid(mine_id),
+            cause: Cause::api("t"),
+        };
+        for (action, outcome, reason) in [
+            ("flow.step", "waiting", Some("wait.duration")),
+            ("flow.wait", "waiting", Some("duration")),
+        ] {
+            append_decision(
+                &pool,
+                &NewDecision {
+                    graph: Some(GraphPoint {
+                        version: 1,
+                        node: Some("wait".into()),
+                    }),
+                    workspace_id: f.ws,
+                    trace: trace.clone(),
+                    action,
+                    outcome,
+                    reason,
+                    subject_ids: vec![("flow", flow_id), ("enrollment", mine_id)],
+                    job: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let reply = f
+            .lead("GET", &format!("/{flow}/enrollments/{mine}"), None)
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["enrollment"]["id"], mine.as_str());
+        assert_eq!(reply.body["steps"][0]["node_id"], "wait");
+        assert_eq!(reply.body["steps"][0]["node_type"], "wait.duration");
+        assert_eq!(reply.body["waits"][0]["kind"], "timer");
+        assert!(reply.body["waits"][0]["wake_at"].is_string());
+        let decisions = reply.body["decisions"].as_array().unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0]["action"], "flow.step");
+        assert_eq!(decisions[0]["reason"], "wait.duration");
+        assert_eq!(decisions[0]["cause"]["kind"], "api");
+        assert_eq!(decisions[0]["subject_ids"]["node"], "wait");
+        assert_eq!(decisions[0]["subject_ids"]["version"], 1);
+        // The trace endpoint returns the same decisions, with the same subjects.
+        let traced = f
+            .call(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{}/traces/{}",
+                    f.ws.as_uuid(),
+                    reply.body["enrollment"]["trace_id"].as_str().unwrap()
+                ),
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+        assert_eq!(traced.status, StatusCode::OK, "{:?}", traced.body);
+        assert_eq!(traced.body["records"], reply.body["decisions"]);
+
+        // Another flow's enrollment, a missing one and another workspace's are not found.
+        let wrong_flow = f
+            .lead("GET", &format!("/{flow}/enrollments/{theirs}"), None)
+            .await;
+        assert_eq!(wrong_flow.status, StatusCode::NOT_FOUND);
+        let missing = f
+            .lead(
+                "GET",
+                &format!("/{flow}/enrollments/{}", Uuid::now_v7()),
+                None,
+            )
+            .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        let their_read = admin::create_api_key(
+            &pool,
+            &Context::system(),
+            f.other_ws,
+            "read",
+            &[Scope::Read],
+        )
+        .await
+        .unwrap()
+        .plaintext;
+        let elsewhere = f
+            .call(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{}/flows/{flow}/enrollments/{mine}",
+                    f.other_ws.as_uuid()
+                ),
+                None,
+                Auth::Key(&their_read),
+            )
+            .await;
+        assert_eq!(elsewhere.status, StatusCode::NOT_FOUND);
+        let malformed = f
+            .lead("GET", &format!("/{flow}/enrollments/nope"), None)
+            .await;
+        assert_eq!(
+            malformed.status,
+            StatusCode::NOT_FOUND,
+            "a malformed path id is not found, as everywhere"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_counts_of_a_version_match_a_hand_count_per_node(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let segment = f
+            .lead_segment(
+                "Pros",
+                json!({"v": 1, "trait": "plan", "op": "eq", "value": "pro"}),
+            )
+            .await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "wait", "type": "wait.duration", "seconds": 60},
+            {"id": "win", "type": "goal", "exit": false},
+            {"id": "end", "type": "exit"}
+        ], "edges": [
+            {"id": "e1", "from": "wait", "port": "next", "to": "win"},
+            {"id": "e2", "from": "win", "port": "next", "to": "end"}
+        ]});
+        let settings = json!({
+            "trigger": {"type": "manual"},
+            "reentry": {"mode": "once"},
+            "goal": {"type": "segment", "segment_id": segment}
+        });
+        let flow = f.create("Goals", graph, settings).await;
+        let published = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        let converted = enrollment_in(&f, &flow, "active", "end", None).await;
+        end_enrollment(&f, &converted).await;
+        let asleep = enrollment_in(&f, &flow, "waiting", "wait", None).await;
+        let stuck = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
+        for (enrollment, node, outcome) in [
+            (&converted, "wait", "done"),
+            (&converted, "win", "done"),
+            (&converted, "end", "done"),
+            (&converted, "settings.goal", "done"),
+            (&asleep, "wait", "waiting"),
+            (&stuck, "wait", "failed"),
+        ] {
+            step_row(&f, enrollment, node, outcome).await;
+        }
+
+        let reply = f
+            .lead("GET", &format!("/{flow}/versions/1/counts"), None)
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let row = |node: &str| -> Vec<i64> {
+            let nodes = reply.body["nodes"].as_array().unwrap();
+            let found = nodes.iter().find(|n| n["node_id"] == node).unwrap();
+            [
+                "entered",
+                "completed",
+                "waiting",
+                "failed",
+                "goal_conversions",
+            ]
+            .iter()
+            .map(|key| found[*key].as_i64().unwrap())
+            .collect()
+        };
+        assert_eq!(row("wait"), [3, 1, 1, 1, 0]);
+        assert_eq!(row("win"), [1, 1, 0, 0, 1]);
+        assert_eq!(row("end"), [1, 1, 0, 0, 0]);
+        assert_eq!(row("settings.goal"), [1, 1, 0, 0, 1]);
+        let ids: Vec<&str> = reply.body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["node_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["wait", "win", "end", "settings.goal"]);
+        assert_eq!(reply.body["nodes"][1]["node_type"], "goal");
+
+        let unknown = f
+            .lead("GET", &format!("/{flow}/versions/9/counts"), None)
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        let malformed = f
+            .lead("GET", &format!("/{flow}/versions/x/counts"), None)
+            .await;
+        assert_eq!(
+            malformed.status,
+            StatusCode::NOT_FOUND,
+            "a malformed path id is not found, as everywhere"
         );
     }
 }

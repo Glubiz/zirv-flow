@@ -1,9 +1,12 @@
 //! The controls an operator has over the enrollments of a flow (architecture 9.4, ruling
 //! 43163028): retry or skip a failed enrollment, and end every in-flight enrollment of an older
-//! version in bulk. All of them need the workspace admin role, are audited, and record a decision
-//! per enrollment under a trace whose cause is `manual` (the signed-in user), which the audit
-//! entry names. A paused or an archived flow refuses all three with a 409 (`flow_paused`,
-//! `flow_archived`) and writes nothing: an operator resumes a paused flow first.
+//! version in bulk. All of them need the workspace admin role (ruling 43163028), are audited, and
+//! record a decision per enrollment with the cause `manual` (the signed-in user). A retry or a skip
+//! is recorded under the enrollment's own trace, so one trace reads from the trigger to the
+//! operator's action (architecture 12.4); the response and the audit entry name that trace. A bulk
+//! exit records its decisions under a trace of its own, which its response and audit entry name. A
+//! paused or an archived flow refuses all three with a 409 (`flow_paused`, `flow_archived`) and
+//! writes nothing: an operator resumes a paused flow first.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -26,7 +29,7 @@ pub(crate) struct EnrollmentActionBody {
     enrollment_id: Uuid,
     /// `retry` or `skip`.
     action: &'static str,
-    /// The trace the operator's decision is recorded under.
+    /// The trace the operator's decision is recorded under: the enrollment's own.
     trace_id: Uuid,
 }
 
@@ -62,9 +65,11 @@ async fn act(
     let (flow, enrollment): (Uuid, Uuid) = (path_id(ids.0)?, path_id(ids.1)?);
     let trace = operator_trace(principal);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::resume_failed(&mut tx, workspace.id, flow, enrollment, skip, &trace)
-        .await
-        .map_err(control_error)?;
+    let trace_id =
+        zirv_flow_store::resume_failed(&mut tx, workspace.id, flow, enrollment, skip, &trace)
+            .await
+            .map_err(control_error)?
+            .as_uuid();
     let action = if skip { "skip" } else { "retry" };
     admin::audit(
         &mut tx,
@@ -76,7 +81,7 @@ async fn act(
             "flow.enrollment_retried"
         },
         Some(("enrollment", enrollment)),
-        json!({ "flow_id": flow, "trace_id": trace.trace_id.as_uuid() }),
+        json!({ "flow_id": flow, "trace_id": trace_id }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -85,7 +90,7 @@ async fn act(
         Json(EnrollmentActionBody {
             enrollment_id: enrollment,
             action,
-            trace_id: trace.trace_id.as_uuid(),
+            trace_id,
         }),
     ))
 }

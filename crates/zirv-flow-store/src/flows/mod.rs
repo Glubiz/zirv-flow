@@ -11,6 +11,7 @@ mod delivery;
 mod effects;
 mod enroll;
 mod inputs;
+mod inspector;
 mod lifecycle;
 mod runtime;
 mod signing;
@@ -40,6 +41,11 @@ pub use enroll::{
     MAX_ENROLL_PEOPLE, Occurrence, enroll, enroll_entries, resolve_survivors,
 };
 pub use inputs::{UnhealthyInput, has_webhook_signing_secret, unhealthy_inputs};
+pub use inspector::{
+    EnrollmentCursor, EnrollmentFilter, EnrollmentPage, EnrollmentPath, EnrollmentSummary,
+    MAX_PATH_DECISIONS, NodeCount, PathEventWait, PathStep, SETTINGS_GOAL_NODE,
+    list_flow_enrollments, load_enrollment_path, version_node_counts,
+};
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
 pub use runtime::{
     Enrollment, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait, STEP_JOB_KIND,

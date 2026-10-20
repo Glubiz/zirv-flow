@@ -137,6 +137,7 @@ impl Run {
                     append_decision(
                         &mut *tx,
                         &NewDecision {
+                            graph: None,
                             workspace_id: self.workspace,
                             trace: self.trace.clone(),
                             action: ACTION,

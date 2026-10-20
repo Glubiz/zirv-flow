@@ -432,6 +432,7 @@ pub async fn rewrite_merged_person(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
             action: "person.merge.rewrite",
