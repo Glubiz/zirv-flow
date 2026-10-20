@@ -1369,7 +1369,7 @@ mod tests {
         let no_version = f.lead("POST", &exit_older(9), None).await;
         assert_eq!(no_version.status, StatusCode::NOT_FOUND);
 
-        // The accepted ones queue their work, record a decision under a trace of their own and
+        // The accepted ones queue their work, record a decision on the enrollment's own trace (cause manual) and
         // audit the action with that trace.
         let retried = f.lead("POST", &retry(&failed), None).await;
         let skipped = f.lead("POST", &skip(&also_failed), None).await;
@@ -1382,9 +1382,8 @@ mod tests {
         assert_eq!(exited.body["version"], 1);
         let trace_of = |reply: &Reply| reply.body["trace_id"].as_str().unwrap().to_owned();
         for (reply, outcome) in [(&retried, "retried"), (&skipped, "skipped")] {
-            let (cause, subjects): (String, Value) = sqlx::query_as(
-                "SELECT cause_kind, subject_ids FROM decision_records \
-                 WHERE trace_id::text = $1 AND outcome = $2",
+            let (cause, reason, subjects): (String, Option<String>, Value) = sqlx::query_as(
+                "SELECT cause_kind, reason, subject_ids FROM decision_records \n                 WHERE trace_id::text = $1 AND outcome = $2",
             )
             .bind(trace_of(reply))
             .bind(outcome)
@@ -1392,6 +1391,12 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(cause, "manual");
+            assert_eq!(reason.as_deref(), Some("operator"));
+            // The enrollment's own trace (the fixture's trace id is the enrollment id).
+            assert_eq!(
+                trace_of(reply),
+                reply.body["enrollment_id"].as_str().unwrap()
+            );
             assert_eq!(subjects["enrollment"], reply.body["enrollment_id"]);
         }
         let audits: Vec<(String, Value)> = sqlx::query_as(

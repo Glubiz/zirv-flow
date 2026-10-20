@@ -149,6 +149,28 @@ mod tests {
             .unwrap()
     }
 
+    /// The cause and reason of the `flow.enrollment` decisions of `outcome` on `trace`.
+    async fn causes_of(
+        env: &Env,
+        trace: &TraceContext,
+        outcome: &str,
+    ) -> Vec<(String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT cause_kind, reason FROM decision_records \n             WHERE workspace_id = $1 AND trace_id = $2 AND outcome = $3 \n               AND action = 'flow.enrollment'",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(trace.trace_id.as_uuid())
+        .bind(outcome)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    /// What an operator's retry or skip records: cause `manual`, reason `operator`.
+    fn by_operator() -> Vec<(String, Option<String>)> {
+        vec![("manual".to_owned(), Some("operator".to_owned()))]
+    }
+
     async fn decisions_of(env: &Env, trace: &TraceContext, outcome: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT count(*) FROM decision_records \
@@ -579,7 +601,9 @@ mod tests {
         assert_eq!(done.status, EnrollmentStatus::Completed);
         assert_eq!(env.traits(person).await["visits"], json!(2));
         assert_eq!(ended_nodes(&env, "bump").await, 1);
-        assert_eq!(decisions_of(&env, &trace, "retried").await, 1);
+        let own = env.enrollment(id).await.trace;
+        assert_eq!(decisions_of(&env, &own, "retried").await, 1);
+        assert_eq!(causes_of(&env, &own, "retried").await, by_operator());
         let again = operate(&env, flow, id, false, &trace).await;
         assert!(matches!(
             again,
@@ -610,7 +634,9 @@ mod tests {
         );
         assert_eq!(ended_nodes(&env, "bump").await, 0);
         assert_eq!(ended_nodes(&env, "end").await, 1);
-        assert_eq!(decisions_of(&env, &trace, "skipped").await, 1);
+        let own = env.enrollment(id).await.trace;
+        assert_eq!(decisions_of(&env, &own, "skipped").await, 1);
+        assert_eq!(causes_of(&env, &own, "skipped").await, by_operator());
     }
 
     #[sqlx::test]
@@ -680,7 +706,10 @@ mod tests {
         assert!(matches!(skip_waiting, Err(ControlError::NotFailed(_))));
         assert!(matches!(unknown, Err(ControlError::NotFound)));
         assert!(matches!(other_flow, Err(ControlError::NotFound)));
-        assert_eq!(decisions_of(&env, &trace, "retried").await, 0);
+        assert_eq!(
+            decisions_of(&env, &env.enrollment(waiting).await.trace, "retried").await,
+            0
+        );
         let kept: Enrollment =
             find_enrollment(&mut env.pool.acquire().await.unwrap(), env.ws, waiting)
                 .await
@@ -853,7 +882,7 @@ mod tests {
 
         let skip = operate(&env, flow, id, true, &trace).await;
         assert!(matches!(skip, Err(ControlError::SkipUnavailable)));
-        assert_eq!(decisions_of(&env, &trace, "skipped").await, 0);
+        assert_eq!(decisions_of(&env, &failed.trace, "skipped").await, 0);
         sqlx::query("UPDATE flow_versions SET graph = $2 WHERE flow_id = $1")
             .bind(flow)
             .bind(&graph)
@@ -864,6 +893,10 @@ mod tests {
         env.run_due().await;
 
         assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
-        assert_eq!(decisions_of(&env, &trace, "retried").await, 1);
+        assert_eq!(decisions_of(&env, &failed.trace, "retried").await, 1);
+        assert_eq!(
+            causes_of(&env, &failed.trace, "retried").await,
+            by_operator()
+        );
     }
 }
