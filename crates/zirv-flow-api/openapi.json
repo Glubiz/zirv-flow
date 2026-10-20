@@ -5101,6 +5101,153 @@
       }
     },
     "/api/v1/workspaces/{ws}/flows/{id}/enrollments": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "The enrollments of a flow, newest first, in pages. Filter by `state`, by `version` and by\n`node` (the node an enrollment is at, or the node it failed at).",
+        "operationId": "list_flow_enrollments",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Enrollments per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "`active`, `waiting`, `held`, `completed`, `exited` or `failed`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Only enrollments pinned to this version",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "description": "Only enrollments at this node or failed at it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of enrollments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is out of range or malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "flows"
@@ -5192,6 +5339,117 @@
           },
           "422": {
             "description": "The body names no person or both, or the key is too long",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "One enrollment of a flow: where it is, the nodes it ran in order, what it waits for, and every\ndecision recorded about it. An enrollment of another flow or workspace is 404.",
+        "operationId": "get_flow_enrollment",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "enrollment_id",
+            "in": "path",
+            "description": "Enrollment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The enrollment's path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentPathBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed id",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or enrollment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6185,6 +6443,117 @@
           },
           "404": {
             "description": "No such workspace, flow or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "How many enrollments entered, finished, wait at and failed at each node of one version,\ncomputed from the rows when asked.",
+        "operationId": "get_flow_version_counts",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The counts per node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionCountsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed id or version",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, flow or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -16836,11 +17205,22 @@
             "description": "What caused the work: a request id for `api`, otherwise a record id."
           },
           "kind": {
-            "type": "string",
-            "description": "`event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.",
-            "example": "api"
+            "$ref": "#/components/schemas/CauseKindBody"
           }
         }
+      },
+      "CauseKindBody": {
+        "type": "string",
+        "description": "What kind of thing caused the work (architecture 12.4). Mirrors the core `CauseKind`, which is\npure and has no schema derive; the unit test below fails to compile if a kind is added there\nand not here.",
+        "enum": [
+          "event",
+          "trait_change",
+          "schedule",
+          "manual",
+          "api",
+          "definition_change",
+          "sync_run"
+        ]
       },
       "Change": {
         "type": "object",
@@ -18573,7 +18953,202 @@
           "trace_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The trace the operator's decision is recorded under."
+            "description": "The trace the operator's decision is recorded under: the enrollment's own."
+          }
+        }
+      },
+      "EnrollmentItemBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "person_id",
+          "version",
+          "state",
+          "node",
+          "created_at",
+          "updated_at",
+          "trace_id"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The error of a failure."
+          },
+          "exit_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the enrollment ended other than by reaching an exit node."
+          },
+          "failed_node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node a failure stopped at."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node": {
+            "type": "string",
+            "description": "The node to run next, or the node the enrollment stopped at."
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "description": "`active`, `waiting`, `held`, `completed`, `exited` or `failed`.",
+            "example": "waiting"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace of the enrollment's journey: `GET /api/v1/workspaces/{ws}/traces/{trace_id}`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version the person entered by; an enrollment never moves to another."
+          },
+          "wake_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the timer of a wait fires."
+          }
+        }
+      },
+      "EnrollmentPathBody": {
+        "type": "object",
+        "required": [
+          "enrollment",
+          "steps",
+          "waits",
+          "decisions",
+          "truncated"
+        ],
+        "properties": {
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DecisionBody"
+            },
+            "description": "Every decision that names the enrollment, oldest first: steps, branches, waits, wakes,\nfailures, retries, skips, exits and goals."
+          },
+          "enrollment": {
+            "$ref": "#/components/schemas/EnrollmentItemBody"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StepBody"
+            },
+            "description": "The nodes the enrollment has run, in the order they started."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the enrollment has more decisions than this response carries."
+          },
+          "waits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentWaitBody"
+            },
+            "description": "What the enrollment is waiting for now; empty when it is not waiting."
+          }
+        }
+      },
+      "EnrollmentWaitBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Asleep at a `wait.until_event`: the event, and when the wait gives up.",
+            "required": [
+              "event",
+              "timeout_at",
+              "kind"
+            ],
+            "properties": {
+              "event": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "event"
+                ]
+              },
+              "timeout_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Asleep at a timed wait: when it wakes.",
+            "required": [
+              "wake_at",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "timer"
+                ]
+              },
+              "wake_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        ]
+      },
+      "EnrollmentsBody": {
+        "type": "object",
+        "required": [
+          "enrollments"
+        ],
+        "properties": {
+          "enrollments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentItemBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
           }
         }
       },
@@ -22072,6 +22647,53 @@
           }
         }
       },
+      "NodeCountBody": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "node_type",
+          "entered",
+          "completed",
+          "waiting",
+          "failed",
+          "goal_conversions"
+        ],
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Step executions that ended `done`."
+          },
+          "entered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Step executions of the node."
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Step executions that ended `failed`."
+          },
+          "goal_conversions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "For a `goal` node its completed count, for `settings.goal` its entered count; zero for the\nrest."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "A node id of the version's graph, or `settings.goal`."
+          },
+          "node_type": {
+            "type": "string",
+            "description": "The node's type; `settings.goal` for the goal setting."
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enrollments of this version waiting at the node now."
+          }
+        }
+      },
       "NotFoundBody": {
         "type": "object",
         "description": "An input that named no person.",
@@ -25266,6 +25888,46 @@
           }
         }
       },
+      "StepBody": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "outcome",
+          "attempts",
+          "started_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "node_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node's type in the pinned version's graph (such as `wait.duration`); null for a node the\nversion does not have."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`done`, `waiting` or `failed`.",
+            "example": "done"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "StreamBody": {
         "type": "object",
         "required": [
@@ -26637,6 +27299,26 @@
           "version": {
             "type": "string",
             "description": "The running zirv-flow version."
+          }
+        }
+      },
+      "VersionCountsBody": {
+        "type": "object",
+        "required": [
+          "version",
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeCountBody"
+            },
+            "description": "The nodes of the version's graph in their order, then `settings.goal` when the version has\na goal setting. A node with no rows has zeros."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },

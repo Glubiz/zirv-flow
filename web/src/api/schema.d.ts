@@ -880,7 +880,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * The enrollments of a flow, newest first, in pages. Filter by `state`, by `version` and by
+         *     `node` (the node an enrollment is at, or the node it failed at).
+         */
+        get: operations["list_flow_enrollments"];
         put?: never;
         /**
          * Enrolls one person in a flow whose trigger is `api`. The request is queued as a `flow.enroll`
@@ -890,6 +894,26 @@ export interface paths {
          *     twice.
          */
         post: operations["enroll_person"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One enrollment of a flow: where it is, the nodes it ran in order, what it waits for, and every
+         *     decision recorded about it. An enrollment of another flow or workspace is 404.
+         */
+        get: operations["get_flow_enrollment"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1102,6 +1126,26 @@ export interface paths {
         };
         /** One version of a flow. */
         get: operations["get_flow_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How many enrollments entered, finished, wait at and failed at each node of one version,
+         *     computed from the rows when asked.
+         */
+        get: operations["get_flow_version_counts"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2947,12 +2991,15 @@ export interface components {
         CauseBody: {
             /** @description What caused the work: a request id for `api`, otherwise a record id. */
             id: string;
-            /**
-             * @description `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
-             * @example api
-             */
-            kind: string;
+            kind: components["schemas"]["CauseKindBody"];
         };
+        /**
+         * @description What kind of thing caused the work (architecture 12.4). Mirrors the core `CauseKind`, which is
+         *     pure and has no schema derive; the unit test below fails to compile if a kind is added there
+         *     and not here.
+         * @enum {string}
+         */
+        CauseKindBody: "event" | "trait_change" | "schedule" | "manual" | "api" | "definition_change" | "sync_run";
         /** @description One difference. */
         Change: {
             /** @description The drafted value; absent for a removed field. */
@@ -3711,9 +3758,78 @@ export interface components {
             enrollment_id: string;
             /**
              * Format: uuid
-             * @description The trace the operator's decision is recorded under.
+             * @description The trace the operator's decision is recorded under: the enrollment's own.
              */
             trace_id: string;
+        };
+        EnrollmentItemBody: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            ended_at?: string | null;
+            /** @description The error of a failure. */
+            error?: string | null;
+            /** @description Why the enrollment ended other than by reaching an exit node. */
+            exit_reason?: string | null;
+            /** @description The node a failure stopped at. */
+            failed_node?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @description The node to run next, or the node the enrollment stopped at. */
+            node: string;
+            /** Format: uuid */
+            person_id: string;
+            /**
+             * @description `active`, `waiting`, `held`, `completed`, `exited` or `failed`.
+             * @example waiting
+             */
+            state: string;
+            /** @description The trace of the enrollment's journey: `GET /api/v1/workspaces/{ws}/traces/{trace_id}`. */
+            trace_id: string;
+            /** Format: date-time */
+            updated_at: string;
+            /**
+             * Format: int32
+             * @description The version the person entered by; an enrollment never moves to another.
+             */
+            version: number;
+            /**
+             * Format: date-time
+             * @description When the timer of a wait fires.
+             */
+            wake_at?: string | null;
+        };
+        EnrollmentPathBody: {
+            /**
+             * @description Every decision that names the enrollment, oldest first: steps, branches, waits, wakes,
+             *     failures, retries, skips, exits and goals.
+             */
+            decisions: components["schemas"]["DecisionBody"][];
+            enrollment: components["schemas"]["EnrollmentItemBody"];
+            /** @description The nodes the enrollment has run, in the order they started. */
+            steps: components["schemas"]["StepBody"][];
+            /** @description True when the enrollment has more decisions than this response carries. */
+            truncated: boolean;
+            /** @description What the enrollment is waiting for now; empty when it is not waiting. */
+            waits: components["schemas"]["EnrollmentWaitBody"][];
+        };
+        EnrollmentWaitBody: {
+            event: string;
+            /** @enum {string} */
+            kind: "event";
+            /** Format: date-time */
+            timeout_at: string;
+        } | {
+            /** @enum {string} */
+            kind: "timer";
+            /** Format: date-time */
+            wake_at: string;
+        };
+        EnrollmentsBody: {
+            /** @description Newest first. */
+            enrollments: components["schemas"]["EnrollmentItemBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         ErasureBody: {
             /** Format: date-time */
@@ -5016,6 +5132,38 @@ export interface components {
              */
             output_price_per_mtok: number;
         };
+        NodeCountBody: {
+            /**
+             * Format: int64
+             * @description Step executions that ended `done`.
+             */
+            completed: number;
+            /**
+             * Format: int64
+             * @description Step executions of the node.
+             */
+            entered: number;
+            /**
+             * Format: int64
+             * @description Step executions that ended `failed`.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description For a `goal` node its completed count, for `settings.goal` its entered count; zero for the
+             *     rest.
+             */
+            goal_conversions: number;
+            /** @description A node id of the version's graph, or `settings.goal`. */
+            node_id: string;
+            /** @description The node's type; `settings.goal` for the goal setting. */
+            node_type: string;
+            /**
+             * Format: int64
+             * @description Enrollments of this version waiting at the node now.
+             */
+            waiting: number;
+        };
         /** @description An input that named no person. */
         NotFoundBody: {
             /**
@@ -6220,6 +6368,24 @@ export interface components {
             /** @example ok */
             status: string;
         };
+        StepBody: {
+            /** Format: int32 */
+            attempts: number;
+            error?: string | null;
+            node_id: string;
+            /**
+             * @description The node's type in the pinned version's graph (such as `wait.duration`); null for a node the
+             *     version does not have.
+             */
+            node_type?: string | null;
+            /**
+             * @description `done`, `waiting` or `failed`.
+             * @example done
+             */
+            outcome: string;
+            /** Format: date-time */
+            started_at: string;
+        };
         StreamBody: {
             cursor_field?: string | null;
             discovered: components["schemas"]["DescriptorBody"];
@@ -6673,6 +6839,15 @@ export interface components {
         VersionBody: {
             /** @description The running zirv-flow version. */
             version: string;
+        };
+        VersionCountsBody: {
+            /**
+             * @description The nodes of the version's graph in their order, then `settings.goal` when the version has
+             *     a goal setting. A node with no rows has zeros.
+             */
+            nodes: components["schemas"]["NodeCountBody"][];
+            /** Format: int32 */
+            version: number;
         };
         /** @description A wait the walk went into. */
         WaitBody: {
@@ -10360,6 +10535,87 @@ export interface operations {
             };
         };
     };
+    list_flow_enrollments: {
+        parameters: {
+            query?: {
+                /** @description Enrollments per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description `active`, `waiting`, `held`, `completed`, `exited` or `failed` */
+                state?: string;
+                /** @description Only enrollments pinned to this version */
+                version?: number;
+                /** @description Only enrollments at this node or failed at it */
+                node?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of enrollments */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollmentsBody"];
+                };
+            };
+            /** @description A parameter is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     enroll_person: {
         parameters: {
             query?: never;
@@ -10425,6 +10681,78 @@ export interface operations {
             };
             /** @description The body names no person or both, or the key is too long */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_flow_enrollment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Enrollment id */
+                enrollment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The enrollment's path */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollmentPathBody"];
+                };
+            };
+            /** @description A malformed id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or enrollment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11070,6 +11398,78 @@ export interface operations {
             };
             /** @description No such workspace, flow or version, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_flow_version_counts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The counts per node */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionCountsBody"];
+                };
+            };
+            /** @description A malformed id or version */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
