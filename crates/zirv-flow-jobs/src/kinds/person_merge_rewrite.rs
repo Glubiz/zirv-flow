@@ -3,7 +3,8 @@
 //!
 //! The payload is `{workspace_id, merged_person_id}`. The job reads the survivor from the
 //! merged person's `merged_into`, so a later merge of the survivor is followed. It re-points
-//! in batches of 1,000 rows per statement, appends a `person.merge.rewrite` decision when it
+//! in batches of 1,000 rows per statement (after locking the merged person and the survivor, so an
+//! erasure of the group waits for it), appends a `person.merge.rewrite` decision when it
 //! is done, and a re-run re-points nothing more.
 
 use serde_json::Value;

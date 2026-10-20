@@ -270,11 +270,93 @@ async fn close_conflicts_the_move_would_duplicate(
     Ok(())
 }
 
+/// Rounds [`lock_merged_and_survivor`] re-reads the survivor before it gives up as a race.
+const LOCK_ROUNDS: usize = 4;
+
+/// Locks `merged` and the person it was merged into `FOR KEY SHARE`, in id order, and returns
+/// the survivor; `None` when the person is gone or is not merged. An erasure of the group locks
+/// both `FOR UPDATE`, so it waits for the transaction that holds these locks, and this waits
+/// for an erasure already under way and then finds the rows gone.
+///
+/// The survivor is read before it is locked, and a merge of the survivor can commit in between
+/// and move `merged_into` (a merge locks the group `FOR UPDATE`, but only once it runs). So the
+/// locked read is checked against the survivor that was locked: when they differ the locks of
+/// the round are released with a savepoint rollback and the next round locks the new pair in id
+/// order. After [`LOCK_ROUNDS`] rounds it is a retryable race and the job runs again.
+async fn lock_merged_and_survivor(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    merged: Uuid,
+) -> Result<Option<Uuid>, StoreError> {
+    for _ in 0..LOCK_ROUNDS {
+        let survivor: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(merged)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        let Some(Some(survivor)) = survivor else {
+            return Ok(None);
+        };
+        sqlx::query("SAVEPOINT rewrite_group")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        let locked: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) \
+             ORDER BY id FOR KEY SHARE",
+        )
+        .bind(workspace.as_uuid())
+        .bind(vec![merged, survivor])
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        // A locking read hands back the row version it locked, and a `KEY SHARE` lock does not
+        // follow a committed update that left the key alone (`merged_into` is not part of it), so
+        // it can be the version from before a merge of the survivor. A plain read in a new
+        // statement sees what committed. With the survivor locked, no further merge of it can
+        // start (it locks the group `FOR UPDATE` first), so the answer holds for this round.
+        let merged_into: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(merged)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        // `Some(result)` ends the loop: `None` when the erasure of the group committed first or
+        // the person is no longer merged, the survivor when it is the one that was locked.
+        let settled = match merged_into {
+            None | Some(None) => Some(None),
+            Some(Some(now)) if now == survivor && locked.len() == 2 => Some(Some(survivor)),
+            Some(Some(_)) => None,
+        };
+        let end = if settled.is_some() {
+            "RELEASE SAVEPOINT rewrite_group"
+        } else {
+            "ROLLBACK TO SAVEPOINT rewrite_group"
+        };
+        sqlx::query(end)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        if let Some(result) = settled {
+            return Ok(result);
+        }
+    }
+    Err(StoreError::retryable_race())
+}
+
 /// Re-points what still names `merged` to the person it was merged into, in batches of
 /// [`REWRITE_BATCH`] rows per statement, on `connection`. Returns how many rows moved; a
 /// second run moves none. Conflicts that end up between the survivor and itself are closed
-/// as merged. Appends a `person.merge.rewrite` decision once the person is
-/// merged and every batch is done; a person that was not merged is left alone.
+/// as merged. Locks the person and the survivor first ([`lock_merged_and_survivor`]), so an
+/// erasure of the group cannot commit between the read and the decision; if it committed
+/// first, nothing is written and the result is 0. Appends a `person.merge.rewrite` decision
+/// once the person is merged and every batch is done; a person that was not merged is left
+/// alone.
 ///
 /// The flow tables, one by one:
 /// - `flow_entries` is **folded** into the survivor's row for the same flow in the merge
@@ -297,14 +379,7 @@ pub async fn rewrite_merged_person(
     trace: &TraceContext,
     job: Option<(Uuid, i32)>,
 ) -> Result<u64, StoreError> {
-    let survivor: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace.as_uuid())
-            .bind(merged)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
-    let Some(Some(survivor)) = survivor else {
+    let Some(survivor) = lock_merged_and_survivor(connection, workspace, merged).await? else {
         return Ok(0);
     };
     let mut total = 0;
@@ -1465,5 +1540,283 @@ mod tests {
 
         assert!(outcome.enrolled.is_empty());
         assert_eq!(outcome.skipped, [(survivor, "already_entered")]);
+    }
+
+    /// Two people merged by a third record, with nothing to re-point: the rewrite of the merged
+    /// one writes nothing but its decision. Returns `(workspace, survivor, merged)`.
+    async fn a_merged_pair_with_nothing_to_move(pool: &PgPool) -> (WorkspaceId, Uuid, Uuid) {
+        let ws = workspace(pool, "erased").await;
+        let first = apply_one(
+            pool,
+            ws,
+            record("a", "1", &[("email", "a@x.com")], json!({})),
+        )
+        .await;
+        let second = apply_one(
+            pool,
+            ws,
+            record("b", "1", &[("email", "b@x.com")], json!({})),
+        )
+        .await;
+        let joined = apply_one(
+            pool,
+            ws,
+            record(
+                "c",
+                "1",
+                &[("email", "a@x.com"), ("email", "b@x.com")],
+                json!({}),
+            ),
+        )
+        .await;
+        let merged = if first == joined { second } else { first };
+        assert_eq!(merged_into(pool, merged).await, Some(joined));
+        (ws, joined, merged)
+    }
+
+    /// The ids of the rows that name `ids`: decisions and jobs.
+    async fn rows_naming(pool: &PgPool, ids: [Uuid; 2]) -> Vec<String> {
+        let mut rows: Vec<String> = Vec::new();
+        for id in ids {
+            let text = id.to_string();
+            let decisions: Vec<String> = sqlx::query_scalar(
+                "SELECT 'decision ' || id::text FROM decision_records \
+                 WHERE subject_ids::text LIKE '%' || $1 || '%'",
+            )
+            .bind(&text)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+            let jobs: Vec<String> = sqlx::query_scalar(
+                "SELECT 'job ' || id::text FROM jobs \
+                 WHERE payload::text LIKE '%' || $1 || '%' OR unique_key LIKE '%' || $1 || '%'",
+            )
+            .bind(&text)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+            rows.extend(decisions);
+            rows.extend(jobs);
+        }
+        rows
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_waits_for_a_running_rewrite_and_leaves_no_decision_naming_the_group(
+        pool: PgPool,
+    ) {
+        let (ws, survivor, merged) = a_merged_pair_with_nothing_to_move(&pool).await;
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        // The rewrite has run and holds its transaction open.
+        let mut rewrite = crate::begin(&pool).await.unwrap();
+        let rewrite_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *rewrite)
+            .await
+            .unwrap();
+        rewrite_merged_person(&mut rewrite, ws, merged, &trace, None)
+            .await
+            .unwrap();
+
+        // The erasure of the group, on a second connection.
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let erasing = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                pid_sender.send(pid).unwrap();
+                crate::delete_person(
+                    &mut tx,
+                    ws,
+                    survivor,
+                    crate::DeleteReason::Erasure,
+                    &TraceContext::root(Cause::api("erase")),
+                )
+                .await
+                .unwrap();
+                crate::commit(tx).await.unwrap();
+            })
+        };
+        let erasure_pid = pid_receiver.await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+                .bind(erasure_pid)
+                .bind(rewrite_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if blocked {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the erasure never waited for the rewrite"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        crate::commit(rewrite).await.unwrap();
+        erasing.await.expect("the erasure finished");
+
+        assert_eq!(
+            rows_naming(&pool, [survivor, merged]).await,
+            Vec::<String>::new()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rewrite_that_runs_after_an_erasure_wrote_nothing(pool: PgPool) {
+        let (ws, survivor, merged) = a_merged_pair_with_nothing_to_move(&pool).await;
+        let mut erase = crate::begin(&pool).await.unwrap();
+        crate::delete_person(
+            &mut erase,
+            ws,
+            survivor,
+            crate::DeleteReason::Erasure,
+            &TraceContext::root(Cause::api("erase")),
+        )
+        .await
+        .unwrap();
+        crate::commit(erase).await.unwrap();
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let moved = rewrite_merged_person(&mut tx, ws, merged, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        assert_eq!(moved, 0);
+        assert_eq!(
+            rows_naming(&pool, [survivor, merged]).await,
+            Vec::<String>::new()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rewrite_whose_survivor_was_merged_while_it_waited_re_points_to_the_new_survivor(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "relock").await;
+        let other = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("email", "o@example.com")], json!({})),
+        )
+        .await;
+        let source_record: Uuid = sqlx::query_scalar("SELECT id FROM source_records LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let [survivor, loser, target] = [(); 3].map(|()| Uuid::now_v7());
+        for id in [loser, survivor, target] {
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(id)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let conflict: Uuid = sqlx::query_scalar(
+            "INSERT INTO identity_conflicts \
+                (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'email', $4, 'unique_kind') RETURNING id",
+        )
+        .bind(ws.as_uuid())
+        .bind(loser)
+        .bind(other)
+        .bind(source_record)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // The loser was merged into the survivor, so a rewrite of it is due.
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A merge of the survivor into the target, held open: it locks the pair `FOR UPDATE` in
+        // id order and moves `merged_into` of the survivor and of the loser (compressed).
+        let mut merge = crate::begin(&pool).await.unwrap();
+        let merge_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+            .bind(vec![survivor, target])
+            .fetch_all(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = ANY($1)")
+            .bind(vec![survivor, loser])
+            .bind(target)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+
+        // The rewrite reads the survivor (still the old one) and then waits for the lock.
+        let trace = TraceContext::root(Cause::api("rewrite"));
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let rewriting = {
+            let pool = pool.clone();
+            let trace = trace.clone();
+            tokio::spawn(async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                pid_sender.send(pid).unwrap();
+                let moved = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+                    .await
+                    .unwrap();
+                crate::commit(tx).await.unwrap();
+                moved
+            })
+        };
+        let rewrite_pid = pid_receiver.await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+                .bind(rewrite_pid)
+                .bind(merge_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if blocked {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the rewrite never waited for the merge"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        crate::commit(merge).await.unwrap();
+        let moved = rewriting.await.expect("the rewrite finished");
+
+        assert_eq!(moved, 1);
+        let person: Uuid =
+            sqlx::query_scalar("SELECT person_id FROM identity_conflicts WHERE id = $1")
+                .bind(conflict)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(person, target);
+        let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].subject_ids["survivor"], target.to_string());
+        assert_eq!(decisions[0].subject_ids["merged"], loser.to_string());
     }
 }
