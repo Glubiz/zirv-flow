@@ -109,9 +109,10 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
-    // Pending flow jobs carry the person's ids in their payloads (`flow.enroll` ones are stripped
-    // after the people are gone, below). A running job keeps its lease.
-    "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ( \n        (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \n            (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \n        OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)))",
+    // Pending flow jobs and merge rewrites carry the person's ids in their payloads (`flow.enroll`
+    // ones are stripped after the people are gone, below). A running job keeps its lease; a
+    // running rewrite holds the group's rows `FOR KEY SHARE`, so this erasure waits for it.
+    "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ( \n        (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \n            (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \n        OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)) \n        OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)))",
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -377,6 +378,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "only the bystander's membership is left");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_deletes_the_pending_merge_rewrite_job_of_the_group(pool: PgPool) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let of_merged = "SELECT count(*) FROM jobs WHERE kind = 'person.merge.rewrite' \
+                         AND payload ->> 'merged_person_id' = $1";
+        let queued: i64 = sqlx::query_scalar(of_merged)
+            .bind(merged.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1, "the merge queued its rewrite");
+        // The rewrite of somebody else's merge stays queued.
+        let other = Uuid::now_v7();
+        let mut job = crate::NewJob::new(crate::REWRITE_JOB_KIND, trace());
+        job.workspace_id = Some(ws);
+        job.payload = serde_json::json!({ "workspace_id": ws, "merged_person_id": other });
+        crate::enqueue(&pool, &job).await.unwrap();
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let naming: Vec<String> = sqlx::query_scalar(
+            "SELECT id::text FROM jobs WHERE payload::text LIKE '%' || $1 || '%' \
+                OR payload::text LIKE '%' || $2 || '%' \
+                OR unique_key LIKE '%' || $1 || '%' OR unique_key LIKE '%' || $2 || '%'",
+        )
+        .bind(person.to_string())
+        .bind(merged.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(naming, Vec::<String>::new());
+        let left: i64 = sqlx::query_scalar(of_merged)
+            .bind(other.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
     }
 
     #[sqlx::test]
