@@ -243,6 +243,10 @@ function Editor({
     setActing(true);
     setNotice(null);
     const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    const noticeOf = (error: unknown) => {
+      const summary = describeError(error);
+      setNotice(summary.detail || summary.title);
+    };
     try {
       // Pending edits go in first: an archived flow takes no more.
       if (action === "archive") await store.saveNow();
@@ -264,11 +268,10 @@ function Editor({
           setLife({ state: current.state, version: current.current_version ?? null });
           setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
         } catch (again) {
-          setNotice(describeError(again).detail || describeError(again).title);
+          noticeOf(again);
         }
       } else {
-        const summary = describeError(error);
-        setNotice(summary.detail || summary.title);
+        noticeOf(error);
       }
     } finally {
       setActing(false);
@@ -534,7 +537,7 @@ function Editor({
           graph={draft.graph}
           names={names}
           saveNow={store.saveNow}
-          itemsFor={(issues) => itemsFor(issues)}
+          itemsFor={itemsFor}
           onPick={pickFromDialog}
           onPublished={published}
           onRefused={store.adoptIssues}
