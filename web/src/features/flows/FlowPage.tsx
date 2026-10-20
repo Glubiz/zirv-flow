@@ -28,6 +28,7 @@ import {
 } from "./model";
 import { layout } from "./layout";
 import { PublishDialog } from "./PublishDialog";
+import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
 import { StepSheet } from "./StepSheet";
 import { useFlowDraft } from "./useFlowDraft";
@@ -131,6 +132,7 @@ function Editor({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [viewing, setViewing] = useState<FlowVersion | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -277,6 +279,7 @@ function Editor({
 
   function published(result: { flow: FlowBody; version: { version: number } }) {
     setPublishing(false);
+    setViewing(null);
     setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
     refocusActions();
     setAnnouncement(`Version ${result.version.version} of ${draft.name} is published.`);
@@ -315,6 +318,12 @@ function Editor({
   const sheetNode = selected === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === selected);
   const doomed = deleting === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === deleting);
 
+  /** Switching tabs leaves a version being looked at. */
+  function chooseTab(next: TabId) {
+    setViewing(null);
+    setTab(next);
+  }
+
   function onTabKey(event: KeyboardEvent<HTMLDivElement>) {
     const at = TABS.findIndex((entry) => entry.id === tab);
     const last = TABS.length - 1;
@@ -327,7 +336,7 @@ function Editor({
     event.preventDefault();
     const next = TABS[to];
     if (next) {
-      setTab(next.id);
+      chooseTab(next.id);
       document.getElementById(`flow-tab-${next.id}`)?.focus();
     }
   }
@@ -358,7 +367,7 @@ function Editor({
               aria-selected={tab === entry.id}
               aria-controls={tab === entry.id ? "flow-panel" : undefined}
               tabIndex={tab === entry.id ? 0 : -1}
-              onClick={() => setTab(entry.id)}
+              onClick={() => chooseTab(entry.id)}
             >
               {entry.label}
             </button>
@@ -472,12 +481,29 @@ function Editor({
         </div>
       ) : null}
 
-      {tab === "versions" ? (
+      {tab === "versions" && viewing === null ? (
         <div className="fl-pane">
-          <Panel flush>
-            <EmptyState title="Version history comes next">Each published version will be listed here, with its steps to look at.</EmptyState>
-          </Panel>
+          <VersionsView
+            workspaceId={workspaceId}
+            flowId={flow.id}
+            state={life.state}
+            current={life.version}
+            canPublish={canAdmin && !archived}
+            onPublish={() => setPublishing(true)}
+            onView={setViewing}
+          />
         </div>
+      ) : null}
+
+      {tab === "versions" && viewing !== null ? (
+        <>
+          <div className="fl-viewing">
+            <span role="status">Viewing version {viewing.version} · read-only</span>
+            <Button onClick={() => setViewing(null)}>All versions</Button>
+            <Button onClick={() => chooseTab("canvas")}>Back to the draft</Button>
+          </div>
+          <VersionCanvas key={viewing.version} workspaceId={workspaceId} version={viewing} names={names} catalog={catalog} />
+        </>
       ) : null}
       </div>
 

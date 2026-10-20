@@ -52,6 +52,8 @@ export function PublishDialog(props: PublishDialogProps) {
   const [refusal, setRefusal] = useState<ErrorSummary | null>(null);
   const reasonId = useId();
   const live = useRef(true);
+  /** Whether the dialog is still open; read through a function so a check after an await is not narrowed away. */
+  const alive = () => live.current;
   /** The newest call of `saveNow`, kept so Retry does not restart the effect that loads. */
   const save = useRef(saveNow);
 
@@ -64,7 +66,7 @@ export function PublishDialog(props: PublishDialogProps) {
     setRefusal(null);
     try {
       const saved = await save.current();
-      if (!live.current) return;
+      if (!alive()) return;
       if (!saved) {
         setPhase({
           name: "failed",
@@ -81,11 +83,11 @@ export function PublishDialog(props: PublishDialogProps) {
           params: { path: { ws: workspaceId, id: flowId }, query: { dry_run: true } },
         }),
       );
-      if (!live.current) return;
+      if (!alive()) return;
       setImpact(body as Impact);
       setPhase({ name: "ready" });
     } catch (error) {
-      if (live.current) setPhase({ name: "failed", error: describeError(error) });
+      if (alive()) setPhase({ name: "failed", error: describeError(error) });
     }
   }, [workspaceId, flowId]);
 
@@ -105,10 +107,10 @@ export function PublishDialog(props: PublishDialogProps) {
       const published = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/flows/{id}/publish", { params: { path: { ws: workspaceId, id: flowId } } }),
       );
-      if (!live.current) return;
+      if (!alive()) return;
       onPublished(published as Published);
     } catch (error) {
-      if (!live.current) return;
+      if (!alive()) return;
       setPublishing(false);
       if (error instanceof ApiError && error.code === "flow_invalid") {
         const found = error.flowIssues.map((issue) => issue as FlowIssue);
@@ -121,7 +123,7 @@ export function PublishDialog(props: PublishDialogProps) {
   }
 
   const title = impact && phase.name === "ready" ? `Publish version ${impact.next_version} of ${flowName}` : `Publish ${flowName}`;
-  const items = impact ? itemsFor(impact.issues as FlowIssue[]) : [];
+  const items = impact ? itemsFor(impact.issues) : [];
   const blocked = impact !== null && !impact.valid;
   const reason = blocked ? `Fix ${items.length === 1 ? "the issue" : `the ${items.length} issues`} above first.` : null;
   const audience = impact?.audience ?? null;
