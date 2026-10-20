@@ -712,6 +712,25 @@ mod tests {
         assert_eq!(cut, actions[7..]);
         assert!(truncated, "older records were left out");
         assert_eq!((all.len(), all_truncated), (12, false));
+
+        // The exact boundary: one record more than the limit.
+        append_decision(&pool, &of_enrollment(ws, &trace, enrollment, "extra"))
+            .await
+            .unwrap();
+        let (edge, edge_truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            12,
+        )
+        .await
+        .unwrap();
+        let edge: Vec<&str> = edge.iter().map(|r| r.action.as_str()).collect();
+        let mut newest: Vec<&str> = actions[1..].to_vec();
+        newest.push("extra");
+        assert_eq!(edge, newest);
+        assert!(edge_truncated, "the oldest of 13 was left out");
     }
 
     #[sqlx::test]
