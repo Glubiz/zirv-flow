@@ -1547,16 +1547,17 @@ main:focus {
 
 /* Flow editor */
 /*
- * The editor fills the window below the app header and never scrolls the page: while it is shown, the
- * root is as tall as the window and the page takes what the header leaves. The sheet and the settings
- * scroll inside themselves.
+ * The editor fills the window below the app header: while it is shown, the root is as tall as the window
+ * and the page takes what the header leaves. The panel never gets less than 480px, so when the
+ * header takes too much of a narrow or short window the root scrolls instead of squeezing the canvas away.
+ * The sheet and the settings scroll inside themselves.
  */
 #root:has(.fl-page) {
   display: flex;
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
-  overflow: hidden;
+  overflow: auto;
 }
 
 #root:has(.fl-page) > main {
@@ -1577,7 +1578,7 @@ main:focus {
   display: flex;
   flex: 1;
   flex-direction: column;
-  min-height: 0;
+  min-height: 480px;
 }
 
 .fl-panel:focus-visible {
