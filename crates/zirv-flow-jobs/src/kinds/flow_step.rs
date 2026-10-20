@@ -2598,7 +2598,7 @@ pub(super) mod tests {
             Uuid::new_v4(),
         )));
         let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let retried = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, false, &operator)
+        zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, false, &operator)
             .await
             .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
@@ -2606,30 +2606,43 @@ pub(super) mod tests {
         env.run_due().await;
         assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
         let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let skipped = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, true, &operator)
+        zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, true, &operator)
             .await
             .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
         one_attempt().await;
         env.run_due().await;
 
-        assert_eq!(
-            retried, trace.trace_id,
-            "the retry is on the enrollment's trace"
-        );
-        assert_eq!(skipped, trace.trace_id, "so is the skip");
         assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
-        // Nothing of the enrollment is on any other trace.
-        let elsewhere: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM decision_records \
-             WHERE subject_ids ->> 'enrollment' = $1 AND trace_id <> $2",
+        // Only the operator's two actions are on a trace of their own (ruling 43163028).
+        let elsewhere: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, outcome FROM decision_records \n             WHERE subject_ids ->> 'enrollment' = $1 AND trace_id = $2 ORDER BY recorded_at",
+        )
+        .bind(id.to_string())
+        .bind(operator.trace_id.as_uuid())
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            elsewhere,
+            [
+                ("flow.enrollment".to_owned(), "retried".to_owned()),
+                ("flow.enrollment".to_owned(), "skipped".to_owned())
+            ]
+        );
+        let on_enrollment: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records \n             WHERE subject_ids ->> 'enrollment' = $1 AND trace_id NOT IN ($2, $3)",
         )
         .bind(id.to_string())
         .bind(trace.trace_id.as_uuid())
+        .bind(operator.trace_id.as_uuid())
         .fetch_one(&env.pool)
         .await
         .unwrap();
-        assert_eq!(elsewhere, 0);
+        assert_eq!(
+            on_enrollment, 0,
+            "no other trace holds a decision of the enrollment"
+        );
         // The trace read, as the trace endpoint reads it.
         let (records, truncated) =
             zirv_flow_store::list_trace(&env.pool, env.ws, trace.trace_id, 1000)
@@ -2666,11 +2679,15 @@ pub(super) mod tests {
             assert_eq!(failure.reason.as_deref(), Some(MESSAGE), "not truncated");
             assert_eq!(failure.subject_ids["node"], "bump");
         }
+        let (actions, _) = zirv_flow_store::list_trace(&env.pool, env.ws, operator.trace_id, 100)
+            .await
+            .unwrap();
         for outcome in ["retried", "skipped"] {
-            let records = of(outcome);
+            let records: Vec<_> = actions.iter().filter(|r| r.outcome == outcome).collect();
             assert_eq!(records.len(), 1, "{outcome}");
             assert_eq!(records[0].reason.as_deref(), Some("operator"));
             assert_eq!(records[0].subject_ids["node"], "bump");
+            assert_eq!(records[0].subject_ids["version"], json!(1));
             assert_eq!(
                 records[0].cause, operator.cause,
                 "the operator is the cause"
@@ -2686,7 +2703,13 @@ pub(super) mod tests {
             .await
             .unwrap()
             .unwrap();
-        let on_trace: Vec<Uuid> = flow_records.iter().map(|r| r.id).collect();
+        let mut on_trace: Vec<(OffsetDateTime, Uuid)> = flow_records
+            .iter()
+            .map(|r| (r.recorded_at, r.id))
+            .chain(actions.iter().map(|r| (r.recorded_at, r.id)))
+            .collect();
+        on_trace.sort();
+        let on_trace: Vec<Uuid> = on_trace.into_iter().map(|(_, id)| id).collect();
         let on_path: Vec<Uuid> = path
             .decisions
             .iter()
