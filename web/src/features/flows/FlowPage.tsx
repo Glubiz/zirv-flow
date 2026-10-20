@@ -617,7 +617,7 @@ function Editor({
                   canSeePeople={canAdmin}
                   describeStep={describeStep}
                   portName={portName}
-                  saveNow={store.saveNow}
+                  graph={draft.graph}
                   onResult={setTestResult}
                   onClose={exitTest}
                   announce={announce}

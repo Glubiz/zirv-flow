@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, SelectField, Sheet, TextAreaField, TextField } from "../../ui";
+import type { Graph } from "./model";
 import {
   advanceBy,
   isObject,
@@ -34,8 +35,8 @@ interface Props {
   describeStep: (id: string) => string;
   /** The name of an output of a step, such as "Yes". */
   portName: (id: string, port: string) => string | null;
-  /** Saves the draft before it is walked, so the walk is of what is on the canvas. */
-  saveNow: () => Promise<boolean>;
+  /** The draft as it is on the canvas, saved or not: every walk carries it, so a test writes nothing. */
+  graph: Graph;
   onResult: (result: TestResult | null) => void;
   onClose: () => void;
   announce: (text: string) => void;
@@ -100,20 +101,10 @@ export function TestSheet(props: Props) {
     inFlight.current = true;
     setBusy(true);
     try {
-      if (!(await props.saveNow())) {
-        if (ticket === run.current) {
-          setFailure({
-            title: "Your latest changes could not be saved",
-            detail: "The test walks the saved draft. Try again once they save.",
-            traceId: null,
-          });
-        }
-        return false;
-      }
       const body = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/flows/{id}/test", {
           params: { path: { ws: workspaceId, id: flowId } },
-          body: walkRequest(target, startAt, next, result),
+          body: walkRequest(target, startAt, next, result, props.graph),
         }),
       );
       if (ticket !== run.current) return false;

@@ -1,4 +1,5 @@
 import type { components } from "../../api";
+import type { Graph } from "./model";
 
 export type TestRequest = components["schemas"]["FlowTestRequest"];
 export type TestResult = components["schemas"]["FlowTestBody"];
@@ -15,15 +16,20 @@ export const UNITS = [
 
 export type UnitId = (typeof UNITS)[number]["id"];
 
-/** The request that walks a person with this script. The first walk names the person; every later one re-posts the snapshot the last response returned. */
+/**
+ * The request that walks a person with this script over this graph, the draft as it is on the canvas, saved or not.
+ * The first walk names the person; every later one re-posts the snapshot the last response returned.
+ */
 export function walkRequest(
   who: { personId: string } | { snapshot: Snapshot },
   startAt: string | null,
   script: readonly ScriptStep[],
   last: TestResult | null,
+  graph: Graph,
 ): TestRequest {
   if (last) {
     return {
+      graph,
       snapshot: last.snapshot,
       start_at: last.start_at,
       enrollment_id: last.enrollment_id,
@@ -31,6 +37,7 @@ export function walkRequest(
     };
   }
   return {
+    graph,
     ...("personId" in who ? { person_id: who.personId } : { snapshot: who.snapshot }),
     ...(startAt ? { start_at: startAt } : {}),
     script: [...script],

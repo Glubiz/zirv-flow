@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, WS } from "../../test/flowsApi";
-import { mountEditor as mount } from "../../test/flowsEditor";
+import { mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -160,8 +160,9 @@ describe("test mode", () => {
     // The second walk re-posted the scenario with the snapshot the first one returned.
     const walks = calls.filter((call) => call.method === "POST" && call.path === `${WS}/flows/${FLOW_ID}/test`);
     expect(walks).toHaveLength(2);
-    expect(walks[0]?.body).toEqual({ snapshot: {}, script: [] });
+    expect(walks[0]?.body).toEqual({ graph: expect.anything(), snapshot: {}, script: [] });
     expect(walks[1]?.body).toEqual({
+      graph: expect.anything(),
       snapshot: SNAPSHOT,
       start_at: START,
       enrollment_id: ENROLLMENT,
@@ -170,6 +171,35 @@ describe("test mode", () => {
 
     // Test mode wrote nothing: the only write-method requests are the test walks.
     expect(nonGet(calls, from)).toEqual(Array(2).fill(`POST ${WS}/flows/${FLOW_ID}/test`));
+  });
+
+  it("walks the unsaved edit on the canvas and writes nothing of its own", async () => {
+    const calls = mockApi({ ...flowRoutes(), [TEST]: () => json(walk()) });
+    const user = userEvent.setup();
+    mount();
+    await settled(calls);
+
+    // An edit the editor has not saved yet: the autosave waits 800 ms, and the walk below is far inside that.
+    const step = await openSheetOf(user, /^Wait: 1 day/);
+    const amount = within(step).getByLabelText("Amount");
+    await user.clear(amount);
+    await user.type(amount, "2");
+    expect(saves(calls)).toHaveLength(0);
+
+    // From the Test click to the end of the walk, only the walk itself may start.
+    const from = calls.length;
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    const sheet = await screen.findByRole("dialog", { name: "Set up a test run" });
+    await user.click(within(sheet).getByRole("radio", { name: /made-up person/ }));
+    await user.click(within(sheet).getByRole("button", { name: "Start the test" }));
+    await screen.findByRole("dialog", { name: "Test run" });
+
+    // The walk carried the edited draft, though nothing had been saved when it was asked.
+    const walks = calls.filter((call) => call.method === "POST" && call.path === `${WS}/flows/${FLOW_ID}/test`);
+    expect(walks).toHaveLength(1);
+    const graph = (walks[0]?.body as { graph: { nodes: { id: string; seconds?: number }[] } }).graph;
+    expect(graph.nodes.find((node) => node.id === "n1")?.seconds).toBe(172_800);
+    expect(nonGet(calls, from)).toEqual([`POST ${WS}/flows/${FLOW_ID}/test`]);
   });
 
   it("says plainly that the walk cannot decide a condition, with the partial path", async () => {
@@ -224,7 +254,7 @@ describe("test mode", () => {
 
     await screen.findByRole("dialog", { name: "Test run" });
     const walks = calls.filter((call) => call.path === `${WS}/flows/${FLOW_ID}/test`);
-    expect(walks[0]?.body).toEqual({ person_id: "88888888-0000-4000-8000-000000000001", script: [] });
+    expect(walks[0]?.body).toEqual({ graph: expect.anything(), person_id: "88888888-0000-4000-8000-000000000001", script: [] });
     expect(nonGet(calls, from)).toEqual([`POST ${WS}/people/search`, `POST ${WS}/flows/${FLOW_ID}/test`]);
   });
 
