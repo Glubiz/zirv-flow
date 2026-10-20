@@ -242,17 +242,12 @@ function Split({ node, issues, graph, readOnly, onChange, onRemovePort }: Fields
       <p className="muted">Each person goes down one arm, chosen at random in proportion to the weights.</p>
       {node.arms.map((arm, index) => (
         <div key={index} className="fl-pair">
-          <TextField
+          <WeightField
             label={`Weight of arm ${index + 1}`}
-            type="number"
-            min={1}
-            max={100}
-            value={String(arm.weight)}
-            onChange={(event) => {
-              const weight = Math.round(Number(event.target.value));
-              if (!Number.isFinite(weight)) return;
-              onChange({ ...node, arms: node.arms.map((entry, at) => (at === index ? { weight } : entry)) }, `${node.id}:arm:${index}`);
-            }}
+            weight={arm.weight}
+            onChange={(weight) =>
+              onChange({ ...node, arms: node.arms.map((entry, at) => (at === index ? { weight } : entry)) }, `${node.id}:arm:${index}`)
+            }
             disabled={readOnly}
             error={fieldError(issues, `/arms/${index}`, graph)}
           />
@@ -277,6 +272,71 @@ function Split({ node, issues, graph, readOnly, onChange, onRemovePort }: Fields
         </div>
       )}
     </div>
+  );
+}
+
+/** The range of an arm's weight that the API accepts. */
+const MIN_WEIGHT = 1;
+const MAX_WEIGHT = 100;
+
+interface WeightFieldProps {
+  label: string;
+  weight: number;
+  onChange: (weight: number) => void;
+  disabled: boolean;
+  error?: string;
+}
+
+/**
+ * The weight of one arm. What is typed is kept as typed while it is being typed; a whole number is
+ * brought into 1 to 100 and saved, and an empty or unreadable field saves nothing and says what is wanted.
+ */
+function WeightField({ label, weight, onChange, disabled, error }: WeightFieldProps) {
+  const [text, setText] = useState(String(weight));
+  const [seen, setSeen] = useState(weight);
+  const [bad, setBad] = useState(false);
+  if (seen !== weight) {
+    // The weight changed from outside, such as by an undo or by splitting evenly.
+    setSeen(weight);
+    const typed = Number(text);
+    if (bad || text.trim() === "" || Math.min(MAX_WEIGHT, Math.max(MIN_WEIGHT, Math.round(typed))) !== weight) {
+      setText(String(weight));
+      setBad(false);
+    }
+  }
+
+  function change(next: string) {
+    setText(next);
+    const typed = Number(next);
+    if (next.trim() === "" || !Number.isFinite(typed)) {
+      setBad(true);
+      return;
+    }
+    setBad(false);
+    const clamped = Math.min(MAX_WEIGHT, Math.max(MIN_WEIGHT, Math.round(typed)));
+    if (clamped !== typed) setText(String(clamped));
+    setSeen(clamped);
+    if (clamped !== weight) onChange(clamped);
+  }
+
+  return (
+    <TextField
+      label={label}
+      type="number"
+      inputMode="numeric"
+      min={MIN_WEIGHT}
+      max={MAX_WEIGHT}
+      value={text}
+      onChange={(event) => change(event.target.value)}
+      onBlur={() => {
+        if (bad) {
+          setText(String(weight));
+          setBad(false);
+        }
+      }}
+      disabled={disabled}
+      error={bad ? `Enter a whole number from ${MIN_WEIGHT} to ${MAX_WEIGHT}.` : error}
+    />
   );
 }
 
@@ -380,11 +440,14 @@ function UpdateTrait({ node, issues, graph, catalog, readOnly, onChange }: Field
         type === "boolean" ? (
           <SelectField
             label="Value"
-            value={String(change.value === true)}
-            onChange={(event) => onChange({ ...node, change: { op: "set", value: event.target.value === "true" } })}
+            value={typeof change.value === "boolean" ? String(change.value) : ""}
+            onChange={(event) =>
+              onChange({ ...node, change: { op: "set", value: event.target.value === "" ? "" : event.target.value === "true" } })
+            }
             disabled={readOnly}
             error={fieldError(issues, "/change/value", graph)}
           >
+            {typeof change.value === "boolean" ? null : <option value="">Choose…</option>}
             <option value="true">true</option>
             <option value="false">false</option>
           </SelectField>

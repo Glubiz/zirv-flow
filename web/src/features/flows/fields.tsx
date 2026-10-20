@@ -261,7 +261,13 @@ export function EventFilters({ workspaceId, event, filters, onChange, disabled, 
             </SelectField>
             {operand ? (
               type === "boolean" ? (
-                <SelectField label="Value" value={operandText(filter.value) || "true"} onChange={(e) => set(position, { ...filter, value: e.target.value === "true" })} disabled={disabled}>
+                <SelectField
+                  label="Value"
+                  value={typeof filter.value === "boolean" ? String(filter.value) : ""}
+                  onChange={(e) => set(position, { ...filter, value: e.target.value === "" ? "" : e.target.value === "true" })}
+                  disabled={disabled}
+                >
+                  {typeof filter.value === "boolean" ? null : <option value="">Choose…</option>}
                   <option value="true">true</option>
                   <option value="false">false</option>
                 </SelectField>

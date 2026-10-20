@@ -70,7 +70,8 @@ export function wordsFor(node: FlowNode, names: Names = NO_NAMES): Words {
       };
     case "branch": {
       const first = node.conditions[0];
-      const title = first ? describeCondition(first, names) : "No conditions";
+      const blank = first !== undefined && (("trait" in first && first.trait === "") || ("event" in first && first.event === ""));
+      const title = first ? (blank ? "Choose a condition" : describeCondition(first, names)) : "No conditions";
       const count = node.conditions.length;
       return {
         title: count > 1 ? `${title} and ${count - 1} more` : title,

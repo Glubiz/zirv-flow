@@ -52,6 +52,9 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
 export function issueText(issue: FlowIssue, graph?: Graph): string {
   const known = (MESSAGES as Record<string, string | undefined>)[issue.code];
   const base = known ?? `This flow has a problem (${issue.code}).`;
+  if (issue.code === "no_entry" && graph !== undefined && graph.nodes.length === 0) {
+    return "The flow has no steps yet. Add the first step after the trigger.";
+  }
   const port = issue.at?.startsWith("/ports/") ? issue.at.slice("/ports/".length) : null;
   if (issue.code === "port_not_wired" && port !== null) {
     const node = graph?.nodes.find((candidate) => candidate.id === issue.node);

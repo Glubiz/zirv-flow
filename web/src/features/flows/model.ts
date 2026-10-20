@@ -156,6 +156,19 @@ export function wire(graph: Graph, from: string, port: string, to: string): Grap
   return { ...graph, edges: [...kept, { id, from, port, to }] };
 }
 
+/**
+ * The wire a drag on the canvas asks for, or null when it asks for none: a reader cannot wire, the
+ * trigger is wired by the flow itself and nothing leads into it, and a step cannot lead to itself.
+ */
+export function connectionWire(
+  connection: { source: string; sourceHandle?: string | null; target: string },
+  editable: boolean,
+): { from: string; port: string; to: string } | null {
+  if (!editable || !connection.sourceHandle) return null;
+  if (connection.source === TRIGGER_ID || connection.target === TRIGGER_ID || connection.source === connection.target) return null;
+  return { from: connection.source, port: connection.sourceHandle, to: connection.target };
+}
+
 export function unwire(graph: Graph, edgeId: string): Graph {
   return { ...graph, edges: graph.edges.filter((edge) => edge.id !== edgeId) };
 }
