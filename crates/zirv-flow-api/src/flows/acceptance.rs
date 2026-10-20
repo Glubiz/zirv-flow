@@ -1558,6 +1558,16 @@ mod tests {
         );
     }
 
+    async fn end_enrollment(f: &Fixture, id: &str) {
+        sqlx::query(
+            "UPDATE enrollments SET state = 'completed', ended_at = now() WHERE id = $1::uuid",
+        )
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+
     async fn step_row(f: &Fixture, enrollment: &str, node: &str, outcome: &str) {
         sqlx::query(
             "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome, error) \
@@ -1626,7 +1636,22 @@ mod tests {
             ("completed", "end", None),
             ("waiting", "end", None),
         ] {
-            created.push(enrollment_in(&f, &flow, state, node, failed).await);
+            let id = enrollment_in(
+                &f,
+                &flow,
+                if state == "completed" {
+                    "active"
+                } else {
+                    state
+                },
+                node,
+                failed,
+            )
+            .await;
+            if state == "completed" {
+                end_enrollment(&f, &id).await;
+            }
+            created.push(id);
         }
         let list = |query: &str| format!("/{flow}/enrollments{query}");
 
@@ -1798,6 +1823,16 @@ mod tests {
             )
             .await;
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        let their_read = admin::create_api_key(
+            &pool,
+            &Context::system(),
+            f.other_ws,
+            "read",
+            &[Scope::Read],
+        )
+        .await
+        .unwrap()
+        .plaintext;
         let elsewhere = f
             .call(
                 "GET",
@@ -1806,20 +1841,30 @@ mod tests {
                     f.other_ws.as_uuid()
                 ),
                 None,
-                Auth::Key(&f.other_admin),
+                Auth::Key(&their_read),
             )
             .await;
         assert_eq!(elsewhere.status, StatusCode::NOT_FOUND);
         let malformed = f
             .lead("GET", &format!("/{flow}/enrollments/nope"), None)
             .await;
-        assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            malformed.status,
+            StatusCode::NOT_FOUND,
+            "a malformed path id is not found, as everywhere"
+        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_counts_of_a_version_match_a_hand_count_per_node(pool: PgPool) {
         let f = fixture(&pool).await;
+        let segment = f
+            .lead_segment(
+                "Pros",
+                json!({"v": 1, "trait": "plan", "op": "eq", "value": "pro"}),
+            )
+            .await;
         let graph = json!({"v": 1, "nodes": [
             {"id": "wait", "type": "wait.duration", "seconds": 60},
             {"id": "win", "type": "goal", "exit": false},
@@ -1828,7 +1873,12 @@ mod tests {
             {"id": "e1", "from": "wait", "port": "next", "to": "win"},
             {"id": "e2", "from": "win", "port": "next", "to": "end"}
         ]});
-        let flow = f.create("Goals", graph, manual()).await;
+        let settings = json!({
+            "trigger": {"type": "manual"},
+            "reentry": {"mode": "once"},
+            "goal": {"type": "segment", "segment_id": segment}
+        });
+        let flow = f.create("Goals", graph, settings).await;
         let published = f.lead("POST", &format!("/{flow}/publish"), None).await;
         assert_eq!(
             published.status,
@@ -1836,17 +1886,8 @@ mod tests {
             "{:?}",
             published.body
         );
-        // A goal setting on the published version.
-        sqlx::query(
-            "UPDATE flow_versions SET settings = settings || '{\"goal\": {\"type\": \"segment\", \
-             \"segment_id\": \"00000000-0000-0000-0000-000000000001\"}}'::jsonb \
-             WHERE flow_id::text = $1",
-        )
-        .bind(&flow)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let converted = enrollment_in(&f, &flow, "completed", "end", None).await;
+        let converted = enrollment_in(&f, &flow, "active", "end", None).await;
+        end_enrollment(&f, &converted).await;
         let asleep = enrollment_in(&f, &flow, "waiting", "wait", None).await;
         let stuck = enrollment_in(&f, &flow, "failed", "wait", Some("wait")).await;
         for (enrollment, node, outcome) in [
@@ -1899,6 +1940,10 @@ mod tests {
         let malformed = f
             .lead("GET", &format!("/{flow}/versions/x/counts"), None)
             .await;
-        assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            malformed.status,
+            StatusCode::NOT_FOUND,
+            "a malformed path id is not found, as everywhere"
+        );
     }
 }

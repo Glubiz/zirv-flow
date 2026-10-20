@@ -5408,16 +5408,6 @@
               }
             }
           },
-          "400": {
-            "description": "A malformed id",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -6508,16 +6498,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VersionCountsBody"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "A malformed id or version",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -18953,7 +18933,7 @@
           "trace_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The trace the operator's decision is recorded under: the enrollment's own."
+            "description": "The trace the operator's decision is recorded under."
           }
         }
       },

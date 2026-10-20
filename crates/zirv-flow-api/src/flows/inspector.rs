@@ -346,7 +346,6 @@ fn waits_of(path: &EnrollmentPath) -> Vec<EnrollmentWaitBody> {
     ),
     responses(
         (status = 200, description = "The enrollment's path", body = EnrollmentPathBody),
-        (status = 400, description = "A malformed id", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or enrollment, or no access", body = Problem, content_type = "application/problem+json"),
@@ -422,7 +421,6 @@ fn count_row(node_id: &str, node_type: String, count: Option<&NodeCount>) -> Nod
     ),
     responses(
         (status = 200, description = "The counts per node", body = VersionCountsBody),
-        (status = 400, description = "A malformed id or version", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or version, or no access", body = Problem, content_type = "application/problem+json"),

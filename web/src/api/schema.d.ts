@@ -3758,7 +3758,7 @@ export interface components {
             enrollment_id: string;
             /**
              * Format: uuid
-             * @description The trace the operator's decision is recorded under: the enrollment's own.
+             * @description The trace the operator's decision is recorded under.
              */
             trace_id: string;
         };
@@ -10715,15 +10715,6 @@ export interface operations {
                     "application/json": components["schemas"]["EnrollmentPathBody"];
                 };
             };
-            /** @description A malformed id */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -11430,15 +11421,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionCountsBody"];
-                };
-            };
-            /** @description A malformed id or version */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Not authenticated */
