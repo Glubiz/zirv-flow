@@ -54,7 +54,7 @@ function issuesLabel(count: number): string {
 
 const Step = memo(function Step({ data }: NodeProps<StepNode>) {
   const many = data.ports.length > 1;
-  const classes = ["fl-node", data.selected ? "fl-node-selected" : "", data.issueCount > 0 ? "fl-node-issue" : ""]
+  const classes = ["fl-node", "nopan", data.selected ? "fl-node-selected" : "", data.issueCount > 0 ? "fl-node-issue" : ""]
     .filter(Boolean)
     .join(" ");
   return (
@@ -247,6 +247,7 @@ function Surface(props: CanvasProps) {
           width: spot.width,
           height: spot.height,
           draggable: false,
+          className: "nopan",
           deletable: false,
           selected: selectedId === id,
           ariaLabel: `Trigger: ${words.title}${trailing}`,
@@ -275,6 +276,7 @@ function Surface(props: CanvasProps) {
         width: spot.width,
         height: spot.height,
         draggable: false,
+        className: "nopan",
         deletable: false,
         selected: selectedId === id,
         ariaLabel: `${kindLabel(node.type)}: ${words.title}, step ${step} of ${total}${trailing}`,
