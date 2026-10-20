@@ -143,6 +143,9 @@ function Editor({
   const [notice, setNotice] = useState<string | null>(null);
   const nonce = useRef(0);
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** Requests that change the flow's state are numbered as they start; a response older than one already applied is dropped. */
+  const requests = useRef(0);
+  const appliedRequest = useRef(0);
 
   useEffect(() => () => clearTimeout(announceTimer.current), []);
   useEffect(() => {
@@ -250,6 +253,20 @@ function Editor({
     }, 0);
   }
 
+  /** Numbers a request that is about to start. */
+  function startRequest(): number {
+    requests.current += 1;
+    return requests.current;
+  }
+
+  /** Shows the flow state a response carries, unless a newer request's state is already shown. */
+  function applyLife(request: number, next: Life): boolean {
+    if (request < appliedRequest.current) return false;
+    appliedRequest.current = request;
+    setLife(next);
+    return true;
+  }
+
   function noticeOf(error: unknown) {
     const summary = describeError(error);
     setNotice(summary.detail || summary.title);
@@ -264,18 +281,22 @@ function Editor({
 
   /** The flow changed somewhere else (a 409): shows it as it is now, with a notice. */
   async function adoptCurrent() {
+    const request = startRequest();
     try {
       const current = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
       );
-      setLife({ state: current.state, version: current.current_version ?? null });
-      setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
+      if (applyLife(request, { state: current.state, version: current.current_version ?? null })) {
+        setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
+      }
     } catch (again) {
       noticeOf(again);
     }
   }
 
   async function lifecycle(action: "pause" | "resume" | "archive") {
+    if (acting || inFlight) return;
+    const request = startRequest();
     setActing(true);
     setNotice(null);
     const path = { params: { path: { ws: workspaceId, id: flow.id } } };
@@ -292,7 +313,7 @@ function Editor({
             ? client.POST("/api/v1/workspaces/{ws}/flows/{id}/resume", path)
             : client.POST("/api/v1/workspaces/{ws}/flows/{id}/archive", path),
       );
-      setLife({ state: updated.state, version: updated.current_version ?? null });
+      applyLife(request, { state: updated.state, version: updated.current_version ?? null });
       announce(action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -308,7 +329,7 @@ function Editor({
   }
 
   function openPublish() {
-    if (inFlight) return;
+    if (inFlight || acting) return;
     setRefusal(null);
     setRefusedIssues(null);
     setPublishOpen(true);
@@ -316,14 +337,15 @@ function Editor({
 
   /** The editor owns the request: the dialog may be closed while it is on its way, and the outcome still lands. */
   async function startPublish() {
-    if (inFlight) return;
+    if (inFlight || acting) return;
+    const request = startRequest();
     setInFlight(true);
     setRefusal(null);
     try {
       const result = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/flows/{id}/publish", { params: { path: { ws: workspaceId, id: flow.id } } }),
       );
-      published(result as { flow: FlowBody; version: { version: number } });
+      published(request, result as { flow: FlowBody; version: { version: number } });
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         publishConflict();
@@ -341,11 +363,11 @@ function Editor({
     }
   }
 
-  function published(result: { flow: FlowBody; version: { version: number } }) {
+  function published(request: number, result: { flow: FlowBody; version: { version: number } }) {
     setPublishOpen(false);
     setViewing(null);
     setNotice(null);
-    setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
+    applyLife(request, { state: result.flow.state, version: result.flow.current_version ?? result.version.version });
     refocusActions();
     announce(`Version ${result.version.version} of ${draft.name} is published.`);
   }
@@ -467,16 +489,16 @@ function Editor({
               {inFlight ? "Publishing…" : "Publish…"}
             </Button>
             {life.state === "published" ? (
-              <Button disabled={acting} onClick={() => void lifecycle("pause")}>
+              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
                 Pause
               </Button>
             ) : null}
             {life.state === "paused" ? (
-              <Button disabled={acting} onClick={() => void lifecycle("resume")}>
+              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("resume")}>
                 Resume
               </Button>
             ) : null}
-            <Button disabled={acting} onClick={() => setArchiving(true)}>
+            <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => !inFlight && setArchiving(true)}>
               Archive…
             </Button>
           </div>
@@ -596,7 +618,7 @@ function Editor({
           </p>
           <div className="dialog-actions">
             <Button onClick={() => setArchiving(false)}>Cancel</Button>
-            <Button variant="primary" disabled={acting} onClick={() => void lifecycle("archive")}>
+            <Button variant="primary" disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("archive")}>
               Archive flow
             </Button>
           </div>
