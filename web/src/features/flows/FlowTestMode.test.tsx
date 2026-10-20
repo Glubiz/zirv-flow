@@ -174,17 +174,24 @@ describe("test mode", () => {
   });
 
   it("walks the unsaved edit on the canvas and writes nothing of its own", async () => {
-    const calls = mockApi({ ...flowRoutes(), [TEST]: () => json(walk()) });
+    // The autosave answers 500, so the edit stays unsaved; the editor never retries a failed save by itself,
+    // so no timer decides what is in flight during the walk.
+    const calls = mockApi({
+      ...flowRoutes(),
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: () => problem(500, "Internal Server Error", "internal error"),
+      [TEST]: () => json(walk()),
+    });
     const user = userEvent.setup();
     mount();
     await settled(calls);
 
-    // An edit the editor has not saved yet: the autosave waits 800 ms, and the walk below is far inside that.
+    // An edit the editor could not save: it waits, unsaved, in the draft.
     const step = await openSheetOf(user, /^Wait: 1 day/);
     const amount = within(step).getByLabelText("Amount");
     await user.clear(amount);
     await user.type(amount, "2");
-    expect(saves(calls)).toHaveLength(0);
+    expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    const failedSaves = saves(calls).length;
 
     // From the Test click to the end of the walk, only the walk itself may start.
     const from = calls.length;
@@ -200,6 +207,7 @@ describe("test mode", () => {
     const graph = (walks[0]?.body as { graph: { nodes: { id: string; seconds?: number }[] } }).graph;
     expect(graph.nodes.find((node) => node.id === "n1")?.seconds).toBe(172_800);
     expect(nonGet(calls, from)).toEqual([`POST ${WS}/flows/${FLOW_ID}/test`]);
+    expect(saves(calls)).toHaveLength(failedSaves);
   });
 
   it("says plainly that the walk cannot decide a condition, with the partial path", async () => {
