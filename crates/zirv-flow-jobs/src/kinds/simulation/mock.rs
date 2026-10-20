@@ -19,7 +19,6 @@
 //! The client's own timeout, 30 s for the whole exchange, is not exercised: a destination that
 //! answers slower than that would hold the run for as long, which no test budget allows.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::Router;
@@ -28,6 +27,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use hashbrown::HashMap;
 use zirv_flow_core::flow::IDEMPOTENCY_HEADER;
 use zirv_flow_engine::sim::rng::mix;
 

@@ -4,9 +4,10 @@
 //! event waits, over 90 virtual days and a few hundred enrollments on generated graphs that use
 //! every node kind. Time is a `ManualClock`. Events arrive at seeded virtual times, many of them
 //! at, just before or just after the timeout of the wait they answer. Every job is put through
-//! seeded failures before its final successful run (see `inject`), and wakes are claimed before
-//! they are due. After the run the four invariants are checked from the tables and the log of
-//! the mock destination (see `invariants`).
+//! at least one seeded failure before its final successful run (see `inject`), the mock
+//! destination fails calls too (see `mock`), and wakes are claimed before they are due. After
+//! the run the four invariants are checked from the tables, the log of write attempts and the
+//! log of the mock destination (see `invariants`).
 //!
 //! The graphs and the generator come from the engine harness (layer 1) through its
 //! `test-support` feature, so both layers draw from the same seeds. The seed is `ZIRV_FLOW_SIM_SEED`

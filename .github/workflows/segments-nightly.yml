@@ -165,8 +165,9 @@ jobs:
   # `flow.enroll`, `flow.step` and `webhook.call` jobs over 90 virtual days, with every job put
   # through seeded rollbacks, commits without the acknowledgement and concurrent duplicate
   # executions, and wakes claimed before they are due; the four invariants are then checked from
-  # the tables. CI runs the same test with two fixed seeds and a few hundred enrollments. Each
-  # PostgreSQL version draws its own seed; a failure prints its seed and population in the log,
+  # the tables. CI runs two tests, one per fixed seed, with a few hundred enrollments. This job
+  # names its seed, and then only the first of the two tests runs it. Each PostgreSQL version draws
+  # its own seed; a failure prints its seed and population in the log,
   # and the `seed` and `pg_enrollments` inputs rerun it.
   flow-simulation-postgres:
     name: Flow Simulation On PostgreSQL ${{ matrix.pg }}
@@ -230,8 +231,10 @@ jobs:
           echo "ZIRV_FLOW_PG_SIM_ENROLLMENTS=$enrollments" >> "$GITHUB_ENV"
           echo "PostgreSQL ${{ matrix.pg }} flow simulation: seed $seed, $enrollments enrollments"
 
-      # `cargo test`, not nextest: the seed and population come from the environment, only this
-      # test reads them, and nextest's slow-test timeout would end a large population.
+      # `cargo test`, not nextest: the seed and population come from the environment, only these
+      # tests read them, and nextest's slow-test timeout would end a large population. The name
+      # matches the test of each CI seed; with a seed in the environment the second has nothing
+      # to run.
       - name: Simulate On PostgreSQL
         run: >-
           cargo test -p zirv-flow-jobs --lib

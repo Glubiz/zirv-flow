@@ -622,7 +622,7 @@ async fn external_effects(
                 succeeded += 1;
             }
             ("webhook.failed", Some(status))
-                if matches!(status, 300..=399 | 400..=499)
+                if matches!(status, 300..=499)
                     && !matches!(status, 408 | 429)
                     && was_answered(status) =>
             {
