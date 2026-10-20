@@ -174,7 +174,11 @@ impl<'w> Driver<'w> {
             if let Some(event) = self.pending.remove(&key) {
                 self.w
                     .env
-                    .apply_event(&event.email, &event.name, json!({"total": event.total}))
+                    .apply_event(
+                        &event.email,
+                        &event.name,
+                        json!({"total": event.total, "seq": key.1}),
+                    )
                     .await;
                 self.bump("events applied");
             }
@@ -192,6 +196,11 @@ impl<'w> Driver<'w> {
                 return;
             }
             let seed = self.w.seed;
+            // Jobs with one label cannot be told apart by anything seeded.
+            let distinct = due.iter().map(|job| job.label).collect::<HashSet<_>>().len();
+            for _ in distinct..due.len() {
+                self.bump("jobs sharing a label with another due job");
+            }
             due.sort_by_key(|job| {
                 (
                     mix(seed ^ LANE_ORDER ^ job.label ^ seconds_of(at) ^ round),
@@ -264,8 +273,40 @@ impl<'w> Driver<'w> {
             .get("state_version")
             .and_then(Value::as_i64)
             .unwrap_or(0);
-        let rest = hash_text(kind) ^ hash_text(text("input")) ^ hash_text(text("node_id"));
+        let mut rest = hash_text(kind) ^ hash_text(text("input")) ^ hash_text(text("node_id"));
+        // Two events can wake the same enrollment at the same version; their payloads differ only
+        // by random ids, so the event's own seeded data tells the two jobs apart.
+        if let Some(event) = uuid(payload.get("event_id")) {
+            rest ^= self.event_tie(event).await;
+        }
         mix(mix(index as u64 ^ rest) ^ u64::try_from(version).unwrap_or(0))
+    }
+
+    /// A name for an event that does not depend on its random id: the sequence number the driver
+    /// gave an event it sent, or for an outcome event of the runtime, the call it reports.
+    async fn event_tie(&self, event: Uuid) -> u64 {
+        let row: Option<(String, Value)> =
+            sqlx::query_as("SELECT name, properties FROM events WHERE id = $1")
+                .bind(event)
+                .fetch_optional(&self.w.env.pool)
+                .await
+                .unwrap();
+        let Some((name, properties)) = row else {
+            return 0;
+        };
+        let text = |key: &str| properties.get(key).map(Value::to_string).unwrap_or_default();
+        let named = properties.get("seq").and_then(Value::as_u64).map_or_else(
+            || {
+                hash_text(&format!(
+                    "{}|{}|{}",
+                    text("node_id"),
+                    text("attempts"),
+                    text("status")
+                ))
+            },
+            mix,
+        );
+        hash_text(&name) ^ named
     }
 
     /// Some wakes are claimed before they are due, as a worker with a fast clock would: the
@@ -275,11 +316,10 @@ impl<'w> Driver<'w> {
         if !rng.chance(20) {
             return;
         }
-        let rows: Vec<(Uuid, Value)> = sqlx::query_as(
-            "SELECT id, payload FROM jobs \
+        let rows: Vec<(Uuid, OffsetDateTime, Value)> = sqlx::query_as(
+            "SELECT id, run_at, payload FROM jobs \
              WHERE workspace_id = $1 AND state = 'ready' AND kind = $2 \
-               AND payload ->> 'input' = 'wake' AND run_at > $3 \
-             ORDER BY run_at, payload ->> 'enrollment_id' LIMIT 6",
+               AND payload ->> 'input' = 'wake' AND run_at > $3",
         )
         .bind(self.w.env.ws.as_uuid())
         .bind(STEP_JOB_KIND)
@@ -287,13 +327,21 @@ impl<'w> Driver<'w> {
         .fetch_all(&self.w.env.pool)
         .await
         .unwrap();
-        if rows.is_empty() {
+        // The earliest few by timer, ties broken by the label (the person and the node), never by
+        // a random id.
+        let mut candidates = Vec::with_capacity(rows.len());
+        for (id, run_at, payload) in rows {
+            let label = self.label(STEP_JOB_KIND, &payload).await;
+            candidates.push((run_at, label, id));
+        }
+        candidates.sort_by_key(|(run_at, label, _)| (*run_at, *label));
+        candidates.truncate(6);
+        if candidates.is_empty() {
             return;
         }
-        let (id, payload) = &rows[rng.index(rows.len())];
-        let label = self.label(STEP_JOB_KIND, payload).await;
+        let (_, label, id) = candidates[rng.index(candidates.len())];
         let job = Due {
-            id: *id,
+            id,
             kind: STEP_JOB_KIND,
             label,
         };

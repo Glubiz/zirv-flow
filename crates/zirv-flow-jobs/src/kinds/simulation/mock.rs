@@ -32,6 +32,17 @@ impl Mock {
             .clone()
     }
 
+    /// The body of the latest request that carried `key`.
+    pub(super) fn last_body(&self, key: &str) -> Option<Vec<u8>> {
+        self.hits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .rev()
+            .find(|hit| hit.key == key)
+            .map(|hit| hit.body.clone())
+    }
+
     /// Starts the server on a free loopback port and returns the port.
     pub(super) async fn serve(&self) -> u16 {
         let router = Router::new()

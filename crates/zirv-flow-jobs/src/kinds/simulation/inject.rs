@@ -153,8 +153,18 @@ impl World {
                 .unwrap()
                 .unwrap_or_default()
             }
-            // A call may be sent again and then records its outcome again: at-least-once.
-            WEBHOOK_JOB_KIND => String::new(),
+            // A call may be sent again and then records its outcome again (at-least-once), so
+            // the events are not compared; the call itself is: its key and the request body the
+            // destination last received must be what a re-run sends again.
+            WEBHOOK_JOB_KIND => {
+                let key = claimed
+                    .payload
+                    .get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let body = self.mock.last_body(key).unwrap_or_default();
+                format!("{key}|{}", String::from_utf8_lossy(&body))
+            }
             _ => sqlx::query_scalar(
                 "SELECT (SELECT count(*) FROM enrollments WHERE workspace_id = $1)::text \
                      || '|' || (SELECT count(*) FROM jobs \
