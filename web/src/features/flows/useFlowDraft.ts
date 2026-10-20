@@ -77,6 +77,8 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inflight = useRef(false);
   const checks = useRef(0);
+  /** Counts every change of the draft, so a save can tell whether a newer edit came in while it ran. */
+  const edits = useRef(0);
   const lastEdit = useRef<{ key: string; at: number } | null>(null);
   const flowId = flow.id;
   const flushRef = useRef<() => Promise<void>>(() => Promise.resolve());
@@ -117,6 +119,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       void check();
       return;
     }
+    const sentEdit = edits.current;
     inflight.current = true;
     setStatus("saving");
     try {
@@ -146,7 +149,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       inflight.current = false;
       setFailure(describeError(error));
       setStatus("error");
-      setChecking(false);
+      // A newer edit is still to be saved and checked, so the issues shown stay stale until then.
+      if (edits.current === sentEdit) setChecking(false);
+      else if (!isSet(timer)) void flushRef.current();
     }
   }, [workspaceId, flowId, check]);
 
@@ -187,6 +192,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
         setUndoDepth(history.current.length);
       }
       draftRef.current = next;
+      edits.current += 1;
       setDraft(next);
       // Whatever check is on its way answers for a draft that is gone.
       checks.current += 1;
@@ -203,6 +209,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     history.current = history.current.slice(0, -1);
     setUndoDepth(history.current.length);
     draftRef.current = previous;
+    edits.current += 1;
     setDraft(previous);
     lastEdit.current = null;
     checks.current += 1;

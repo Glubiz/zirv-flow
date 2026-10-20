@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, sampleGraph, WS } from "../../test/flowsApi";
 import { lastGraph, mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
-import { json, mockApi, type Call, type Handler } from "../../test/mockApi";
+import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 import { PURCHASE_DETAIL } from "../../test/segmentsApi";
 
@@ -277,6 +277,44 @@ describe("stale issues", () => {
     firstSave.release(undefined);
     expect(await screen.findByText("No issues", undefined, SAVE)).toBeInTheDocument();
     expect(saves(calls)).toHaveLength(1);
+  });
+});
+
+describe("a failed save", () => {
+  it("keeps saying it is checking while a newer edit waits", async () => {
+    const routes = flowRoutes({ issues: [{ code: "invalid_url", node: "n4", at: "/url" }] });
+    const save = routes[`PATCH ${WS}/flows/${FLOW_ID}`]!;
+    const firstSave = gate<undefined>();
+    let patches = 0;
+    mockApi({
+      ...routes,
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
+        patches += 1;
+        if (patches === 1) {
+          await firstSave.promise;
+          return problem(500, "Internal Server Error", "internal error");
+        }
+        return save(request);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    expect(await screen.findByRole("button", { name: "1 issue" })).toBeInTheDocument();
+    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+
+    await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
+    await waitFor(() => expect(patches).toBe(1), SAVE);
+    await user.selectOptions(within(sheet).getByLabelText("Unit"), "minute");
+    await act(async () => {
+      firstSave.release(undefined);
+      await pause(50);
+    });
+
+    expect(screen.getByText("Checking…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "1 issue" })).not.toBeInTheDocument();
+    await waitFor(() => expect(patches).toBe(2), SAVE);
+    expect(await screen.findByRole("button", { name: "1 issue" }, SAVE)).toBeInTheDocument();
+    expect(screen.queryByText("Checking…")).not.toBeInTheDocument();
   });
 });
 
