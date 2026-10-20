@@ -24,6 +24,7 @@
 
 mod driver;
 mod inject;
+mod invariants;
 mod mock;
 mod world;
 
@@ -96,18 +97,30 @@ async fn the_population_holds_all_four_invariants_under_crash_injection(pool: Pg
         let mut driver = Driver::new(&world);
         driver.run().await;
         let ran = started.elapsed();
+        let found = invariants::check(&world, &driver, population).await;
         println!(
-            "seed {seed}: setup {built:.1?}, run {:.1?}",
-            ran - built
+            "seed {seed}: setup {built:.1?}, run {:.1?}, checks {:.1?}",
+            ran - built,
+            started.elapsed() - ran
         );
         for (what, count) in &driver.counts {
             println!("  {what}: {count}");
         }
+        for (what, count) in &found.summary {
+            println!("  {what}: {count}");
+        }
         assert!(
-            driver.problems.is_empty(),
-            "simulation failed: seed {seed}, population {population} enrollments; rerun with \
-             {SEED_VAR}={seed} {POPULATION_VAR}={population}\n{}",
-            driver.problems.join("\n")
+            found.violations.is_empty() && found.run_problems.is_empty(),
+            "simulation failed: seed {seed}, population {population} enrollments, {} violations; \
+             rerun with {SEED_VAR}={seed} {POPULATION_VAR}={population}\n{}",
+            found.summary.get("violations").copied().unwrap_or(0),
+            found
+                .run_problems
+                .iter()
+                .map(|problem| format!("during the run: {problem}"))
+                .chain(found.violations.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         for mode in [
             "rollback flow.step",
