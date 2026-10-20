@@ -70,7 +70,7 @@ export const SECTIONS: readonly { id: Section; label: string }[] = [
 ];
 
 /** The settings section a pointer into the settings object lands in. */
-export function sectionOf(at: string | undefined): Section | null {
+function sectionOf(at: string | undefined): Section | null {
   if (at === undefined) return null;
   if (at.startsWith("/trigger")) return "trigger";
   if (at.startsWith("/reentry")) return "reentry";

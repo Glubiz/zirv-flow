@@ -1,10 +1,10 @@
 import { entryOf, portsOf, TRIGGER_ID, type FlowNode, type Graph } from "./model";
 
-export const NODE_WIDTH = 220;
+const NODE_WIDTH = 220;
 const GAP_X = 40;
 const GAP_Y = 56;
 
-export interface Placed {
+interface Placed {
   id: string;
   x: number;
   y: number;
@@ -18,13 +18,13 @@ export interface Placed {
   reachable: boolean;
 }
 
-export function sizeOf(node: FlowNode | null): { width: number; height: number } {
+function sizeOf(node: FlowNode | null): { width: number; height: number } {
   if (node === null) return { width: NODE_WIDTH, height: 84 };
   if (node.type === "exit") return { width: NODE_WIDTH, height: 72 };
   return { width: NODE_WIDTH, height: portsOf(node).length > 1 ? 120 : 92 };
 }
 
-export interface Layout {
+interface Layout {
   placed: Map<string, Placed>;
   /** Every node id, trigger first, in reading order. */
   order: string[];

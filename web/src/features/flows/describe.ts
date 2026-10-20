@@ -6,9 +6,9 @@ export interface Names {
   segments: readonly { id: string; name: string }[];
 }
 
-export const NO_NAMES: Names = { lists: [], segments: [] };
+const NO_NAMES: Names = { lists: [], segments: [] };
 
-export interface Words {
+interface Words {
   /** The headline of a node. */
   title: string;
   /** The one line under it. */

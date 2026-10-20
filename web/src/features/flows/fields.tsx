@@ -15,7 +15,7 @@ import {
 } from "./model";
 import { issuesAt, issueText } from "./issues";
 
-export type Filter = components["schemas"]["SegmentPropertyFilter"];
+type Filter = components["schemas"]["SegmentPropertyFilter"];
 
 /** The message of the first issue whose pointer starts with `prefix`, for a field to show. */
 export function fieldError(issues: readonly FlowIssue[] | undefined, prefix: string, graph?: Graph): string | undefined {

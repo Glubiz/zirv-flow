@@ -4,19 +4,19 @@ import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { sameJson, type Draft, type FlowDetail, type FlowIssue } from "./model";
 
 /** How long after the last edit the draft is saved. */
-export const AUTOSAVE_DELAY_MS = 800;
+const AUTOSAVE_DELAY_MS = 800;
 /** Edits to one field closer together than this are one step of undo. */
-export const COALESCE_MS = 1000;
+const COALESCE_MS = 1000;
 const UNDO_LIMIT = 100;
 
-export type SaveStatus = "saved" | "saving" | "error";
+type SaveStatus = "saved" | "saving" | "error";
 
-export interface Meta {
+interface Meta {
   state: FlowDetail["state"];
   currentVersion: number | null;
 }
 
-export interface FlowDraft {
+interface FlowDraft {
   draft: Draft;
   /** Changes the draft. Edits to the same `key` in quick succession count as one step of undo. */
   edit: (change: (draft: Draft) => Draft, key?: string) => void;

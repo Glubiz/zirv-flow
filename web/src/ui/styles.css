@@ -1580,7 +1580,7 @@ main:focus {
 
 .fl-name-input:focus-visible {
   border-color: var(--focus);
-  background: #fff;
+  background: var(--surface);
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
@@ -1598,7 +1598,7 @@ main:focus {
   margin: 0 auto;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
-  background: #fff;
+  background: var(--surface);
 }
 
 .fl-tab {
@@ -1672,7 +1672,7 @@ main:focus {
 }
 
 .fl-flow .react-flow__node {
-  border-radius: 12px;
+  border-radius: var(--radius-control);
 }
 
 .fl-flow .react-flow__node:focus-visible {
@@ -1701,9 +1701,9 @@ main:focus {
   flex-direction: column;
   gap: 2px;
   padding: 10px 14px;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   color: var(--ink);
   text-align: left;
 }
@@ -1774,7 +1774,7 @@ main:focus {
 .fl-flow .react-flow__handle {
   width: 10px;
   height: 10px;
-  background: #fff;
+  background: var(--surface);
   border: 2px solid var(--ink-3);
 }
 
@@ -1844,7 +1844,7 @@ main:focus {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: #fff;
+  background: var(--surface);
   color: var(--error-text);
 }
 
@@ -1945,9 +1945,9 @@ main:focus {
   display: grid;
   gap: 10px;
   padding: 10px;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
 }
 
 .fl-days {
@@ -1978,7 +1978,7 @@ main:focus {
   gap: 6px;
   padding: 4px 6px 4px 10px;
   font-size: 13.5px;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
 }

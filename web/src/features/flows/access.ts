@@ -1,6 +1,6 @@
 import { useWorkspaceAccess } from "../members";
 
-export interface FlowAccess {
+interface FlowAccess {
   /** Whether the answer is in; until then nobody is offered an edit. */
   ready: boolean;
   /** Create flows and change drafts: any member, admin or the owner, as the API lets a PATCH through. */

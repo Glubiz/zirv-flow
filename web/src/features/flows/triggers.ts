@@ -10,10 +10,6 @@ export const TRIGGER_KINDS: readonly { type: TriggerType; label: string }[] = [
   { type: "api", label: "From the API" },
 ];
 
-export function triggerLabel(type: TriggerType): string {
-  return TRIGGER_KINDS.find((kind) => kind.type === type)?.label ?? type;
-}
-
 function browserZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";

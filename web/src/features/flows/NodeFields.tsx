@@ -34,7 +34,7 @@ const WEEKDAYS = [
   { id: "sun", label: "Sun" },
 ] as const;
 
-export interface FieldsProps {
+interface FieldsProps {
   workspaceId: string;
   graph: Graph;
   node: FlowNode;

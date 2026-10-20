@@ -2,7 +2,7 @@ import type { components } from "../../api";
 
 export type Graph = components["schemas"]["FlowGraph"];
 export type FlowNode = components["schemas"]["FlowNode"];
-export type FlowEdge = components["schemas"]["FlowEdge"];
+type FlowEdge = components["schemas"]["FlowEdge"];
 export type Settings = components["schemas"]["FlowSettings"];
 export type FlowIssue = components["schemas"]["FlowIssue"];
 export type FlowDetail = components["schemas"]["FlowDetailBody"];
@@ -26,7 +26,7 @@ export interface Draft {
   settings: Settings;
 }
 
-export interface KindInfo {
+interface KindInfo {
   type: NodeType;
   /** The kind in the add-a-step menu and above the title of a node. */
   label: string;
@@ -113,7 +113,7 @@ function nextNumber(prefix: string, ids: readonly string[]): string {
 }
 
 /** A step of `type` with the fields a new step starts with. Nothing is wired. */
-export function blankNode(type: NodeType, id: string): FlowNode {
+function blankNode(type: NodeType, id: string): FlowNode {
   switch (type) {
     case "wait.duration":
       return { id, type, seconds: 86_400 };

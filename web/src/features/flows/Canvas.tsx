@@ -230,46 +230,17 @@ function Surface(props: CanvasProps) {
   const plan = useMemo(() => layout(graph), [graph]);
 
   const nodes = useMemo(() => {
-    const steps = plan.order.filter((id) => id !== TRIGGER_ID);
-    const total = steps.length;
+    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+    const total = plan.order.filter((id) => id !== TRIGGER_ID).length;
     const list: StepNode[] = [];
+    let step = 0;
     for (const id of plan.order) {
+      if (id !== TRIGGER_ID) step += 1;
       const spot = plan.placed.get(id);
       if (!spot) continue;
       const count = placed.byNode.get(id)?.length ?? 0;
       const trailing = count > 0 ? `, ${issuesLabel(count)}` : "";
-      if (id === TRIGGER_ID) {
-        const words = triggerWords(settings, names);
-        list.push({
-          id,
-          type: "step",
-          position: { x: spot.x, y: spot.y },
-          width: spot.width,
-          height: spot.height,
-          draggable: false,
-          className: "nopan",
-          deletable: false,
-          selected: selectedId === id,
-          ariaLabel: `Trigger: ${words.title}${trailing}`,
-          data: {
-            icon: "trigger",
-            kind: "Trigger",
-            title: words.title,
-            detail: words.detail,
-            mono: false,
-            ports: [{ id: "next", label: "Next", name: `Output of the trigger` }],
-            issueCount: count,
-            selected: selectedId === id,
-            editable: false,
-          },
-        });
-        continue;
-      }
-      const node = graph.nodes.find((candidate) => candidate.id === id);
-      if (!node) continue;
-      const words = wordsFor(node, names);
-      const step = steps.indexOf(id) + 1;
-      list.push({
+      const base = {
         id,
         type: "step",
         position: { x: spot.x, y: spot.y },
@@ -279,6 +250,31 @@ function Surface(props: CanvasProps) {
         className: "nopan",
         deletable: false,
         selected: selectedId === id,
+      } as const;
+      if (id === TRIGGER_ID) {
+        const words = triggerWords(settings, names);
+        list.push({
+          ...base,
+          ariaLabel: `Trigger: ${words.title}${trailing}`,
+          data: {
+            icon: "trigger",
+            kind: "Trigger",
+            title: words.title,
+            detail: words.detail,
+            mono: false,
+            ports: [{ id: "next", label: "Next", name: "Output of the trigger" }],
+            issueCount: count,
+            selected: base.selected,
+            editable: false,
+          },
+        });
+        continue;
+      }
+      const node = byId.get(id);
+      if (!node) continue;
+      const words = wordsFor(node, names);
+      list.push({
+        ...base,
         ariaLabel: `${kindLabel(node.type)}: ${words.title}, step ${step} of ${total}${trailing}`,
         data: {
           icon: node.type,
@@ -292,7 +288,7 @@ function Surface(props: CanvasProps) {
             name: `${portLabel(node, port)} output of ${words.title}`,
           })),
           issueCount: count,
-          selected: selectedId === id,
+          selected: base.selected,
           editable,
         },
       });
