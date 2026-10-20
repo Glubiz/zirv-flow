@@ -211,6 +211,7 @@ pub(crate) async fn retry(
         zirv_flow_store::append_decision(
             &mut *tx,
             &NewDecision {
+                graph: None,
                 workspace_id,
                 trace: TraceContext {
                     trace_id: job.trace_id,

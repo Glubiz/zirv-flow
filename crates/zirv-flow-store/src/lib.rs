@@ -70,8 +70,8 @@ pub use contacts::{
     list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
 };
 pub use decisions::{
-    Decision, NewDecision, append_decision, append_decisions, ensure_decision_partitions,
-    list_trace,
+    Decision, GraphPoint, NewDecision, append_decision, append_decisions,
+    ensure_decision_partitions, list_trace,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,

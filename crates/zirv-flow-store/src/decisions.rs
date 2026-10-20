@@ -41,6 +41,33 @@ pub struct NewDecision {
     pub subject_ids: Vec<(&'static str, Uuid)>,
     /// The job and attempt number that made the decision, when a job did.
     pub job: Option<(Uuid, i32)>,
+    /// Where in a flow's graph the decision was made, for the flow decisions the UI links from.
+    pub graph: Option<GraphPoint>,
+}
+
+/// A point in a flow's published graph: the version an enrollment is pinned to and, when the
+/// decision concerns one, the node. Both are ids the marketer chose, never personal data. They
+/// are stored in `subject_ids` as `version` (a number) and `node` (text).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphPoint {
+    pub version: i32,
+    pub node: Option<String>,
+}
+
+/// The `subject_ids` document of a record: ids by name, then the graph point.
+fn subjects_of(decision: &NewDecision) -> Value {
+    let mut subjects: Map<String, Value> = decision
+        .subject_ids
+        .iter()
+        .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
+        .collect();
+    if let Some(point) = &decision.graph {
+        subjects.insert("version".to_owned(), Value::from(point.version));
+        if let Some(node) = &point.node {
+            subjects.insert("node".to_owned(), Value::String(node.clone()));
+        }
+    }
+    Value::Object(subjects)
 }
 
 /// A record as stored.
@@ -103,11 +130,6 @@ pub async fn append_decision<'e>(
     if BENCH_NO_DECISIONS {
         return Ok(());
     }
-    let subjects: Map<String, Value> = decision
-        .subject_ids
-        .iter()
-        .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
-        .collect();
     sqlx::query(
         "INSERT INTO decision_records \
             (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
@@ -122,7 +144,7 @@ pub async fn append_decision<'e>(
     .bind(decision.reason)
     .bind(decision.trace.cause.kind.as_str())
     .bind(&decision.trace.cause.id)
-    .bind(Value::Object(subjects))
+    .bind(subjects_of(decision))
     .bind(decision.job.map(|(id, _)| id))
     .bind(decision.job.map(|(_, attempt)| attempt))
     .execute(executor)
@@ -145,11 +167,6 @@ pub async fn append_decisions(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
         );
         query.push_values(chunk, |mut row, decision| {
-            let subjects: Map<String, Value> = decision
-                .subject_ids
-                .iter()
-                .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
-                .collect();
             row.push_bind(Uuid::new_v4())
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
@@ -158,7 +175,7 @@ pub async fn append_decisions(
                 .push_bind(decision.reason)
                 .push_bind(decision.trace.cause.kind.as_str())
                 .push_bind(decision.trace.cause.id.clone())
-                .push_bind(Value::Object(subjects))
+                .push_bind(subjects_of(decision))
                 .push_bind(decision.job.map(|(id, _)| id))
                 .push_bind(decision.job.map(|(_, attempt)| attempt));
         });
@@ -265,6 +282,7 @@ mod tests {
         action: &'static str,
     ) -> NewDecision {
         NewDecision {
+            graph: None,
             workspace_id,
             trace: trace.clone(),
             action,
@@ -377,6 +395,7 @@ mod tests {
                         append_decision(
                             &mut *tx,
                             &NewDecision {
+                                graph: None,
                                 workspace_id: ws,
                                 trace: trace.clone(),
                                 action,

@@ -1255,6 +1255,7 @@ mod tests {
         action: &'static str,
     ) {
         let decision = zirv_flow_store::NewDecision {
+            graph: None,
             workspace_id: ws.parse().unwrap(),
             trace: trace.clone(),
             action,

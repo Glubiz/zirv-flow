@@ -47,6 +47,7 @@ pub async fn recompute_trait_batch(
             append_decision(
                 &mut *connection,
                 &NewDecision {
+                    graph: None,
                     workspace_id: workspace,
                     trace: trace.clone(),
                     action: "trait.change",

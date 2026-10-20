@@ -722,6 +722,7 @@ pub(crate) async fn reject_apply_failed(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: item.trace.clone(),
             action,
@@ -745,6 +746,7 @@ async fn decide(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: record.trace.clone(),
             action,

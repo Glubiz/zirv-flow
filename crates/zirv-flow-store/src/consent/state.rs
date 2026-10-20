@@ -242,6 +242,7 @@ pub(super) async fn write_state(
     append_decision(
         &mut *connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
             action: "consent.change",

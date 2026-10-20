@@ -12,7 +12,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::arrivals::{Arrival, enqueue_arrivals};
 use crate::{
-    EnrollmentStatus, NewDecision, StoreError, append_decision, find_enrollment, find_person,
+    EnrollmentStatus, GraphPoint, NewDecision, StoreError, append_decision, find_enrollment,
+    find_person,
 };
 
 /// The source of the events a flow writes.
@@ -197,15 +198,35 @@ pub async fn record_webhook_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    // The flow and version the call belongs to, for the trace to link from; an erased enrollment has
+    // none.
+    let pinned: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT flow_id, flow_version FROM enrollments WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(outcome.workspace.as_uuid())
+    .bind(outcome.enrollment)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut subject_ids = vec![
+        ("enrollment", outcome.enrollment),
+        ("person", outcome.person),
+        ("event", event),
+    ];
+    subject_ids.extend(pinned.map(|(flow, _)| ("flow", flow)));
     append_decision(
         &mut *connection,
         &NewDecision {
+            graph: pinned.map(|(_, version)| GraphPoint {
+                version,
+                node: Some(outcome.node.to_owned()),
+            }),
             workspace_id: outcome.workspace,
             trace: outcome.trace.clone(),
             action: "webhook.call",
             outcome: outcome.result.outcome(),
             reason: outcome.reason,
-            subject_ids: vec![("enrollment", outcome.enrollment), ("event", event)],
+            subject_ids,
             job: Some(outcome.job),
         },
     )

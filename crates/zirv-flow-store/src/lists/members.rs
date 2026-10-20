@@ -241,6 +241,7 @@ async fn record_changes(
     let decisions: Vec<NewDecision> = people
         .iter()
         .map(|person| NewDecision {
+            graph: None,
             workspace_id: recorded.workspace,
             trace: recorded.trace.clone(),
             action: "list.membership",
@@ -607,6 +608,7 @@ pub(crate) async fn move_on_merge(
         append_decision(
             connection,
             &NewDecision {
+                graph: None,
                 workspace_id: workspace,
                 trace: trace.clone(),
                 action: "list.membership",

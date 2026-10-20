@@ -28,10 +28,10 @@ use zirv_flow_core::flow::{ExitCriterion, FlowSettings, Goal};
 use zirv_flow_engine::{EnrollmentState, Matched, Outcome, Status, WaitChange, settle};
 use zirv_flow_segments::{Catalog, TraitStorage};
 use zirv_flow_store::{
-    Enrollment, EnrollmentStatus, EnrollmentUpdate, NewDecision, NewStepExecution, SETTLE_JOB_KIND,
-    SettleItem, SettlePayload, Signal, StepJobInput, StepOutcome, append_decisions, clear_waits,
-    find_event_of_person, find_flow_version, lock_enrollment, record_steps, save_enrollment,
-    segment_catalog,
+    Enrollment, EnrollmentStatus, EnrollmentUpdate, GraphPoint, NewDecision, NewStepExecution,
+    SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, StepJobInput, StepOutcome,
+    append_decisions, clear_waits, find_event_of_person, find_flow_version, lock_enrollment,
+    record_steps, save_enrollment, segment_catalog,
 };
 
 use super::flow_step::{exit_reason_text, filters_pass};
@@ -198,7 +198,8 @@ impl Run {
             )
             .await?;
             if let Some(row) = rows.first().filter(|row| row.fresh) {
-                let mut decision = self.decision(&enrollment, "flow.goal", "converted", None);
+                let mut decision =
+                    self.decision(&enrollment, "flow.goal", "converted", None, GOAL_NODE);
                 decision.subject_ids.push(("step_execution", row.id));
                 decisions.push(decision);
             }
@@ -236,7 +237,13 @@ impl Run {
             }
             // A held enrollment keeps its waits in the row, not the engine state.
             clear_waits(&mut *conn, enrollment.id, None).await?;
-            decisions.push(self.decision(&enrollment, "flow.enrollment", "exited", Some(text)));
+            decisions.push(self.decision(
+                &enrollment,
+                "flow.enrollment",
+                "exited",
+                Some(text),
+                &transition.state.node,
+            ));
         }
         append_decisions(conn, &decisions).await?;
         Ok(())
@@ -248,8 +255,13 @@ impl Run {
         action: &'static str,
         outcome: &'static str,
         reason: Option<&'static str>,
+        node: &str,
     ) -> NewDecision {
         NewDecision {
+            graph: Some(GraphPoint {
+                version: enrollment.flow_version,
+                node: Some(node.to_owned()),
+            }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
             action,

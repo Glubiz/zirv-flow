@@ -33,9 +33,9 @@ use zirv_flow_segments::{
 };
 use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
-    NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput, StepJobPayload,
-    StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list,
-    apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
+    GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions,
+    apply_flow_list, apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
     find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment, record_steps,
     register_wait, release_enrollment, reopen_failed_step, run_person_batch, save_enrollment,
     segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
@@ -174,6 +174,10 @@ async fn release(
     // The decision the resume batch would have written, under the enrollment's own trace (the
     // batch's is not known here) and in this transaction, so the trace reads held, resumed, steps.
     let decision = NewDecision {
+        graph: Some(GraphPoint {
+            version: enrollment.flow_version,
+            node: Some(enrollment.node.clone()),
+        }),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",
@@ -216,6 +220,10 @@ async fn hold(
     hold_enrollment(conn, job.workspace, enrollment.id, &job.input).await?;
     if !already {
         let decision = NewDecision {
+            graph: Some(GraphPoint {
+                version: enrollment.flow_version,
+                node: Some(enrollment.node.clone()),
+            }),
             workspace_id: job.workspace,
             trace: enrollment.trace.clone(),
             action: "flow.enrollment",
@@ -311,6 +319,7 @@ impl Walk<'_> {
         outcome: &'static str,
         reason: Option<&'static str>,
         step: Option<Uuid>,
+        node: Option<&str>,
     ) -> NewDecision {
         let enrollment = self.enrollment;
         let mut subject_ids = vec![
@@ -320,6 +329,10 @@ impl Walk<'_> {
         ];
         subject_ids.extend(step.map(|id| ("step_execution", id)));
         NewDecision {
+            graph: Some(GraphPoint {
+                version: enrollment.flow_version,
+                node: node.map(str::to_owned),
+            }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
             action,
@@ -544,7 +557,7 @@ async fn wake(
     };
     let node = walk.enrollment.node.clone();
     let step = settle_wait_step(&mut *conn, walk.enrollment.id, &node).await?;
-    let decision = walk.decision("flow.wake", outcome, None, step);
+    let decision = walk.decision("flow.wake", outcome, None, step, Some(&node));
     append_decisions(conn, &[decision]).await?;
     Ok(())
 }
@@ -628,7 +641,13 @@ async fn apply(
             ),
             (None, _) => ("done", Some(kind)),
         };
-        decisions.push(walk.decision("flow.step", outcome, reason, Some(record.id)));
+        decisions.push(walk.decision(
+            "flow.step",
+            outcome,
+            reason,
+            Some(record.id),
+            Some(&visit.node),
+        ));
     }
     append_decisions(&mut *conn, &decisions).await?;
 
@@ -716,7 +735,7 @@ async fn apply_effect(
             Ok(None)
         }
         EffectKind::GoalConversion => {
-            decisions.push(walk.decision("flow.goal", "converted", None, step));
+            decisions.push(walk.decision("flow.goal", "converted", None, step, Some(&effect.node)));
             Ok(None)
         }
         EffectKind::Webhook { url, trait_keys } => {
@@ -882,13 +901,14 @@ async fn branch(
             CASES.get(index).copied().unwrap_or("case_more")
         });
     let step = walk.step_of(node);
-    let mut decisions = vec![walk.decision("flow.branch", taken, None, step)];
+    let mut decisions = vec![walk.decision("flow.branch", taken, None, step, Some(node))];
     for (index, matched) in results.iter().enumerate() {
         decisions.push(walk.decision(
             "flow.branch.condition",
             if *matched { "matched" } else { "unmatched" },
             Some(CASES.get(index).copied().unwrap_or("case_more")),
             step,
+            Some(node),
         ));
     }
     append_decisions(&mut *conn, &decisions)
@@ -953,11 +973,29 @@ async fn finish(
                 Some(NodeKind::WaitUntilTime { .. }) => "until_time",
                 _ => "duration",
             };
-            walk.decision("flow.wait", "waiting", Some(reason), step)
+            walk.decision(
+                "flow.wait",
+                "waiting",
+                Some(reason),
+                step,
+                Some(&state.node),
+            )
         }
-        Outcome::Completed => walk.decision("flow.enrollment", "completed", None, step),
-        Outcome::Exited { .. } => walk.decision("flow.enrollment", "exited", exit_reason, step),
-        _ => walk.decision("flow.enrollment", "failed", error, step),
+        Outcome::Completed => walk.decision(
+            "flow.enrollment",
+            "completed",
+            None,
+            step,
+            Some(&state.node),
+        ),
+        Outcome::Exited { .. } => walk.decision(
+            "flow.enrollment",
+            "exited",
+            exit_reason,
+            step,
+            Some(&state.node),
+        ),
+        _ => walk.decision("flow.enrollment", "failed", error, step, Some(&state.node)),
     };
     append_decisions(&mut *conn, &[decision]).await?;
     Ok(())
@@ -1005,6 +1043,10 @@ async fn fail_enrollment(
         return Err(JobError::new("the enrollment moved under its lock"));
     }
     let decision = NewDecision {
+        graph: Some(GraphPoint {
+            version: enrollment.flow_version,
+            node: Some(failed_node.to_owned()),
+        }),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",

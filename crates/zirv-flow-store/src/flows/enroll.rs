@@ -17,7 +17,7 @@ use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::state::FlowState;
-use crate::{NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
+use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 
 /// The most people one enroll takes (the size of a `flow.enroll` job).
 pub const MAX_ENROLL_PEOPLE: usize = 1000;
@@ -251,6 +251,10 @@ pub async fn enroll_entries(
         .iter()
         .filter(|(_, reason)| *reason != NO_SUCH_PERSON)
         .map(|(person, reason)| NewDecision {
+            graph: Some(GraphPoint {
+                version: request.version,
+                node: None,
+            }),
             workspace_id: request.workspace,
             trace: request.trace.clone(),
             action: "flow.enroll",
@@ -302,6 +306,10 @@ pub async fn enroll_entries(
     enqueue_many(&mut *connection, &starts).await?;
     for enrolled in &outcome.enrolled {
         decisions.push(NewDecision {
+            graph: Some(GraphPoint {
+                version: request.version,
+                node: None,
+            }),
             workspace_id: request.workspace,
             trace: enrolled.trace.clone(),
             action: "flow.enroll",
