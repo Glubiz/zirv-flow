@@ -41,9 +41,10 @@ export function pathOverlay(graph: Graph, path: readonly PathStop[]): Pick<Overl
     steps.set(stop.node, [...(steps.get(stop.node) ?? []), index + 1]);
     const next = path[index + 1];
     if (!next) return;
-    const exact = graph.edges.find((edge) => edge.from === stop.node && edge.to === next.node && edge.port === stop.port);
-    const any = graph.edges.find((edge) => edge.from === stop.node && edge.to === next.node);
-    const found = exact ?? any;
+    const between = graph.edges.filter((edge) => edge.from === stop.node && edge.to === next.node);
+    // The port names the wire. Without it, a single wire between the two steps is still certain; with several
+    // (two arms of a branch that share a target) any pick would be a guess, so none is lit and the steps keep their numbers.
+    const found = between.find((edge) => edge.port === stop.port) ?? (between.length === 1 ? between[0] : undefined);
     if (found) edges.add(found.id);
   });
   if (path.length > 0) {
