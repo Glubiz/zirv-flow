@@ -123,9 +123,9 @@ impl World {
         for name in EVENTS {
             env.define_event(name).await;
         }
-        for index in 0..self.lists.len() {
+        for (index, list) in self.lists.iter().enumerate() {
             sqlx::query("INSERT INTO lists (id, workspace_id, name) VALUES ($1, $2, $3)")
-                .bind(self.lists[index])
+                .bind(list)
                 .bind(env.ws.as_uuid())
                 .bind(format!("List {index}"))
                 .execute(&env.pool)

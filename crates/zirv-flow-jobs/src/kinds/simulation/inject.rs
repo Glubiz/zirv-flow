@@ -34,7 +34,7 @@ enum Mode {
 }
 
 impl Mode {
-    const fn letter(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Rollback => "rollback",
             Self::CommitWithoutAck => "commit without ack",
@@ -184,7 +184,8 @@ impl Driver<'_> {
         let w = self.w;
         w.hold_real_time_jobs(self.now).await;
         let made = sqlx::query(
-            "UPDATE jobs SET run_at = now() - interval '1 hour', max_attempts = 50 \n             WHERE id = $1 AND state = 'ready'",
+            "UPDATE jobs SET run_at = now() - interval '1 hour', max_attempts = 50 \
+             WHERE id = $1 AND state = 'ready'",
         )
         .bind(due.id)
         .execute(&w.env.pool)
@@ -215,16 +216,13 @@ impl Driver<'_> {
         Some(claimed.unwrap_or_else(|| panic!("the claim query skipped {due:?}")))
     }
 
-    async fn watch(&self, due: &Due) -> Option<Watch> {
-        if due.kind != STEP_JOB_KIND {
+    /// The enrollment of a claimed `flow.step` job, as it is before the job runs.
+    async fn watch(&self, claimed: &ClaimedJob) -> Option<Watch> {
+        if claimed.kind != STEP_JOB_KIND {
             return None;
         }
-        let payload: Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE id = $1")
-            .bind(due.id)
-            .fetch_optional(&self.w.env.pool)
-            .await
-            .unwrap()?;
-        let enrollment = enrollment_of(&payload);
+        let payload = &claimed.payload;
+        let enrollment = enrollment_of(payload);
         let (version, wake_at): (i64, Option<OffsetDateTime>) =
             sqlx::query_as("SELECT state_version, wake_at FROM enrollments WHERE id = $1")
                 .bind(enrollment)
@@ -273,8 +271,8 @@ impl Driver<'_> {
                 self.bump("job gone before its turn");
                 return;
             };
-            self.bump(format!("{} {}", mode.letter(), due.kind));
-            let before = self.watch(due).await;
+            self.bump(format!("{} {}", mode.name(), due.kind));
+            let before = self.watch(&claimed).await;
             let Some(print) = self.failed_attempt(&claimed, mode).await else {
                 continue;
             };
@@ -286,11 +284,11 @@ impl Driver<'_> {
             }
         }
 
-        let before = self.watch(due).await;
         let Some(claimed) = self.claim(due).await else {
             self.bump("job gone before its turn");
             return;
         };
+        let before = self.watch(&claimed).await;
         let outcome = if concurrent {
             self.bump(format!("concurrent duplicate {}", due.kind));
             self.concurrent_duplicate(claimed, due, fenced).await
@@ -340,7 +338,7 @@ impl Driver<'_> {
                 "{} job {} failed in a {} attempt: {}",
                 claimed.kind,
                 claimed.id,
-                mode.letter(),
+                mode.name(),
                 error.message()
             ));
             let _ = fail_job(

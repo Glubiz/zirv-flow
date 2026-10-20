@@ -74,7 +74,7 @@ pub(super) fn hash_text(text: &str) -> u64 {
         .fold(0x9e37_79b9, |state, byte| mix(state ^ u64::from(byte)))
 }
 
-/// A stable 64-bit name for a uuid-free quantity.
+/// A virtual instant as seconds since the Unix epoch, for seeding.
 pub(super) fn seconds_of(at: OffsetDateTime) -> u64 {
     u64::try_from(at.unix_timestamp()).unwrap_or(0)
 }
