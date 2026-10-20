@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
@@ -95,7 +95,10 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   const [sheetOpen, setSheetOpen] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({ state: "", version: "", node: "" });
+  /** Bumped when the list must be read again; the counts and the detail reload in place, so what is shown stays. */
   const [refresh, setRefresh] = useState(0);
+  /** An action has finished, so focus goes back once the detail has been read again. */
+  const [returnFocus, setReturnFocus] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
   const [confirm, setConfirm] = useState<"skip" | "exit" | null>(null);
@@ -111,7 +114,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
           params: { path: { ws: workspaceId, id: flowId, n: version } },
         }),
       ),
-    [workspaceId, flowId, version, refresh],
+    [workspaceId, flowId, version],
   );
   const detail = useResource(async (): Promise<EnrollmentPath | null> => {
     if (selectedId === null) return null;
@@ -120,7 +123,13 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
         params: { path: { ws: workspaceId, id: flowId, enrollment_id: selectedId } },
       }),
     );
-  }, [workspaceId, flowId, selectedId, refresh]);
+  }, [workspaceId, flowId, selectedId]);
+
+  function reread() {
+    setRefresh((value) => value + 1);
+    counts.reload();
+    detail.reload();
+  }
 
   const tallies = counts.status === "ready" ? counts.data.nodes : null;
 
@@ -176,7 +185,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
           : CHANGED_ELSEWHERE;
     setNotice(said);
     props.announce(said);
-    setRefresh((value) => value + 1);
+    reread();
     await props.onConflict();
   }
 
@@ -201,7 +210,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
         );
         props.announce(kind === "retry" ? "The step will run again." : "The step is skipped.");
       }
-      setRefresh((value) => value + 1);
+      reread();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         await conflict(error, kind);
@@ -212,6 +221,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
     } finally {
       setActing(false);
       setConfirm(null);
+      setReturnFocus(true);
     }
   }
 
@@ -346,6 +356,9 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                         canAdmin={props.canAdmin}
                         acting={acting}
                         reason={stepReason}
+                        refreshing={detail.status === "ready" && detail.refreshing}
+                        returnFocus={returnFocus}
+                        onFocused={() => setReturnFocus(false)}
                         onRetry={() => !stepReason && void act("retry", data.enrollment.id)}
                         onSkip={() => !acting && !stepReason && setConfirm("skip")}
                       />
@@ -602,6 +615,9 @@ function EnrollmentDetail({
   canAdmin,
   acting,
   reason,
+  refreshing,
+  returnFocus,
+  onFocused,
   onRetry,
   onSkip,
 }: {
@@ -613,10 +629,21 @@ function EnrollmentDetail({
   acting: boolean;
   /** Why Retry and Skip are refused, when the flow's state forbids them. */
   reason: string | null;
+  refreshing: boolean;
+  /** An action just finished: once the detail is read again, focus goes to Retry if it is still there, else to the heading. */
+  returnFocus: boolean;
+  onFocused: () => void;
   onRetry: () => void;
   onSkip: () => void;
 }) {
   const { enrollment } = path;
+  const heading = useRef<HTMLHeadingElement>(null);
+  const actions = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!returnFocus || refreshing) return;
+    (actions.current?.querySelector<HTMLElement>("button") ?? heading.current)?.focus();
+    onFocused();
+  }, [returnFocus, refreshing, onFocused]);
   const failedAt = enrollment.failed_node ? stepTitle(graph, names, enrollment.failed_node) : null;
   const retried = operatorDecisions(path, "retried");
   const skipped = operatorDecisions(path, "skipped");
@@ -629,7 +656,9 @@ function EnrollmentDetail({
   return (
     <>
       <div className="stack-tight">
-        <h3 className="strong">Person {shortId(enrollment.person_id)}</h3>
+        <h3 ref={heading} tabIndex={-1} className="strong">
+          Person {shortId(enrollment.person_id)}
+        </h3>
         <div className="row">
           <Pill tone={STATE_TONE[enrollment.state] ?? "neutral"}>{failed && failedAt ? `Failed at ${failedAt}` : enrollment.state}</Pill>
           <span className="faint">
@@ -642,7 +671,7 @@ function EnrollmentDetail({
       {failed ? (
         canAdmin ? (
           <>
-            <div className="row" role="group" aria-label="Admin actions">
+            <div ref={actions} className="row" role="group" aria-label="Admin actions">
               <Button variant="primary" aria-disabled={acting || reason !== null || undefined} onClick={onRetry}>
                 {failedAt ? `Retry ${failedAt}` : "Retry"}
               </Button>

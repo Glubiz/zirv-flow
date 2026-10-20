@@ -288,6 +288,45 @@ describe("the enrollment inspector", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Skip the failed step?" })).not.toBeInTheDocument());
   });
 
+  it("keeps the detail and the marks while it is read again after a skip, and keeps focus in the sheet", async () => {
+    let reads = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi(
+      routes({
+        routes: {
+          [`POST ${FLOW}/enrollments/${E1}/skip`]: () => json({ action: "skip", enrollment_id: E1, trace_id: TRACE }, 202),
+          [`GET ${FLOW}/enrollments/${E1}`]: async () => {
+            reads += 1;
+            if (reads === 1) return json(pathBody());
+            await gate;
+            return json(pathBody({ enrollment: failedEnrollment({ state: "waiting", failed_node: null, error: null }) }));
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openFailed(user);
+    await user.click(await within(sheet).findByRole("button", { name: "Skip it…" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "Skip the failed step?" })).getByRole("button", { name: "Skip the step" }));
+
+    // The read is held: the detail and the failed mark are still there, not a loading state.
+    await waitFor(() => expect(reads).toBe(2));
+    expect(within(sheet).queryByText("Loading the enrollment")).not.toBeInTheDocument();
+    expect(within(sheet).getByRole("heading", { name: /^Person/ })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: /Failed here/ })).toBeInTheDocument();
+
+    release?.();
+
+    // The buttons are gone with the failure, so focus is on the detail's heading, not on the page body.
+    await waitFor(() => expect(within(sheet).queryByRole("button", { name: "Skip it…" })).not.toBeInTheDocument());
+    await waitFor(() => expect(within(sheet).getByRole("heading", { name: /^Person/ })).toHaveFocus());
+    expect(document.body).not.toHaveFocus();
+  });
+
   it("refetches and says so when a retry meets a 409", async () => {
     const calls = mockApi(
       routes({ routes: { [`POST ${FLOW}/enrollments/${E1}/retry`]: () => problem(409, "Conflict", "the enrollment is not failed") } }),
