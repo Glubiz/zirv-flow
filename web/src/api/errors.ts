@@ -23,6 +23,16 @@ export interface ProblemDetails {
   errors?: FieldError[];
   /** What is wrong with a segment definition (`segment_invalid`). */
   issues?: DefinitionIssue[];
+  /** What is wrong with a flow's draft (`flow_invalid`). */
+  flowIssues?: FlowProblemIssue[];
+}
+
+/** One issue of a flow as a problem lists it: a fixed code and the step, connection or pointer it concerns. */
+export interface FlowProblemIssue {
+  code: string;
+  node?: string;
+  edge?: string;
+  at?: string;
 }
 
 export class ApiError extends Error {
@@ -34,6 +44,7 @@ export class ApiError extends Error {
   readonly code: string | null;
   readonly errors: FieldError[];
   readonly issues: DefinitionIssue[];
+  readonly flowIssues: FlowProblemIssue[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -46,6 +57,7 @@ export class ApiError extends Error {
     this.code = problem.code ?? null;
     this.errors = problem.errors ?? [];
     this.issues = problem.issues ?? [];
+    this.flowIssues = problem.flowIssues ?? [];
   }
 }
 
@@ -68,6 +80,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       code: text(body["code"]),
       errors: fieldErrors(body["errors"]),
       issues: definitionIssues(body["issues"]),
+      flowIssues: flowProblemIssues(body["flow_issues"]),
     });
   }
   return new ApiError({
@@ -113,5 +126,16 @@ function definitionIssues(value: unknown): DefinitionIssue[] {
     if (!isRecord(entry)) return [];
     const { pointer, code } = entry;
     return typeof pointer === "string" && typeof code === "string" ? [{ pointer, code }] : [];
+  });
+}
+
+function flowProblemIssues(value: unknown): FlowProblemIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry) || typeof entry["code"] !== "string") return [];
+    const node = text(entry["node"]);
+    const edge = text(entry["edge"]);
+    const at = text(entry["at"]);
+    return [{ code: entry["code"], ...(node ? { node } : {}), ...(edge ? { edge } : {}), ...(at ? { at } : {}) }];
   });
 }

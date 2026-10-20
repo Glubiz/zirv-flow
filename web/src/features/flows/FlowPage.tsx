@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, useResource } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel } from "../../ui";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
@@ -27,9 +27,18 @@ import {
   type Settings,
 } from "./model";
 import { layout } from "./layout";
+import { PublishDialog } from "./PublishDialog";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
 import { StepSheet } from "./StepSheet";
 import { useFlowDraft } from "./useFlowDraft";
+
+/** The settings section an issue about no step or connection belongs to, if any. */
+function sectionOfIssue(issue: FlowIssue) {
+  const found = placeIssues([issue]).bySection;
+  return SECTIONS.find((section) => found.get(section.id)?.length);
+}
+
+type FlowBody = components["schemas"]["FlowBody"];
 
 const TABS = [
   { id: "canvas", label: "Canvas" },
@@ -79,7 +88,7 @@ function FlowLoader({ workspaceId, flowId }: { workspaceId: string; flowId: stri
       </div>
     );
   }
-  return <Editor workspaceId={workspaceId} flow={flow.data} canWrite={access.canWrite} />;
+  return <Editor workspaceId={workspaceId} flow={flow.data} canWrite={access.canWrite} canAdmin={access.canAdmin} />;
 }
 
 function stateLabel(state: FlowDetail["state"], version: number | null): string | null {
@@ -88,8 +97,24 @@ function stateLabel(state: FlowDetail["state"], version: number | null): string 
   return null;
 }
 
-function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: FlowDetail; canWrite: boolean }) {
-  const archived = flow.state === "archived";
+interface Life {
+  state: FlowDetail["state"];
+  version: number | null;
+}
+
+function Editor({
+  workspaceId,
+  flow,
+  canWrite,
+  canAdmin,
+}: {
+  workspaceId: string;
+  flow: FlowDetail;
+  canWrite: boolean;
+  canAdmin: boolean;
+}) {
+  const [life, setLife] = useState<Life>({ state: flow.state, version: flow.current_version ?? null });
+  const archived = life.state === "archived";
   const editable = canWrite && !archived;
   const store = useFlowDraft({ workspaceId, flow, editable });
   const { draft } = store;
@@ -104,6 +129,8 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
   const nonce = useRef(0);
 
   const placed = useMemo(() => placeIssues(store.issues ?? []), [store.issues]);
@@ -119,27 +146,30 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
     return node ? `${kindLabel(node.type)}: ${wordsFor(node, names).title}` : "A step";
   }
 
-  const issueItems: IssueItem[] = (store.issues ?? []).map((issue, index) => {
-    let where = "The whole flow";
-    let openable = false;
-    if (issue.node !== undefined) {
-      where = issue.node === TRIGGER_ID ? "Trigger" : describeStep(issue.node);
-      openable = true;
-    } else if (issue.edge !== undefined) {
-      const edge = draft.graph.edges.find((candidate) => candidate.id === issue.edge);
-      where = edge ? `Connection from ${describeStep(edge.from)}` : "A connection";
-      openable = edge !== undefined && draft.graph.nodes.some((node) => node.id === edge.from);
-    } else {
-      const section = placed.bySection;
-      for (const entry of SECTIONS) {
-        if (section.get(entry.id)?.includes(issue)) {
+  /** The issues as entries, each with where it is in words and whether a step or section can be opened for it. */
+  function itemsFor(issues: readonly FlowIssue[]): IssueItem[] {
+    return issues.map((issue, index) => {
+      let where = "The whole flow";
+      let openable = false;
+      if (issue.node !== undefined) {
+        where = issue.node === TRIGGER_ID ? "Trigger" : describeStep(issue.node);
+        openable = true;
+      } else if (issue.edge !== undefined) {
+        const edge = draft.graph.edges.find((candidate) => candidate.id === issue.edge);
+        where = edge ? `Connection from ${describeStep(edge.from)}` : "A connection";
+        openable = edge !== undefined && draft.graph.nodes.some((node) => node.id === edge.from);
+      } else {
+        const entry = sectionOfIssue(issue);
+        if (entry) {
           where = entry.label;
           openable = true;
         }
       }
-    }
-    return { key: `${index}:${issue.code}:${issue.node ?? issue.edge ?? issue.at ?? ""}`, where, issue, openable };
-  });
+      return { key: `${index}:${issue.code}:${issue.node ?? issue.edge ?? issue.at ?? ""}`, where, issue, openable };
+    });
+  }
+
+  const issueItems = itemsFor(store.issues ?? []);
 
   /** The issues of a step, with those of its outgoing connections placed on the outputs they leave. */
   function issuesOfStep(id: string): FlowIssue[] {
@@ -186,9 +216,21 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
       const edge = draft.graph.edges.find((candidate) => candidate.id === issue.edge);
       if (edge) focusStep(edge.from, false);
     } else {
-      const entry = SECTIONS.find((section) => placed.bySection.get(section.id)?.includes(issue));
+      const entry = sectionOfIssue(issue);
       if (entry) openSettings(entry.id);
     }
+  }
+
+  /** Closes the publish dialog and shows what one of its issues is about. */
+  function pickFromDialog(item: IssueItem) {
+    setPublishing(false);
+    pick(item);
+  }
+
+  function published(result: { flow: FlowBody; version: { version: number } }) {
+    setPublishing(false);
+    setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
+    setAnnouncement(`Version ${result.version.version} of ${draft.name} is published.`);
   }
 
   const editGraph = (change: (graph: Graph) => Graph, key?: string) =>
@@ -241,7 +283,7 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
     }
   }
 
-  const version = stateLabel(store.meta.state, store.meta.currentVersion);
+  const version = stateLabel(life.state, life.version);
 
   return (
     <div className="fl-page">
@@ -253,7 +295,7 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
           <h1 className="fl-name-read">{draft.name}</h1>
         )}
         <span className="fl-state">
-          <StatePill state={store.meta.state} />
+          <StatePill state={life.state} />
           {version ? <span className="faint">{version}</span> : null}
         </span>
         <div className="fl-tabs" role="tablist" aria-label="Flow views" onKeyDown={onTabKey}>
@@ -284,6 +326,13 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
             <span className="muted">Saved</span>
           ) : null}
         </div>
+        {canAdmin && life.state !== "archived" ? (
+          <div className="fl-actions">
+            <Button variant="primary" onClick={() => setPublishing(true)}>
+              Publish…
+            </Button>
+          </div>
+        ) : null}
         {store.status === "error" ? (
           <div className="fl-retry">
             {store.failure ? <span className="faint">{store.failure.detail}</span> : null}
@@ -363,6 +412,26 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
         </div>
       ) : null}
       </div>
+
+      <div className="visually-hidden" role="status" aria-live="polite">
+        {announcement}
+      </div>
+
+      {publishing ? (
+        <PublishDialog
+          workspaceId={workspaceId}
+          flowId={flow.id}
+          flowName={draft.name}
+          graph={draft.graph}
+          names={names}
+          saveNow={store.saveNow}
+          itemsFor={(issues) => itemsFor(issues)}
+          onPick={pickFromDialog}
+          onPublished={published}
+          onRefused={store.adoptIssues}
+          onClose={() => setPublishing(false)}
+        />
+      ) : null}
 
       {doomed ? (
         <Dialog title="Delete this step?" onClose={() => setDeleting(null)}>
