@@ -1683,6 +1683,9 @@ mod tests {
     async fn taken(pool: &PgPool, ws: WorkspaceId, shard: Shard, limit: i64) -> (Vec<i64>, bool) {
         let mut tx = begin(pool).await.unwrap();
         let (rows, more) = take_rows(&mut tx, ws, shard, limit).await.unwrap();
+        // A dropped transaction rolls back only when its connection is next used, so the
+        // next call could run on another connection while these rows are still locked.
+        tx.rollback().await.unwrap();
         (rows.iter().map(|row| row.id).collect(), more)
     }
 
