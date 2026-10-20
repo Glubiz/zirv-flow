@@ -2208,3 +2208,200 @@ main:focus {
   color: var(--error-text);
   font-weight: 600;
 }
+
+/* The decisions of a trace as a tree. */
+.trace-tree {
+  margin: 0;
+  padding-left: 18px;
+  list-style: none;
+  border-left: 1px solid var(--line);
+}
+
+.trace-tree > li {
+  padding: 4px 0 4px 10px;
+  font-size: 14px;
+}
+
+.trace-tree .trace-tree {
+  margin-top: 2px;
+}
+
+/* Test path, counts and enrollment marks over the flow canvas. */
+.fl-node {
+  position: relative;
+}
+
+.fl-node-dim {
+  opacity: 0.42;
+}
+
+.fl-node-onpath {
+  border: 2px solid var(--focus);
+  padding: 9px 13px;
+}
+
+.fl-node-failed {
+  border: 2px solid var(--error-dot);
+  padding: 9px 13px;
+}
+
+.fl-step-no {
+  position: absolute;
+  top: -12px;
+  right: -10px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--link);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.fl-flow .react-flow__edge.fl-edge-path .react-flow__edge-path {
+  stroke: var(--focus);
+  stroke-width: 3;
+}
+
+.fl-mark {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.fl-mark-failed {
+  color: var(--error-text);
+}
+
+.fl-mark-retried,
+.fl-mark-skipped {
+  color: var(--attention-text);
+}
+
+.fl-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: auto;
+}
+
+.fl-count {
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--night);
+  color: var(--night-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fl-count-lite {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.fl-count-bad {
+  background: var(--error-dot);
+  color: #fff;
+}
+
+.fl-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 24px;
+  background: #fbf1d3;
+  border-bottom: 1px solid #e3c766;
+  color: #5c4100;
+  font-size: 14px;
+}
+
+.fl-card {
+  position: absolute;
+  z-index: 6;
+  top: 16px;
+  left: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(340px, calc(100% - 460px));
+  min-width: 260px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-popover);
+  font-size: 14px;
+}
+
+.fl-steps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fl-step-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.fl-step-n {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--link);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fl-step-n-bad {
+  background: var(--error-dot);
+}
+
+.fl-effect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+
+.fl-code {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: var(--radius-control);
+  background: var(--night);
+  color: #dfe6ec;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre;
+}
+
+.fl-sheet-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fl-sheet-section > h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}

@@ -22,6 +22,7 @@ import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
+import { TRIGGER_EDGE, type Overlay } from "./overlay";
 import {
   connectionWire,
   entryOf,
@@ -46,6 +47,11 @@ interface StepData extends Record<string, unknown> {
   issueCount: number;
   selected: boolean;
   editable: boolean;
+  /** The numbers this step has on a path, in order; empty when it is not on one. */
+  stepNumbers: readonly number[];
+  dim: boolean;
+  counts: { entered: number; waiting: number; failed: number } | null;
+  mark: { tone: string; text: string } | null;
 }
 
 type StepNode = Node<StepData, "step">;
@@ -56,7 +62,15 @@ function issuesLabel(count: number): string {
 
 const Step = memo(function Step({ data }: NodeProps<StepNode>) {
   const many = data.ports.length > 1;
-  const classes = ["fl-node", "nopan", data.selected ? "fl-node-selected" : "", data.issueCount > 0 ? "fl-node-issue" : ""]
+  const classes = [
+    "fl-node",
+    "nopan",
+    data.selected ? "fl-node-selected" : "",
+    data.issueCount > 0 ? "fl-node-issue" : "",
+    data.dim ? "fl-node-dim" : "",
+    data.stepNumbers.length > 0 ? "fl-node-onpath" : "",
+    data.mark ? `fl-node-${data.mark.tone}` : "",
+  ]
     .filter(Boolean)
     .join(" ");
   return (
@@ -78,6 +92,19 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
       </div>
       <div className="fl-title">{data.title}</div>
       <div className={data.mono ? "fl-detail mono" : "fl-detail"}>{data.detail}</div>
+      {data.stepNumbers.length > 0 ? (
+        <span className="fl-step-no" aria-hidden="true">
+          {data.stepNumbers.join(", ")}
+        </span>
+      ) : null}
+      {data.mark ? <span className={`fl-mark fl-mark-${data.mark.tone}`}>{data.mark.text}</span> : null}
+      {data.counts ? (
+        <div className="fl-counts">
+          <span className="fl-count">{data.counts.entered.toLocaleString("en")} entered</span>
+          {data.counts.waiting > 0 ? <span className="fl-count fl-count-lite">{data.counts.waiting.toLocaleString("en")} waiting</span> : null}
+          {data.counts.failed > 0 ? <span className="fl-count fl-count-bad">{data.counts.failed.toLocaleString("en")} failed</span> : null}
+        </div>
+      ) : null}
       {many ? (
         <div className="fl-ports" aria-hidden="true">
           {data.ports.map((port) => (
@@ -140,6 +167,8 @@ interface CanvasProps {
   onUndo: () => void;
   onDeleteRequest: (id: string) => void;
   onPickIssue: (item: IssueItem) => void;
+  /** Test path, counts or an enrollment drawn over the steps; nothing is drawn when absent. */
+  overlay?: Overlay;
   children?: ReactNode;
 }
 
@@ -279,10 +308,28 @@ function IssuesButton({
   );
 }
 
+function withCount(label: string, count: number | undefined): string {
+  return count === undefined ? label : `${label} · ${count.toLocaleString("en")}`;
+}
+
+/** What the overlay says about one step, as node data and as words for its accessible name. */
+function overlayFacts(overlay: Overlay | undefined, id: string) {
+  const stepNumbers = overlay?.steps?.get(id) ?? [];
+  const counts = overlay?.counts?.get(id) ?? null;
+  const mark = overlay?.marks?.get(id) ?? null;
+  const dim = overlay?.dimOthers === true && overlay.steps?.has(id) !== true;
+  const words = [
+    stepNumbers.length > 0 ? `, on the path as step ${stepNumbers.join(" and ")}` : "",
+    counts ? `, ${counts.entered} entered, ${counts.waiting} waiting, ${counts.failed} failed` : "",
+    mark ? `, ${mark.text}` : "",
+  ].join("");
+  return { words, data: { stepNumbers, dim, counts, mark } };
+}
+
 const ARROWS = ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"];
 
 function Surface(props: CanvasProps) {
-  const { graph, settings, names, placed, editable, selectedId, focusRequest } = props;
+  const { graph, settings, names, placed, editable, selectedId, focusRequest, overlay } = props;
   const container = useRef<HTMLDivElement>(null);
   const plan = useMemo(() => layout(graph), [graph]);
 
@@ -296,7 +343,8 @@ function Surface(props: CanvasProps) {
       const spot = plan.placed.get(id);
       if (!spot) continue;
       const count = placed.byNode.get(id)?.length ?? 0;
-      const trailing = count > 0 ? `, ${issuesLabel(count)}` : "";
+      const extra = overlayFacts(overlay, id);
+      const trailing = (count > 0 ? `, ${issuesLabel(count)}` : "") + extra.words;
       const base = {
         id,
         type: "step",
@@ -323,6 +371,7 @@ function Surface(props: CanvasProps) {
             issueCount: count,
             selected: base.selected,
             editable: false,
+            ...extra.data,
           },
         });
         continue;
@@ -341,17 +390,18 @@ function Surface(props: CanvasProps) {
           mono: node.type === "action.webhook",
           ports: portsOf(node).map((port) => ({
             id: port,
-            label: portLabel(node, port),
+            label: withCount(portLabel(node, port), overlay?.portCounts?.get(`${id}/${port}`)),
             name: `${portLabel(node, port)} output of ${words.title}`,
           })),
           issueCount: count,
           selected: base.selected,
           editable,
+          ...extra.data,
         },
       });
     }
     return list;
-  }, [plan, graph.nodes, settings, names, placed, selectedId, editable]);
+  }, [plan, graph.nodes, settings, names, placed, selectedId, editable, overlay]);
 
   const edges = useMemo(() => {
     const known = new Set(plan.order);
@@ -359,7 +409,7 @@ function Surface(props: CanvasProps) {
     const entry = entryOf(graph);
     if (entry) {
       list.push({
-        id: "__trigger-edge",
+        id: TRIGGER_EDGE,
         source: TRIGGER_ID,
         sourceHandle: "next",
         target: entry.id,
@@ -368,6 +418,7 @@ function Surface(props: CanvasProps) {
         selectable: false,
         focusable: false,
         deletable: false,
+        className: overlay?.pathEdges?.has(TRIGGER_EDGE) ? "fl-edge-path" : undefined,
       });
     }
     for (const edge of graph.edges) {
@@ -383,13 +434,13 @@ function Surface(props: CanvasProps) {
         selectable: false,
         focusable: false,
         deletable: false,
-        className: problems ? "fl-edge-error" : undefined,
+        className: problems ? "fl-edge-error" : overlay?.pathEdges?.has(edge.id) ? "fl-edge-path" : undefined,
         label: problems ? "Needs attention" : undefined,
         ariaLabel: problems ? problems.map((issue) => issueText(issue)).join(" ") : undefined,
       });
     }
     return list;
-  }, [plan, graph, placed.byEdge]);
+  }, [plan, graph, placed.byEdge, overlay]);
 
   function focusNode(id: string) {
     const target = Array.from(container.current?.querySelectorAll<HTMLElement>(".react-flow__node") ?? []).find(
