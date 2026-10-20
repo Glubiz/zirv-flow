@@ -140,6 +140,18 @@ async fn simulate(pool: PgPool, ordinal: usize) {
         "early wake claimed",
         "early wake put back",
         "wake moved an enrollment",
+        // The concurrent duplicates overlap for real, and each variant shows it: the fenced
+        // claim was skipped while A was open, the unfenced B was blocked on A, and A's ack was
+        // refused every way. A webhook B never waits on A, so only its finish is counted.
+        "fenced: A open while B claimed flow.step",
+        "fenced: claim skipped flow.step",
+        "fenced: claim skipped webhook.call",
+        "fenced: A's ack refused flow.step",
+        "fenced: A's ack refused webhook.call",
+        "unfenced: B blocked on A flow.step",
+        "unfenced: B finished without waiting on A webhook.call",
+        "unfenced: A's ack refused flow.step",
+        "unfenced: A's ack refused webhook.call",
     ] {
         assert!(
             driver.counts.get(mode).copied().unwrap_or(0) > 0,

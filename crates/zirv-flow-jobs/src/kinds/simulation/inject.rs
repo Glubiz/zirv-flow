@@ -1,4 +1,5 @@
-//! Failure injection. Every job goes through a seeded plan before its final successful run:
+//! Failure injection. Every job goes through a seeded plan of at least one failure before its
+//! final successful run:
 //!
 //! - **rollback**: the handler runs in its transaction, which is then rolled back; the lease
 //!   expires and the reaper returns the job;
@@ -6,15 +7,18 @@
 //!   lease expires, the reaper returns the job and it runs again, which must change nothing;
 //! - **concurrent duplicate**: worker A runs the handler and holds its transaction open while
 //!   its lease expires and worker B claims the job and runs it to commit; A's completion must
-//!   then find the lease gone, and A rolls back.
+//!   then find the lease gone, and A rolls back. The overlap is read from the lock state, not
+//!   timed (see `concurrent_duplicate`).
 //!
 //! The runs follow the worker's `execute`: begin, `lock_lease`, the handler, `complete_job`,
-//! commit. The final run of a plan also stands for the success of a job nothing was injected into.
+//! commit.
 
+use std::cell::Cell;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_engine::sim::rng::Rng;
@@ -389,12 +393,18 @@ impl Driver<'_> {
     ///
     /// - **fenced** (A took the lease lock first, as the worker does): the claim query skips the
     ///   job while A's transaction holds the key-share lock on its row, so B cannot claim it.
-    ///   A's ack finds the lease gone and A rolls back; only then does B claim and run.
+    ///   The driver checks that A's transaction is still open when B's claim runs, and that the
+    ///   claim was skipped. A's ack finds the lease gone and A rolls back; only then does B
+    ///   claim and run.
     /// - **unfenced** (A reached its handler without the lease lock, which no worker does, so
-    ///   the data fences are all that stand between the two): B claims and runs the job to
-    ///   commit while A is open. On a `flow.step` B waits for the row lock A holds on the
-    ///   enrollment, and on a `webhook.call` B commits first, since A holds no lock on the job
-    ///   row. A's ack must find the lease gone either way, and A rolls back.
+    ///   the data fences are all that stand between the two): B claims and runs the job while A
+    ///   is open. A acts only once B is provably blocked on a lock A holds (the lock state is
+    ///   read from `pg_stat_activity` and `pg_blocking_pids`), or once B has finished without
+    ///   ever waiting on A (a `webhook.call`: A holds no lock on anything B needs). A's ack must
+    ///   find the lease gone either way, and A rolls back, which lets a blocked B go on.
+    ///
+    /// Nothing here is decided by a sleep: the only waits are polls of the lock state, bounded
+    /// and loud.
     async fn concurrent_duplicate(
         &mut self,
         claimed_a: ClaimedJob,
@@ -404,7 +414,12 @@ impl Driver<'_> {
         let w = self.w;
         let id = claimed_a.id;
         let a_token = claimed_a.lease_token;
+        let kind = due.kind;
         let mut tx_a = zirv_flow_store::begin(&w.env.pool).await.unwrap();
+        let a_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx_a)
+            .await
+            .unwrap();
         if fenced {
             assert!(
                 lock_lease(&mut tx_a, id, a_token).await.unwrap(),
@@ -419,8 +434,21 @@ impl Driver<'_> {
             return Err("the reaper did not return the job under worker A".to_owned());
         }
         if fenced {
+            // B's claim runs while A's transaction is open: A is idle inside it.
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid = $1")
+                    .bind(a_pid)
+                    .fetch_optional(&w.env.pool)
+                    .await
+                    .unwrap();
+            if state.as_deref() != Some("idle in transaction") {
+                return Err(format!(
+                    "worker A's transaction was not open when B claimed: {state:?}"
+                ));
+            }
+            self.bump(format!("fenced: A open while B claimed {kind}"));
             match self.try_claim(due).await {
-                Some(None) => self.bump(format!("claim skipped under a lease lock {}", due.kind)),
+                Some(None) => self.bump(format!("fenced: claim skipped {kind}")),
                 Some(Some(_)) => {
                     return Err(
                         "a second worker claimed the job while the first held its lease lock"
@@ -434,7 +462,7 @@ impl Driver<'_> {
             if acked {
                 return Err("worker A's ack succeeded after its lease was returned".to_owned());
             }
-            self.bump("zombie ack refused");
+            self.bump(format!("fenced: A's ack refused {kind}"));
             let Some(claimed_b) = self.claim(due).await else {
                 return Err("worker B could not claim the job".to_owned());
             };
@@ -444,27 +472,38 @@ impl Driver<'_> {
         let Some(claimed_b) = self.claim(due).await else {
             return Err("worker B could not claim the job".to_owned());
         };
-        // A webhook's B commits without waiting for A, so A is slow; a step's B waits for A.
-        let pause = Duration::from_millis(if due.kind == WEBHOOK_JOB_KIND {
-            120
-        } else {
-            15
-        });
-        let b = w.final_run(&claimed_b);
-        let a = async move {
-            tokio::time::sleep(pause).await;
+        let finished = Cell::new(false);
+        let b = async {
+            let result = w.final_run(&claimed_b).await;
+            finished.set(true);
+            result
+        };
+        let a = async {
+            let overlap = wait_for_overlap(&w.env.pool, a_pid, &finished).await;
             let acked = complete_job(&mut *tx_a, id, a_token).await.unwrap();
             tx_a.rollback().await.unwrap();
-            acked
+            (overlap, acked)
         };
-        let (result_b, acked) =
+        let (result_b, (overlap, acked)) =
             tokio::time::timeout(Duration::from_secs(120), async { tokio::join!(b, a) })
                 .await
                 .map_err(|_| "workers A and B did not finish in 120 s: a deadlock".to_owned())?;
+        match overlap {
+            Overlap::Blocked => self.bump(format!("unfenced: B blocked on A {kind}")),
+            Overlap::FinishedFirst => {
+                self.bump(format!("unfenced: B finished without waiting on A {kind}"));
+            }
+            Overlap::Stuck => {
+                return Err(format!(
+                    "worker B neither blocked on worker A nor finished in {} s",
+                    OVERLAP_WAIT.as_secs()
+                ));
+            }
+        }
         if acked {
             return Err("worker A's ack succeeded after its lease was taken over".to_owned());
         }
-        self.bump("zombie ack refused");
+        self.bump(format!("unfenced: A's ack refused {kind}"));
         result_b
     }
 
@@ -497,5 +536,45 @@ impl Driver<'_> {
         if moved {
             self.plan_events(watch.enrollment).await;
         }
+    }
+}
+
+/// How long worker A waits for worker B to block on it or finish before the run reports a stall.
+const OVERLAP_WAIT: Duration = Duration::from_secs(30);
+/// How often the lock state is read while waiting. It only paces the polls.
+const OVERLAP_POLL: Duration = Duration::from_millis(5);
+
+/// How worker B stood towards worker A's open transaction when A acted.
+enum Overlap {
+    /// A backend was waiting on a lock that A holds.
+    Blocked,
+    /// B ran to the end without waiting on A.
+    FinishedFirst,
+    /// Neither happened within the bound.
+    Stuck,
+}
+
+/// Waits until some backend is blocked on a lock held by backend `holder`, or `finished` is set.
+async fn wait_for_overlap(pool: &PgPool, holder: i32, finished: &Cell<bool>) -> Overlap {
+    let started = Instant::now();
+    loop {
+        if finished.get() {
+            return Overlap::FinishedFirst;
+        }
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked > 0 {
+            return Overlap::Blocked;
+        }
+        if started.elapsed() > OVERLAP_WAIT {
+            return Overlap::Stuck;
+        }
+        tokio::time::sleep(OVERLAP_POLL).await;
     }
 }
