@@ -262,6 +262,40 @@ pub(crate) fn bound(date: Date) -> String {
     )
 }
 
+/// The records that name `enrollment` as a subject, oldest first, at most `limit`, recorded at or after
+/// `since` (the enrollment's creation, which prunes the partitions). The flag is true when more
+/// existed. Errors are bounded-read errors, so a timeout is reported as one.
+pub(crate) async fn list_enrollment_decisions(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+    since: OffsetDateTime,
+    limit: u32,
+) -> Result<(Vec<Decision>, bool), StoreError> {
+    let rows: Vec<DecisionRow> = sqlx::query_as(
+        "SELECT id, trace_id, recorded_at, action, outcome, reason, cause_kind, cause_id, \r
+                subject_ids, job_id, attempt \r
+         FROM decision_records \r
+         WHERE workspace_id = $1 AND subject_ids ? 'enrollment' \r
+           AND (subject_ids ->> 'enrollment') = $2 AND recorded_at >= $3 \r
+         ORDER BY recorded_at, id LIMIT $4",
+    )
+    .bind(workspace.as_uuid())
+    .bind(enrollment.to_string())
+    .bind(since)
+    .bind(i64::from(limit) + 1)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::bounded)?;
+    let truncated = rows.len() > limit as usize;
+    let decisions = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(DecisionRow::into_decision)
+        .collect::<Result<_, _>>()?;
+    Ok((decisions, truncated))
+}
+
 #[cfg(test)]
 mod tests {
     use time::macros::date;

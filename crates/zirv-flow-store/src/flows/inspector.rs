@@ -1,0 +1,762 @@
+//! The flow enrollment inspector's reads (architecture 12.3 and 12.4): a flow's enrollments, one
+//! enrollment's path, and the per-node counts of a version. Every read runs in one
+//! `REPEATABLE READ READ ONLY` snapshot under a statement timeout, so a slow scan is cancelled and
+//! reported as a timeout (`StoreError::is_timeout`) and the parts of a response agree.
+
+use std::time::Duration;
+
+use hashbrown::HashMap;
+use sqlx::prelude::FromRow;
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
+use time::OffsetDateTime;
+use uuid::Uuid;
+use zirv_flow_core::WorkspaceId;
+
+use super::runtime::EnrollmentStatus;
+use crate::StoreError;
+use crate::bounded::begin_snapshot_for;
+use crate::decisions::{Decision, list_enrollment_decisions};
+
+/// How long an inspector read may run.
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most decisions one enrollment's path carries.
+pub const MAX_PATH_DECISIONS: u32 = 1000;
+
+/// The step row of the flow's goal setting, which no node of the graph has.
+pub const SETTINGS_GOAL_NODE: &str = "settings.goal";
+
+/// Which enrollments to list.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EnrollmentFilter {
+    pub state: Option<EnrollmentStatus>,
+    pub version: Option<i32>,
+    /// Matches the node an enrollment is at or the node it failed at.
+    pub node: Option<String>,
+}
+
+/// Where a page ended: the next page starts after this enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnrollmentCursor {
+    pub created_at: OffsetDateTime,
+    pub id: Uuid,
+}
+
+/// An enrollment as the inspector shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnrollmentSummary {
+    pub id: Uuid,
+    pub person_id: Uuid,
+    pub flow_version: i32,
+    pub status: EnrollmentStatus,
+    pub node: String,
+    pub failed_node: Option<String>,
+    pub exit_reason: Option<String>,
+    pub error: Option<String>,
+    pub wake_at: Option<OffsetDateTime>,
+    pub trace_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub ended_at: Option<OffsetDateTime>,
+}
+
+#[derive(FromRow)]
+struct SummaryRow {
+    id: Uuid,
+    person_id: Uuid,
+    flow_version: i32,
+    state: String,
+    node: String,
+    failed_node: Option<String>,
+    exit_reason: Option<String>,
+    error: Option<String>,
+    wake_at: Option<OffsetDateTime>,
+    trace_id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    ended_at: Option<OffsetDateTime>,
+}
+
+impl SummaryRow {
+    fn into_summary(self) -> Result<EnrollmentSummary, StoreError> {
+        let status = EnrollmentStatus::parse(&self.state)
+            .ok_or_else(|| StoreError::query(sqlx::Error::Decode("unknown state".into())))?;
+        Ok(EnrollmentSummary {
+            id: self.id,
+            person_id: self.person_id,
+            flow_version: self.flow_version,
+            status,
+            node: self.node,
+            failed_node: self.failed_node,
+            exit_reason: self.exit_reason,
+            error: self.error,
+            wake_at: self.wake_at,
+            trace_id: self.trace_id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            ended_at: self.ended_at,
+        })
+    }
+}
+
+const SUMMARY_COLUMNS: &str = "id, person_id, flow_version, state, node, failed_node, \
+     exit_reason, error, wake_at, trace_id, created_at, updated_at, ended_at";
+
+/// A page of a flow's enrollments, newest first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnrollmentPage {
+    pub enrollments: Vec<EnrollmentSummary>,
+    /// Pass as `before` for the next page; absent on the last.
+    pub next: Option<EnrollmentCursor>,
+}
+
+async fn flow_exists(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flow: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM flows WHERE workspace_id = $1 AND id = $2)")
+        .bind(workspace.as_uuid())
+        .bind(flow)
+        .fetch_one(connection)
+        .await
+        .map_err(StoreError::bounded)
+}
+
+/// Appends the statement of [`list_flow_enrollments`]. Only the predicates asked for are in it, so
+/// the planner can use the index that matches them.
+fn list_query(
+    workspace: WorkspaceId,
+    flow: Uuid,
+    filter: &EnrollmentFilter,
+    limit: i64,
+    before: Option<EnrollmentCursor>,
+) -> QueryBuilder<Postgres> {
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "SELECT {SUMMARY_COLUMNS} FROM enrollments WHERE workspace_id = "
+    ));
+    query.push_bind(workspace.as_uuid());
+    query.push(" AND flow_id = ").push_bind(flow);
+    if let Some(state) = filter.state {
+        query.push(" AND state = ").push_bind(state.as_str());
+    }
+    if let Some(version) = filter.version {
+        query.push(" AND flow_version = ").push_bind(version);
+    }
+    if let Some(node) = &filter.node {
+        query.push(" AND (node = ").push_bind(node.clone());
+        query.push(" OR failed_node = ").push_bind(node.clone());
+        query.push(")");
+    }
+    if let Some(cursor) = before {
+        query
+            .push(" AND (created_at, id) < (")
+            .push_bind(cursor.created_at);
+        query.push(", ").push_bind(cursor.id);
+        query.push(")");
+    }
+    query
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+        .push_bind(limit);
+    query
+}
+
+/// The enrollments of a flow, newest first by `(created_at, id)`, at most `limit`, after `before`.
+/// `None` when the workspace has no such flow.
+pub async fn list_flow_enrollments(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    filter: &EnrollmentFilter,
+    limit: u32,
+    before: Option<EnrollmentCursor>,
+) -> Result<Option<EnrollmentPage>, StoreError> {
+    let limit = i64::from(limit.max(1));
+    let mut tx = begin_snapshot_for(pool, TIMEOUT).await?;
+    if !flow_exists(&mut tx, workspace, flow).await? {
+        return Ok(None);
+    }
+    let rows: Vec<SummaryRow> = list_query(workspace, flow, filter, limit + 1, before)
+        .build_query_as()
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::bounded)?;
+    drop(tx);
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let more = rows.len() > limit;
+    let enrollments = rows
+        .into_iter()
+        .take(limit)
+        .map(SummaryRow::into_summary)
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = if more {
+        enrollments.last().map(|last| EnrollmentCursor {
+            created_at: last.created_at,
+            id: last.id,
+        })
+    } else {
+        None
+    };
+    Ok(Some(EnrollmentPage { enrollments, next }))
+}
+
+/// A node an enrollment has run.
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub struct PathStep {
+    pub id: Uuid,
+    pub node_id: String,
+    pub outcome: String,
+    pub error: Option<String>,
+    pub attempts: i32,
+    pub started_at: OffsetDateTime,
+}
+
+/// The event an enrollment is asleep at, with the time it gives up.
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub struct PathEventWait {
+    pub event_name: String,
+    pub timeout_at: OffsetDateTime,
+}
+
+/// One enrollment's path: its steps, its waits and every decision that names it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnrollmentPath {
+    pub enrollment: EnrollmentSummary,
+    pub steps: Vec<PathStep>,
+    pub event_waits: Vec<PathEventWait>,
+    pub decisions: Vec<Decision>,
+    /// True when the enrollment has more decisions than [`MAX_PATH_DECISIONS`].
+    pub truncated: bool,
+}
+
+/// An enrollment of `flow` with its steps, waits and decisions, or `None` when the workspace has
+/// no such enrollment of that flow.
+pub async fn load_enrollment_path(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    enrollment: Uuid,
+) -> Result<Option<EnrollmentPath>, StoreError> {
+    let mut tx = begin_snapshot_for(pool, TIMEOUT).await?;
+    let row: Option<SummaryRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SUMMARY_COLUMNS} FROM enrollments \
+         WHERE workspace_id = $1 AND flow_id = $2 AND id = $3"
+    )))
+    .bind(workspace.as_uuid())
+    .bind(flow)
+    .bind(enrollment)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let summary = row.into_summary()?;
+    let steps: Vec<PathStep> = sqlx::query_as(
+        "SELECT id, node_id, outcome, error, attempts, started_at FROM step_executions \
+         WHERE enrollment_id = $1 ORDER BY started_at, node_id",
+    )
+    .bind(enrollment)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    let event_waits: Vec<PathEventWait> = sqlx::query_as(
+        "SELECT event_name, timeout_at FROM enrollment_waits \
+         WHERE enrollment_id = $1 ORDER BY event_name",
+    )
+    .bind(enrollment)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    let (decisions, truncated) = list_enrollment_decisions(
+        &mut tx,
+        workspace,
+        enrollment,
+        summary.created_at,
+        MAX_PATH_DECISIONS,
+    )
+    .await?;
+    Ok(Some(EnrollmentPath {
+        enrollment: summary,
+        steps,
+        event_waits,
+        decisions,
+        truncated,
+    }))
+}
+
+/// What happened at one node of a version, counted from the rows.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NodeCount {
+    /// Step executions of the node.
+    pub entered: i64,
+    /// Step executions that ended `done`.
+    pub completed: i64,
+    /// Enrollments of the version waiting at the node now.
+    pub waiting: i64,
+    /// Step executions that ended `failed`.
+    pub failed: i64,
+}
+
+/// The counts of every node that has rows, by node id (the settings goal as
+/// [`SETTINGS_GOAL_NODE`]), for one version of a flow; computed on read. `None` when the workspace
+/// has no such flow version.
+pub async fn version_node_counts(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    version: i32,
+) -> Result<Option<HashMap<String, NodeCount>>, StoreError> {
+    let mut tx = begin_snapshot_for(pool, TIMEOUT).await?;
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM flow_versions v JOIN flows f ON f.id = v.flow_id \
+         WHERE f.workspace_id = $1 AND v.flow_id = $2 AND v.version = $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(flow)
+    .bind(version)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    if !known {
+        return Ok(None);
+    }
+    let steps: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT s.node_id, count(*), count(*) FILTER (WHERE s.outcome = 'done'), \
+                count(*) FILTER (WHERE s.outcome = 'failed') \
+         FROM enrollments e JOIN step_executions s ON s.enrollment_id = e.id \
+         WHERE e.flow_id = $1 AND e.flow_version = $2 AND e.workspace_id = $3 \
+         GROUP BY s.node_id",
+    )
+    .bind(flow)
+    .bind(version)
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    let waiting: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT node, count(*) FROM enrollments \
+         WHERE flow_id = $1 AND state = 'waiting' AND flow_version = $2 AND workspace_id = $3 \
+         GROUP BY node",
+    )
+    .bind(flow)
+    .bind(version)
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    drop(tx);
+    let mut counts: HashMap<String, NodeCount> = HashMap::new();
+    for (node, entered, completed, failed) in steps {
+        let count = counts.entry(node).or_default();
+        count.entered = entered;
+        count.completed = completed;
+        count.failed = failed;
+    }
+    for (node, waiting) in waiting {
+        counts.entry(node).or_default().waiting = waiting;
+    }
+    Ok(Some(counts))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::PgPool;
+    use time::Duration as Span;
+
+    use super::*;
+    use crate::flows::tests_support::{create, edit, publish, trace, workspace};
+    use crate::{GraphPoint, NewDecision, append_decision};
+
+    struct Seed {
+        ws: WorkspaceId,
+        flow: Uuid,
+        version: i32,
+        state: &'static str,
+        node: &'static str,
+        failed_node: Option<&'static str>,
+        created_at: OffsetDateTime,
+    }
+
+    impl Seed {
+        fn new(ws: WorkspaceId, flow: Uuid, state: &'static str, node: &'static str) -> Self {
+            Self {
+                ws,
+                flow,
+                version: 1,
+                state,
+                node,
+                failed_node: None,
+                created_at: OffsetDateTime::now_utc(),
+            }
+        }
+    }
+
+    /// An enrollment of a new person; returns its id.
+    async fn seed(pool: &PgPool, seed: Seed) -> Uuid {
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(seed.ws.as_uuid())
+            .execute(pool)
+            .await
+            .unwrap();
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id, error, failed_node, created_at, updated_at, \
+                 ended_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $1, $1, 'api', 't', \
+                     CASE WHEN $6 = 'failed' THEN 'boom' END, $8, $9, $9, \
+                     CASE WHEN $6 IN ('completed', 'exited') THEN $9 END)",
+        )
+        .bind(id)
+        .bind(seed.ws.as_uuid())
+        .bind(seed.flow)
+        .bind(seed.version)
+        .bind(person)
+        .bind(seed.state)
+        .bind(seed.node)
+        .bind(seed.failed_node)
+        .bind(seed.created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn step(pool: &PgPool, ws: WorkspaceId, enrollment: Uuid, node: &str, outcome: &str) {
+        sqlx::query(
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome, error) \
+             VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 = 'failed' THEN 'boom' END)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(enrollment)
+        .bind(node)
+        .bind(outcome)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn at(minutes: i64) -> OffsetDateTime {
+        OffsetDateTime::UNIX_EPOCH + Span::days(20_000) + Span::minutes(minutes)
+    }
+
+    async fn published_flow(pool: &PgPool, slug: &str) -> (WorkspaceId, Uuid) {
+        let ws = workspace(pool, slug).await;
+        let flow = create(pool, ws, "Welcome").await;
+        publish(pool, ws, flow.id).await.unwrap();
+        edit(pool, ws, flow.id, "second").await;
+        publish(pool, ws, flow.id).await.unwrap();
+        (ws, flow.id)
+    }
+
+    fn ids(page: &EnrollmentPage) -> Vec<Uuid> {
+        page.enrollments.iter().map(|e| e.id).collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn pages_have_no_duplicates_or_gaps_and_the_filters_narrow_them(pool: PgPool) {
+        let (ws, flow) = published_flow(&pool, "list").await;
+        // Created at 0, 1, 2, 3, 3 minutes: the last two share a time, so the id orders them.
+        let rows = [
+            ("failed", "a", Some("b"), 1, 0),
+            ("waiting", "b", None, 1, 1),
+            ("active", "a", None, 1, 2),
+            ("active", "a", None, 1, 3),
+            ("active", "a", None, 2, 3),
+        ];
+        let mut all = Vec::new();
+        for (state, node, failed_node, version, minute) in rows {
+            let mut one = Seed::new(ws, flow, state, node);
+            one.failed_node = failed_node;
+            one.version = version;
+            one.created_at = at(minute);
+            all.push((minute, seed(&pool, one).await));
+        }
+        all.sort_by_key(|entry| std::cmp::Reverse(*entry));
+        let newest_first: Vec<Uuid> = all.iter().map(|(_, id)| *id).collect();
+        let none = EnrollmentFilter::default();
+
+        let first = list_flow_enrollments(&pool, ws, flow, &none, 2, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = list_flow_enrollments(&pool, ws, flow, &none, 2, first.next)
+            .await
+            .unwrap()
+            .unwrap();
+        let third = list_flow_enrollments(&pool, ws, flow, &none, 2, second.next)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut seen = ids(&first);
+        seen.extend(ids(&second));
+        seen.extend(ids(&third));
+        assert!(first.next.is_some() && second.next.is_some() && third.next.is_none());
+        assert_eq!(seen, newest_first, "newest first, no duplicate, no gap");
+
+        let by_minute = |minute: i64| all.iter().find(|(m, _)| *m == minute).unwrap().1;
+        let waiting = EnrollmentFilter {
+            state: Some(EnrollmentStatus::Waiting),
+            ..none.clone()
+        };
+        let page = list_flow_enrollments(&pool, ws, flow, &waiting, 50, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids(&page), [by_minute(1)]);
+        let v2 = EnrollmentFilter {
+            version: Some(2),
+            ..none.clone()
+        };
+        let page = list_flow_enrollments(&pool, ws, flow, &v2, 50, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.enrollments.len(), 1);
+        assert_eq!(page.enrollments[0].flow_version, 2);
+        let at_b = EnrollmentFilter {
+            node: Some("b".into()),
+            ..none.clone()
+        };
+        let page = list_flow_enrollments(&pool, ws, flow, &at_b, 50, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut found = ids(&page);
+        found.sort();
+        let mut want = vec![by_minute(0), by_minute(1)];
+        want.sort();
+        assert_eq!(
+            found, want,
+            "a node filter matches the node and the failed node"
+        );
+
+        let other = workspace(&pool, "elsewhere").await;
+        let elsewhere = list_flow_enrollments(&pool, other, flow, &none, 5, None).await;
+        assert!(elsewhere.unwrap().is_none());
+        let unknown = list_flow_enrollments(&pool, ws, Uuid::now_v7(), &none, 5, None).await;
+        assert!(unknown.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_counts_of_a_version_match_a_hand_count(pool: PgPool) {
+        let (ws, flow) = published_flow(&pool, "counts").await;
+        let done = seed(&pool, Seed::new(ws, flow, "completed", "c")).await;
+        let waiting = seed(&pool, Seed::new(ws, flow, "waiting", "b")).await;
+        let mut stuck = Seed::new(ws, flow, "failed", "b");
+        stuck.failed_node = Some("b");
+        let failed = seed(&pool, stuck).await;
+        let mut later = Seed::new(ws, flow, "waiting", "b");
+        later.version = 2;
+        let other_version = seed(&pool, later).await;
+        for (enrollment, node, outcome) in [
+            (done, "a", "done"),
+            (done, "b", "done"),
+            (done, "c", "done"),
+            (done, SETTINGS_GOAL_NODE, "done"),
+            (waiting, "a", "done"),
+            (waiting, "b", "waiting"),
+            (failed, "a", "done"),
+            (failed, "b", "failed"),
+            (other_version, "a", "done"),
+        ] {
+            step(&pool, ws, enrollment, node, outcome).await;
+        }
+
+        let counts = version_node_counts(&pool, ws, flow, 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let count = |node: &str| counts.get(node).cloned().unwrap_or_default();
+        let expect = |entered, completed, waiting, failed| NodeCount {
+            entered,
+            completed,
+            waiting,
+            failed,
+        };
+        assert_eq!(count("a"), expect(3, 3, 0, 0));
+        assert_eq!(count("b"), expect(3, 1, 1, 1));
+        assert_eq!(count("c"), expect(1, 1, 0, 0));
+        assert_eq!(count(SETTINGS_GOAL_NODE), expect(1, 1, 0, 0));
+        assert_eq!(count("nowhere"), NodeCount::default());
+        let missing = version_node_counts(&pool, ws, flow, 9).await.unwrap();
+        assert!(missing.is_none());
+        let other = workspace(&pool, "elsewhere").await;
+        let elsewhere = version_node_counts(&pool, other, flow, 1).await.unwrap();
+        assert!(elsewhere.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_path_has_the_steps_waits_and_decisions_of_that_enrollment_only(pool: PgPool) {
+        let (ws, flow) = published_flow(&pool, "path").await;
+        let mine = seed(&pool, Seed::new(ws, flow, "waiting", "b")).await;
+        let theirs = seed(&pool, Seed::new(ws, flow, "active", "a")).await;
+        step(&pool, ws, mine, "a", "done").await;
+        step(&pool, ws, theirs, "a", "done").await;
+        sqlx::query(
+            "INSERT INTO enrollment_waits (workspace_id, enrollment_id, person_id, event_name, \
+                wake_version, timeout_at) \
+             SELECT workspace_id, id, person_id, 'opened', 0, now() FROM enrollments WHERE id = $1",
+        )
+        .bind(mine)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (enrollment, outcome) in [(mine, "done"), (theirs, "done"), (mine, "waiting")] {
+            append_decision(
+                &pool,
+                &NewDecision {
+                    graph: Some(GraphPoint {
+                        version: 1,
+                        node: Some("a".into()),
+                    }),
+                    workspace_id: ws,
+                    trace: trace(),
+                    action: "flow.step",
+                    outcome,
+                    reason: None,
+                    subject_ids: vec![("flow", flow), ("enrollment", enrollment)],
+                    job: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let path = load_enrollment_path(&pool, ws, flow, mine)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(path.enrollment.id, mine);
+        assert_eq!(path.steps.len(), 1);
+        assert_eq!(path.event_waits.len(), 1);
+        assert_eq!(path.event_waits[0].event_name, "opened");
+        assert_eq!(path.decisions.len(), 2);
+        assert!(!path.truncated);
+        assert_eq!(path.decisions[0].subject_ids["version"], json!(1));
+        assert_eq!(path.decisions[0].subject_ids["node"], "a");
+        // Another flow's or workspace's enrollment is not found.
+        let wrong_flow = load_enrollment_path(&pool, ws, Uuid::now_v7(), mine).await;
+        assert!(wrong_flow.unwrap().is_none());
+        let other = workspace(&pool, "elsewhere").await;
+        let elsewhere = load_enrollment_path(&pool, other, flow, mine).await;
+        assert!(elsewhere.unwrap().is_none());
+    }
+
+    /// The plan of `sql` mentions `index`.
+    async fn plan_uses(pool: &PgPool, sql: &str, index: &str) -> bool {
+        let mut tx = pool.begin().await.unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {sql}")))
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        let text = plan.join("\n");
+        eprintln!("{sql}\n{text}");
+        text.contains(index)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_read_uses_its_index(pool: PgPool) {
+        let (ws, flow) = published_flow(&pool, "explain").await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 20000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
+                node, occurrence_id, trace_id, cause_kind, cause_id, created_at, ended_at) \
+             SELECT gen_random_uuid(), $1, $2, 1 + (p.n % 2), p.id, \
+                    CASE WHEN p.n % 50 = 0 THEN 'completed' ELSE 'exited' END, 'a', \
+                    gen_random_uuid(), gen_random_uuid(), 'api', 't', \
+                    now() - make_interval(secs => p.n), now() \
+             FROM (SELECT id, row_number() OVER () AS n FROM people WHERE workspace_id = $1) p",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
+                cause_kind, cause_id, subject_ids) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'flow.step', 'done', 'api', 't', \
+                jsonb_build_object('enrollment', gen_random_uuid()::text) \
+             FROM generate_series(1, 20000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        for table in ["people", "enrollments", "decision_records"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE {table}")))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let (w, f) = (ws.as_uuid(), flow);
+        let base = format!("FROM enrollments WHERE workspace_id = '{w}' AND flow_id = '{f}'");
+        let order = "ORDER BY created_at DESC, id DESC LIMIT 51";
+        let e = Uuid::now_v7();
+
+        let checks = [
+            (
+                format!("SELECT id {base} {order}"),
+                "enrollments_flow_list_idx",
+            ),
+            (
+                format!("SELECT id {base} AND state = 'completed' {order}"),
+                "enrollments_flow_state_list_idx",
+            ),
+            (
+                format!("SELECT id {base} AND flow_version = 2 {order}"),
+                "enrollments_flow_version_list_idx",
+            ),
+            (
+                format!(
+                    "SELECT s.node_id, count(*) FROM enrollments e \
+                     JOIN step_executions s ON s.enrollment_id = e.id \
+                     WHERE e.flow_id = '{f}' AND e.flow_version = 1 AND e.workspace_id = '{w}' \
+                     GROUP BY s.node_id"
+                ),
+                "enrollments_flow_version_list_idx",
+            ),
+            (
+                format!(
+                    "SELECT node, count(*) FROM enrollments WHERE flow_id = '{f}' \
+                     AND state = 'completed' AND flow_version = 1 AND workspace_id = '{w}' \
+                     GROUP BY node"
+                ),
+                "enrollments_flow_state_idx",
+            ),
+            (
+                format!(
+                    "SELECT id FROM decision_records WHERE workspace_id = '{w}' \
+                     AND subject_ids ? 'enrollment' AND (subject_ids ->> 'enrollment') = '{e}' \
+                     AND recorded_at >= now() - interval '1 day' \
+                     ORDER BY recorded_at, id LIMIT 1001"
+                ),
+                "decision_records_enrollment_idx",
+            ),
+        ];
+        for (sql, index) in checks {
+            assert!(plan_uses(&pool, &sql, index).await, "{index}: {sql}");
+        }
+    }
+}
