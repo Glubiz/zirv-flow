@@ -1489,3 +1489,52 @@ main:focus {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* Sheet: a non-modal slide-over panel. The page that hosts it positions it. */
+.sheet {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  overflow: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-popover);
+}
+
+.sheet:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.sheet-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-eyebrow {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.sheet-title {
+  margin: 4px 0 0;
+  font-size: 21px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+}
