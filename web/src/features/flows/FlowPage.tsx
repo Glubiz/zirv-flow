@@ -604,6 +604,7 @@ function Editor({
             state={life.state}
             current={life.version}
             canPublish={canAdmin && !archived}
+            publishing={inFlight}
             onPublish={openPublish}
             onView={view}
           />

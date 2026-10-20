@@ -142,3 +142,24 @@ describe("a publish result after the editor is gone", () => {
     other.remove();
   });
 });
+
+describe("the empty Versions view while a publish runs", () => {
+  it("shows Publishing… and does not open the dialog", async () => {
+    const publish = deferred();
+    mockApi({
+      ...flowRoutes(),
+      ...publishRoute(() => publish.pending),
+      [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
+    });
+    const user = userEvent.setup();
+    mount();
+    await hangingPublish(user);
+
+    await user.click(screen.getByRole("tab", { name: "Versions" }));
+    const panel = await screen.findByRole("tabpanel");
+    const button = await within(panel).findByRole("button", { name: "Publishing…" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    await user.click(button);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
