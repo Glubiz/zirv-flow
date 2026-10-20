@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { ApiError, client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
-import { Button, Dialog, formatAgo } from "../../ui";
+import { Button, Dialog, formatAgo, LoadingState } from "../../ui";
 import type { IssueItem } from "./Canvas";
 import type { Names } from "./describe";
 import { issueText } from "./issues";
@@ -131,12 +131,7 @@ export function PublishDialog(props: PublishDialogProps) {
 
   return (
     <Dialog title={title} onClose={onClose} wide>
-      {phase.name === "loading" ? (
-        <div className="loading" role="status">
-          <span className="spinner" aria-hidden="true" />
-          <span>Checking what publishing would do</span>
-        </div>
-      ) : null}
+      {phase.name === "loading" ? <LoadingState label="Checking what publishing would do" /> : null}
 
       {phase.name === "failed" ? (
         <div className="state state-error" role="alert">
@@ -160,21 +155,25 @@ export function PublishDialog(props: PublishDialogProps) {
                 </div>
               ) : (
                 <ul className="pub-issues" aria-label="Issues that stop publishing">
-                  {items.map((item) => (
-                    <li key={item.key}>
-                      {item.openable ? (
-                        <button type="button" className="fl-issue" onClick={() => onPick(item)}>
-                          <span className="fl-issue-where">{item.where}</span>
-                          <span>{issueText(item.issue, graph)}</span>
-                        </button>
-                      ) : (
-                        <div className="fl-issue fl-issue-text">
-                          <span className="fl-issue-where">{item.where}</span>
-                          <span>{issueText(item.issue, graph)}</span>
-                        </div>
-                      )}
-                    </li>
-                  ))}
+                  {items.map((item) => {
+                    const words = (
+                      <>
+                        <span className="fl-issue-where">{item.where}</span>
+                        <span>{issueText(item.issue, graph)}</span>
+                      </>
+                    );
+                    return (
+                      <li key={item.key}>
+                        {item.openable ? (
+                          <button type="button" className="fl-issue" onClick={() => onPick(item)}>
+                            {words}
+                          </button>
+                        ) : (
+                          <div className="fl-issue fl-issue-text">{words}</div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </Row>
