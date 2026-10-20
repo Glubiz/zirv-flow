@@ -11,11 +11,6 @@ const UNDO_LIMIT = 100;
 
 type SaveStatus = "saved" | "saving" | "error";
 
-interface Meta {
-  state: FlowDetail["state"];
-  currentVersion: number | null;
-}
-
 interface FlowDraft {
   draft: Draft;
   /** Changes the draft. Edits to the same `key` in quick succession count as one step of undo. */
@@ -34,7 +29,13 @@ interface FlowDraft {
   issues: FlowIssue[] | null;
   /** Whether an edit is waiting for the check of its save, so `issues` may be out of date. */
   checking: boolean;
-  meta: Meta;
+  /**
+   * Saves what is waiting and resolves once the server has it: true when it does, false when a save
+   * failed. Resolves true at once when nothing is waiting.
+   */
+  saveNow: () => Promise<boolean>;
+  /** Shows these issues as the check of the saved draft, as a refused publish reports them. */
+  adoptIssues: (issues: FlowIssue[]) => void;
   /** How many saves have gone through since the editor opened. */
   saves: number;
 }
@@ -68,7 +69,6 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const [issues, setIssues] = useState<FlowIssue[] | null>(null);
   const [checking, setChecking] = useState(false);
   const [saves, setSaves] = useState(0);
-  const [meta, setMeta] = useState<Meta>({ state: flow.state, currentVersion: flow.current_version ?? null });
   const history = useRef<Draft[]>([]);
   const [undoDepth, setUndoDepth] = useState(0);
 
@@ -82,6 +82,10 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const lastEdit = useRef<{ key: string; at: number } | null>(null);
   const flowId = flow.id;
   const flushRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  /** The save under way, so a caller can wait for it. */
+  const running = useRef<Promise<void> | null>(null);
+  /** Whether the last save failed. */
+  const failed = useRef(false);
 
   const check = useCallback(async () => {
     checks.current += 1;
@@ -100,7 +104,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     }
   }, [workspaceId, flowId]);
 
-  const flush = useCallback(async () => {
+  const run = useCallback(async () => {
     if (timer.current !== null) {
       clearTimeout(timer.current);
       timer.current = null;
@@ -115,6 +119,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       ...(sameJson(sent.settings, base.settings) ? {} : { settings: sent.settings }),
     };
     if (Object.keys(body).length === 0) {
+      // The draft is the saved state, so an earlier failed save has nothing left to retry.
+      failed.current = false;
+      setFailure(null);
       setStatus("saved");
       void check();
       return;
@@ -129,9 +136,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       const now: Draft = { name: updated.name, graph: sent.graph, settings: sent.settings };
       savedRef.current = now;
       setSaved(now);
-      setMeta({ state: updated.state, currentVersion: updated.current_version ?? null });
       setSaves((count) => count + 1);
       setFailure(null);
+      failed.current = false;
       inflight.current = false;
       const latest = draftRef.current;
       const newer =
@@ -147,6 +154,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       void check();
     } catch (error) {
       inflight.current = false;
+      failed.current = true;
       setFailure(describeError(error));
       setStatus("error");
       // A newer edit is still to be saved and checked, so the issues shown stay stale until then.
@@ -154,6 +162,16 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       else if (!isSet(timer)) void flushRef.current();
     }
   }, [workspaceId, flowId, check]);
+
+  const flush = useCallback(() => {
+    if (inflight.current) return Promise.resolve();
+    const promise = run();
+    running.current = promise;
+    void promise.then(() => {
+      if (running.current === promise) running.current = null;
+    });
+    return promise;
+  }, [run]);
 
   useEffect(() => {
     flushRef.current = flush;
@@ -217,6 +235,32 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     schedule();
   }, [editable, schedule]);
 
+  const saveNow = useCallback(async (): Promise<boolean> => {
+    for (let round = 0; round < 20; round += 1) {
+      if (running.current !== null) {
+        await running.current;
+      } else {
+        const latest = draftRef.current;
+        const base = savedRef.current;
+        const waiting =
+          isSet(timer) ||
+          (latest.name.trim() !== "" && latest.name.trim() !== base.name) ||
+          !sameJson(latest.graph, base.graph) ||
+          !sameJson(latest.settings, base.settings);
+        if (!waiting) return true;
+        await flushRef.current();
+      }
+      if (failed.current) return false;
+    }
+    return false;
+  }, []);
+
+  const adoptIssues = useCallback((found: FlowIssue[]) => {
+    checks.current += 1;
+    setChecking(false);
+    setIssues(found);
+  }, []);
+
   const retry = useCallback(() => {
     void flush();
   }, [flush]);
@@ -244,7 +288,8 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       draft.name.trim() !== saved.name || !sameJson(draft.graph, saved.graph) || !sameJson(draft.settings, saved.settings),
     issues: editable ? current : null,
     checking: editable && checking,
-    meta,
+    saveNow,
+    adoptIssues,
     saves,
   };
 }
