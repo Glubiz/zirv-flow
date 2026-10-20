@@ -198,7 +198,11 @@ impl<'w> Driver<'w> {
             }
             let seed = self.w.seed;
             // Jobs with one label cannot be told apart by anything seeded.
-            let distinct = due.iter().map(|job| job.label).collect::<HashSet<_>>().len();
+            let distinct = due
+                .iter()
+                .map(|job| job.label)
+                .collect::<HashSet<_>>()
+                .len();
             for _ in distinct..due.len() {
                 self.bump("jobs sharing a label with another due job");
             }
@@ -295,7 +299,12 @@ impl<'w> Driver<'w> {
         let Some((name, properties)) = row else {
             return 0;
         };
-        let text = |key: &str| properties.get(key).map(Value::to_string).unwrap_or_default();
+        let text = |key: &str| {
+            properties
+                .get(key)
+                .map(Value::to_string)
+                .unwrap_or_default()
+        };
         let named = properties.get("seq").and_then(Value::as_u64).map_or_else(
             || {
                 hash_text(&format!(

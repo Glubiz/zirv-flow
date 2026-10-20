@@ -7,7 +7,10 @@
 //!    decision per done goal step. Trait writes are replayed over the person's start (an
 //!    increment is not idempotent, so a repeated one shows in the value, and a repeated set after
 //!    a later write shows too). List writes are replayed against the membership and the
-//!    `list_member_changes` rows of source `flow`.
+//!    `list_member_changes` rows of source `flow`. Those end states cannot show a repeated
+//!    idempotent write (a set, an unset, an add to a member), so triggers on the test database
+//!    log every committed write attempt (see `world::install_write_log`) and the attempts per
+//!    person, list and operation must equal what the done steps make, once each.
 //! 2. **Every external effect enqueued once, under its stable key.** The trigger log of
 //!    `webhook.call` inserts holds exactly one row for the key of each done webhook step, and the
 //!    destination saw only those keys, with one body per key however often it was called.
@@ -178,6 +181,23 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
         .filter_map(|(step, _, count)| step.map(|step| (step, count)))
         .collect();
 
+    // The committed write attempts the triggers logged: (kind, person, target, operation) to count.
+    let attempt_rows: Vec<(String, Uuid, String, String, i64)> = sqlx::query_as(
+        "SELECT kind, person_id, target, op, count(*) FROM sim_writes \n         WHERE workspace_id = $1 GROUP BY 1, 2, 3, 4",
+    )
+    .bind(ws)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let attempts: HashMap<(String, Uuid, String, String), i64> = attempt_rows
+        .into_iter()
+        .map(|(kind, person, target, op, count)| ((kind, person, target, op), count))
+        .collect();
+    let mut logged_traits_total = 0_i64;
+    let mut logged_inserts_total = 0_i64;
+    let mut logged_deletes_total = 0_i64;
+    let mut repeated_adds = 0_i64;
+
     // Invariant 1, and the expected webhook keys for invariant 2.
     let mut expected_keys: BTreeMap<String, Uuid> = BTreeMap::new();
     let mut expected_goals: BTreeSet<String> = BTreeSet::new();
@@ -193,6 +213,15 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
         let mut values: [Option<f64>; 5] = [None; 5];
         let mut membership: HashMap<Uuid, bool> = HashMap::new();
         let mut expected_changes: HashMap<(Uuid, &'static str), i64> = HashMap::new();
+        // The write attempts each done step makes, as the store takes them: a step on a trait is
+        // one ledger write, unless it repeats the previous one exactly (the store skips a write
+        // whose content hash is the ledger row's); an add is one insert attempt even to a member;
+        // a remove is one delete, and only a member has a row to delete.
+        let mut trait_writes = 0_i64;
+        let mut trait_repeats = 0_i64;
+        let mut last_write: Option<(usize, Option<f64>)> = None;
+        let mut expected_inserts: HashMap<Uuid, i64> = HashMap::new();
+        let mut expected_deletes: HashMap<Uuid, i64> = HashMap::new();
         for (_, node_id, step) in done.get(&enrollment.id).map_or(&[][..], Vec::as_slice) {
             let Some(node) = graph.node(node_id) else {
                 found.violate(format!(
@@ -210,10 +239,23 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
                             TraitChange::Increment { by } => Some(values[slot].unwrap_or(0.0) + by),
                             TraitChange::Unset {} => None,
                         };
+                        let write = (slot, values[slot]);
+                        trait_writes += 1;
+                        if last_write == Some(write) {
+                            trait_repeats += 1;
+                        }
+                        last_write = Some(write);
                     }
                 }
                 NodeKind::ActionList { list_id, change } => {
                     let member = membership.entry(*list_id).or_default();
+                    match change {
+                        ListChange::Add => *expected_inserts.entry(*list_id).or_default() += 1,
+                        ListChange::Remove if *member => {
+                            *expected_deletes.entry(*list_id).or_default() += 1;
+                        }
+                        ListChange::Remove => {}
+                    }
                     match (change, *member) {
                         (ListChange::Add, false) => {
                             *member = true;
@@ -283,7 +325,81 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
                 ));
             }
         }
+
+        // The replay above compares end states, which a repeated idempotent write cannot
+        // change. The write log can see the repeat: the committed attempts must be exactly
+        // those the done steps make, once each.
+        let logged = |kind: &str, target: &str, op: &str| {
+            attempts
+                .get(&(
+                    kind.to_owned(),
+                    enrollment.person,
+                    target.to_owned(),
+                    op.to_owned(),
+                ))
+                .copied()
+                .unwrap_or(0)
+        };
+        let logged_traits: i64 = ["INSERT", "UPDATE", "DELETE"]
+            .iter()
+            .map(|op| logged("trait", "traits", op))
+            .sum();
+        logged_traits_total += logged_traits;
+        if logged_traits > trait_writes || logged_traits < trait_writes - trait_repeats {
+            found.violate(format!(
+                "invariant 1 (write attempts): person {} had {logged_traits} committed trait \
+                 writes by flow {}, the {trait_writes} done trait steps of enrollment {} make \
+                 between {} and {trait_writes}",
+                enrollment.person,
+                enrollment.flow,
+                enrollment.id,
+                trait_writes - trait_repeats
+            ));
+        }
+        for list in &w.lists {
+            let target = list.to_string();
+            for (op, expected) in [
+                ("INSERT", expected_inserts.get(list).copied().unwrap_or(0)),
+                ("DELETE", expected_deletes.get(list).copied().unwrap_or(0)),
+            ] {
+                let actual = logged("list", &target, op);
+                if op == "INSERT" {
+                    logged_inserts_total += actual;
+                } else {
+                    logged_deletes_total += actual;
+                }
+                if actual != expected {
+                    found.violate(format!(
+                        "invariant 1 (write attempts): person {} had {actual} committed {op} \
+                         attempts on list {list}, the done steps of enrollment {} make {expected}",
+                        enrollment.person, enrollment.id
+                    ));
+                }
+            }
+            // Adds that found the person a member already: the repeats only the log can see.
+            let added = expected_changes
+                .get(&(*list, "added"))
+                .copied()
+                .unwrap_or(0);
+            repeated_adds += expected_inserts.get(list).copied().unwrap_or(0) - added;
+        }
     }
+    found.count(
+        "committed trait write attempts",
+        usize::try_from(logged_traits_total).unwrap_or(0),
+    );
+    found.count(
+        "committed list insert attempts",
+        usize::try_from(logged_inserts_total).unwrap_or(0),
+    );
+    found.count(
+        "committed list delete attempts",
+        usize::try_from(logged_deletes_total).unwrap_or(0),
+    );
+    found.count(
+        "list adds that found a member already",
+        usize::try_from(repeated_adds).unwrap_or(0),
+    );
     for step in &expected_goals {
         let count = goals.get(step).copied().unwrap_or(0);
         if count != 1 {

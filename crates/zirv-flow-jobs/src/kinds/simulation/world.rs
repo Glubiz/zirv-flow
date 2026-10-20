@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 use zirv_flow_core::egress::EgressPolicy;
-use zirv_flow_core::flow::{FlowGraph, NodeKind};
+use zirv_flow_core::flow::{FlowGraph, ListChange, NodeKind};
 use zirv_flow_core::people::TraitType;
 use zirv_flow_core::signature::generate_secret;
 use zirv_flow_core::{
@@ -73,6 +73,7 @@ impl World {
     pub(super) async fn build(pool: PgPool, ordinal: usize, seed: u64, population: usize) -> Self {
         zirv_flow_store::migrate(&pool).await.unwrap();
         install_enqueue_log(&pool).await;
+        install_write_log(&pool).await;
         let slug = format!("sim-{ordinal}");
         let ws = zirv_flow_store::create_workspace(
             &pool,
@@ -166,6 +167,7 @@ impl World {
     async fn publish_flows(&mut self, port: u16, population: usize) {
         let count = (population / 20).clamp(4, 12);
         let mut rng = Rng::derive(self.seed, &[2]);
+        let mut lists = Rng::derive(self.seed, &[5]);
         for index in 0..count {
             let size = usize::try_from(rng.range(10, 30)).unwrap_or(12);
             let mut graph = generate::graph(&mut rng, size, index % 2 == 0);
@@ -174,10 +176,17 @@ impl World {
                     NodeKind::ActionWebhook { url, .. } => {
                         *url = format!("http://127.0.0.1:{port}/hook");
                     }
-                    // The generator names four fixed lists; each workspace has its own.
-                    NodeKind::ActionList { list_id, .. } => {
-                        let slot = list_id.as_u128() - generate::list_id(0).as_u128();
-                        *list_id = self.lists[usize::try_from(slot).unwrap_or(0)];
+                    // The generator names four fixed lists and mostly adds; each workspace has
+                    // its own lists. Every list node here uses the first one and adds or removes
+                    // by the seed, so that a person's walk adds to a list it is in already and
+                    // removes from one it joined, which the write log has to count.
+                    NodeKind::ActionList { list_id, change } => {
+                        *list_id = self.lists[0];
+                        *change = if lists.chance(55) {
+                            ListChange::Add
+                        } else {
+                            ListChange::Remove
+                        };
                     }
                     _ => {}
                 }
@@ -265,6 +274,63 @@ async fn install_enqueue_log(pool: &PgPool) {
         "DROP TRIGGER IF EXISTS sim_log_enqueue ON jobs",
         "CREATE TRIGGER sim_log_enqueue AFTER INSERT ON jobs FOR EACH ROW \
          WHEN (NEW.kind = 'webhook.call') EXECUTE FUNCTION sim_log_enqueue()",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
+/// Triggers on the tables the internal effects write, logging every write attempt, one row per
+/// attempt: a flow's contribution to a trait (a `source_records` row whose source is
+/// `flow:<id>`) and list membership. A row trigger runs before the statement acts on the row,
+/// so it also fires for an `INSERT ... ON CONFLICT DO NOTHING` row that conflicts: a repeated
+/// list add is logged although it changes nothing. The log lives in the transaction that wrote
+/// it, so an attempt rolled back disappears, and what remains is every committed application.
+///
+/// Two repeats leave no row to fire on, and are therefore not seen: a `DELETE` that finds no
+/// row (removing a non-member) and a trait write whose content hash equals the ledger row's
+/// (the same value at the same instant, which the store skips before writing). The checks count
+/// the attempts they predict with that in mind (see `invariants`). Test fixture only.
+async fn install_write_log(pool: &PgPool) {
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS sim_writes ( \
+             n bigserial PRIMARY KEY, kind text NOT NULL, workspace_id uuid NOT NULL, \
+             person_id uuid NOT NULL, target text NOT NULL, flow uuid, op text NOT NULL)",
+        "CREATE OR REPLACE FUNCTION sim_log_trait_write() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             IF TG_OP = 'DELETE' THEN \
+                 INSERT INTO sim_writes (kind, workspace_id, person_id, target, flow, op) \
+                 VALUES ('trait', OLD.workspace_id, OLD.person_id, 'traits', \
+                         substr(OLD.source, 6)::uuid, TG_OP); \
+                 RETURN OLD; \
+             END IF; \
+             INSERT INTO sim_writes (kind, workspace_id, person_id, target, flow, op) \
+             VALUES ('trait', NEW.workspace_id, NEW.person_id, 'traits', \
+                     substr(NEW.source, 6)::uuid, TG_OP); \
+             RETURN NEW; \
+         END $$",
+        "DROP TRIGGER IF EXISTS sim_log_trait_write ON source_records",
+        "CREATE TRIGGER sim_log_trait_write BEFORE INSERT OR UPDATE ON source_records \
+         FOR EACH ROW WHEN (NEW.source LIKE 'flow:%') EXECUTE FUNCTION sim_log_trait_write()",
+        "DROP TRIGGER IF EXISTS sim_log_trait_delete ON source_records",
+        "CREATE TRIGGER sim_log_trait_delete BEFORE DELETE ON source_records \
+         FOR EACH ROW WHEN (OLD.source LIKE 'flow:%') EXECUTE FUNCTION sim_log_trait_write()",
+        "CREATE OR REPLACE FUNCTION sim_log_list_write() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             IF TG_OP = 'DELETE' THEN \
+                 INSERT INTO sim_writes (kind, workspace_id, person_id, target, op) \
+                 VALUES ('list', OLD.workspace_id, OLD.person_id, OLD.list_id::text, TG_OP); \
+                 RETURN OLD; \
+             END IF; \
+             INSERT INTO sim_writes (kind, workspace_id, person_id, target, op) \
+             VALUES ('list', NEW.workspace_id, NEW.person_id, NEW.list_id::text, TG_OP); \
+             RETURN NEW; \
+         END $$",
+        "DROP TRIGGER IF EXISTS sim_log_list_insert ON list_members",
+        "CREATE TRIGGER sim_log_list_insert BEFORE INSERT ON list_members \
+         FOR EACH ROW WHEN (NEW.source = 'flow') EXECUTE FUNCTION sim_log_list_write()",
+        "DROP TRIGGER IF EXISTS sim_log_list_delete ON list_members",
+        "CREATE TRIGGER sim_log_list_delete BEFORE DELETE ON list_members \
+         FOR EACH ROW EXECUTE FUNCTION sim_log_list_write()",
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }
