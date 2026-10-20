@@ -1538,3 +1538,475 @@ main:focus {
   gap: 16px;
   flex: 1;
 }
+
+/* Flow editor */
+.fl-page {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 64px);
+}
+
+.fl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 24px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.fl-name,
+.fl-name-read {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.fl-name-input {
+  font: inherit;
+  color: inherit;
+  min-width: 12ch;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-input);
+  background: transparent;
+}
+
+.fl-name-input:hover {
+  border-color: var(--line-2);
+}
+
+.fl-name-input:focus-visible {
+  border-color: var(--focus);
+  background: #fff;
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.fl-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fl-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: #fff;
+}
+
+.fl-tab {
+  font: inherit;
+  font-size: 14px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.fl-tab[aria-selected="true"] {
+  background: var(--night);
+  color: var(--night-ink);
+}
+
+.fl-tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.fl-status {
+  font-size: 14px;
+  min-width: 8ch;
+}
+
+.fl-status-error {
+  color: var(--error-text);
+  font-weight: 600;
+}
+
+.fl-retry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fl-pane {
+  padding: 24px;
+  max-width: 880px;
+}
+
+.fl-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.fl-canvas {
+  position: relative;
+  overflow: hidden;
+  flex: 1;
+  height: max(560px, calc(100vh - 190px));
+  background: var(--ground);
+}
+
+.fl-flow {
+  position: absolute;
+  inset: 0;
+}
+
+.fl-flow .react-flow {
+  --xy-background-color: var(--ground);
+  --xy-background-pattern-dots-color-default: #c9cfd6;
+  --xy-edge-stroke-default: var(--line-2);
+  --xy-edge-stroke-width-default: 2;
+  font-family: var(--sans);
+}
+
+.fl-flow .react-flow__node {
+  border-radius: 12px;
+}
+
+.fl-flow .react-flow__node:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.fl-flow .react-flow__edge.fl-edge-error .react-flow__edge-path {
+  stroke: var(--error-dot);
+}
+
+.fl-flow .react-flow__edge-text {
+  fill: var(--error-text);
+  font-size: 12.5px;
+}
+
+.fl-flow .react-flow__attribution {
+  background: transparent;
+}
+
+.fl-node {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  text-align: left;
+}
+
+.fl-node-selected {
+  border: 2px solid var(--focus);
+  padding: 9px 13px;
+  box-shadow: 0 0 0 4px rgb(0 124 187 / 0.18);
+}
+
+.fl-node-issue {
+  border-color: var(--error-dot);
+}
+
+.fl-kind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.fl-kind-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fl-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--error-text);
+}
+
+.fl-title {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-detail {
+  font-size: 13.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-ports {
+  display: flex;
+  margin-top: auto;
+}
+
+.fl-port-label {
+  flex: 1;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-flow .react-flow__handle {
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 2px solid var(--ink-3);
+}
+
+.fl-flow .react-flow__handle.connectingfrom,
+.fl-flow .react-flow__handle:hover {
+  border-color: var(--focus);
+}
+
+.fl-tools {
+  position: absolute;
+  z-index: 5;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.fl-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.fl-rail .menu-wrap {
+  position: relative;
+}
+
+.fl-tool {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.fl-tool:hover:not(:disabled) {
+  background: var(--paper-3);
+}
+
+.fl-tool:disabled {
+  color: var(--ink-3);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fl-tool:focus-visible,
+.fl-issue:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.fl-issues {
+  position: relative;
+}
+
+.fl-issues-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  color: var(--error-text);
+}
+
+.fl-clear {
+  display: inline-block;
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+}
+
+.fl-issues-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 6;
+  width: 340px;
+  max-height: 60vh;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  list-style: none;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-popover);
+}
+
+.fl-issue {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  color: var(--ink);
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.fl-issue:hover {
+  background: var(--paper-3);
+}
+
+.fl-issue-where {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--error-text);
+}
+
+.fl-sheet {
+  position: absolute;
+  z-index: 7;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  width: min(400px, calc(100% - 32px));
+}
+
+.fl-sheet > .sheet {
+  flex: 1;
+  min-width: 0;
+}
+
+.fl-sheet-foot {
+  margin-top: auto;
+}
+
+.fl-danger {
+  color: var(--error-text);
+}
+
+.fl-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.fl-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
+.fl-filter {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.fl-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.fl-wire {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.fl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  font-size: 13.5px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+}
+
+.fl-chip-remove {
+  min-width: 28px;
+  min-height: 28px;
+  font: inherit;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.fl-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.fl-note p {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fl-flow .react-flow__viewport {
+    transition: none;
+  }
+}

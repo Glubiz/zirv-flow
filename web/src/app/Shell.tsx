@@ -18,6 +18,7 @@ const TITLES: Record<string, string> = {
   events: "Events",
   lists: "Lists",
   segments: "Segments",
+  flows: "Flows",
   topics: "Topics",
   suppressions: "Suppressions",
   privacy: "Privacy",
@@ -96,6 +97,7 @@ export function Shell() {
             <WorkspaceItem base={base} segment="traits">Fields</WorkspaceItem>
             <WorkspaceItem base={base} segment="lists">Lists</WorkspaceItem>
             <WorkspaceItem base={base} segment="segments">Segments</WorkspaceItem>
+            <WorkspaceItem base={base} segment="flows">Flows</WorkspaceItem>
             <WorkspaceItem base={base} segment="contacts">Contacts</WorkspaceItem>
             <WorkspaceItem base={base} segment="people" except="people/conflicts">People</WorkspaceItem>
             <WorkspaceItem base={base} segment="people/conflicts">Conflicts</WorkspaceItem>
