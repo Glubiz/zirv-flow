@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowDetail, flowRoutes, impactBody, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount } from "../../test/flowsEditor";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -147,35 +147,27 @@ describe("archive", () => {
 });
 
 describe("announcements and notices", () => {
-  it("announces the same words again when the flow is paused a second time", async () => {
-    let state = "published";
+  it("announces the same words again when the same version is opened twice in a row", async () => {
     mockApi({
       ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
-      [`POST ${WS}/flows/${FLOW_ID}/pause`]: () => {
-        state = "paused";
-        return json(flowDetail({ state, current_version: 2 }));
-      },
-      [`POST ${WS}/flows/${FLOW_ID}/resume`]: () => {
-        state = "published";
-        return json(flowDetail({ state, current_version: 2 }));
-      },
+      [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([versionBody(1)]),
     });
     const user = userEvent.setup();
     mount();
-    await screen.findByRole("button", { name: "Pause" });
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
     const polite = document.querySelector('[aria-live="polite"]')!;
     const spoken: string[] = [];
     const watch = new MutationObserver(() => spoken.push(polite.textContent));
     watch.observe(polite, { childList: true, characterData: true, subtree: true });
+    await user.click(screen.getByRole("tab", { name: "Versions" }));
 
-    await user.click(await screen.findByRole("button", { name: "Pause" }));
-    await screen.findByRole("button", { name: "Resume" });
-    await user.click(screen.getByRole("button", { name: "Resume" }));
-    await screen.findByRole("button", { name: "Pause" });
-    await user.click(screen.getByRole("button", { name: "Pause" }));
-    await screen.findByRole("button", { name: "Resume" });
+    await user.click(await screen.findByRole("button", { name: "View version 1" }));
+    await screen.findByRole("button", { name: "All versions" });
+    await waitFor(() => expect(spoken.filter((text) => text === "Viewing version 1, read-only.")).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "All versions" }));
+    await user.click(await screen.findByRole("button", { name: "View version 1" }));
 
-    await waitFor(() => expect(spoken.filter((text) => text === "The flow is paused.")).toHaveLength(2));
+    await waitFor(() => expect(spoken.filter((text) => text === "Viewing version 1, read-only.")).toHaveLength(2));
     watch.disconnect();
   });
 
