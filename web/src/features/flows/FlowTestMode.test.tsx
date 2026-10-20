@@ -160,9 +160,9 @@ describe("test mode", () => {
     // The second walk re-posted the scenario with the snapshot the first one returned.
     const walks = calls.filter((call) => call.method === "POST" && call.path === `${WS}/flows/${FLOW_ID}/test`);
     expect(walks).toHaveLength(2);
-    expect(walks[0]?.body).toEqual({ graph: expect.anything(), snapshot: {}, script: [] });
+    expect(walks[0]?.body).toEqual({ graph: expect.anything() as unknown, snapshot: {}, script: [] });
     expect(walks[1]?.body).toEqual({
-      graph: expect.anything(),
+      graph: expect.anything() as unknown,
       snapshot: SNAPSHOT,
       start_at: START,
       enrollment_id: ENROLLMENT,
@@ -254,7 +254,7 @@ describe("test mode", () => {
 
     await screen.findByRole("dialog", { name: "Test run" });
     const walks = calls.filter((call) => call.path === `${WS}/flows/${FLOW_ID}/test`);
-    expect(walks[0]?.body).toEqual({ graph: expect.anything(), person_id: "88888888-0000-4000-8000-000000000001", script: [] });
+    expect(walks[0]?.body).toEqual({ graph: expect.anything() as unknown, person_id: "88888888-0000-4000-8000-000000000001", script: [] });
     expect(nonGet(calls, from)).toEqual([`POST ${WS}/people/search`, `POST ${WS}/flows/${FLOW_ID}/test`]);
   });
 
