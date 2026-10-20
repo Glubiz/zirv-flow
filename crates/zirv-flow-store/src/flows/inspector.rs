@@ -225,7 +225,8 @@ pub struct EnrollmentPath {
     pub steps: Vec<PathStep>,
     pub event_waits: Vec<PathEventWait>,
     pub decisions: Vec<Decision>,
-    /// True when the enrollment has more decisions than [`MAX_PATH_DECISIONS`].
+    /// True when older decisions were left out because the enrollment has more than
+    /// [`MAX_PATH_DECISIONS`]; the newest are kept.
     pub truncated: bool,
 }
 

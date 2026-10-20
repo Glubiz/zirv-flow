@@ -286,9 +286,11 @@ pub(crate) fn bound(date: Date) -> String {
     )
 }
 
-/// The records that name `enrollment` as a subject, oldest first, at most `limit`, recorded at or
-/// after `since` (the enrollment's creation, which prunes the partitions). The flag is true when more
-/// existed. Errors are bounded-read errors, so a timeout is reported as one.
+/// The newest `limit` records that name `enrollment` as a subject, returned oldest first,
+/// recorded at or after `since` (the enrollment's creation, which prunes the partitions). The
+/// flag is true when older records were left out: the failure, retry, skip or exit an operator
+/// came to see is at the end of the walk, so the newest are the ones to keep. Errors are
+/// bounded-read errors, so a timeout is reported as one.
 pub(crate) async fn list_enrollment_decisions(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -302,7 +304,7 @@ pub(crate) async fn list_enrollment_decisions(
          FROM decision_records \
          WHERE workspace_id = $1 AND subject_ids ? 'enrollment' \
            AND (subject_ids ->> 'enrollment') = $2 AND recorded_at >= $3 \
-         ORDER BY recorded_at, id LIMIT $4",
+         ORDER BY recorded_at DESC, id DESC LIMIT $4",
     )
     .bind(workspace.as_uuid())
     .bind(enrollment.to_string())
@@ -311,7 +313,10 @@ pub(crate) async fn list_enrollment_decisions(
     .fetch_all(connection)
     .await
     .map_err(StoreError::bounded)?;
-    decisions_page(rows, limit)
+    // Newest first here, so the extra row is the oldest to drop; then flip to oldest first.
+    let (mut newest, truncated) = decisions_page(rows, limit)?;
+    newest.reverse();
+    Ok((newest, truncated))
 }
 
 #[cfg(test)]
@@ -659,6 +664,45 @@ mod tests {
             let read: Vec<&str> = read.iter().map(|r| r.action.as_str()).collect();
             assert_eq!(read, actions);
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_long_enrollment_keeps_its_newest_records_oldest_first(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let actions = numbered(12);
+        for action in &actions {
+            append_decision(&pool, &of_enrollment(ws, &trace, enrollment, action))
+                .await
+                .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let (cut, truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            5,
+        )
+        .await
+        .unwrap();
+        let (all, all_truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            12,
+        )
+        .await
+        .unwrap();
+
+        let cut: Vec<&str> = cut.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(cut, actions[7..]);
+        assert!(truncated, "older records were left out");
+        assert_eq!((all.len(), all_truncated), (12, false));
     }
 
     #[sqlx::test]

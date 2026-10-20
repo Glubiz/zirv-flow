@@ -133,10 +133,11 @@ pub(crate) struct EnrollmentPathBody {
     steps: Vec<StepBody>,
     /// What the enrollment is waiting for now; empty when it is not waiting.
     waits: Vec<EnrollmentWaitBody>,
-    /// Every decision that names the enrollment, oldest first: steps, branches, waits, wakes,
+    /// The newest decisions that name the enrollment, oldest first: steps, branches, waits, wakes,
     /// failures, retries, skips, exits and goals.
     decisions: Vec<DecisionBody>,
-    /// True when the enrollment has more decisions than this response carries.
+    /// True when older decisions were left out because the enrollment has more than this
+    /// response carries; the newest are always kept.
     truncated: bool,
 }
 

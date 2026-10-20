@@ -3801,14 +3801,17 @@ export interface components {
         };
         EnrollmentPathBody: {
             /**
-             * @description Every decision that names the enrollment, oldest first: steps, branches, waits, wakes,
+             * @description The newest decisions that name the enrollment, oldest first: steps, branches, waits, wakes,
              *     failures, retries, skips, exits and goals.
              */
             decisions: components["schemas"]["DecisionBody"][];
             enrollment: components["schemas"]["EnrollmentItemBody"];
             /** @description The nodes the enrollment has run, in the order they started. */
             steps: components["schemas"]["StepBody"][];
-            /** @description True when the enrollment has more decisions than this response carries. */
+            /**
+             * @description True when older decisions were left out because the enrollment has more than this
+             *     response carries; the newest are always kept.
+             */
             truncated: boolean;
             /** @description What the enrollment is waiting for now; empty when it is not waiting. */
             waits: components["schemas"]["EnrollmentWaitBody"][];

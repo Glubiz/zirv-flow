@@ -19037,7 +19037,7 @@
             "items": {
               "$ref": "#/components/schemas/DecisionBody"
             },
-            "description": "Every decision that names the enrollment, oldest first: steps, branches, waits, wakes,\nfailures, retries, skips, exits and goals."
+            "description": "The newest decisions that name the enrollment, oldest first: steps, branches, waits, wakes,\nfailures, retries, skips, exits and goals."
           },
           "enrollment": {
             "$ref": "#/components/schemas/EnrollmentItemBody"
@@ -19051,7 +19051,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the enrollment has more decisions than this response carries."
+            "description": "True when older decisions were left out because the enrollment has more than this\nresponse carries; the newest are always kept."
           },
           "waits": {
             "type": "array",
