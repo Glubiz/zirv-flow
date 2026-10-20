@@ -2686,5 +2686,20 @@ pub(super) mod tests {
             .collect();
         assert_eq!(on_path, on_trace);
         assert_eq!(path.enrollment.trace_id, trace.trace_id.as_uuid());
+        // Both reads agree, but they share an ORDER BY, so check the order itself: it is the
+        // order the walk wrote the records in, which the ids follow.
+        let mut by_id = on_path.clone();
+        by_id.sort();
+        assert_eq!(on_path, by_id, "the path is in the order the walk wrote");
+        let walk: Vec<&str> = path
+            .decisions
+            .iter()
+            .filter(|r| r.action == "flow.enrollment" && r.outcome != "enrolled")
+            .map(|r| r.outcome.as_str())
+            .collect();
+        assert_eq!(
+            walk,
+            ["failed", "retried", "failed", "skipped", "completed"]
+        );
     }
 }

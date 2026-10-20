@@ -254,7 +254,7 @@ pub async fn load_enrollment_path(
     let summary = row.into_summary()?;
     let steps: Vec<PathStep> = sqlx::query_as(
         "SELECT id, node_id, outcome, error, attempts, started_at FROM step_executions \
-         WHERE enrollment_id = $1 ORDER BY started_at, node_id",
+         WHERE enrollment_id = $1 ORDER BY started_at, id",
     )
     .bind(enrollment)
     .fetch_all(&mut *tx)
@@ -594,6 +594,37 @@ mod tests {
         let other = workspace(&pool, "elsewhere").await;
         let elsewhere = version_node_counts(&pool, other, flow, 1).await.unwrap();
         assert!(elsewhere.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_steps_of_one_job_come_back_in_the_order_they_ran(pool: PgPool) {
+        use crate::{NewStepExecution, StepOutcome, record_steps};
+
+        let (ws, flow) = published_flow(&pool, "order").await;
+        let id = seed(&pool, Seed::new(ws, flow, "active", "a")).await;
+        // One transaction, so every step shares one `started_at`; the names are not in order.
+        let nodes = ["zeta", "mid", "alpha", "queue", "beta", "omega"];
+        let steps: Vec<NewStepExecution> = nodes
+            .iter()
+            .map(|node| NewStepExecution {
+                node_id: node,
+                outcome: StepOutcome::Done,
+                error: None,
+                attempt: 1,
+            })
+            .collect();
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_steps(&mut tx, ws, id, &steps).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let path = load_enrollment_path(&pool, ws, flow, id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ran: Vec<&str> = path.steps.iter().map(|s| s.node_id.as_str()).collect();
+        assert_eq!(ran, nodes);
     }
 
     #[sqlx::test]

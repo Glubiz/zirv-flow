@@ -166,7 +166,7 @@ pub async fn append_decision<'e>(
              subject_ids, job_id, attempt) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
-    .bind(Uuid::new_v4())
+    .bind(Uuid::now_v7())
     .bind(decision.workspace_id.as_uuid())
     .bind(decision.trace.trace_id.as_uuid())
     .bind(decision.action)
@@ -197,7 +197,7 @@ pub async fn append_decisions(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
         );
         query.push_values(chunk, |mut row, decision| {
-            row.push_bind(Uuid::new_v4())
+            row.push_bind(Uuid::now_v7())
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
                 .push_bind(decision.action)
@@ -603,6 +603,62 @@ mod tests {
 
         assert_eq!((cut.len(), cut_flag), (2, true));
         assert_eq!((all.len(), all_flag), (3, false));
+    }
+
+    fn numbered(count: usize) -> Vec<&'static str> {
+        (0..count)
+            .map(|n| &*Box::leak(format!("a{n:03}").into_boxed_str()))
+            .collect()
+    }
+
+    fn of_enrollment(
+        ws: WorkspaceId,
+        trace: &TraceContext,
+        enrollment: Uuid,
+        action: &'static str,
+    ) -> NewDecision {
+        let mut record = decision(ws, trace, action);
+        record.subject_ids = vec![("enrollment", enrollment)];
+        record
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn records_of_one_transaction_keep_the_order_they_were_written_in(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let actions = numbered(80);
+        // Both write paths, in one transaction, so every record shares one `recorded_at`.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        for action in &actions[..40] {
+            append_decision(&mut *tx, &of_enrollment(ws, &trace, enrollment, action))
+                .await
+                .unwrap();
+        }
+        let batch: Vec<NewDecision> = actions[40..]
+            .iter()
+            .map(|a| of_enrollment(ws, &trace, enrollment, a))
+            .collect();
+        append_decisions(&mut tx, &batch).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 1000).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let (on_enrollment, _) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            1000,
+        )
+        .await
+        .unwrap();
+
+        for read in [records, on_enrollment] {
+            let read: Vec<&str> = read.iter().map(|r| r.action.as_str()).collect();
+            assert_eq!(read, actions);
+        }
     }
 
     #[sqlx::test]
