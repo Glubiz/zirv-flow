@@ -2197,3 +2197,12 @@ main:focus {
     flex-basis: auto;
   }
 }
+
+.fl-notice {
+  margin: 0;
+  padding: 8px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  color: var(--error-text);
+  font-weight: 600;
+}

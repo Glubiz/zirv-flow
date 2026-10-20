@@ -131,6 +131,9 @@ function Editor({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [acting, setActing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const nonce = useRef(0);
 
   const placed = useMemo(() => placeIssues(store.issues ?? []), [store.issues]);
@@ -227,9 +230,55 @@ function Editor({
     pick(item);
   }
 
+  /** After an action the button that had focus may be gone, so focus goes to the first action or the tab in use. */
+  function refocusActions() {
+    setTimeout(() => {
+      (document.getElementById("flow-primary-action") ?? document.getElementById(`flow-tab-${tab}`))?.focus();
+    }, 0);
+  }
+
+  async function lifecycle(action: "pause" | "resume" | "archive") {
+    setActing(true);
+    setNotice(null);
+    const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    try {
+      // Pending edits go in first: an archived flow takes no more.
+      if (action === "archive") await store.saveNow();
+      const updated = await unwrap(
+        action === "pause"
+          ? client.POST("/api/v1/workspaces/{ws}/flows/{id}/pause", path)
+          : action === "resume"
+            ? client.POST("/api/v1/workspaces/{ws}/flows/{id}/resume", path)
+            : client.POST("/api/v1/workspaces/{ws}/flows/{id}/archive", path),
+      );
+      setLife({ state: updated.state, version: updated.current_version ?? null });
+      setAnnouncement(
+        action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.",
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          const current = await unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}", path));
+          setLife({ state: current.state, version: current.current_version ?? null });
+          setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
+        } catch (again) {
+          setNotice(describeError(again).detail || describeError(again).title);
+        }
+      } else {
+        const summary = describeError(error);
+        setNotice(summary.detail || summary.title);
+      }
+    } finally {
+      setActing(false);
+      setArchiving(false);
+      refocusActions();
+    }
+  }
+
   function published(result: { flow: FlowBody; version: { version: number } }) {
     setPublishing(false);
     setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
+    refocusActions();
     setAnnouncement(`Version ${result.version.version} of ${draft.name} is published.`);
   }
 
@@ -328,8 +377,21 @@ function Editor({
         </div>
         {canAdmin && life.state !== "archived" ? (
           <div className="fl-actions">
-            <Button variant="primary" onClick={() => setPublishing(true)}>
+            <Button id="flow-primary-action" variant="primary" disabled={acting} onClick={() => setPublishing(true)}>
               Publish…
+            </Button>
+            {life.state === "published" ? (
+              <Button disabled={acting} onClick={() => void lifecycle("pause")}>
+                Pause
+              </Button>
+            ) : null}
+            {life.state === "paused" ? (
+              <Button disabled={acting} onClick={() => void lifecycle("resume")}>
+                Resume
+              </Button>
+            ) : null}
+            <Button disabled={acting} onClick={() => setArchiving(true)}>
+              Archive…
             </Button>
           </div>
         ) : null}
@@ -340,6 +402,12 @@ function Editor({
           </div>
         ) : null}
       </div>
+
+      {notice ? (
+        <p className="fl-notice" role="alert">
+          {notice}
+        </p>
+      ) : null}
 
       <div role="tabpanel" id="flow-panel" aria-labelledby={`flow-tab-${tab}`} tabIndex={0} className="fl-panel">
       {tab === "canvas" ? (
@@ -416,6 +484,21 @@ function Editor({
       <div className="visually-hidden" role="status" aria-live="polite">
         {announcement}
       </div>
+
+      {archiving ? (
+        <Dialog title={`Archive ${draft.name}?`} onClose={() => setArchiving(false)}>
+          <p className="muted">
+            Archiving is permanent. The flow cannot be published again, and no one new will enter it. Everyone still in the flow
+            leaves it, whichever step they are on. The versions and their history stay readable.
+          </p>
+          <div className="dialog-actions">
+            <Button onClick={() => setArchiving(false)}>Cancel</Button>
+            <Button variant="primary" disabled={acting} onClick={() => void lifecycle("archive")}>
+              Archive flow
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
 
       {publishing ? (
         <PublishDialog
