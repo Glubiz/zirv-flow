@@ -286,7 +286,7 @@ async fn end_in_flight(
     let decisions: Vec<NewDecision> = ended
         .iter()
         .map(|(id, person, flow, version, node)| NewDecision {
-            graph: Some(GraphPoint::at(*version, &node)),
+            graph: Some(GraphPoint::at(*version, node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
