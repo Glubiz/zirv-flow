@@ -2741,6 +2741,34 @@ pub(super) mod tests {
             .collect();
         written.sort();
         assert_eq!(on_timeline, written);
+        // Each carries the enrollment's trace and names the enrollment.
+        let timeline_flow: Vec<_> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
+                    Some(d)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(timeline_flow.len(), flow_records.len());
+        for d in timeline_flow {
+            assert_eq!(
+                d.trace_id,
+                trace.trace_id.as_uuid(),
+                "{} {} is on the enrollment's trace",
+                d.action,
+                d.outcome
+            );
+            assert_eq!(
+                d.subject_ids["enrollment"].as_str(),
+                Some(id.to_string().as_str()),
+                "{} {} names the enrollment",
+                d.action,
+                d.outcome
+            );
+        }
         assert!(
             on_timeline
                 .iter()
