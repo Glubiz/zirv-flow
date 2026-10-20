@@ -14,9 +14,19 @@ interface MenuButtonProps {
   heading?: string;
   entries: MenuEntry[];
   emptyText?: string;
+  /** Where the menu opens: under the button with its right edge on it (the default), or beside it, to its right. */
+  placement?: "below-end" | "beside";
 }
 
-export function MenuButton({ label, buttonClassName, buttonContent, heading, entries, emptyText }: MenuButtonProps) {
+export function MenuButton({
+  label,
+  buttonClassName,
+  buttonContent,
+  heading,
+  entries,
+  emptyText,
+  placement = "below-end",
+}: MenuButtonProps) {
   const [open, setOpen] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
@@ -102,7 +112,7 @@ export function MenuButton({ label, buttonClassName, buttonContent, heading, ent
         {buttonContent}
       </button>
       {open ? (
-        <div id={menuId} ref={menu} className="menu" role="menu" aria-label={label} onKeyDown={onMenuKey}>
+        <div id={menuId} ref={menu} className={placement === "beside" ? "menu menu-beside" : "menu"} role="menu" aria-label={label} onKeyDown={onMenuKey}>
           {heading ? (
             <div className="menu-heading" role="presentation">
               {heading}
