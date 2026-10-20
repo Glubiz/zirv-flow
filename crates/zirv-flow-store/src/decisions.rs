@@ -72,11 +72,12 @@ impl GraphPoint {
     }
 }
 
-/// The rows of a decision's `subject_ids` that hold a durable id (`s.value`, with its name in
-/// `s.key`), as `SELECT 1 FROM {ID_SUBJECTS} AND s.value = ...`: every key but the graph point's `node` and `version`, which are text
-/// the marketer chose and can equal anything, a person's id included. Erasure and the erasure
-/// scan match a person only through this, so a node id never reads as a reference to a person.
-/// The decision table must be aliased `d`.
+/// The `FROM` and `WHERE` of a subquery over the rows of a decision's `subject_ids` that hold a
+/// durable id (`s.key` is the name, `s.value` the id), used as `SELECT 1 FROM {ID_SUBJECTS} AND
+/// s.value = ...`. It leaves out the graph point's `node` and `version`, which are text the
+/// marketer chose and can equal anything, a person's id included. Erasure and the erasure scan
+/// match a person only through this, so a node id never reads as a reference to a person. The
+/// decision table must be aliased `d`.
 pub(crate) const ID_SUBJECTS: &str =
     "jsonb_each_text(d.subject_ids) s WHERE s.key NOT IN ('node', 'version')";
 
