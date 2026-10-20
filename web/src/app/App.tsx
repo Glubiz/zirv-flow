@@ -8,6 +8,7 @@ import { HealthPage } from "../features/health";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
+import { FlowPage, FlowsPage, NewFlowPage } from "../features/flows";
 import { NewSegmentPage, SegmentPage, SegmentsPage } from "../features/segments";
 import { NewSourcePage, SourcePage, SourcesPage } from "../features/sources";
 import { MembersPage } from "../features/members";
@@ -122,6 +123,9 @@ export function AppRoutes() {
           <Route path="w/:ws/segments" element={<SegmentsPage />} />
           <Route path="w/:ws/segments/new" element={<NewSegmentPage />} />
           <Route path="w/:ws/segments/:id" element={<SegmentPage />} />
+          <Route path="w/:ws/flows" element={<FlowsPage />} />
+          <Route path="w/:ws/flows/new" element={<NewFlowPage />} />
+          <Route path="w/:ws/flows/:id" element={<FlowPage />} />
           <Route path="w/:ws/contacts" element={<ContactsPage />} />
           <Route path="w/:ws/contacts/:key" element={<ContactPage />} />
           <Route path="w/:ws/contact-definition" element={<ContactDefinitionPage />} />

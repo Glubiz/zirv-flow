@@ -104,7 +104,8 @@ describe("people routes", () => {
     expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
     expect(await screen.findByText("Search to find people")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Main" });
-    expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
+    // The workspace links appear once the workspace has loaded, which may be after the page.
+    expect(await within(nav).findByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Conflicts" })).not.toHaveAttribute("aria-current");
   });
 
@@ -204,11 +205,11 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(15);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(16);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Lists", "Segments", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "API keys", "Traces"]) {
+    for (const name of ["Members", "Fields", "Lists", "Segments", "Flows", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "API keys", "Traces"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");

@@ -10,6 +10,7 @@ export { PageHeader, Panel } from "./Page";
 export { Pill } from "./Pill";
 export type { Tone } from "./Pill";
 export { ResourceView } from "./ResourceView";
+export { Sheet } from "./Sheet";
 export { SkipLink } from "./SkipLink";
 export { Stepper } from "./Stepper";
 export type { StepEntry } from "./Stepper";

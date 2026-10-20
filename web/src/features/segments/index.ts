@@ -1,4 +1,9 @@
+export { ConditionEditor, describeCondition } from "./ConditionEditor";
+export type { ConditionNode } from "./ConditionEditor";
+export { useCatalog } from "./catalog";
+export type { Catalog, CatalogState } from "./catalog";
 export { NewSegmentPage } from "./NewSegmentPage";
 export { SegmentExplainPanel } from "./SegmentExplainPanel";
 export { SegmentPage } from "./SegmentPage";
 export { SegmentsPage } from "./SegmentsPage";
+export { useLeaveGuard } from "./useLeaveGuard";
