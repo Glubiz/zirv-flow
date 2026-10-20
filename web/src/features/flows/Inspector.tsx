@@ -42,6 +42,8 @@ interface Props {
   names: Names;
   catalog: Catalog | null;
   announce: (text: string) => void;
+  /** Reads the flow's lifecycle state again after a 409, so the editor shows what the API now says. */
+  onConflict: () => Promise<void>;
 }
 
 /** The Enrollments view: a version on the canvas with its counts, the people in it, and one person's path. */
@@ -172,11 +174,22 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
     props.announce("Back to all enrollments.");
   }
 
-  /** A refusal because the enrollment or the flow changed somewhere else: shown as it is now, with a notice. */
-  function conflict() {
-    setNotice(CHANGED_ELSEWHERE);
-    props.announce(CHANGED_ELSEWHERE);
+  /**
+   * A 409: the flow's state is read again, and the notice names the cause the problem's code gives.
+   * Only a conflict with no such cause says the enrollment changed somewhere else.
+   */
+  async function conflict(error: ApiError, kind: "retry" | "skip" | "exit") {
+    const done = kind === "retry" ? "retried" : kind === "skip" ? "skipped" : "ended";
+    const said =
+      error.code === "flow_paused"
+        ? `The flow is paused, so nothing was ${done}. Resume it first.`
+        : error.code === "flow_archived"
+          ? `The flow is archived, so nothing was ${done}.`
+          : CHANGED_ELSEWHERE;
+    setNotice(said);
+    props.announce(said);
     setRefresh((value) => value + 1);
+    await props.onConflict();
   }
 
   async function act(kind: "retry" | "skip" | "exit", enrollmentId?: string) {
@@ -203,7 +216,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
       setRefresh((value) => value + 1);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        conflict();
+        await conflict(error, kind);
       } else {
         const summary = describeError(error);
         setNotice(summary.detail || summary.title);
@@ -218,6 +231,12 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   const waitingHere = tallies?.reduce((sum, entry) => sum + entry.waiting, 0) ?? null;
   const exitReason =
     props.state !== "published" ? "A paused or archived flow cannot end anyone's enrollment." : null;
+  const stepReason =
+    props.state === "paused"
+      ? "The flow is paused, so a failed step cannot be retried or skipped. Resume it first."
+      : props.state === "archived"
+        ? "The flow is archived, so a failed step cannot be retried or skipped."
+        : null;
 
   return (
     <>
@@ -338,8 +357,9 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                         names={names}
                         canAdmin={props.canAdmin}
                         acting={acting}
-                        onRetry={() => void act("retry", data.enrollment.id)}
-                        onSkip={() => !acting && setConfirm("skip")}
+                        reason={stepReason}
+                        onRetry={() => !stepReason && void act("retry", data.enrollment.id)}
+                        onSkip={() => !acting && !stepReason && setConfirm("skip")}
                       />
                     ) : null
                   }
@@ -592,6 +612,7 @@ function EnrollmentDetail({
   names,
   canAdmin,
   acting,
+  reason,
   onRetry,
   onSkip,
 }: {
@@ -601,6 +622,8 @@ function EnrollmentDetail({
   names: Names;
   canAdmin: boolean;
   acting: boolean;
+  /** Why Retry and Skip are refused, when the flow's state forbids them. */
+  reason: string | null;
   onRetry: () => void;
   onSkip: () => void;
 }) {
@@ -629,14 +652,17 @@ function EnrollmentDetail({
       </div>
       {failed ? (
         canAdmin ? (
-          <div className="row" role="group" aria-label="Admin actions">
-            <Button variant="primary" aria-disabled={acting || undefined} onClick={onRetry}>
-              {failedAt ? `Retry ${failedAt}` : "Retry"}
-            </Button>
-            <Button aria-disabled={acting || undefined} onClick={onSkip}>
-              Skip it…
-            </Button>
-          </div>
+          <>
+            <div className="row" role="group" aria-label="Admin actions">
+              <Button variant="primary" aria-disabled={acting || reason !== null || undefined} onClick={onRetry}>
+                {failedAt ? `Retry ${failedAt}` : "Retry"}
+              </Button>
+              <Button aria-disabled={acting || reason !== null || undefined} onClick={onSkip}>
+                Skip it…
+              </Button>
+            </div>
+            {reason ? <p className="faint">{reason}</p> : null}
+          </>
         ) : (
           <p className="faint">Retrying or skipping a failed step needs a workspace admin.</p>
         )

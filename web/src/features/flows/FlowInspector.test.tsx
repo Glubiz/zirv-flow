@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowDetail, flowRoutes, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -299,6 +299,53 @@ describe("the enrollment inspector", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("changed somewhere else");
     await waitFor(() => expect(calls.filter((call) => call.path === `${FLOW}/enrollments/${E1}`).length).toBeGreaterThan(before));
+  });
+
+  it("names the pause when a retry meets flow_paused, and reads the flow's state again", async () => {
+    let life = "published";
+    const calls = mockApi(
+      routes({
+        routes: {
+          [`GET ${FLOW}`]: () => json(flowDetail({ state: life, current_version: 2 })),
+          [`POST ${FLOW}/enrollments/${E1}/retry`]: () => {
+            life = "paused";
+            return problem(409, "Conflict", "the flow is paused", undefined, "flow_paused");
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openFailed(user);
+    const reads = () => calls.filter((call) => call.method === "GET" && call.path === FLOW).length;
+    const before = reads();
+
+    await user.click(await within(sheet).findByRole("button", { name: /^Retry/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The flow is paused, so nothing was retried.");
+    expect(alert).not.toHaveTextContent("changed somewhere else");
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    // The editor now knows: Resume is offered, and Retry and Skip are refused with the reason.
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(await within(sheet).findByText(/The flow is paused, so a failed step cannot be retried or skipped/)).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: /^Retry/ })).toHaveAttribute("aria-disabled", "true");
+    expect(within(sheet).getByRole("button", { name: "Skip it…" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("shows Retry and Skip refused with the reason while the flow is paused", async () => {
+    const calls = mockApi(routes({ state: "paused" }));
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openFailed(user);
+
+    const retry = await within(sheet).findByRole("button", { name: /^Retry/ });
+    expect(retry).toHaveAttribute("aria-disabled", "true");
+    expect(within(sheet).getByText(/The flow is paused, so a failed step cannot be retried or skipped/)).toBeInTheDocument();
+    await user.click(retry);
+    await user.click(within(sheet).getByRole("button", { name: "Skip it…" }));
+    expect(screen.queryByRole("dialog", { name: "Skip the failed step?" })).not.toBeInTheDocument();
+    expect(calls.some((call) => call.method === "POST" && /\/(retry|skip)$/.test(call.path))).toBe(false);
   });
 
   it("offers Retry and Skip to admins only, and gives others the reason", async () => {

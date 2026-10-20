@@ -307,13 +307,13 @@ function Editor({
   }
 
   /** The flow changed somewhere else (a 409): shows it as it is now, with a notice. */
-  async function adoptCurrent() {
+  async function adoptCurrent(withNotice = true) {
     const request = startRequest();
     try {
       const current = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
       );
-      if (applyLife(request, { state: current.state, version: current.current_version ?? null })) {
+      if (applyLife(request, { state: current.state, version: current.current_version ?? null }) && withNotice) {
         setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
       }
     } catch (again) {
@@ -690,6 +690,7 @@ function Editor({
           names={names}
           catalog={catalog}
           announce={announce}
+          onConflict={() => adoptCurrent(false)}
         />
       ) : null}
 
