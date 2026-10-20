@@ -104,7 +104,8 @@ describe("people routes", () => {
     expect(await screen.findByRole("heading", { name: "People" })).toBeInTheDocument();
     expect(await screen.findByText("Search to find people")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Main" });
-    expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
+    // The workspace links appear once the workspace has loaded, which may be after the page.
+    expect(await within(nav).findByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Conflicts" })).not.toHaveAttribute("aria-current");
   });
 
