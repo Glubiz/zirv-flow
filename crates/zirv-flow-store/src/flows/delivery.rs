@@ -217,10 +217,7 @@ pub async fn record_webhook_outcome(
     append_decision(
         &mut *connection,
         &NewDecision {
-            graph: pinned.map(|(_, version)| GraphPoint {
-                version,
-                node: Some(outcome.node.to_owned()),
-            }),
+            graph: pinned.map(|(_, version)| GraphPoint::at(version, outcome.node)),
             workspace_id: outcome.workspace,
             trace: outcome.trace.clone(),
             action: "webhook.call",

@@ -54,6 +54,24 @@ pub struct GraphPoint {
     pub node: Option<String>,
 }
 
+impl GraphPoint {
+    /// The point of a decision about the version as a whole, such as an enrollment.
+    pub fn of_version(version: i32) -> Self {
+        Self {
+            version,
+            node: None,
+        }
+    }
+
+    /// The point of a decision about one node of the version.
+    pub fn at(version: i32, node: &str) -> Self {
+        Self {
+            version,
+            node: Some(node.to_owned()),
+        }
+    }
+}
+
 /// The `subject_ids` document of a record: ids by name, then the graph point.
 fn subjects_of(decision: &NewDecision) -> Value {
     let mut subjects: Map<String, Value> = decision

@@ -286,10 +286,7 @@ async fn end_in_flight(
     let decisions: Vec<NewDecision> = ended
         .iter()
         .map(|(id, person, flow, version, node)| NewDecision {
-            graph: Some(GraphPoint {
-                version: *version,
-                node: Some(node.clone()),
-            }),
+            graph: Some(GraphPoint::at(*version, &node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -392,10 +389,7 @@ pub async fn resume_batch(
         jobs.push(payload.job(&enrollment_trace, None, key));
         resumed.push((row.id, input.status_before().as_str()));
         decisions.push(NewDecision {
-            graph: Some(GraphPoint {
-                version: row.flow_version,
-                node: Some(row.node.clone()),
-            }),
+            graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -430,10 +424,7 @@ pub async fn resume_batch(
         .await
         .map_err(StoreError::query)?;
         decisions.extend(unresumable.iter().map(|row| NewDecision {
-            graph: Some(GraphPoint {
-                version: row.flow_version,
-                node: Some(row.node.clone()),
-            }),
+            graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -591,10 +582,7 @@ pub async fn resume_failed(
     append_decisions(
         connection,
         &[NewDecision {
-            graph: Some(GraphPoint {
-                version: locked.flow_version,
-                node: Some(node),
-            }),
+            graph: Some(GraphPoint::at(locked.flow_version, &node)),
             workspace_id: workspace,
             trace: decided,
             action: "flow.enrollment",

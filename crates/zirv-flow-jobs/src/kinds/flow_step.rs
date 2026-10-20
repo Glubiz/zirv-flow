@@ -174,10 +174,7 @@ async fn release(
     // The decision the resume batch would have written, under the enrollment's own trace (the
     // batch's is not known here) and in this transaction, so the trace reads held, resumed, steps.
     let decision = NewDecision {
-        graph: Some(GraphPoint {
-            version: enrollment.flow_version,
-            node: Some(enrollment.node.clone()),
-        }),
+        graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",
@@ -220,10 +217,7 @@ async fn hold(
     hold_enrollment(conn, job.workspace, enrollment.id, &job.input).await?;
     if !already {
         let decision = NewDecision {
-            graph: Some(GraphPoint {
-                version: enrollment.flow_version,
-                node: Some(enrollment.node.clone()),
-            }),
+            graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
             workspace_id: job.workspace,
             trace: enrollment.trace.clone(),
             action: "flow.enrollment",
@@ -1043,10 +1037,7 @@ async fn fail_enrollment(
         return Err(JobError::new("the enrollment moved under its lock"));
     }
     let decision = NewDecision {
-        graph: Some(GraphPoint {
-            version: enrollment.flow_version,
-            node: Some(failed_node.to_owned()),
-        }),
+        graph: Some(GraphPoint::at(enrollment.flow_version, failed_node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",

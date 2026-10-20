@@ -258,10 +258,7 @@ impl Run {
         node: &str,
     ) -> NewDecision {
         NewDecision {
-            graph: Some(GraphPoint {
-                version: enrollment.flow_version,
-                node: Some(node.to_owned()),
-            }),
+            graph: Some(GraphPoint::at(enrollment.flow_version, node)),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
             action,

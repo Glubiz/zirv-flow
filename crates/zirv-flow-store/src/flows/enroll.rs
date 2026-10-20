@@ -251,10 +251,7 @@ pub async fn enroll_entries(
         .iter()
         .filter(|(_, reason)| *reason != NO_SUCH_PERSON)
         .map(|(person, reason)| NewDecision {
-            graph: Some(GraphPoint {
-                version: request.version,
-                node: None,
-            }),
+            graph: Some(GraphPoint::of_version(request.version)),
             workspace_id: request.workspace,
             trace: request.trace.clone(),
             action: "flow.enroll",
@@ -306,10 +303,7 @@ pub async fn enroll_entries(
     enqueue_many(&mut *connection, &starts).await?;
     for enrolled in &outcome.enrolled {
         decisions.push(NewDecision {
-            graph: Some(GraphPoint {
-                version: request.version,
-                node: None,
-            }),
+            graph: Some(GraphPoint::of_version(request.version)),
             workspace_id: request.workspace,
             trace: enrolled.trace.clone(),
             action: "flow.enroll",
