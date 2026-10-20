@@ -83,7 +83,7 @@ impl From<JobSummary> for JobBody {
             max_attempts: job.max_attempts,
             last_error: job.last_error,
             trace_id: job.trace_id.to_string(),
-            cause: CauseBody::new(job.cause.kind.to_string(), job.cause.id),
+            cause: CauseBody::new(job.cause.kind, job.cause.id),
             dead_at: job.dead_at,
         }
     }
