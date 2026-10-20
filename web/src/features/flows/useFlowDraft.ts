@@ -119,6 +119,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       ...(sameJson(sent.settings, base.settings) ? {} : { settings: sent.settings }),
     };
     if (Object.keys(body).length === 0) {
+      // The draft is the saved state, so an earlier failed save has nothing left to retry.
+      failed.current = false;
+      setFailure(null);
       setStatus("saved");
       void check();
       return;

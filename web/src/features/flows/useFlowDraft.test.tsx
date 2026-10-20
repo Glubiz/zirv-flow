@@ -74,4 +74,26 @@ describe("useFlowDraft", () => {
 
     expect(patches).toBe(1);
   });
+
+  it("reports nothing to save as saved after a failed save is undone back to the saved state", async () => {
+    mockApi({
+      ...flowRoutes(),
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: () => problem(500, "Internal Server Error", "the save failed"),
+      [`POST ${WS}/flows/${FLOW_ID}/validate`]: () => json({ valid: true, issues: [] }),
+    });
+    const { result } = renderHook(() =>
+      useFlowDraft({ workspaceId: "ws1", flow: flowDetail() as unknown as FlowDetail, editable: true }),
+    );
+    act(() => result.current.edit((draft) => ({ ...draft, name: "One" })));
+    await waitFor(() => expect(result.current.status).toBe("error"), { timeout: 3000 });
+    act(() => result.current.undo());
+
+    let outcome = false;
+    await act(async () => {
+      outcome = await result.current.saveNow();
+    });
+
+    expect(outcome).toBe(true);
+    expect(result.current.unsaved).toBe(false);
+  });
 });
