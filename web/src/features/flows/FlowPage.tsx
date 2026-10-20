@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel } from "../../ui";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
@@ -130,7 +130,12 @@ function Editor({
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [publishing, setPublishing] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [inFlight, setInFlight] = useState(false);
+  const [refusal, setRefusal] = useState<ErrorSummary | null>(null);
+  const [refusedIssues, setRefusedIssues] = useState<FlowIssue[] | null>(null);
+  /** Read after an await, where the state of the render that started the publish is stale. */
+  const publishOpenRef = useRef(false);
   const [announcement, setAnnouncement] = useState("");
   const [viewing, setViewing] = useState<FlowVersion | null>(null);
   const [archiving, setArchiving] = useState(false);
@@ -140,6 +145,9 @@ function Editor({
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(announceTimer.current), []);
+  useEffect(() => {
+    publishOpenRef.current = publishOpen;
+  }, [publishOpen]);
 
   const placed = useMemo(() => placeIssues(store.issues ?? []), [store.issues]);
   const plan = useMemo(() => layout(draft.graph), [draft.graph]);
@@ -231,7 +239,7 @@ function Editor({
 
   /** Closes the publish dialog and shows what one of its issues is about. */
   function pickFromDialog(item: IssueItem) {
-    setPublishing(false);
+    setPublishOpen(false);
     pick(item);
   }
 
@@ -299,8 +307,42 @@ function Editor({
     }
   }
 
+  function openPublish() {
+    if (inFlight) return;
+    setRefusal(null);
+    setRefusedIssues(null);
+    setPublishOpen(true);
+  }
+
+  /** The editor owns the request: the dialog may be closed while it is on its way, and the outcome still lands. */
+  async function startPublish() {
+    if (inFlight) return;
+    setInFlight(true);
+    setRefusal(null);
+    try {
+      const result = await unwrap(
+        client.POST("/api/v1/workspaces/{ws}/flows/{id}/publish", { params: { path: { ws: workspaceId, id: flow.id } } }),
+      );
+      published(result as { flow: FlowBody; version: { version: number } });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        publishConflict();
+      } else if (error instanceof ApiError && error.code === "flow_invalid") {
+        const found = error.flowIssues.map((issue) => issue as FlowIssue);
+        store.adoptIssues(found);
+        setRefusedIssues(found);
+        if (!publishOpenRef.current) setNotice("The flow has issues, so it was not published. They are marked on the canvas.");
+      } else {
+        setRefusal(describeError(error));
+        if (!publishOpenRef.current) noticeOf(error);
+      }
+    } finally {
+      setInFlight(false);
+    }
+  }
+
   function published(result: { flow: FlowBody; version: { version: number } }) {
-    setPublishing(false);
+    setPublishOpen(false);
     setViewing(null);
     setNotice(null);
     setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
@@ -310,7 +352,7 @@ function Editor({
 
   /** A publish was refused with a 409: the dialog goes and the flow is shown as it is now. */
   function publishConflict() {
-    setPublishing(false);
+    setPublishOpen(false);
     setNotice(null);
     void adoptCurrent().then(refocusActions);
   }
@@ -421,8 +463,8 @@ function Editor({
         </div>
         {canAdmin && life.state !== "archived" ? (
           <div className="fl-actions">
-            <Button id="flow-primary-action" variant="primary" disabled={acting} onClick={() => setPublishing(true)}>
-              Publish…
+            <Button id="flow-primary-action" variant="primary" disabled={acting} aria-disabled={inFlight || undefined} onClick={openPublish}>
+              {inFlight ? "Publishing…" : "Publish…"}
             </Button>
             {life.state === "published" ? (
               <Button disabled={acting} onClick={() => void lifecycle("pause")}>
@@ -524,7 +566,7 @@ function Editor({
             state={life.state}
             current={life.version}
             canPublish={canAdmin && !archived}
-            onPublish={() => setPublishing(true)}
+            onPublish={openPublish}
             onView={view}
           />
         </div>
@@ -561,7 +603,7 @@ function Editor({
         </Dialog>
       ) : null}
 
-      {publishing ? (
+      {publishOpen ? (
         <PublishDialog
           workspaceId={workspaceId}
           flowId={flow.id}
@@ -571,10 +613,11 @@ function Editor({
           saveNow={store.saveNow}
           itemsFor={itemsFor}
           onPick={pickFromDialog}
-          onPublished={published}
-          onRefused={store.adoptIssues}
-          onConflict={publishConflict}
-          onClose={() => setPublishing(false)}
+          publishing={inFlight}
+          onPublish={() => void startPublish()}
+          refusal={refusal}
+          refusedIssues={refusedIssues}
+          onClose={() => setPublishOpen(false)}
         />
       ) : null}
 

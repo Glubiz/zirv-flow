@@ -285,7 +285,36 @@ describe("publishing is for admins", () => {
 });
 
 describe("publish in flight and refused", () => {
-  it("stays open on Escape and Cancel while the publish is on its way, and shows the new version when it lands", async () => {
+  it("lets the dialog be closed while the publish hangs, and lands the result when it arrives", async () => {
+    let release: (response: Response) => void = () => undefined;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    mockApi({ ...flowRoutes(), ...publishRoute(() => json(impactBody()), () => pending) });
+    const user = userEvent.setup();
+    mount();
+    const opener = await screen.findByRole("button", { name: "Publish…" });
+    await user.click(opener);
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
+    await within(dialog).findByRole("button", { name: "Publishing…" });
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const again = screen.getByRole("button", { name: "Publishing…" });
+    expect(again).toHaveAttribute("aria-disabled", "true");
+    expect(again).toHaveFocus();
+    await user.click(again);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    release(published(1));
+    expect(await screen.findByText("v1 live")).toBeInTheDocument();
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(await screen.findByText("Version 1 of Welcome series is published.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish…" })).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("puts the issues on the canvas with a notice when a publish is refused after the dialog was closed", async () => {
     let release: (response: Response) => void = () => undefined;
     const pending = new Promise<Response>((resolve) => {
       release = resolve;
@@ -296,16 +325,14 @@ describe("publish in flight and refused", () => {
     const dialog = await openDialog(user);
     await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
     await within(dialog).findByRole("button", { name: "Publishing…" });
-
     await user.keyboard("{Escape}");
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    release(published(1));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(screen.getByText("Live")).toBeInTheDocument();
-    expect(screen.getByText("v1 live")).toBeInTheDocument();
+
+    release(refused([{ code: "port_not_wired", node: "n1" }]));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("has issues");
+    expect(await screen.findByRole("group", { name: /^Wait: 1 day.*1 issue/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish…" })).not.toHaveAttribute("aria-disabled");
   });
 
   it("refetches the flow on a 409, closes the dialog, makes the editor read-only and says so", async () => {

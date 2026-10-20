@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
-import { ApiError, client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, formatAgo, LoadingState } from "../../ui";
 import type { IssueItem } from "./Canvas";
 import type { Names } from "./describe";
@@ -8,7 +8,6 @@ import { issueText } from "./issues";
 import type { FlowIssue, Graph } from "./model";
 
 type Impact = components["schemas"]["ImpactBody"];
-type Published = components["schemas"]["PublishedBody"];
 
 interface PublishDialogProps {
   workspaceId: string;
@@ -22,11 +21,14 @@ interface PublishDialogProps {
   itemsFor: (issues: FlowIssue[]) => IssueItem[];
   /** Closes the dialog and shows the step or section of the issue. */
   onPick: (item: IssueItem) => void;
-  onPublished: (published: Published) => void;
-  /** A publish was refused with these issues, so the canvas can show them. */
-  onRefused: (issues: FlowIssue[]) => void;
-  /** The flow was changed somewhere else (a 409), so the dialog is no use: the editor refetches and closes it. */
-  onConflict: () => void;
+  /** Whether the editor has a publish request in flight; the editor owns it, so closing the dialog does not stop it. */
+  publishing: boolean;
+  /** Starts the publish; the editor handles the outcome whether or not this dialog is still open. */
+  onPublish: () => void;
+  /** Why the last publish failed, when it did for a reason other than the flow's issues. */
+  refusal: ErrorSummary | null;
+  /** The issues a publish was refused with (a 422), so the checks list shows them. */
+  refusedIssues: FlowIssue[] | null;
   onClose: () => void;
 }
 
@@ -47,12 +49,11 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 /** The preview of a publish, from a dry run, and the publish itself. */
 export function PublishDialog(props: PublishDialogProps) {
-  const { workspaceId, flowId, flowName, graph, names, saveNow, itemsFor, onPick, onPublished, onRefused, onConflict, onClose } = props;
+  const { workspaceId, flowId, flowName, graph, names, saveNow, itemsFor, onPick, publishing, onPublish, refusal, refusedIssues, onClose } = props;
   const [phase, setPhase] = useState<Phase>({ name: "loading" });
   const [impact, setImpact] = useState<Impact | null>(null);
-  const [publishing, setPublishing] = useState(false);
-  const [refusal, setRefusal] = useState<ErrorSummary | null>(null);
   const reasonId = useId();
+  const closeId = useId();
   const live = useRef(true);
   /** Whether the dialog is still open; read through a function so a check after an await is not narrowed away. */
   const alive = () => live.current;
@@ -65,7 +66,6 @@ export function PublishDialog(props: PublishDialogProps) {
 
   const load = useCallback(async () => {
     setPhase({ name: "loading" });
-    setRefusal(null);
     try {
       const saved = await save.current();
       if (!alive()) return;
@@ -102,36 +102,14 @@ export function PublishDialog(props: PublishDialogProps) {
     };
   }, [load]);
 
-  async function publish() {
-    setPublishing(true);
-    setRefusal(null);
-    try {
-      const published = await unwrap(
-        client.POST("/api/v1/workspaces/{ws}/flows/{id}/publish", { params: { path: { ws: workspaceId, id: flowId } } }),
-      );
-      if (!alive()) return;
-      onPublished(published as Published);
-    } catch (error) {
-      if (!alive()) return;
-      setPublishing(false);
-      if (error instanceof ApiError && error.status === 409) {
-        onConflict();
-        return;
-      }
-      if (error instanceof ApiError && error.code === "flow_invalid") {
-        const found = error.flowIssues.map((issue) => issue as FlowIssue);
-        setImpact((current) => (current ? { ...current, valid: false, issues: found } : current));
-        onRefused(found);
-        return;
-      }
-      setRefusal(describeError(error));
-    }
-  }
+  /** The button that started the publish is disabled now, which would drop focus out of the dialog: Close takes it. */
+  useEffect(() => {
+    if (publishing) document.getElementById(closeId)?.focus();
+  }, [publishing, closeId]);
 
-  /** While the publish is on its way the dialog stays: closing it would drop the result. */
-  const close = () => {
-    if (!publishing) onClose();
-  };
+  useEffect(() => {
+    if (refusedIssues) setImpact((current) => (current ? { ...current, valid: false, issues: refusedIssues } : current));
+  }, [refusedIssues]);
 
   const title = impact && phase.name === "ready" ? `Publish version ${impact.next_version} of ${flowName}` : `Publish ${flowName}`;
   const items = impact ? itemsFor(impact.issues) : [];
@@ -141,7 +119,7 @@ export function PublishDialog(props: PublishDialogProps) {
   const segmentName = audience ? names.segments.find((segment) => segment.id === audience.segment_id)?.name : undefined;
 
   return (
-    <Dialog title={title} onClose={close} wide>
+    <Dialog title={title} onClose={onClose} wide>
       {phase.name === "loading" ? <LoadingState label="Checking what publishing would do" /> : null}
 
       {phase.name === "failed" ? (
@@ -241,7 +219,7 @@ export function PublishDialog(props: PublishDialogProps) {
               <p className="state-title">{refusal.title}</p>
               {refusal.detail ? <p className="state-body">{refusal.detail}</p> : null}
               <div className="state-actions">
-                <Button onClick={() => void publish()}>Retry</Button>
+                <Button onClick={() => onPublish()}>Retry</Button>
               </div>
             </div>
           ) : null}
@@ -255,15 +233,13 @@ export function PublishDialog(props: PublishDialogProps) {
         <span className="visually-hidden pub-announce" role="status">
           {reason}
         </span>
-        <Button disabled={publishing} onClick={close}>
-          Cancel
-        </Button>
+        <Button id={closeId} onClick={onClose}>{publishing ? "Close" : "Cancel"}</Button>
         {phase.name === "ready" && impact ? (
           <Button
             variant="primary"
             disabled={blocked || publishing}
             aria-describedby={blocked ? reasonId : undefined}
-            onClick={() => void publish()}
+            onClick={onPublish}
           >
             {publishing ? "Publishing…" : `Publish version ${impact.next_version}`}
           </Button>

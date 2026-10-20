@@ -172,12 +172,14 @@ select {
   font-size: 16px;
 }
 
-.btn[disabled] {
+.btn[disabled],
+.btn[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.6;
 }
 
-.btn[disabled]:active {
+.btn[disabled]:active,
+.btn[aria-disabled="true"]:active {
   transform: none;
 }
 
