@@ -169,6 +169,8 @@ interface CanvasProps {
   onPickIssue: (item: IssueItem) => void;
   /** Test path, counts or an enrollment drawn over the steps; nothing is drawn when absent. */
   overlay?: Overlay;
+  /** Fit the view again whenever this changes, such as when another version is drawn. */
+  fitKey?: string | number;
   children?: ReactNode;
 }
 
@@ -331,6 +333,8 @@ const ARROWS = ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"];
 function Surface(props: CanvasProps) {
   const { graph, settings, names, placed, editable, selectedId, focusRequest, overlay } = props;
   const container = useRef<HTMLDivElement>(null);
+  const flow = useReactFlow();
+  const fitted = useRef(props.fitKey);
   const plan = useMemo(() => layout(graph), [graph]);
 
   const nodes = useMemo(() => {
@@ -441,6 +445,13 @@ function Surface(props: CanvasProps) {
     }
     return list;
   }, [plan, graph, placed.byEdge, overlay]);
+
+  useEffect(() => {
+    if (fitted.current === props.fitKey) return;
+    fitted.current = props.fitKey;
+    const timer = setTimeout(() => void flow.fitView({ maxZoom: 1, padding: 0.2 }), 0);
+    return () => clearTimeout(timer);
+  }, [props.fitKey, flow]);
 
   function focusNode(id: string) {
     const target = Array.from(container.current?.querySelectorAll<HTMLElement>(".react-flow__node") ?? []).find(

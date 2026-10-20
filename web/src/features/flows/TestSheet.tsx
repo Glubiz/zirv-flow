@@ -151,7 +151,7 @@ export function TestSheet(props: Props) {
   }
 
   return (
-    <Sheet title={result ? "Test run" : "Set up a test run"} eyebrow="Test mode · the draft" closeLabel="Exit test" onClose={props.onClose}>
+    <Sheet title={result ? "Test run" : "Set up a test run"} eyebrow="Test mode · the draft" closeLabel="Close" onClose={props.onClose}>
       <p className="muted">{NOTHING_SENT}</p>
       <div className="fl-sheet-section">
         {result === null ? (
@@ -300,7 +300,7 @@ function PersonPicker({
   }
 
   return (
-    <form className="stack" aria-label="Search people" onSubmit={(event) => void search(event)}>
+    <form className="stack" aria-label="Find a person" onSubmit={(event) => void search(event)}>
       <div className="row">
         <SelectField label="Search by" value={kind} onChange={(event) => setKind(event.target.value)}>
           <option value="email">Email</option>

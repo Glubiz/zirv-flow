@@ -227,7 +227,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
         </p>
       ) : null}
       <Canvas
-        key={shown.version}
+        fitKey={shown.version}
         graph={shown.graph}
         settings={shown.settings}
         names={names}
