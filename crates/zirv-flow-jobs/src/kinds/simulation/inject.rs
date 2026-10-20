@@ -518,17 +518,16 @@ impl Driver<'_> {
                 .unwrap();
         let moved = row.is_some_and(|(version,)| version != watch.version);
         if watch.is_wake {
-            match (moved, watch.wake_at) {
-                (true, Some(wake_at)) => {
-                    self.bump("wake moved an enrollment");
-                    self.wake_moves.push(WakeMove {
-                        enrollment: watch.enrollment,
-                        wake_at,
-                        at: self.now,
-                    });
-                }
-                (false, _) if early => self.bump("early wake put back"),
-                _ => {}
+            if moved {
+                self.bump("wake moved an enrollment");
+                // A wake with no timer to answer must not move anything either.
+                self.wake_moves.push(WakeMove {
+                    enrollment: watch.enrollment,
+                    wake_at: watch.wake_at,
+                    at: self.now,
+                });
+            } else if early {
+                self.bump("early wake put back");
             }
         } else if moved {
             self.bump("event or start moved an enrollment");

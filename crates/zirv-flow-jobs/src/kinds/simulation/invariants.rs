@@ -28,7 +28,7 @@ use zirv_flow_core::flow::{FlowGraph, ListChange, NODE_TYPES, NodeKind, TraitCha
 use zirv_flow_engine::effect_key;
 use zirv_flow_store::{STEP_JOB_KIND, WEBHOOK_JOB_KIND};
 
-use super::driver::{Driver, KINDS};
+use super::driver::{Driver, KINDS, WakeMove};
 use super::world::{TRAIT_KEYS, World, end};
 
 /// What the checks found.
@@ -304,13 +304,8 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
     external_effects(w, &mut found, &expected_keys, &enrollments).await;
 
     // Invariant 3.
-    for moved in &driver.wake_moves {
-        if moved.at < moved.wake_at {
-            found.violate(format!(
-                "invariant 3: a wake moved enrollment {} at {} though its wake_at is {}",
-                moved.enrollment, moved.at, moved.wake_at
-            ));
-        }
+    for text in wake_violations(&driver.wake_moves) {
+        found.violate(text);
     }
     found.count("wakes that moved an enrollment", driver.wake_moves.len());
 
@@ -564,5 +559,52 @@ async fn liveness(
     }
     for (state, count) in states {
         found.count(&format!("enrollments {state}"), count);
+    }
+}
+
+/// Invariant 3 over the wakes that moved an enrollment: each answered a timer that was due. A
+/// wake that moved an enrollment with no timer at all is as wrong as one that moved it early.
+fn wake_violations(moves: &[WakeMove]) -> Vec<String> {
+    moves
+        .iter()
+        .filter_map(|moved| match moved.wake_at {
+            None => Some(format!(
+                "invariant 3: a wake moved enrollment {} at {} though it had no wake_at",
+                moved.enrollment, moved.at
+            )),
+            Some(wake_at) if moved.at < wake_at => Some(format!(
+                "invariant 3: a wake moved enrollment {} at {} though its wake_at is {wake_at}",
+                moved.enrollment, moved.at
+            )),
+            Some(_) => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    fn moved(wake_at: Option<OffsetDateTime>, at: OffsetDateTime) -> WakeMove {
+        WakeMove {
+            enrollment: Uuid::from_u128(1),
+            wake_at,
+            at,
+        }
+    }
+
+    #[test]
+    fn a_wake_that_moves_an_enrollment_needs_a_timer_that_was_due() {
+        let due = datetime!(2030-01-02 0:00 UTC);
+        assert!(wake_violations(&[moved(Some(due), due)]).is_empty());
+        assert!(wake_violations(&[moved(Some(due), datetime!(2030-01-03 0:00 UTC))]).is_empty());
+        let early = wake_violations(&[moved(Some(due), datetime!(2030-01-01 0:00 UTC))]);
+        assert_eq!(early.len(), 1);
+        assert!(early[0].contains("though its wake_at is"));
+        let none = wake_violations(&[moved(None, due)]);
+        assert_eq!(none.len(), 1);
+        assert!(none[0].contains("had no wake_at"));
     }
 }

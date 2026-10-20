@@ -33,7 +33,8 @@ pub(super) const KINDS: [&str; 3] = [ENROLL_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB
 #[derive(Clone, Debug)]
 pub(super) struct WakeMove {
     pub(super) enrollment: Uuid,
-    pub(super) wake_at: OffsetDateTime,
+    /// The timer the enrollment held when the job claimed it; none means it had none due.
+    pub(super) wake_at: Option<OffsetDateTime>,
     pub(super) at: OffsetDateTime,
 }
 
