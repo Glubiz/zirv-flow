@@ -3758,7 +3758,7 @@ export interface components {
             enrollment_id: string;
             /**
              * Format: uuid
-             * @description The trace the operator's decision is recorded under.
+             * @description The trace the operator's decision is recorded under: the enrollment's own.
              */
             trace_id: string;
         };

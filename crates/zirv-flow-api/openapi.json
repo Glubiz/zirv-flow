@@ -18933,7 +18933,7 @@
           "trace_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The trace the operator's decision is recorded under."
+            "description": "The trace the operator's decision is recorded under: the enrollment's own."
           }
         }
       },
