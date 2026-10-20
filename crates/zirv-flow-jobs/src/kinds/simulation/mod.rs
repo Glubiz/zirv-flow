@@ -81,65 +81,81 @@ fn the_environment_overrides_parse() {
     assert!(std::panic::catch_unwind(|| population(Some("0"))).is_err());
 }
 
+/// Runs the CI seed of `ordinal` in the database of the calling test. Each fixed seed is a test of
+/// its own, so nextest runs them in parallel and each stays within the default slow-test
+/// timeout. With `ZIRV_FLOW_SIM_SEED` set, the first test runs that seed and the others have
+/// nothing to do.
+async fn simulate(pool: PgPool, ordinal: usize) {
+    let seeds = seeds(env::var(SEED_VAR).ok().as_deref());
+    let Some(seed) = seeds.get(ordinal).copied() else {
+        println!("{SEED_VAR} names one seed: the test of CI seed {ordinal} has nothing to run");
+        return;
+    };
+    let population = population(env::var(POPULATION_VAR).ok().as_deref());
+    println!(
+        "PostgreSQL flow simulation: seed {seed}, {population} enrollments, 90 virtual days \
+         (rerun with {SEED_VAR}={seed} {POPULATION_VAR}={population})"
+    );
+    let started = Instant::now();
+    let world = World::build(pool.clone(), ordinal, seed, population).await;
+    let built = started.elapsed();
+    let mut driver = Driver::new(&world);
+    driver.run().await;
+    let ran = started.elapsed();
+    let found = invariants::check(&world, &driver, population).await;
+    println!(
+        "seed {seed}: setup {built:.1?}, run {:.1?}, checks {:.1?}",
+        ran - built,
+        started.elapsed() - ran
+    );
+    for (what, count) in &driver.counts {
+        println!("  {what}: {count}");
+    }
+    for (what, count) in &found.summary {
+        println!("  {what}: {count}");
+    }
+    assert!(
+        found.violations.is_empty() && found.run_problems.is_empty(),
+        "simulation failed: seed {seed}, population {population} enrollments, {} violations; \
+         rerun with {SEED_VAR}={seed} {POPULATION_VAR}={population}\n{}",
+        found.summary.get("violations").copied().unwrap_or(0),
+        found
+            .run_problems
+            .iter()
+            .map(|problem| format!("during the run: {problem}"))
+            .chain(found.violations.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for mode in [
+        "rollback flow.step",
+        "commit without ack flow.step",
+        "concurrent duplicate flow.step",
+        "rollback webhook.call",
+        "commit without ack webhook.call",
+        "concurrent duplicate webhook.call",
+        "rollback flow.enroll",
+        "commit without ack flow.enroll",
+        "concurrent duplicate flow.enroll",
+        "early wake claimed",
+        "early wake put back",
+        "wake moved an enrollment",
+    ] {
+        assert!(
+            driver.counts.get(mode).copied().unwrap_or(0) > 0,
+            "seed {seed}: the run never exercised {mode:?}"
+        );
+    }
+}
+
 #[sqlx::test]
 #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-async fn the_population_holds_all_four_invariants_under_crash_injection(pool: PgPool) {
-    let seeds = seeds(env::var(SEED_VAR).ok().as_deref());
-    let population = population(env::var(POPULATION_VAR).ok().as_deref());
-    for (ordinal, seed) in seeds.into_iter().enumerate() {
-        println!(
-            "PostgreSQL flow simulation: seed {seed}, {population} enrollments, 90 virtual days \
-             (rerun with {SEED_VAR}={seed} {POPULATION_VAR}={population})"
-        );
-        let started = Instant::now();
-        let world = World::build(pool.clone(), ordinal, seed, population).await;
-        let built = started.elapsed();
-        let mut driver = Driver::new(&world);
-        driver.run().await;
-        let ran = started.elapsed();
-        let found = invariants::check(&world, &driver, population).await;
-        println!(
-            "seed {seed}: setup {built:.1?}, run {:.1?}, checks {:.1?}",
-            ran - built,
-            started.elapsed() - ran
-        );
-        for (what, count) in &driver.counts {
-            println!("  {what}: {count}");
-        }
-        for (what, count) in &found.summary {
-            println!("  {what}: {count}");
-        }
-        assert!(
-            found.violations.is_empty() && found.run_problems.is_empty(),
-            "simulation failed: seed {seed}, population {population} enrollments, {} violations; \
-             rerun with {SEED_VAR}={seed} {POPULATION_VAR}={population}\n{}",
-            found.summary.get("violations").copied().unwrap_or(0),
-            found
-                .run_problems
-                .iter()
-                .map(|problem| format!("during the run: {problem}"))
-                .chain(found.violations.iter().cloned())
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        for mode in [
-            "rollback flow.step",
-            "commit without ack flow.step",
-            "concurrent duplicate flow.step",
-            "rollback webhook.call",
-            "commit without ack webhook.call",
-            "concurrent duplicate webhook.call",
-            "rollback flow.enroll",
-            "commit without ack flow.enroll",
-            "concurrent duplicate flow.enroll",
-            "early wake claimed",
-            "early wake put back",
-            "wake moved an enrollment",
-        ] {
-            assert!(
-                driver.counts.get(mode).copied().unwrap_or(0) > 0,
-                "seed {seed}: the run never exercised {mode:?}"
-            );
-        }
-    }
+async fn the_population_holds_all_four_invariants_under_crash_injection_first_seed(pool: PgPool) {
+    simulate(pool, 0).await;
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL; set DATABASE_URL"]
+async fn the_population_holds_all_four_invariants_under_crash_injection_second_seed(pool: PgPool) {
+    simulate(pool, 1).await;
 }
