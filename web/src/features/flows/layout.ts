@@ -20,7 +20,6 @@ interface Placed {
 
 function sizeOf(node: FlowNode | null): { width: number; height: number } {
   if (node === null) return { width: NODE_WIDTH, height: 84 };
-  if (node.type === "exit") return { width: NODE_WIDTH, height: 72 };
   return { width: NODE_WIDTH, height: portsOf(node).length > 1 ? 120 : 92 };
 }
 
