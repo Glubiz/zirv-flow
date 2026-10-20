@@ -31,53 +31,84 @@ const CAUSES: Record<string, string> = {
   sync_run: "A sync run",
 };
 
-interface Group {
-  key: string;
-  kind: string;
-  id: string;
-  records: TraceTreeRecord[];
+interface Branch {
+  record: TraceTreeRecord;
+  /** What was decided after it, under the cause that started the trace, until the next branch. */
+  children: TraceTreeRecord[];
 }
 
-/** The records grouped under what caused them, in the order each cause first appears. */
-function groupByCause(records: readonly TraceTreeRecord[]): Group[] {
-  const groups: Group[] = [];
+function sameCause(left: TraceTreeRecord, right: TraceTreeRecord): boolean {
+  return left.cause.kind === right.cause.kind && left.cause.id === right.cause.id;
+}
+
+/**
+ * The tree of a trace. Its root is what started the trace, the cause of the first record. A record
+ * with another cause, such as an operator's retry or skip, opens a branch; the records that follow
+ * under the root's cause belong to that branch until the next one opens. Reading the tree top to
+ * bottom is reading the records in the order they were written.
+ */
+function build(records: readonly TraceTreeRecord[]): { root: TraceTreeRecord | null; trunk: TraceTreeRecord[]; branches: Branch[] } {
+  const root = records[0] ?? null;
+  const trunk: TraceTreeRecord[] = [];
+  const branches: Branch[] = [];
   for (const record of records) {
-    const key = `${record.cause.kind}:${record.cause.id}`;
-    let group = groups.find((candidate) => candidate.key === key);
-    if (!group) {
-      group = { key, kind: record.cause.kind, id: record.cause.id, records: [] };
-      groups.push(group);
+    if (root && !sameCause(record, root)) {
+      branches.push({ record, children: [] });
+    } else if (branches.length > 0) {
+      branches[branches.length - 1]?.children.push(record);
+    } else {
+      trunk.push(record);
     }
-    group.records.push(record);
   }
-  return groups;
+  return { root, trunk, branches };
 }
 
-/** The decisions of one trace as a tree: each cause, and under it what was decided because of it. */
+function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: TraceTreeProps["describe"]; tag?: boolean }) {
+  const about = describe?.(record) ?? null;
+  return (
+    <>
+      <span className="mono">{record.action}</span> <span className="mono">{record.outcome}</span>
+      {about ? <span> {about}</span> : null}
+      {record.reason ? <span className="muted"> · {record.reason}</span> : null}
+      {record.attempt != null ? <span className="muted"> · attempt {record.attempt}</span> : null}
+      {tag ? <span className="pill"> {CAUSES[record.cause.kind] ?? record.cause.kind}</span> : null}{" "}
+      <time className="faint" dateTime={record.recorded_at}>
+        {formatDateTime(record.recorded_at)}
+      </time>
+    </>
+  );
+}
+
+/** The decisions of one trace as a tree: what started it, and under it what was decided, with each operator decision opening a branch. */
 export function TraceTree({ records, label, describe }: TraceTreeProps) {
+  const { root, trunk, branches } = build(records);
+  if (!root) return null;
   return (
     <ul className="trace-tree" aria-label={label}>
-      {groupByCause(records).map((group) => (
-        <li key={group.key}>
-          <span className="strong">{CAUSES[group.kind] ?? group.kind}</span> <span className="faint mono">{group.kind}</span>
-          <ul className="trace-tree">
-            {group.records.map((record) => {
-              const about = describe?.(record) ?? null;
-              return (
-                <li key={record.id} className="trace-record">
-                  <span className="mono">{record.action}</span> <span className="mono">{record.outcome}</span>
-                  {about ? <span> {about}</span> : null}
-                  {record.reason ? <span className="muted"> · {record.reason}</span> : null}
-                  {record.attempt != null ? <span className="muted"> · attempt {record.attempt}</span> : null}{" "}
-                  <time className="faint" dateTime={record.recorded_at}>
-                    {formatDateTime(record.recorded_at)}
-                  </time>
-                </li>
-              );
-            })}
-          </ul>
-        </li>
-      ))}
+      <li>
+        <span className="strong">{CAUSES[root.cause.kind] ?? root.cause.kind}</span> <span className="faint mono">{root.cause.kind}</span>
+        <ul className="trace-tree">
+          {trunk.map((record) => (
+            <li key={record.id} className="trace-record">
+              <Line record={record} describe={describe} />
+            </li>
+          ))}
+          {branches.map((branch) => (
+            <li key={branch.record.id} className="trace-record">
+              <Line record={branch.record} describe={describe} tag />
+              {branch.children.length > 0 ? (
+                <ul className="trace-tree">
+                  {branch.children.map((record) => (
+                    <li key={record.id} className="trace-record">
+                      <Line record={record} describe={describe} />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </li>
     </ul>
   );
 }
