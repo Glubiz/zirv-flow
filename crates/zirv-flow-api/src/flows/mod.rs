@@ -5,6 +5,7 @@
 //! publishes, pauses, resumes and archives.
 
 pub(crate) mod crud;
+pub(crate) mod inspector;
 pub(crate) mod operator;
 pub(crate) mod publish;
 mod schema;
