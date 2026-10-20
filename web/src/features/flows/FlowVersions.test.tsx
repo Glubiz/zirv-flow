@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -121,6 +121,25 @@ describe("a version on the canvas", () => {
     expect(screen.getByRole("button", { name: "Fit to screen" })).toBeInTheDocument();
   });
 
+  it("announces the banner through the page's polite region, which is there before the words", async () => {
+    const user = userEvent.setup();
+    mockApi({
+      ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
+      [VERSIONS]: () => json([versionBody(1, { graph: olderGraph() }), versionBody(2)]),
+    });
+    mount();
+    await openVersions(user);
+    await screen.findByRole("tabpanel");
+    const polite = document.querySelector('[aria-live="polite"]')!;
+    expect(polite).toBeEmptyDOMElement();
+
+    await user.click(await screen.findByRole("button", { name: "View version 1" }));
+
+    const banner = await screen.findByText("Viewing version 1 · read-only");
+    expect(banner).not.toHaveAttribute("role");
+    await waitFor(() => expect(polite).toHaveTextContent("Viewing version 1, read-only."));
+  });
+
   it("opens a step in a sheet that cannot change anything", async () => {
     const user = userEvent.setup();
     await viewVersionOne(user);
@@ -140,7 +159,7 @@ describe("a version on the canvas", () => {
     await user.click(screen.getByRole("button", { name: "Back to the draft" }));
 
     expect(await screen.findByRole("group", { name: /^Wait: 1 day/ })).toBeInTheDocument();
-    expect(screen.queryByText(/Viewing version/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Viewing version [0-9]+ · read-only/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add a step" })).toBeInTheDocument();
   });
 

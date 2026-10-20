@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowBody, flowRoutes, impactBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowBody, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -281,5 +281,90 @@ describe("publishing is for admins", () => {
 
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
     expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+  });
+});
+
+describe("publish in flight and refused", () => {
+  it("stays open on Escape and Cancel while the publish is on its way, and shows the new version when it lands", async () => {
+    let release: (response: Response) => void = () => undefined;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    mockApi({ ...flowRoutes(), ...publishRoute(() => json(impactBody()), () => pending) });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
+    await within(dialog).findByRole("button", { name: "Publishing…" });
+
+    await user.keyboard("{Escape}");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    release(published(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(screen.getByText("v1 live")).toBeInTheDocument();
+  });
+
+  it("refetches the flow on a 409, closes the dialog, makes the editor read-only and says so", async () => {
+    const routes = flowRoutes();
+    const load = routes[`GET ${WS}/flows/${FLOW_ID}`]!;
+    let loads = 0;
+    mockApi({
+      ...routes,
+      [`GET ${WS}/flows/${FLOW_ID}`]: (request) => {
+        loads += 1;
+        return loads === 1 ? load(request) : json(flowDetail({ state: "archived" }));
+      },
+      ...publishRoute(
+        () => json(impactBody()),
+        () => problem(409, "Conflict", "The flow is archived."),
+      ),
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(await screen.findByRole("alert")).toHaveTextContent("changed somewhere else");
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Flow name" })).not.toBeInTheDocument();
+    expect(loads).toBe(2);
+  });
+
+  it("speaks the reason a publish is blocked through a region that was there before the words", async () => {
+    const impact = impactBody({ valid: false, issues: [{ code: "port_not_wired", node: "n1", at: "/ports/next" }] });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi({
+      ...flowRoutes(),
+      ...publishRoute(
+        async () => {
+          await gate;
+          return json(impact);
+        },
+        () => published(1),
+      ),
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    const region = dialog.querySelector(".pub-announce");
+    expect(region).not.toBeNull();
+    expect(region).toHaveAttribute("role", "status");
+    expect(region).toBeEmptyDOMElement();
+    release();
+    await within(dialog).findByRole("list", { name: "Issues that stop publishing" });
+
+    await waitFor(() => expect(region).toHaveTextContent("Fix the issue above first."));
+    expect(dialog.querySelector(".pub-announce")).toBe(region);
   });
 });

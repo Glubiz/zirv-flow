@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
@@ -137,6 +137,9 @@ function Editor({
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const nonce = useRef(0);
+  const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => () => clearTimeout(announceTimer.current), []);
 
   const placed = useMemo(() => placeIssues(store.issues ?? []), [store.issues]);
   const plan = useMemo(() => layout(draft.graph), [draft.graph]);
@@ -239,17 +242,41 @@ function Editor({
     }, 0);
   }
 
+  function noticeOf(error: unknown) {
+    const summary = describeError(error);
+    setNotice(summary.detail || summary.title);
+  }
+
+  /** Says something to a screen reader; the region is cleared first so the same words are read again. */
+  function announce(text: string) {
+    clearTimeout(announceTimer.current);
+    setAnnouncement("");
+    announceTimer.current = setTimeout(() => setAnnouncement(text), 0);
+  }
+
+  /** The flow changed somewhere else (a 409): shows it as it is now, with a notice. */
+  async function adoptCurrent() {
+    try {
+      const current = await unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
+      );
+      setLife({ state: current.state, version: current.current_version ?? null });
+      setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
+    } catch (again) {
+      noticeOf(again);
+    }
+  }
+
   async function lifecycle(action: "pause" | "resume" | "archive") {
     setActing(true);
     setNotice(null);
     const path = { params: { path: { ws: workspaceId, id: flow.id } } };
-    const noticeOf = (error: unknown) => {
-      const summary = describeError(error);
-      setNotice(summary.detail || summary.title);
-    };
     try {
-      // Pending edits go in first: an archived flow takes no more.
-      if (action === "archive") await store.saveNow();
+      // Pending edits go in first: an archived flow takes no more, so a failed save stops the archive.
+      if (action === "archive" && !(await store.saveNow())) {
+        setNotice("Your latest changes could not be saved, so the flow was not archived. Try again once they save.");
+        return;
+      }
       const updated = await unwrap(
         action === "pause"
           ? client.POST("/api/v1/workspaces/{ws}/flows/{id}/pause", path)
@@ -258,18 +285,10 @@ function Editor({
             : client.POST("/api/v1/workspaces/{ws}/flows/{id}/archive", path),
       );
       setLife({ state: updated.state, version: updated.current_version ?? null });
-      setAnnouncement(
-        action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.",
-      );
+      announce(action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        try {
-          const current = await unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}", path));
-          setLife({ state: current.state, version: current.current_version ?? null });
-          setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
-        } catch (again) {
-          noticeOf(again);
-        }
+        await adoptCurrent();
       } else {
         noticeOf(error);
       }
@@ -283,9 +302,22 @@ function Editor({
   function published(result: { flow: FlowBody; version: { version: number } }) {
     setPublishing(false);
     setViewing(null);
+    setNotice(null);
     setLife({ state: result.flow.state, version: result.flow.current_version ?? result.version.version });
     refocusActions();
-    setAnnouncement(`Version ${result.version.version} of ${draft.name} is published.`);
+    announce(`Version ${result.version.version} of ${draft.name} is published.`);
+  }
+
+  /** A publish was refused with a 409: the dialog goes and the flow is shown as it is now. */
+  function publishConflict() {
+    setPublishing(false);
+    setNotice(null);
+    void adoptCurrent().then(refocusActions);
+  }
+
+  function view(version: FlowVersion) {
+    setViewing(version);
+    announce(`Viewing version ${version.version}, read-only.`);
   }
 
   const editGraph = (change: (graph: Graph) => Graph, key?: string) =>
@@ -493,7 +525,7 @@ function Editor({
             current={life.version}
             canPublish={canAdmin && !archived}
             onPublish={() => setPublishing(true)}
-            onView={setViewing}
+            onView={view}
           />
         </div>
       ) : null}
@@ -501,7 +533,7 @@ function Editor({
       {tab === "versions" && viewing !== null ? (
         <>
           <div className="fl-viewing">
-            <span role="status">Viewing version {viewing.version} · read-only</span>
+            <span>Viewing version {viewing.version} · read-only</span>
             <Button onClick={() => setViewing(null)}>All versions</Button>
             <Button onClick={() => chooseTab("canvas")}>Back to the draft</Button>
           </div>
@@ -541,6 +573,7 @@ function Editor({
           onPick={pickFromDialog}
           onPublished={published}
           onRefused={store.adoptIssues}
+          onConflict={publishConflict}
           onClose={() => setPublishing(false)}
         />
       ) : null}

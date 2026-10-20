@@ -25,6 +25,8 @@ interface PublishDialogProps {
   onPublished: (published: Published) => void;
   /** A publish was refused with these issues, so the canvas can show them. */
   onRefused: (issues: FlowIssue[]) => void;
+  /** The flow was changed somewhere else (a 409), so the dialog is no use: the editor refetches and closes it. */
+  onConflict: () => void;
   onClose: () => void;
 }
 
@@ -45,7 +47,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 /** The preview of a publish, from a dry run, and the publish itself. */
 export function PublishDialog(props: PublishDialogProps) {
-  const { workspaceId, flowId, flowName, graph, names, saveNow, itemsFor, onPick, onPublished, onRefused, onClose } = props;
+  const { workspaceId, flowId, flowName, graph, names, saveNow, itemsFor, onPick, onPublished, onRefused, onConflict, onClose } = props;
   const [phase, setPhase] = useState<Phase>({ name: "loading" });
   const [impact, setImpact] = useState<Impact | null>(null);
   const [publishing, setPublishing] = useState(false);
@@ -112,6 +114,10 @@ export function PublishDialog(props: PublishDialogProps) {
     } catch (error) {
       if (!alive()) return;
       setPublishing(false);
+      if (error instanceof ApiError && error.status === 409) {
+        onConflict();
+        return;
+      }
       if (error instanceof ApiError && error.code === "flow_invalid") {
         const found = error.flowIssues.map((issue) => issue as FlowIssue);
         setImpact((current) => (current ? { ...current, valid: false, issues: found } : current));
@@ -122,6 +128,11 @@ export function PublishDialog(props: PublishDialogProps) {
     }
   }
 
+  /** While the publish is on its way the dialog stays: closing it would drop the result. */
+  const close = () => {
+    if (!publishing) onClose();
+  };
+
   const title = impact && phase.name === "ready" ? `Publish version ${impact.next_version} of ${flowName}` : `Publish ${flowName}`;
   const items = impact ? itemsFor(impact.issues) : [];
   const blocked = impact !== null && !impact.valid;
@@ -130,7 +141,7 @@ export function PublishDialog(props: PublishDialogProps) {
   const segmentName = audience ? names.segments.find((segment) => segment.id === audience.segment_id)?.name : undefined;
 
   return (
-    <Dialog title={title} onClose={onClose} wide>
+    <Dialog title={title} onClose={close} wide>
       {phase.name === "loading" ? <LoadingState label="Checking what publishing would do" /> : null}
 
       {phase.name === "failed" ? (
@@ -238,10 +249,15 @@ export function PublishDialog(props: PublishDialogProps) {
       ) : null}
 
       <div className="pub-foot">
-        <span id={reasonId} className="faint pub-note" role={blocked ? "status" : undefined}>
+        <span id={reasonId} className="faint pub-note">
           {reason ?? "Only admins can publish, pause or archive."}
         </span>
-        <Button onClick={onClose}>Cancel</Button>
+        <span className="visually-hidden pub-announce" role="status">
+          {reason}
+        </span>
+        <Button disabled={publishing} onClick={close}>
+          Cancel
+        </Button>
         {phase.name === "ready" && impact ? (
           <Button
             variant="primary"

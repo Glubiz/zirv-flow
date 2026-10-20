@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowDetail, flowRoutes, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount } from "../../test/flowsEditor";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -143,5 +143,92 @@ describe("archive", () => {
     expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Flow name" })).not.toBeInTheDocument();
     expect(posted(calls, "archive")).toHaveLength(1);
+  });
+});
+
+describe("announcements and notices", () => {
+  it("announces the same words again when the flow is paused a second time", async () => {
+    let state = "published";
+    mockApi({
+      ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
+      [`POST ${WS}/flows/${FLOW_ID}/pause`]: () => {
+        state = "paused";
+        return json(flowDetail({ state, current_version: 2 }));
+      },
+      [`POST ${WS}/flows/${FLOW_ID}/resume`]: () => {
+        state = "published";
+        return json(flowDetail({ state, current_version: 2 }));
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole("button", { name: "Pause" });
+    const polite = document.querySelector('[aria-live="polite"]')!;
+    const spoken: string[] = [];
+    const watch = new MutationObserver(() => spoken.push(polite.textContent));
+    watch.observe(polite, { childList: true, characterData: true, subtree: true });
+
+    await user.click(await screen.findByRole("button", { name: "Pause" }));
+    await screen.findByRole("button", { name: "Resume" });
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    await screen.findByRole("button", { name: "Pause" });
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+    await screen.findByRole("button", { name: "Resume" });
+
+    await waitFor(() => expect(spoken.filter((text) => text === "The flow is paused.")).toHaveLength(2));
+    watch.disconnect();
+  });
+
+  it("drops an old notice once a later action goes through", async () => {
+    let pauses = 0;
+    mockApi({
+      ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
+      [`POST ${WS}/flows/${FLOW_ID}/pause`]: () => {
+        pauses += 1;
+        return pauses === 1 ? problem(500, "Internal Server Error", "the pause failed") : json(flowDetail({ state: "paused", current_version: 2 }));
+      },
+      [`POST ${WS}/flows/${FLOW_ID}/publish`]: (request) =>
+        new URL(request.url).searchParams.get("dry_run") === "true"
+          ? json(impactBody())
+          : json(
+          {
+            flow: flowDetail({ state: "published", current_version: 3 }),
+            version: { version: 3, graph: { v: 1, nodes: [], edges: [] }, settings: {}, published_at: "2026-10-20T09:00:00Z", trace_id: "66666666-0000-4000-8000-000000000001" },
+          },
+          201,
+        ),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Pause" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("the pause failed");
+    await user.click(screen.getByRole("button", { name: "Publish…" }));
+    await user.click(await within(await screen.findByRole("dialog")).findByRole("button", { name: /^Publish version/ }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByText("the pause failed")).not.toBeInTheDocument();
+  });
+
+  it("does not archive when the changes could not be saved, and leaves the flow editable", async () => {
+    const routes = flowRoutes({ flow: { state: "published", current_version: 2 } });
+    const calls = mockApi({
+      ...routes,
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: () => problem(500, "Internal Server Error", "the save failed"),
+      [`POST ${WS}/flows/${FLOW_ID}/archive`]: after("archived"),
+    });
+    const user = userEvent.setup();
+    mount();
+    const name = await screen.findByRole("textbox", { name: "Flow name" });
+    await user.clear(name);
+    await user.type(name, "Renamed{Enter}");
+
+    await user.click(screen.getByRole("button", { name: "Archive…" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Archive flow" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be saved");
+    expect(posted(calls, "archive")).toHaveLength(0);
+    expect(screen.getByRole("textbox", { name: "Flow name" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archive…" })).toBeEnabled();
   });
 });
