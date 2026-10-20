@@ -64,6 +64,14 @@ pub(super) struct Driver<'w> {
     /// How often each thing happened, by name.
     pub(super) counts: BTreeMap<String, usize>,
     pub(super) wake_moves: Vec<WakeMove>,
+    /// The outcome events (`webhook.succeeded` or `webhook.failed`) each call has committed, by
+    /// the call's idempotency key: one per committed execution that reached a terminal outcome.
+    pub(super) outcomes: HashMap<String, usize>,
+    /// The calls whose `webhook.call` job ran out of attempts.
+    pub(super) dead_webhooks: HashSet<String>,
+    /// How often an enrollment was moved out of each state version. A wait settles once, so
+    /// no entry may pass one.
+    pub(super) advances: HashMap<(Uuid, i64), usize>,
     /// What went wrong during the run itself (a handler that failed, a fence that let a stale
     /// execution through), apart from what the tables show afterwards.
     pub(super) problems: Vec<String>,
@@ -98,6 +106,9 @@ impl<'w> Driver<'w> {
             owner: HashMap::new(),
             counts: BTreeMap::new(),
             wake_moves: Vec::new(),
+            outcomes: HashMap::new(),
+            dead_webhooks: HashSet::new(),
+            advances: HashMap::new(),
             problems: Vec::new(),
         };
         driver.schedule_noise();
@@ -274,6 +285,14 @@ impl<'w> Driver<'w> {
         }
         let enrollment = uuid(payload.get("enrollment_id")).unwrap_or_default();
         let index = self.person_of_enrollment(enrollment).await;
+        if kind == WEBHOOK_JOB_KIND {
+            // The destination's answers to this call follow the seed: the person and the node,
+            // not the random ids of the key.
+            let key = text("idempotency_key");
+            self.w
+                .mock
+                .name(key, mix(index as u64 ^ hash_text(text("node_id"))));
+        }
         let version = payload
             .get("state_version")
             .and_then(Value::as_i64)
@@ -372,6 +391,11 @@ impl<'w> Driver<'w> {
         .unwrap();
         for (name, version, timeout, person) in waits {
             if !self.scheduled.insert((enrollment, version)) {
+                continue;
+            }
+            // The outcome of a webhook call is written by the runtime, not sent in.
+            if name.starts_with("webhook.") {
+                self.bump("waits on a webhook outcome");
                 continue;
             }
             let Some(index) = self.person_index.get(&person).copied() else {

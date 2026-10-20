@@ -10,6 +10,12 @@
 //!   then find the lease gone, and A rolls back. The overlap is read from the lock state, not
 //!   timed (see `concurrent_duplicate`).
 //!
+//! A `webhook.call` also meets the destination's own failures (see `mock`): a retryable answer
+//! ends the attempt with the handler's error, and the worker's reaction follows, `fail_job`,
+//! which spends an attempt like the others. The job keeps the production `max_attempts`, so the
+//! lease expiries and the retries together can use them up: the last attempt records a failed
+//! outcome, and a job whose attempts run out through lease expiry goes dead.
+//!
 //! The runs follow the worker's `execute`: begin, `lock_lease`, the handler, `complete_job`,
 //! commit.
 
@@ -23,8 +29,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_engine::sim::rng::Rng;
 use zirv_flow_store::{
-    ClaimedJob, Clock, STEP_JOB_KIND, Tx, WEBHOOK_JOB_KIND, claim_job, commit, complete_job,
-    fail_job, lock_lease, reap_expired,
+    ClaimedJob, Clock, FailOutcome, STEP_JOB_KIND, Tx, WEBHOOK_JOB_KIND, claim_job, commit,
+    complete_job, fail_job, lock_lease, reap_expired,
 };
 
 use super::driver::{Driver, Due, LANE_PLAN, WakeMove, seconds_of};
@@ -50,9 +56,44 @@ impl Mode {
 struct Watch {
     enrollment: Uuid,
     version: i64,
+    /// The version the job expects to find, from its payload.
+    job_version: i64,
     wake_at: Option<OffsetDateTime>,
     is_wake: bool,
+    /// The name of the event the job answers, when it answers one.
+    event: Option<String>,
 }
+
+/// Why a run did not end in a commit.
+#[derive(Debug)]
+pub(super) enum RunError {
+    /// The destination's answer was one to retry: the handler returned its error, as a worker
+    /// retries it.
+    Retry(String),
+    /// Anything else.
+    Failed(String),
+}
+
+/// How a job's final attempts ended.
+enum Final {
+    Done,
+    /// A retryable answer: the job is back in the queue with an attempt spent.
+    Retried,
+    /// The attempts ran out.
+    Dead,
+    Failed(String),
+}
+
+/// How the reaper left a job whose lease just ran out.
+#[derive(Debug, Eq, PartialEq)]
+enum Reaped {
+    Requeued,
+    Dead,
+    Untouched,
+}
+
+/// The most attempts a job is given in its final stage before the run calls it stuck.
+const MAX_FINAL_ROUNDS: usize = 8;
 
 impl World {
     /// Runs the handler of `claimed` in `tx` the way the worker does.
@@ -74,32 +115,80 @@ impl World {
         kind.run(&mut ctx, claimed.payload.clone()).await
     }
 
+    /// Whether a handler's error is the retry of a `webhook.call`: the destination's answer, or
+    /// a failed send. The worker retries every error; the other kinds have none to retry.
+    fn is_retry(kind: &str, message: &str) -> bool {
+        kind == WEBHOOK_JOB_KIND
+            && (message.starts_with("the destination answered")
+                || message.starts_with("the request to the destination"))
+    }
+
     /// The final run: the handler, the ack and the commit in one transaction. The error is the
     /// handler's, after the transaction was rolled back.
-    pub(super) async fn final_run(&self, claimed: &ClaimedJob) -> Result<(), String> {
+    pub(super) async fn final_run(&self, claimed: &ClaimedJob) -> Result<(), RunError> {
         let mut tx = zirv_flow_store::begin(&self.env.pool).await.unwrap();
         if !lock_lease(&mut tx, claimed.id, claimed.lease_token)
             .await
             .unwrap()
         {
-            return Err("the lease was lost before the handler ran".to_owned());
+            return Err(RunError::Failed(
+                "the lease was lost before the handler ran".to_owned(),
+            ));
         }
         if let Err(error) = self.run_handler(&mut tx, claimed).await {
             drop(tx);
-            return Err(error.message().to_owned());
+            let message = error.message().to_owned();
+            return Err(if Self::is_retry(&claimed.kind, &message) {
+                RunError::Retry(message)
+            } else {
+                RunError::Failed(message)
+            });
         }
         if !complete_job(&mut *tx, claimed.id, claimed.lease_token)
             .await
             .unwrap()
         {
-            return Err("the ack found the lease gone in the final run".to_owned());
+            return Err(RunError::Failed(
+                "the ack found the lease gone in the final run".to_owned(),
+            ));
         }
         commit(tx).await.unwrap();
         Ok(())
     }
 
+    /// The final run, and the worker's reaction to a retry: `fail_job`.
+    async fn finish(&self, claimed: &ClaimedJob) -> Final {
+        match self.final_run(claimed).await {
+            Ok(()) => Final::Done,
+            Err(RunError::Failed(message)) => Final::Failed(message),
+            Err(RunError::Retry(message)) => self.retry(claimed, &message).await,
+        }
+    }
+
+    /// Hands a failed attempt back to the queue as the worker does.
+    async fn retry(&self, claimed: &ClaimedJob, message: &str) -> Final {
+        match fail_job(
+            &self.env.pool,
+            claimed.id,
+            claimed.lease_token,
+            Duration::ZERO,
+            message,
+        )
+        .await
+        .unwrap()
+        {
+            // The handler's last attempt records a failed outcome and returns Ok; a retry that
+            // finds no attempt left is the handler dying with the enrollment never told.
+            Some(FailOutcome::Dead) => Final::Failed(
+                "the last attempt returned a retry instead of recording the failure".to_owned(),
+            ),
+            Some(FailOutcome::Retried) => Final::Retried,
+            None => Final::Failed("the lease was lost before the attempt was failed".to_owned()),
+        }
+    }
+
     /// Lets the lease of a running job run out and has the reaper return it.
-    async fn expire_and_reap(&self, id: Uuid) -> bool {
+    async fn expire_and_reap(&self, id: Uuid) -> Reaped {
         sqlx::query(
             "UPDATE jobs SET lease_expires_at = now() - interval '1 second' \
              WHERE id = $1 AND state = 'running'",
@@ -108,7 +197,14 @@ impl World {
         .execute(&self.env.pool)
         .await
         .unwrap();
-        reap_expired(&self.env.pool).await.unwrap().requeued >= 1
+        let reaped = reap_expired(&self.env.pool).await.unwrap();
+        if reaped.dead >= 1 {
+            Reaped::Dead
+        } else if reaped.requeued >= 1 {
+            Reaped::Requeued
+        } else {
+            Reaped::Untouched
+        }
     }
 
     /// Makes the jobs the runtime enqueued "now" (the database's real time, long before the
@@ -161,11 +257,7 @@ impl World {
             // the events are not compared; the call itself is: its key and the request body the
             // destination last received must be what a re-run sends again.
             WEBHOOK_JOB_KIND => {
-                let key = claimed
-                    .payload
-                    .get("idempotency_key")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let key = key_of(&claimed.payload);
                 let body = self.mock.last_body(key).unwrap_or_default();
                 format!("{key}|{}", String::from_utf8_lossy(&body))
             }
@@ -181,6 +273,27 @@ impl World {
             .unwrap(),
         }
     }
+
+    /// How many outcome events (`webhook.succeeded` or `webhook.failed`) are committed for the
+    /// call of a `webhook.call` payload.
+    async fn outcome_events(&self, payload: &Value) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE workspace_id = $1 AND name IN ('webhook.succeeded', 'webhook.failed') \
+               AND properties ->> 'enrollment_id' = $2 AND properties ->> 'node_id' = $3",
+        )
+        .bind(self.env.ws.as_uuid())
+        .bind(enrollment_of(payload).to_string())
+        .bind(
+            payload
+                .get("node_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .fetch_one(&self.env.pool)
+        .await
+        .unwrap()
+    }
 }
 
 fn enrollment_of(payload: &Value) -> Uuid {
@@ -191,6 +304,73 @@ fn enrollment_of(payload: &Value) -> Uuid {
         .unwrap_or_default()
 }
 
+fn key_of(payload: &Value) -> &str {
+    payload
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// The plan of one job: the failures that come before its final run, and whether the final run
+/// is a concurrent duplicate.
+struct Plan {
+    modes: Vec<Mode>,
+    concurrent: bool,
+    fenced: bool,
+}
+
+impl Plan {
+    /// Drawn from the seed. At least one failure before the final run, for every kind of job: the
+    /// seed picks how many and which, never none. A `webhook.call` may be given enough of them
+    /// for the reaper to use up its attempts; the other kinds stay below, as a stuck enrollment
+    /// is not a result the run accepts.
+    fn draw(rng: &mut Rng, kind: &str) -> Self {
+        let roll = rng.below(100);
+        let failures = if kind == WEBHOOK_JOB_KIND {
+            match roll {
+                0..=34 => 1,
+                35..=64 => 2,
+                65..=84 => 3,
+                85..=94 => 4,
+                _ => 5,
+            }
+        } else {
+            match roll {
+                0..=44 => 1,
+                45..=79 => 2,
+                _ => 3,
+            }
+        };
+        let modes = (0..failures)
+            .map(|_| {
+                if rng.chance(50) {
+                    Mode::Rollback
+                } else {
+                    Mode::CommitWithoutAck
+                }
+            })
+            .collect();
+        Self {
+            modes,
+            concurrent: rng.chance(25),
+            fenced: rng.chance(50),
+        }
+    }
+}
+
+/// How a failed attempt ended.
+enum Attempt {
+    /// The handler's transaction ended as planned. The fingerprint is that of the committed
+    /// state for a commit without the ack.
+    Ended(String),
+    /// The destination's answer was retried.
+    Retried,
+    /// The attempts ran out.
+    Dead,
+    /// The handler failed some other way; the run records it as a problem.
+    Broken,
+}
+
 impl Driver<'_> {
     /// Tries to claim exactly the job `due` names. The outer `None` means the job is gone; the
     /// inner one that the claim query skipped it (a transaction holds its row).
@@ -198,7 +378,7 @@ impl Driver<'_> {
         let w = self.w;
         w.hold_real_time_jobs(self.now).await;
         let made = sqlx::query(
-            "UPDATE jobs SET run_at = now() - interval '1 hour', max_attempts = 50 \
+            "UPDATE jobs SET run_at = now() - interval '1 hour' \
              WHERE id = $1 AND state = 'ready'",
         )
         .bind(due.id)
@@ -209,6 +389,8 @@ impl Driver<'_> {
         if made == 0 {
             return None;
         }
+        // `claim_job` runs with no per-workspace cap (`None`), as the worker pool does when the
+        // setting is left out: a cap would only add a serialising advisory lock.
         let claimed = claim_job(
             &w.env.pool,
             "sim",
@@ -243,12 +425,54 @@ impl Driver<'_> {
                 .fetch_optional(&self.w.env.pool)
                 .await
                 .unwrap()?;
+        let input = payload.get("input").and_then(Value::as_str);
         Some(Watch {
             enrollment,
             version,
+            job_version: payload
+                .get("state_version")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1),
             wake_at,
-            is_wake: payload.get("input").and_then(Value::as_str) == Some("wake"),
+            is_wake: input == Some("wake"),
+            event: (input == Some("event"))
+                .then(|| payload.get("event").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_owned),
         })
+    }
+
+    /// What a `webhook.call` committed: the outcome events it wrote, at most one per execution.
+    async fn note_outcomes(&mut self, claimed: &ClaimedJob, before: Option<i64>) {
+        let Some(before) = before else {
+            return;
+        };
+        let after = self.w.outcome_events(&claimed.payload).await;
+        match after - before {
+            0 => {}
+            1 => {
+                *self
+                    .outcomes
+                    .entry(key_of(&claimed.payload).to_owned())
+                    .or_default() += 1;
+            }
+            more => self.problem(format!(
+                "one execution of the call {} wrote {more} outcome events",
+                key_of(&claimed.payload)
+            )),
+        }
+    }
+
+    /// A job's attempts ran out. A `webhook.call` that does is accounted for; any other job is
+    /// a stuck flow.
+    fn job_died(&mut self, due: &Due, claimed: &ClaimedJob) {
+        if due.kind == WEBHOOK_JOB_KIND {
+            self.bump("webhook.call jobs dead");
+            self.dead_webhooks
+                .insert(key_of(&claimed.payload).to_owned());
+        } else {
+            self.problem(format!("{} job {} ran out of attempts", due.kind, due.id));
+        }
     }
 
     /// Runs one job through its seeded plan. `early` marks a wake claimed before it was due.
@@ -258,78 +482,118 @@ impl Driver<'_> {
             w.seed,
             &[LANE_PLAN, due.label, seconds_of(self.now), u64::from(early)],
         );
-        // At least one failure before the final run, for every kind of job: the seed picks how
-        // many and which, never none.
-        let failures = match rng.below(100) {
-            0..=44 => 1,
-            45..=79 => 2,
-            _ => 3,
-        };
-        let modes: Vec<Mode> = (0..failures)
-            .map(|_| {
-                if rng.chance(50) {
-                    Mode::Rollback
-                } else {
-                    Mode::CommitWithoutAck
-                }
-            })
-            .collect();
-        let concurrent = rng.chance(25);
-        let fenced = rng.chance(50);
+        let plan = Plan::draw(&mut rng, due.kind);
         if early {
             self.bump("early wake claimed");
         }
 
         let mut kept: Option<(ClaimedJob, String)> = None;
         let mut injected = 0_u32;
-        for mode in modes {
+        for mode in plan.modes {
             let Some(claimed) = self.claim(due).await else {
                 self.bump("job gone before its turn");
                 return;
             };
             self.bump(format!("{} {}", mode.name(), due.kind));
             let before = self.watch(&claimed).await;
-            let Some(print) = self.failed_attempt(&claimed, mode).await else {
-                continue;
-            };
-            injected += 1;
-            if mode == Mode::CommitWithoutAck {
-                if let Some(before) = &before {
-                    self.after_step(before, false).await;
+            let events = self.events_before(&claimed).await;
+            match self.failed_attempt(&claimed, mode).await {
+                Attempt::Ended(print) => {
+                    injected += 1;
+                    if mode == Mode::CommitWithoutAck {
+                        self.note_outcomes(&claimed, events).await;
+                        if let Some(before) = &before {
+                            self.after_step(before, false).await;
+                        }
+                        kept = Some((claimed, print));
+                    }
                 }
-                kept = Some((claimed, print));
+                Attempt::Retried => {
+                    injected += 1;
+                    self.bump("webhook.call attempts retried");
+                }
+                Attempt::Dead => {
+                    if mode == Mode::CommitWithoutAck {
+                        self.note_outcomes(&claimed, events).await;
+                    }
+                    self.job_died(due, &claimed);
+                    return;
+                }
+                Attempt::Broken => {}
             }
         }
 
-        let Some(claimed) = self.claim(due).await else {
-            self.bump("job gone before its turn");
-            return;
-        };
-        self.bump("executions");
-        if injected > 0 {
-            self.bump("injected executions");
+        let mut concurrent = plan.concurrent;
+        for round in 0..MAX_FINAL_ROUNDS {
+            let Some(claimed) = self.claim(due).await else {
+                self.bump("job gone before its turn");
+                return;
+            };
+            if round == 0 {
+                self.bump("executions");
+                if injected > 0 {
+                    self.bump("injected executions");
+                }
+            }
+            let before = self.watch(&claimed).await;
+            let events = self.events_before(&claimed).await;
+            let ended = if concurrent {
+                concurrent = false;
+                self.bump(format!("concurrent duplicate {}", due.kind));
+                self.concurrent_duplicate(&claimed, due, plan.fenced).await
+            } else {
+                w.finish(&claimed).await
+            };
+            match ended {
+                Final::Done => {
+                    self.note_outcomes(&claimed, events).await;
+                    self.bump(format!("completed {}", due.kind));
+                    self.after_done(due, kept, before, early).await;
+                    return;
+                }
+                Final::Retried => self.bump("webhook.call attempts retried"),
+                Final::Dead => {
+                    self.job_died(due, &claimed);
+                    return;
+                }
+                Final::Failed(error) => {
+                    self.problem(format!("{} job {} failed: {error}", due.kind, due.id));
+                    // Retire the job so the run goes on and the end state shows the harm.
+                    sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE id = $1")
+                        .bind(due.id)
+                        .execute(&w.env.pool)
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
         }
-        let before = self.watch(&claimed).await;
-        let outcome = if concurrent {
-            self.bump(format!("concurrent duplicate {}", due.kind));
-            self.concurrent_duplicate(claimed, due, fenced).await
-        } else {
-            w.final_run(&claimed).await
-        };
-        if let Err(error) = outcome {
-            self.problem(format!("{} job {} failed: {error}", due.kind, due.id));
-            // Retire the job so the run goes on and the end state shows the harm.
-            sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE id = $1")
-                .bind(due.id)
-                .execute(&w.env.pool)
-                .await
-                .unwrap();
-            return;
-        }
-        self.bump(format!("completed {}", due.kind));
+        self.problem(format!(
+            "{} job {} was still not done after {MAX_FINAL_ROUNDS} attempts",
+            due.kind, due.id
+        ));
+    }
 
+    /// The outcome events of a call before an execution, for a `webhook.call`.
+    async fn events_before(&self, claimed: &ClaimedJob) -> Option<i64> {
+        if claimed.kind == WEBHOOK_JOB_KIND {
+            Some(self.w.outcome_events(&claimed.payload).await)
+        } else {
+            None
+        }
+    }
+
+    /// A job's final run committed: compare a re-run after a commit without the ack with the
+    /// state that commit left, and look at what the step did to its enrollment.
+    async fn after_done(
+        &mut self,
+        due: &Due,
+        kept: Option<(ClaimedJob, String)>,
+        before: Option<Watch>,
+        early: bool,
+    ) {
         if let Some((first, print)) = kept {
-            let after = w.fingerprint(&first).await;
+            let after = self.w.fingerprint(&first).await;
             if after != print {
                 self.problem(format!(
                     "the re-run of {} {} after a commit without the ack changed state:\n  before {print}\n  after  {after}",
@@ -343,8 +607,8 @@ impl Driver<'_> {
     }
 
     /// One failed attempt: the handler ran and its transaction ended without the job being
-    /// completed. Returns the fingerprint of the committed state for a commit without the ack.
-    async fn failed_attempt(&mut self, claimed: &ClaimedJob, mode: Mode) -> Option<String> {
+    /// completed.
+    async fn failed_attempt(&mut self, claimed: &ClaimedJob, mode: Mode) -> Attempt {
         let w = self.w;
         let mut tx = zirv_flow_store::begin(&w.env.pool).await.unwrap();
         assert!(
@@ -355,22 +619,31 @@ impl Driver<'_> {
         );
         if let Err(error) = w.run_handler(&mut tx, claimed).await {
             drop(tx);
+            let message = error.message().to_owned();
+            if World::is_retry(&claimed.kind, &message) {
+                return match w.retry(claimed, &message).await {
+                    Final::Failed(why) => {
+                        self.problem(format!("job {}: {why}", claimed.id));
+                        Attempt::Broken
+                    }
+                    Final::Done | Final::Retried | Final::Dead => Attempt::Retried,
+                };
+            }
             self.problem(format!(
-                "{} job {} failed in a {} attempt: {}",
+                "{} job {} failed in a {} attempt: {message}",
                 claimed.kind,
                 claimed.id,
-                mode.name(),
-                error.message()
+                mode.name()
             ));
             let _ = fail_job(
                 &w.env.pool,
                 claimed.id,
                 claimed.lease_token,
                 Duration::ZERO,
-                error.message(),
+                &message,
             )
             .await;
-            return None;
+            return Attempt::Broken;
         }
         let print = match mode {
             Mode::Rollback => {
@@ -382,10 +655,15 @@ impl Driver<'_> {
                 w.fingerprint(claimed).await
             }
         };
-        if !w.expire_and_reap(claimed.id).await {
-            self.problem(format!("the reaper did not return job {}", claimed.id));
+        match w.expire_and_reap(claimed.id).await {
+            Reaped::Requeued => Attempt::Ended(print),
+            // The commit, if there was one, stays; the job is gone from the queue.
+            Reaped::Dead => Attempt::Dead,
+            Reaped::Untouched => {
+                self.problem(format!("the reaper did not return job {}", claimed.id));
+                Attempt::Ended(print)
+            }
         }
-        Some(print)
     }
 
     /// Two workers hold the same job. Worker A runs the handler and keeps its transaction open
@@ -403,14 +681,30 @@ impl Driver<'_> {
     ///   ever waiting on A (a `webhook.call`: A holds no lock on anything B needs). A's ack must
     ///   find the lease gone either way, and A rolls back, which lets a blocked B go on.
     ///
+    /// A is always the one rolled back, which is what production allows: the ack and the commit
+    /// are one transaction, so a worker whose ack finds its lease gone has nothing to commit.
+    /// "The first execution may still finish" is the commit-without-ack mode of the plan.
+    ///
     /// Nothing here is decided by a sleep: the only waits are polls of the lock state, bounded
     /// and loud.
     async fn concurrent_duplicate(
         &mut self,
-        claimed_a: ClaimedJob,
+        claimed_a: &ClaimedJob,
         due: &Due,
         fenced: bool,
-    ) -> Result<(), String> {
+    ) -> Final {
+        match self.overlap(claimed_a, due, fenced).await {
+            Ok(ended) => ended,
+            Err(error) => Final::Failed(error),
+        }
+    }
+
+    async fn overlap(
+        &mut self,
+        claimed_a: &ClaimedJob,
+        due: &Due,
+        fenced: bool,
+    ) -> Result<Final, String> {
         let w = self.w;
         let id = claimed_a.id;
         let a_token = claimed_a.lease_token;
@@ -426,12 +720,22 @@ impl Driver<'_> {
                 "the lease of a fresh claim is held"
             );
         }
-        if let Err(error) = w.run_handler(&mut tx_a, &claimed_a).await {
+        if let Err(error) = w.run_handler(&mut tx_a, claimed_a).await {
             drop(tx_a);
-            return Err(format!("worker A's handler failed: {}", error.message()));
+            let message = error.message().to_owned();
+            if World::is_retry(kind, &message) {
+                // A's attempt ended on the destination's answer before there was anything to
+                // overlap: the job goes back with an attempt spent, and the next round runs it.
+                return Ok(w.retry(claimed_a, &message).await);
+            }
+            return Err(format!("worker A's handler failed: {message}"));
         }
-        if !w.expire_and_reap(id).await {
-            return Err("the reaper did not return the job under worker A".to_owned());
+        match w.expire_and_reap(id).await {
+            Reaped::Requeued => {}
+            Reaped::Dead => return Ok(Final::Dead),
+            Reaped::Untouched => {
+                return Err("the reaper did not return the job under worker A".to_owned());
+            }
         }
         if fenced {
             // B's claim runs while A's transaction is open: A is idle inside it.
@@ -466,7 +770,7 @@ impl Driver<'_> {
             let Some(claimed_b) = self.claim(due).await else {
                 return Err("worker B could not claim the job".to_owned());
             };
-            return w.final_run(&claimed_b).await;
+            return Ok(w.finish(&claimed_b).await);
         }
 
         let Some(claimed_b) = self.claim(due).await else {
@@ -474,7 +778,7 @@ impl Driver<'_> {
         };
         let finished = Cell::new(false);
         let b = async {
-            let result = w.final_run(&claimed_b).await;
+            let result = w.finish(&claimed_b).await;
             finished.set(true);
             result
         };
@@ -504,11 +808,12 @@ impl Driver<'_> {
             return Err("worker A's ack succeeded after its lease was taken over".to_owned());
         }
         self.bump(format!("unfenced: A's ack refused {kind}"));
-        result_b
+        Ok(result_b)
     }
 
-    /// After a `flow.step` job: record a wake that moved the enrollment, and let an enrollment
-    /// that now waits for an event be sent one.
+    /// After a `flow.step` job: record a wake that moved the enrollment, check that a job only
+    /// ever moves the enrollment it expected, and let an enrollment that now waits for an event
+    /// be sent one.
     async fn after_step(&mut self, watch: &Watch, early: bool) {
         let row: Option<(i64,)> =
             sqlx::query_as("SELECT state_version FROM enrollments WHERE id = $1")
@@ -517,6 +822,38 @@ impl Driver<'_> {
                 .await
                 .unwrap();
         let moved = row.is_some_and(|(version,)| version != watch.version);
+        if moved {
+            // A wait settles once: the job that moves an enrollment out of its version is the
+            // one that expected that version, and nothing else moves it out of that version.
+            if watch.job_version != watch.version {
+                self.problem(format!(
+                    "enrollment {} moved from version {} by a job that expected version {}",
+                    watch.enrollment, watch.version, watch.job_version
+                ));
+            }
+            let advances = self
+                .advances
+                .entry((watch.enrollment, watch.version))
+                .or_default();
+            *advances += 1;
+            if *advances > 1 {
+                let text = format!(
+                    "enrollment {} was moved out of version {} {advances} times: a wait settled \
+                     more than once",
+                    watch.enrollment, watch.version
+                );
+                self.problem(text);
+            }
+        }
+        if let Some(name) = &watch.event
+            && name.starts_with("webhook.")
+        {
+            self.bump(if moved {
+                "outcome events that settled a wait"
+            } else {
+                "outcome events that settled nothing"
+            });
+        }
         if watch.is_wake {
             if moved {
                 self.bump("wake moved an enrollment");

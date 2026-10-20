@@ -11,7 +11,11 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 use zirv_flow_core::egress::EgressPolicy;
-use zirv_flow_core::flow::{FlowGraph, ListChange, NodeKind};
+use zirv_flow_core::events::{WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT};
+use zirv_flow_core::flow::{
+    Edge, EventMatch, FlowGraph, FlowNode, ListChange, NodeKind, PORT_EVENT, PORT_NEXT,
+    PORT_TIMEOUT, validate_graph,
+};
 use zirv_flow_core::people::TraitType;
 use zirv_flow_core::signature::generate_secret;
 use zirv_flow_core::{
@@ -89,7 +93,7 @@ impl World {
             clock: ManualClock::new(EPOCH),
         };
         let keyring = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
-        let mock = Mock::default();
+        let mock = Mock::new(seed);
         let port = mock.serve().await;
         let mut world = Self {
             env,
@@ -168,6 +172,7 @@ impl World {
         let count = (population / 20).clamp(4, 12);
         let mut rng = Rng::derive(self.seed, &[2]);
         let mut lists = Rng::derive(self.seed, &[5]);
+        let mut waits = Rng::derive(self.seed, &[6]);
         for index in 0..count {
             let size = usize::try_from(rng.range(10, 30)).unwrap_or(12);
             let mut graph = generate::graph(&mut rng, size, index % 2 == 0);
@@ -191,6 +196,7 @@ impl World {
                     _ => {}
                 }
             }
+            wait_for_outcomes(&mut graph, &mut waits);
             let id = self
                 .env
                 .flow(
@@ -334,4 +340,61 @@ async fn install_write_log(pool: &PgPool) {
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }
+}
+
+/// Puts a wait for the outcome of the call after most webhook nodes: the node's `next` edge now
+/// leads to a `wait.until_event` on `webhook.succeeded` or `webhook.failed`, whose two ports
+/// lead on to what the edge led to. The runtime writes those events itself, once per committed
+/// execution of the call, and a call that commits without its ack writes one twice; a wait that
+/// settles on the first has to ignore the second. The generator's own waits cannot do that: they
+/// rarely follow a webhook node closely enough to be registered when the outcome arrives.
+fn wait_for_outcomes(graph: &mut FlowGraph, rng: &mut Rng) {
+    let hooks: Vec<String> = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::ActionWebhook { .. }))
+        .map(|node| node.id.clone())
+        .collect();
+    for (count, hook) in hooks.iter().enumerate() {
+        if !rng.chance(70) {
+            continue;
+        }
+        let Some(edge) = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == *hook && edge.port == PORT_NEXT)
+        else {
+            continue;
+        };
+        let wait = format!("w{count}");
+        let target = std::mem::replace(&mut edge.to, wait.clone());
+        let name = if rng.chance(70) {
+            WEBHOOK_SUCCEEDED_EVENT
+        } else {
+            WEBHOOK_FAILED_EVENT
+        };
+        graph.nodes.push(FlowNode {
+            id: wait.clone(),
+            kind: NodeKind::WaitUntilEvent {
+                event: EventMatch {
+                    name: name.to_owned(),
+                    filters: Vec::new(),
+                },
+                timeout_seconds: rng.range(3_600, 3 * 86_400),
+            },
+        });
+        for (suffix, port) in [("event", PORT_EVENT), ("timeout", PORT_TIMEOUT)] {
+            graph.edges.push(Edge {
+                id: format!("ew{count}{suffix}"),
+                from: wait.clone(),
+                port: port.to_owned(),
+                to: target.clone(),
+            });
+        }
+    }
+    let issues = validate_graph(graph);
+    assert!(
+        issues.is_empty(),
+        "the outcome waits made an invalid graph: {issues:?}"
+    );
 }

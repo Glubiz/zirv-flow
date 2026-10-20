@@ -152,10 +152,27 @@ async fn simulate(pool: PgPool, ordinal: usize) {
         "unfenced: B finished without waiting on A webhook.call",
         "unfenced: A's ack refused flow.step",
         "unfenced: A's ack refused webhook.call",
+        // The destination fails too: calls are retried, some use up their attempts through
+        // lease expiry, some record a failure on their last attempt, and the outcome events a
+        // call writes twice settle each wait once.
+        "webhook.call attempts retried",
+        "webhook.call jobs dead",
+        "waits on a webhook outcome",
+        "outcome events that settled a wait",
+        "outcome events that settled nothing",
     ] {
         assert!(
             driver.counts.get(mode).copied().unwrap_or(0) > 0,
             "seed {seed}: the run never exercised {mode:?}"
+        );
+    }
+    for what in [
+        "webhook outcomes: succeeded",
+        "webhook outcomes: failed on the last attempt",
+    ] {
+        assert!(
+            found.summary.get(what).copied().unwrap_or(0) > 0,
+            "seed {seed}: the run never recorded {what:?}"
         );
     }
     // The issue asks for a failure after every effect: no job runs once without one.

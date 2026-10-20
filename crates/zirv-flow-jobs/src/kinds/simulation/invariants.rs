@@ -29,7 +29,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, ListChange, NODE_TYPES, NodeKind, TraitChange};
 use zirv_flow_engine::effect_key;
-use zirv_flow_store::{STEP_JOB_KIND, WEBHOOK_JOB_KIND};
+use zirv_flow_store::{DEFAULT_MAX_ATTEMPTS, STEP_JOB_KIND, WEBHOOK_JOB_KIND};
 
 use super::driver::{Driver, KINDS, WakeMove};
 use super::world::{TRAIT_KEYS, World, end};
@@ -417,7 +417,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
     }
     found.count("goal conversions", expected_goals.len());
 
-    external_effects(w, &mut found, &expected_keys, &enrollments).await;
+    external_effects(driver, w, &mut found, &expected_keys, &enrollments).await;
 
     // Invariant 3.
     for text in wake_violations(&driver.wake_moves) {
@@ -425,7 +425,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
     }
     found.count("wakes that moved an enrollment", driver.wake_moves.len());
 
-    liveness(w, &mut found, &enrollments, &graphs).await;
+    liveness(driver, w, &mut found, &enrollments, &graphs).await;
 
     if population >= 100 {
         let missing: Vec<&str> = NODE_TYPES
@@ -443,6 +443,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
 
 /// Invariant 2.
 async fn external_effects(
+    driver: &Driver<'_>,
     w: &World,
     found: &mut Findings,
     expected: &BTreeMap<String, Uuid>,
@@ -505,9 +506,37 @@ async fn external_effects(
         .filter(|row| row.state == "exited")
         .map(|row| row.id)
         .collect();
+    let hits = w.mock.hits();
     let mut bodies: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
-    for hit in w.mock.hits() {
-        bodies.entry(hit.key).or_default().push(hit.body);
+    let mut answered: BTreeMap<String, Vec<u16>> = BTreeMap::new();
+    let mut failed_sends = 0;
+    for hit in &hits {
+        bodies
+            .entry(hit.key.clone())
+            .or_default()
+            .push(hit.body.clone());
+        answered
+            .entry(hit.key.clone())
+            .or_default()
+            .push(hit.status);
+        if !(200..300).contains(&hit.status) {
+            failed_sends += 1;
+        }
+        // The stable key is the same on every send: the header the destination saw is the key
+        // inside the body the call signed.
+        let in_body = serde_json::from_slice::<Value>(&hit.body)
+            .ok()
+            .and_then(|body| {
+                body.get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        if in_body.as_deref() != Some(hit.key.as_str()) {
+            found.violate(format!(
+                "invariant 2: a send under the header key {} carried the key {in_body:?} in its body",
+                hit.key
+            ));
+        }
     }
     let mut resends = 0;
     for (key, sent) in &bodies {
@@ -531,22 +560,113 @@ async fn external_effects(
             ));
         }
     }
-    // Informational: a call that ran again after a commit without the ack records its outcome
-    // again (the product documents the call as at-least-once).
-    let (outcomes, distinct): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(DISTINCT (properties ->> 'enrollment_id', properties ->> 'node_id')) \n         FROM events WHERE workspace_id = $1 AND name IN ('webhook.succeeded', 'webhook.failed')",
+    for key in &driver.dead_webhooks {
+        if !expected.contains_key(key) {
+            found.violate(format!(
+                "invariant 2 (outcome events): the job of {key} ran out of attempts, which no done step explains"
+            ));
+        }
+    }
+
+    // The outcome events. A call that ran again after a commit without the ack records its
+    // outcome again (the product documents the call as at-least-once), and the job's retries
+    // and last attempt shape what is recorded:
+    //
+    // - each call has exactly as many committed outcome events as the committed executions that
+    //   reached a terminal outcome, which the driver counted as they committed;
+    // - a success is a 2xx the destination really answered;
+    // - a terminal refusal (a 4xx other than 408 and 429, or a 3xx) is recorded at once, as
+    //   answered;
+    // - a retryable answer (408, 429, 5xx) is recorded only by the last attempt, the production
+    //   `max_attempts`.
+    let events: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT name, properties FROM events \
+         WHERE workspace_id = $1 AND name IN ('webhook.succeeded', 'webhook.failed')",
     )
     .bind(ws)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .unwrap();
-    found.count(
-        "webhook outcome events",
-        usize::try_from(outcomes).unwrap_or(0),
-    );
+    let mut written: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut succeeded, mut refused, mut gave_up) = (0, 0, 0);
+    for (name, properties) in &events {
+        let text = |field: &str| properties.get(field).and_then(Value::as_str);
+        let (Some(enrollment), Some(node)) = (
+            text("enrollment_id").and_then(|id| Uuid::parse_str(id).ok()),
+            text("node_id"),
+        ) else {
+            found.violate(format!(
+                "invariant 2 (outcome events): an outcome event has no call: {properties}"
+            ));
+            continue;
+        };
+        let key = effect_key(enrollment, node, "webhook");
+        *written.entry(key.clone()).or_default() += 1;
+        let status = properties
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok());
+        let attempts = properties
+            .get("attempts")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let was_answered = |status: u16| {
+            answered
+                .get(&key)
+                .is_some_and(|statuses| statuses.contains(&status))
+        };
+        match (name.as_str(), status) {
+            ("webhook.succeeded", Some(status))
+                if (200..300).contains(&status) && was_answered(status) =>
+            {
+                succeeded += 1;
+            }
+            ("webhook.failed", Some(status))
+                if matches!(status, 300..=399 | 400..=499)
+                    && !matches!(status, 408 | 429)
+                    && was_answered(status) =>
+            {
+                refused += 1;
+            }
+            ("webhook.failed", Some(status))
+                if matches!(status, 408 | 429 | 500..=599)
+                    && was_answered(status)
+                    && attempts == i64::from(DEFAULT_MAX_ATTEMPTS) =>
+            {
+                gave_up += 1;
+            }
+            _ => found.violate(format!(
+                "invariant 2 (outcome events): the call of {key} recorded {name} with status \
+                 {status:?} after {attempts} attempts, which the destination's answers \
+                 {:?} do not explain",
+                answered.get(&key)
+            )),
+        }
+    }
+    for key in written.keys().chain(driver.outcomes.keys()) {
+        let events = written.get(key).copied().unwrap_or(0);
+        let executions = driver.outcomes.get(key).copied().unwrap_or(0);
+        if events != executions {
+            found.violate(format!(
+                "invariant 2 (outcome events): the call of {key} has {events} committed outcome \
+                 events, and {executions} committed executions that reached an outcome"
+            ));
+        }
+    }
+    let outcomes = events.len();
+    let calls = written.len();
+    found.count("webhook outcome events", outcomes);
+    found.count("webhook calls with an outcome", calls);
     found.count(
         "webhook outcome events beyond one per call",
-        usize::try_from(outcomes - distinct).unwrap_or(0),
+        outcomes - calls,
+    );
+    found.count("webhook outcomes: succeeded", succeeded);
+    found.count("webhook outcomes: refused at once", refused);
+    found.count("webhook outcomes: failed on the last attempt", gave_up);
+    found.count(
+        "sends the destination answered with a failure",
+        failed_sends,
     );
     found.count("keys the destination saw", bodies.len());
     found.count("calls sent again with the same key", resends);
@@ -554,6 +674,7 @@ async fn external_effects(
 
 /// Invariant 4.
 async fn liveness(
+    driver: &Driver<'_>,
     w: &World,
     found: &mut Findings,
     enrollments: &[EnrollmentRow],
@@ -562,8 +683,8 @@ async fn liveness(
     let pool = &w.env.pool;
     let ws = w.env.ws.as_uuid();
     let stop = end();
-    let jobs: Vec<(String, String, OffsetDateTime, Value)> = sqlx::query_as(
-        "SELECT kind, state, run_at, payload FROM jobs \
+    let jobs: Vec<(String, String, OffsetDateTime, Value, Option<String>)> = sqlx::query_as(
+        "SELECT kind, state, run_at, payload, unique_key FROM jobs \
          WHERE workspace_id = $1 AND kind = ANY($2)",
     )
     .bind(ws)
@@ -572,8 +693,18 @@ async fn liveness(
     .await
     .unwrap();
     let mut left: BTreeMap<(String, &str), usize> = BTreeMap::new();
-    for (kind, state, run_at, _) in &jobs {
-        if state != "ready" {
+    let mut dead_calls = 0;
+    for (kind, state, run_at, _, key) in &jobs {
+        // A call whose attempts ran out is accounted for: the run saw it die (its attempts went
+        // to lease expiries and retries), and invariant 2 checks its key against the done steps.
+        let accounted = kind == WEBHOOK_JOB_KIND
+            && state == "dead"
+            && key
+                .as_ref()
+                .is_some_and(|key| driver.dead_webhooks.contains(key));
+        if accounted {
+            dead_calls += 1;
+        } else if state != "ready" {
             *left.entry((kind.clone(), "not ready")).or_default() += 1;
         } else if *run_at <= stop {
             *left.entry((kind.clone(), "due and never run")).or_default() += 1;
@@ -584,14 +715,15 @@ async fn liveness(
             "invariant 4: {count} {kind} jobs are {what} at the end"
         ));
     }
+    found.count("webhook.call jobs dead and accounted for", dead_calls);
     let wakes: Vec<(&Value, OffsetDateTime)> = jobs
         .iter()
-        .filter(|(kind, state, _, payload)| {
+        .filter(|(kind, state, _, payload, _)| {
             kind == STEP_JOB_KIND
                 && state == "ready"
                 && payload.get("input").and_then(Value::as_str) == Some("wake")
         })
-        .map(|(_, _, run_at, payload)| (payload, *run_at))
+        .map(|(_, _, run_at, payload, _)| (payload, *run_at))
         .collect();
     let waits: Vec<(Uuid, String, i64, OffsetDateTime)> = sqlx::query_as(
         "SELECT enrollment_id, event_name, wake_version, timeout_at FROM enrollment_waits \
