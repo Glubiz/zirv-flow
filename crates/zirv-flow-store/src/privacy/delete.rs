@@ -5,6 +5,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
+use crate::decisions::ID_SUBJECTS;
 use crate::{NewDecision, StoreError, append_decision};
 
 /// Why a person is being deleted; recorded as the reason of the `person.deleted` decision.
@@ -70,10 +71,10 @@ pub async fn delete_person(
             .await
             .map_err(StoreError::query)?;
     }
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "DELETE FROM decision_records d WHERE d.workspace_id = $1 AND EXISTS \
-            (SELECT 1 FROM jsonb_each_text(d.subject_ids) s WHERE s.value = ANY($2::text[]))",
-    )
+            (SELECT 1 FROM {ID_SUBJECTS} AND s.value = ANY($2::text[]))"
+    )))
     .bind(workspace.as_uuid())
     .bind(people.iter().map(Uuid::to_string).collect::<Vec<_>>())
     .execute(&mut *connection)
@@ -443,6 +444,69 @@ mod tests {
         assert!(deleted);
         assert_eq!(rows_referencing_person(&pool, person).await, []);
         assert_eq!(rows_referencing_person(&pool, merged).await, []);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_node_id_that_looks_like_another_persons_id_is_not_a_reference_to_them(pool: PgPool) {
+        use crate::GraphPoint;
+
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let scanned = |found: Vec<(String, i64)>| {
+            found
+                .into_iter()
+                .find(|(place, _)| place == "decision_records.subject_ids")
+                .map_or(0, |(_, count)| count)
+        };
+        let before = scanned(rows_referencing_person(&pool, bystander).await);
+        // A decision about `person` at a node whose author-chosen id is the bystander's id.
+        append_decision(
+            &pool,
+            &NewDecision {
+                workspace_id: ws,
+                trace: trace(),
+                action: "flow.step",
+                outcome: "bait",
+                reason: None,
+                subject_ids: vec![("person", person)],
+                job: None,
+                graph: Some(GraphPoint::at(1, &bystander.to_string())),
+            },
+        )
+        .await
+        .unwrap();
+        let bait = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM decision_records WHERE outcome = 'bait'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(
+            scanned(rows_referencing_person(&pool, bystander).await),
+            before,
+            "the scan does not count a node id"
+        );
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, bystander, DeleteReason::Requested, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        assert_eq!(bait().await, 1, "erasing the bystander leaves it");
+
+        let mut tx = begin(&pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Requested, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        assert_eq!(bait().await, 0, "erasing its own person deletes it");
     }
 
     #[sqlx::test]
