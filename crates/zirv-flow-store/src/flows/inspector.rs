@@ -682,7 +682,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
                 node, occurrence_id, trace_id, cause_kind, cause_id, created_at, ended_at) \
-             SELECT gen_random_uuid(), $1, $2, 1 + (p.n % 2), p.id, \
+             SELECT gen_random_uuid(), $1, $2, 1 + (p.n % 100 = 0)::int, p.id, \
                     CASE WHEN p.n % 50 = 0 THEN 'completed' ELSE 'exited' END, 'a', \
                     gen_random_uuid(), gen_random_uuid(), 'api', 't', \
                     now() - make_interval(secs => p.n), now() \
@@ -690,6 +690,14 @@ mod tests {
         )
         .bind(ws.as_uuid())
         .bind(flow)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // One step row per enrollment, so the counts join reads a table of a realistic size.
+        sqlx::query(
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome) \r
+             SELECT gen_random_uuid(), workspace_id, id, 'a', 'done' FROM enrollments",
+        )
         .execute(&pool)
         .await
         .unwrap();
@@ -704,7 +712,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        for table in ["people", "enrollments", "decision_records"] {
+        for table in [
+            "people",
+            "enrollments",
+            "step_executions",
+            "decision_records",
+        ] {
             sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE {table}")))
                 .execute(&pool)
                 .await
@@ -718,32 +731,32 @@ mod tests {
         let checks = [
             (
                 format!("SELECT id {base} {order}"),
-                "enrollments_flow_list_idx",
+                "enrollments_flow_list_idx".to_owned(),
             ),
             (
                 format!("SELECT id {base} AND state = 'completed' {order}"),
-                "enrollments_flow_state_list_idx",
+                "enrollments_flow_state_list_idx".to_owned(),
             ),
             (
                 format!("SELECT id {base} AND flow_version = 2 {order}"),
-                "enrollments_flow_version_list_idx",
+                "enrollments_flow_version_list_idx".to_owned(),
             ),
             (
                 format!(
                     "SELECT s.node_id, count(*) FROM enrollments e \
                      JOIN step_executions s ON s.enrollment_id = e.id \
-                     WHERE e.flow_id = '{f}' AND e.flow_version = 1 AND e.workspace_id = '{w}' \
+                     WHERE e.flow_id = '{f}' AND e.flow_version = 2 AND e.workspace_id = '{w}' \
                      GROUP BY s.node_id"
                 ),
-                "enrollments_flow_version_list_idx",
+                "enrollments_flow_version_list_idx".to_owned(),
             ),
             (
                 format!(
                     "SELECT node, count(*) FROM enrollments WHERE flow_id = '{f}' \
-                     AND state = 'completed' AND flow_version = 1 AND workspace_id = '{w}' \
+                     AND state = 'completed' AND flow_version = 2 AND workspace_id = '{w}' \
                      GROUP BY node"
                 ),
-                "enrollments_flow_state_idx",
+                "enrollments_flow_state_idx".to_owned(),
             ),
             (
                 format!(
@@ -752,11 +765,14 @@ mod tests {
                      AND recorded_at >= now() - interval '1 day' \
                      ORDER BY recorded_at, id LIMIT 1001"
                 ),
-                "decision_records_enrollment_idx",
+                // The per-partition index has a generated name; its condition is what identifies it.
+                format!(
+                    "Index Cond: ((workspace_id = '{w}'::uuid) AND ((subject_ids ->> 'enrollment'::text) = "
+                ),
             ),
         ];
         for (sql, index) in checks {
-            assert!(plan_uses(&pool, &sql, index).await, "{index}: {sql}");
+            assert!(plan_uses(&pool, &sql, &index).await, "{index}: {sql}");
         }
     }
 }
