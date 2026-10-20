@@ -11,6 +11,7 @@ import {
   useReactFlow,
   type Connection,
   type Edge,
+  type FinalConnectionState,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
@@ -22,6 +23,7 @@ import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
 import {
+  connectionWire,
   entryOf,
   KINDS,
   kindLabel,
@@ -108,6 +110,8 @@ export interface IssueItem {
   /** Where the issue is, in words: the step, the connection or the settings section. */
   where: string;
   issue: FlowIssue;
+  /** Whether there is a step or a settings section to open for it; an issue about the whole flow has none. */
+  openable: boolean;
 }
 
 export interface FocusRequest {
@@ -123,6 +127,8 @@ interface CanvasProps {
   issueItems: readonly IssueItem[];
   /** Whether the check of the saved draft has come back. */
   checked: boolean;
+  /** Whether an edit is waiting for the check of its save, so the issues shown may be out of date. */
+  checking: boolean;
   editable: boolean;
   selectedId: string | null;
   focusRequest: FocusRequest | null;
@@ -165,6 +171,7 @@ function Rail({
           buttonClassName="fl-tool"
           buttonContent={<FlowIcon name="plus" size={18} />}
           heading="Add a step"
+          placement="beside"
           entries={KINDS.map((kind) => ({ key: kind.type, label: kind.label, onSelect: () => onAdd(kind.type) }))}
         />
       ) : null}
@@ -178,14 +185,46 @@ function Rail({
 
 function IssuesButton({
   items,
+  graph,
   checked,
+  checking,
   onPick,
 }: {
   items: readonly IssueItem[];
+  graph: Graph;
   checked: boolean;
+  checking: boolean;
   onPick: (item: IssueItem) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointer(event: MouseEvent) {
+      if (wrap.current && event.target instanceof Node && !wrap.current.contains(event.target)) setOpen(false);
+    }
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      button.current?.focus();
+    }
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (checking) {
+    return (
+      <span className="fl-clear" role="status">
+        Checking…
+      </span>
+    );
+  }
   if (items.length === 0) {
     return checked ? (
       <span className="fl-clear" role="status">
@@ -194,28 +233,46 @@ function IssuesButton({
     ) : null;
   }
   return (
-    <div className="fl-issues">
-      <button type="button" className="btn fl-issues-button" aria-expanded={open} aria-controls="flow-issues-list" onClick={() => setOpen((value) => !value)}>
+    <div className="fl-issues" ref={wrap}>
+      <button
+        ref={button}
+        type="button"
+        className="btn fl-issues-button"
+        aria-expanded={open}
+        aria-controls="flow-issues-list"
+        onClick={() => setOpen((value) => !value)}
+      >
         <span className="dot dot-error" aria-hidden="true" />
         {issuesLabel(items.length)}
       </button>
       {open ? (
         <ul id="flow-issues-list" className="fl-issues-list" aria-label="Issues in this flow">
-          {items.map((item) => (
-            <li key={item.key}>
-              <button
-                type="button"
-                className="fl-issue"
-                onClick={() => {
-                  setOpen(false);
-                  onPick(item);
-                }}
-              >
+          {items.map((item) => {
+            const words = (
+              <>
                 <span className="fl-issue-where">{item.where}</span>
-                <span>{issueText(item.issue)}</span>
-              </button>
-            </li>
-          ))}
+                <span>{issueText(item.issue, graph)}</span>
+              </>
+            );
+            return (
+              <li key={item.key}>
+                {item.openable ? (
+                  <button
+                    type="button"
+                    className="fl-issue"
+                    onClick={() => {
+                      setOpen(false);
+                      onPick(item);
+                    }}
+                  >
+                    {words}
+                  </button>
+                ) : (
+                  <div className="fl-issue fl-issue-text">{words}</div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : null}
     </div>
@@ -395,16 +452,33 @@ function Surface(props: CanvasProps) {
   }
 
   function onConnect(connection: Connection) {
-    if (!editable || !connection.sourceHandle) return;
-    if (connection.source === TRIGGER_ID || connection.source === connection.target) return;
-    props.onWire(connection.source, connection.sourceHandle, connection.target);
+    const wire = connectionWire(connection, editable);
+    if (wire) props.onWire(wire.from, wire.port, wire.to);
+  }
+
+  /** A drag from an output that lets go over a step, but not over its input dot, wires to that step too. */
+  function onConnectEnd(event: MouseEvent | TouchEvent, state: FinalConnectionState) {
+    if (state.isValid || !state.fromHandle || state.fromHandle.type !== "source" || !state.fromHandle.id) return;
+    const point = "changedTouches" in event ? event.changedTouches[0] : event;
+    if (!point) return;
+    const over = document.elementFromPoint(point.clientX, point.clientY)?.closest<HTMLElement>(".react-flow__node");
+    const target = over?.dataset["id"];
+    if (target === undefined) return;
+    const wire = connectionWire({ source: state.fromNode.id, sourceHandle: state.fromHandle.id, target }, editable);
+    if (wire) props.onWire(wire.from, wire.port, wire.to);
   }
 
   return (
     <>
       <div className="fl-tools">
         <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} />
-        <IssuesButton items={props.issueItems} checked={props.checked} onPick={props.onPickIssue} />
+        <IssuesButton
+          items={props.issueItems}
+          graph={graph}
+          checked={props.checked}
+          checking={props.checking}
+          onPick={props.onPickIssue}
+        />
       </div>
       <div className="fl-flow" ref={container} onKeyDown={onKeyDown}>
         <ReactFlow
@@ -424,6 +498,7 @@ function Surface(props: CanvasProps) {
           zoomOnDoubleClick={false}
           onNodeClick={(_, node) => props.onOpen(node.id)}
           onConnect={onConnect}
+          onConnectEnd={onConnectEnd}
           attributionPosition="bottom-left"
         >
           <Background variant={BackgroundVariant.Dots} gap={20} size={1} />

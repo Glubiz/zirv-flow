@@ -20,6 +20,7 @@ import {
   unwire,
   wire,
   type FlowDetail,
+  type FlowIssue,
   type FlowNode,
   type Graph,
   type NodeType,
@@ -120,19 +121,34 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
 
   const issueItems: IssueItem[] = (store.issues ?? []).map((issue, index) => {
     let where = "The whole flow";
+    let openable = false;
     if (issue.node !== undefined) {
       where = issue.node === TRIGGER_ID ? "Trigger" : describeStep(issue.node);
+      openable = true;
     } else if (issue.edge !== undefined) {
       const edge = draft.graph.edges.find((candidate) => candidate.id === issue.edge);
       where = edge ? `Connection from ${describeStep(edge.from)}` : "A connection";
+      openable = edge !== undefined && draft.graph.nodes.some((node) => node.id === edge.from);
     } else {
       const section = placed.bySection;
       for (const entry of SECTIONS) {
-        if (section.get(entry.id)?.includes(issue)) where = entry.label;
+        if (section.get(entry.id)?.includes(issue)) {
+          where = entry.label;
+          openable = true;
+        }
       }
     }
-    return { key: `${index}:${issue.code}:${issue.node ?? issue.edge ?? issue.at ?? ""}`, where, issue };
+    return { key: `${index}:${issue.code}:${issue.node ?? issue.edge ?? issue.at ?? ""}`, where, issue, openable };
   });
+
+  /** The issues of a step, with those of its outgoing connections placed on the outputs they leave. */
+  function issuesOfStep(id: string): FlowIssue[] {
+    const own = placed.byNode.get(id) ?? [];
+    const onWires = draft.graph.edges
+      .filter((edge) => edge.from === id)
+      .flatMap((edge) => (placed.byEdge.get(edge.id) ?? []).map((issue) => ({ ...issue, at: issue.at ?? `/ports/${edge.port}` })));
+    return [...own, ...onWires];
+  }
 
   function focusStep(id: string, takeFocus: boolean) {
     nonce.current += 1;
@@ -249,7 +265,7 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
               id={`flow-tab-${entry.id}`}
               className="fl-tab"
               aria-selected={tab === entry.id}
-              aria-controls={`flow-panel-${entry.id}`}
+              aria-controls={tab === entry.id ? "flow-panel" : undefined}
               tabIndex={tab === entry.id ? 0 : -1}
               onClick={() => setTab(entry.id)}
             >
@@ -276,8 +292,8 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
         ) : null}
       </div>
 
+      <div role="tabpanel" id="flow-panel" aria-labelledby={`flow-tab-${tab}`} tabIndex={0} className="fl-panel">
       {tab === "canvas" ? (
-        <div role="tabpanel" id="flow-panel-canvas" aria-labelledby="flow-tab-canvas">
           <Canvas
             graph={draft.graph}
             settings={draft.settings}
@@ -285,6 +301,7 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
             placed={placed}
             issueItems={issueItems}
             checked={store.issues !== null}
+            checking={store.checking}
             editable={editable}
             selectedId={sheetNode ? sheetNode.id : null}
             focusRequest={focusRequest}
@@ -300,12 +317,13 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
             {sheetNode ? (
               <div className="fl-sheet">
                 <StepSheet
+                  key={sheetNode.id}
                   workspaceId={workspaceId}
                   graph={draft.graph}
                   node={sheetNode}
                   names={names}
                   steps={steps}
-                  issues={placed.byNode.get(sheetNode.id) ?? []}
+                  issues={issuesOfStep(sheetNode.id)}
                   catalog={catalog}
                   readOnly={!editable}
                   autoFocus={sheetFocus}
@@ -318,11 +336,10 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
               </div>
             ) : null}
           </Canvas>
-        </div>
       ) : null}
 
       {tab === "settings" ? (
-        <div role="tabpanel" id="flow-panel-settings" aria-labelledby="flow-tab-settings" className="fl-pane">
+        <div className="fl-pane">
           <p className="faint">
             Starts with: {triggerWords(draft.settings, names).title}. Changes here are saved as you make them.
           </p>
@@ -339,12 +356,13 @@ function Editor({ workspaceId, flow, canWrite }: { workspaceId: string; flow: Fl
       ) : null}
 
       {tab === "versions" ? (
-        <div role="tabpanel" id="flow-panel-versions" aria-labelledby="flow-tab-versions" className="fl-pane">
+        <div className="fl-pane">
           <Panel flush>
             <EmptyState title="Version history comes next">Each published version will be listed here, with its steps to look at.</EmptyState>
           </Panel>
         </div>
       ) : null}
+      </div>
 
       {doomed ? (
         <Dialog title="Delete this step?" onClose={() => setDeleting(null)}>

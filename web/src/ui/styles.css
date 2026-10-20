@@ -624,6 +624,12 @@ select {
   box-shadow: var(--shadow-popover);
 }
 
+.menu-beside {
+  right: auto;
+  left: calc(100% + 12px);
+  top: 0;
+}
+
 .menu-heading {
   padding: 8px 12px;
   font-size: 13.5px;
@@ -1540,10 +1546,43 @@ main:focus {
 }
 
 /* Flow editor */
-.fl-page {
+/*
+ * The editor fills the window below the app header and never scrolls the page: while it is shown, the
+ * root is as tall as the window and the page takes what the header leaves. The sheet and the settings
+ * scroll inside themselves.
+ */
+#root:has(.fl-page) {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 64px);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root:has(.fl-page) > main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fl-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fl-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fl-panel:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .fl-head {
@@ -1640,7 +1679,13 @@ main:focus {
 }
 
 .fl-pane {
+  flex: 1;
+  min-height: 0;
   padding: 24px;
+  overflow: auto;
+}
+
+.fl-pane > * {
   max-width: 880px;
 }
 
@@ -1654,7 +1699,7 @@ main:focus {
   position: relative;
   overflow: hidden;
   flex: 1;
-  height: max(560px, calc(100vh - 190px));
+  min-height: 0;
   background: var(--ground);
 }
 
@@ -1893,6 +1938,14 @@ main:focus {
 
 .fl-issue:hover {
   background: var(--paper-3);
+}
+
+.fl-issue-text {
+  cursor: default;
+}
+
+.fl-issue-text:hover {
+  background: transparent;
 }
 
 .fl-issue-where {

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { sameJson, type Draft, type FlowDetail, type FlowIssue } from "./model";
+import { sameJson, TRIGGER_ID, type Draft, type FlowDetail, type FlowIssue } from "./model";
 
 /** How long after the last edit the draft is saved. */
 const AUTOSAVE_DELAY_MS = 800;
@@ -27,8 +27,13 @@ interface FlowDraft {
   retry: () => void;
   /** Whether the draft holds changes the server does not have yet. */
   unsaved: boolean;
-  /** The issues of the saved draft; null until the first check, and always null for a reader. */
+  /**
+   * The issues of the saved draft, less those of a step or connection the draft no longer has; null
+   * until the first check, and always null for a reader.
+   */
   issues: FlowIssue[] | null;
+  /** Whether an edit is waiting for the check of its save, so `issues` may be out of date. */
+  checking: boolean;
   meta: Meta;
   /** How many saves have gone through since the editor opened. */
   saves: number;
@@ -61,6 +66,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const [status, setStatus] = useState<SaveStatus>("saved");
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [issues, setIssues] = useState<FlowIssue[] | null>(null);
+  const [checking, setChecking] = useState(false);
   const [saves, setSaves] = useState(0);
   const [meta, setMeta] = useState<Meta>({ state: flow.state, currentVersion: flow.current_version ?? null });
   const history = useRef<Draft[]>([]);
@@ -82,9 +88,13 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       const body = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/flows/{id}/validate", { params: { path: { ws: workspaceId, id: flowId } } }),
       );
-      if (mine === checks.current) setIssues(body.issues);
+      if (mine === checks.current) {
+        setIssues(body.issues);
+        setChecking(false);
+      }
     } catch {
       // The editor stays usable without the check; the issues shown are those of the last one.
+      if (mine === checks.current) setChecking(false);
     }
   }, [workspaceId, flowId]);
 
@@ -104,6 +114,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     };
     if (Object.keys(body).length === 0) {
       setStatus("saved");
+      void check();
       return;
     }
     inflight.current = true;
@@ -135,6 +146,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       inflight.current = false;
       setFailure(describeError(error));
       setStatus("error");
+      setChecking(false);
     }
   }, [workspaceId, flowId, check]);
 
@@ -176,6 +188,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       }
       draftRef.current = next;
       setDraft(next);
+      // Whatever check is on its way answers for a draft that is gone.
+      checks.current += 1;
+      setChecking(true);
       schedule();
     },
     [editable, schedule],
@@ -190,12 +205,25 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     draftRef.current = previous;
     setDraft(previous);
     lastEdit.current = null;
+    checks.current += 1;
+    setChecking(true);
     schedule();
   }, [editable, schedule]);
 
   const retry = useCallback(() => {
     void flush();
   }, [flush]);
+
+  const current = useMemo(() => {
+    if (issues === null) return null;
+    const nodes = new Set(draft.graph.nodes.map((node) => node.id));
+    const edges = new Set(draft.graph.edges.map((edge) => edge.id));
+    return issues.filter(
+      (issue) =>
+        (issue.node === undefined || issue.node === TRIGGER_ID || nodes.has(issue.node)) &&
+        (issue.edge === undefined || edges.has(issue.edge)),
+    );
+  }, [issues, draft.graph]);
 
   return {
     draft,
@@ -207,7 +235,8 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     retry,
     unsaved:
       draft.name.trim() !== saved.name || !sameJson(draft.graph, saved.graph) || !sameJson(draft.settings, saved.settings),
-    issues: editable ? issues : null,
+    issues: editable ? current : null,
+    checking: editable && checking,
     meta,
     saves,
   };
