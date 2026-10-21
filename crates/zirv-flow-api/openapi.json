@@ -1420,7 +1420,7 @@
         "tags": [
           "ai"
         ],
-        "summary": "Drafts a mapping or a manifest with the assistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
+        "summary": "Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or\n`flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few\nsynthetic people) with the assistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
         "operationId": "create_ai_draft",
         "parameters": [
           {
@@ -1637,7 +1637,7 @@
             }
           },
           "409": {
-            "description": "The draft never validated (`ai_draft_invalid`), or the saved version changed since (`ai_draft_outdated`)",
+            "description": "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1647,7 +1647,7 @@
             }
           },
           "422": {
-            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save)",
+            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)",
             "content": {
               "application/problem+json": {
                 "schema": {
