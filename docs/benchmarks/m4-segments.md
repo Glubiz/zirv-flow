@@ -369,10 +369,78 @@ an hour of builds had evicted the cache, is consistent with this and not reprodu
   changes (seed 1) and 638.8 ms on the 0.57.1 run of 6.6 (p50 4.0 ms, p95 131.6 ms). The time is spent on the
   server (`service_latency` p99 635.3 ms; loadgen dispatch lag p99 7.6 ms). No ingest, inbox or drain code
   changed between 0.56.0 and 0.57.1, and every run used the same database, which gains a segment and 1.2
-  million events per run. The cause is not established; #151 tracks an A/B of 0.56.0 against 0.57.1 on the
-  same database.
+  million events per run. The version A/B that #151 asked for is no longer possible (6.5.1); a factor A/B on
+  0.76.0 shows that segment re-evaluation roughly doubles the p99, and that with no active segment it still
+  sits at 640 to 740 ms. The cause of that baseline is not established (6.5.1).
 - D4.1 on `jsonb` was not re-measured (6.1).
 - Everything remains provisional under D1 until the M8 hardware run.
+
+#### 6.5.1 Ingest p99 with and without segment re-evaluation, on 0.76.0 (#151)
+
+This tests the overhead of segment re-evaluation on 0.76.0. It is **not** the 0.56.0 to 0.57.1 regression:
+the M5 timer bench (#169) ran image 0.76.0 on this stack and migrated the database through
+`0036_flow_runtime`; zirv-flow refuses to start on a newer schema (`SchemaState::Newer`), and no backup from
+before that migration exists, so 0.56.0 and 0.57.1 cannot be run on this database any more. Any
+version-specific attribution is carried to the M8 hardware run (`docs/roadmap.md`, M8 Performance).
+
+Setup. Image `ghcr.io/glubiz/zirv-flow:0.76.0` (digest in `data/m4/151-ab/stack.txt`), compose project
+`zirv-flow-m4bench10m`, app tier M, PostgreSQL 16.15 with `/dev/shm` 8 GB (`BENCH_PG_SHM=8gb`; the M5 bench
+had 1 GB, so the PostgreSQL container was recreated on the same volumes), `max_wal_size` 8 GB,
+`synchronous_commit` on. Before the first run the workspace held 25 archived segments, none active, and
+9,117,293 `segment_members` rows. Its three M5 flows (`m5-spread`, `m5-burst`, `m5-probe`) are published
+with a manual trigger, so nothing reacts to track events or to segment entries; none was changed. Six dated
+`flow.step` wake-up jobs (tomorrow and 2099) were the only jobs in the queue. Two 30 s smoke runs (seeds 9001
+and 9002, not in the table) preceded the runs. Each run: 2,000 track events/s for 600 s over 1,000,000
+people (`scripts/bench/m4/ab.sh`), a fresh seed, no `cargo.exe` running, and the inbox, the dirty marks and
+the due jobs drained first.
+
+- **A**: a fresh `agg90` segment is saved and refreshed (230 k to 270 k members), then the load runs.
+- **B**: no active segment in the workspace.
+
+| Run | Seed | `service_latency` p50 / p95 / p99 (ms) | From schedule p99 (ms) | Dispatch lag p99 (ms) | PostgreSQL / serve / worker CPU (% of a core, mean) | Jobs enqueued per s | WAL (GB) |
+|---|---|---|---|---|---|---|---|
+| A1 | 1101 | 3.4 / 697.5 / 1345.5 | 1350.6 | 9.4 | 422 / 128 / 107 | 69.2 | 17.4 |
+| B1 | 1102 | 3.5 / 185.5 / 742.4 | 746.4 | 7.6 | 440 / 130 / 104 | 81.9 | 17.6 |
+| A2 | 1103 | 3.5 / 1043.8 / 1713.1 | 1716.1 | 10.7 | 417 / 132 / 105 | 77.0 | 19.1 |
+| B2 | 1104 | 3.4 / 143.4 / 638.1 | 642.9 | 7.5 | 401 / 127 / 105 | 112.5 | 19.1 |
+| B3 (wait-event sampler on) | 1105 | 3.5 / 142.9 / 707.3 | 711.6 | 7.7 | 447 / 130 / 101 | 85.3 | 20.4 |
+
+Every run accepted all of its events (about 1,200,000; no 429, no 5xx, no late dispatch). The event to
+`segment.entered` p95 in A was 1.72 s and 0.32 s (19,438 and 20,489 entries).
+
+What the runs show.
+
+- Segment re-evaluation matters. The A p99 is 1.35 and 1.71 s against 0.64 to 0.74 s for B, and the A p95 is
+  700 to 1,040 ms against 143 to 186 ms. The order held in every pair and the spread within a condition is
+  narrow next to the gap.
+- It is not the whole story. B has no active segment and still misses 100 ms by 6 to 7 times, and sits at or
+  above the 635 ms of 0.57.1 in 6.6. The p50 (3.4 to 3.5 ms) is the same in every run.
+- Condition B still runs the re-evaluation machinery. Every accepted event batch marks its people in
+  `person_changes` and enqueues a `segment.reevaluate` job (`request_reevaluation`, whether or not a segment
+  exists), so the job is claimed in B as well: a running `segment.reevaluate` job was seen in 82 to 101 of
+  about 203 one-second queue samples, against 103 to 110 in A. In B it claims the marks and finds no segment
+  to evaluate. So the check "no `segment.reevaluate` job is claimed in B" does not hold; what holds is "no
+  segment is evaluated in B" (`members_ins` and `members_upd` are 0).
+- PostgreSQL and app CPU are the same in both conditions, so the extra latency of A is not CPU. The WAL
+  volume is also the same: 17 to 20 GB per 600 s run, about 14 KB per event, 4 to 5 checkpoints, against
+  `max_wal_size` 8 GB.
+- Wait events of the client backends, sampled once per second during B3 (3,747 samples,
+  `data/m4/151-ab/diag-waits.csv`): 43 % on CPU, 31 % `LWLock:WALWrite` and 11 % `IO:WALSync`, nearly all on
+  `COMMIT`; 5 % `Lock:transactionid`, mostly on the `INSERT INTO jobs` that enqueues the workspace's single
+  `segment.reevaluate:<workspace>` unique key. So the commits of the ingest path queue behind the WAL flush.
+  Over the life of the database: 6.1 M `wal_buffers_full` (16 MB `wal_buffers`), 91 requested against 16
+  timed checkpoints, `wal_compression` off.
+
+Verdict. Re-evaluation explains part of the rise (about 0.6 to 1 s of p99 on this database) but not the
+baseline. The ingest path is bound by WAL flush contention at 17 to 20 GB of WAL per 10 minutes. The
+mechanism by which an active segment adds to that is not established. Two candidates are left for a reviewed
+follow-up: the hot unique key that every ingest transaction contends on, and the write volume per event
+(an `events` row, a `decision_records` row, a dedupe row and a mark). Neither was tested, and no code was
+changed. Not covered: the 0.56.0 to 0.57.1 attribution, a run with `synchronous_commit` off or a larger
+`wal_buffers`, and a reference-hardware run.
+
+Data: [`data/m4/151-ab/`](data/m4/151-ab/): per run `ab-<condition>-<seed>.json` with its loadgen report,
+the `docker stats` samples, the queue samples per kind and the counters of the window.
 
 ### 6.6 Incremental on 0.57.1 (after #149)
 

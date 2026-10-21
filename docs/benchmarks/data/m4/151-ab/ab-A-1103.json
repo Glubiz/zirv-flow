@@ -1,0 +1,162 @@
+{
+  "condition": "A",
+  "seed": 1103,
+  "image": "0.76.0",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "segment": "01a15fc6-37e8-7170-9ae1-286c39192903",
+  "active_segments_at_start": 1,
+  "measured_at": "2026-10-21T18:54:37Z",
+  "window_start": "2026-10-21T18:44:18.248330Z",
+  "window_end": "2026-10-21 18:54:19.278628+00",
+  "loadgen_cfg": {
+    "rate_per_s": 2000,
+    "seconds": 600,
+    "people": 1000000
+  },
+  "loadgen": {
+    "requests": 1199997,
+    "accepted": 1199997,
+    "achieved_rate": 1999.9400946446117,
+    "status": {
+      "accepted_202": 1199997,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "service_latency_ms": {
+      "count": 1199997,
+      "p50_ms": 3.52,
+      "p95_ms": 1043.764,
+      "p99_ms": 1713.065,
+      "max_ms": 3028.036
+    },
+    "latency_from_schedule_ms": {
+      "count": 1199997,
+      "p50_ms": 4.667,
+      "p95_ms": 1046.96,
+      "p99_ms": 1716.148,
+      "max_ms": 3032.138
+    },
+    "dispatch_lag_ms": {
+      "count": 1199997,
+      "p50_ms": 0.839,
+      "p95_ms": 4.33,
+      "p99_ms": 10.743,
+      "max_ms": 65.541
+    }
+  },
+  "counters_during_load": {
+    "changes_ins": 1199489,
+    "changes_upd": 126,
+    "checkpoints": 4,
+    "decisions": 1220463,
+    "jobs_del": 46191,
+    "jobs_ins": 46193,
+    "jobs_upd": 37612,
+    "members_ins": 20480,
+    "members_upd": 2,
+    "wal_bytes": 19133437610,
+    "xact_commit": 3951968
+  },
+  "counters_including_drain": {
+    "changes_ins": 1199871,
+    "changes_upd": 126,
+    "checkpoints": 4,
+    "decisions": 1220488,
+    "jobs_del": 46210,
+    "jobs_ins": 46210,
+    "jobs_upd": 37622,
+    "members_ins": 20489,
+    "members_upd": 2,
+    "wal_bytes": 19133985411,
+    "xact_commit": 3953470
+  },
+  "reevaluate_running": {
+    "seconds_sampled": 207,
+    "seconds_with_running_reevaluate": 103
+  },
+  "incremental_latency_s": {
+    "entries_caused_by_events": 20489,
+    "p50_s": 0.062,
+    "p95_s": 0.321,
+    "p99_s": 0.533,
+    "max_s": 1.042,
+    "entries_total": 20489,
+    "exits_total": 2
+  },
+  "members_after": {
+    "member_count": 290787,
+    "computed_version": 1
+  },
+  "docker_stats_cpu": [
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-worker-1",
+      "samples": 121,
+      "mean_cpu_pct": 105.1,
+      "max_cpu_pct": 129.0
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-scheduler-1",
+      "samples": 121,
+      "mean_cpu_pct": 0.1,
+      "max_cpu_pct": 0.3
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-1",
+      "samples": 121,
+      "mean_cpu_pct": 131.7,
+      "max_cpu_pct": 209.5
+    },
+    {
+      "container": "zirv-flow-m4bench10m-postgres-1",
+      "samples": 121,
+      "mean_cpu_pct": 417.2,
+      "max_cpu_pct": 554.1
+    }
+  ],
+  "queue_depth": [
+    {
+      "series": "none/none",
+      "samples": 202,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "person_changes/rows",
+      "samples": 202,
+      "mean": 88.05,
+      "max": 962
+    },
+    {
+      "series": "ingest.drain/running",
+      "samples": 187,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "segment.reevaluate/ready",
+      "samples": 15,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "ingest_inbox/rows",
+      "samples": 202,
+      "mean": 176.42,
+      "max": 1258
+    },
+    {
+      "series": "ingest.drain/ready",
+      "samples": 8,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "segment.reevaluate/running",
+      "samples": 103,
+      "mean": 1.00,
+      "max": 1
+    }
+  ]
+}
