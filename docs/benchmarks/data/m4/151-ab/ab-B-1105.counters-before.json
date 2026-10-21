@@ -1,0 +1,1 @@
+{"at" : "2026-10-21T19:06:14.30528+00:00", "jobs_ins" : 3377635, "jobs_del" : 3377629, "jobs_upd" : 3308709, "changes_ins" : 12713491, "changes_upd" : 851222, "members_ins" : 5904902, "members_upd" : 7, "decisions" : 10654631, "xact_commit" : 49932283, "wal_bytes" : 351355414227, "checkpoints" : 103}

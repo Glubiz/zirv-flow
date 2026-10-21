@@ -1,0 +1,97 @@
+{
+  "tool": "zirv-flow-loadgen",
+  "mode": "track",
+  "seed": 1104,
+  "run_id": "ab-B-1104",
+  "started_unix_s": 1792608901,
+  "batch_size": 1,
+  "max_in_flight": 10000,
+  "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+  "people": 1000000,
+  "total": {
+    "name": "total",
+    "target_rate": 2000,
+    "planned_duration_s": 600.0,
+    "elapsed_s": 600.0196538,
+    "requests": 1199989,
+    "items_offered": 1199989,
+    "items_accepted": 1199989,
+    "achieved_rate": 1999.9161567463975,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 1199989,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "latency_from_schedule": {
+      "count": 1199989,
+      "p50_ms": 4.438,
+      "p95_ms": 144.965,
+      "p99_ms": 642.911,
+      "max_ms": 1892.795
+    },
+    "service_latency": {
+      "count": 1199989,
+      "p50_ms": 3.368,
+      "p95_ms": 143.37,
+      "p99_ms": 638.087,
+      "max_ms": 1882.887
+    },
+    "dispatch_lag": {
+      "count": 1199989,
+      "p50_ms": 0.865,
+      "p95_ms": 3.566,
+      "p99_ms": 7.486,
+      "max_ms": 28.625
+    },
+    "late_dispatch": 0,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0
+  },
+  "phases": [
+    {
+      "name": "base",
+      "target_rate": 2000,
+      "planned_duration_s": 600.0,
+      "elapsed_s": 600.0196538,
+      "requests": 1199989,
+      "items_offered": 1199989,
+      "items_accepted": 1199989,
+      "achieved_rate": 1999.9161567463975,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 1199989,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 1199989,
+        "p50_ms": 4.438,
+        "p95_ms": 144.965,
+        "p99_ms": 642.911,
+        "max_ms": 1892.795
+      },
+      "service_latency": {
+        "count": 1199989,
+        "p50_ms": 3.368,
+        "p95_ms": 143.37,
+        "p99_ms": 638.087,
+        "max_ms": 1882.887
+      },
+      "dispatch_lag": {
+        "count": 1199989,
+        "p50_ms": 0.865,
+        "p95_ms": 3.566,
+        "p99_ms": 7.486,
+        "max_ms": 28.625
+      },
+      "late_dispatch": 0,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  ]
+}

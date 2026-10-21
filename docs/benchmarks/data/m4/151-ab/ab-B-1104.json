@@ -1,0 +1,151 @@
+{
+  "condition": "B",
+  "seed": 1104,
+  "image": "0.76.0",
+  "workspace": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+  "segment": null,
+  "active_segments_at_start": 0,
+  "measured_at": "2026-10-21T19:05:15Z",
+  "window_start": "2026-10-21T18:55:01.745335Z",
+  "window_end": "2026-10-21 19:05:02.73832+00",
+  "loadgen_cfg": {
+    "rate_per_s": 2000,
+    "seconds": 600,
+    "people": 1000000
+  },
+  "loadgen": {
+    "requests": 1199989,
+    "accepted": 1199989,
+    "achieved_rate": 1999.9161567463975,
+    "status": {
+      "accepted_202": 1199989,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "service_latency_ms": {
+      "count": 1199989,
+      "p50_ms": 3.368,
+      "p95_ms": 143.37,
+      "p99_ms": 638.087,
+      "max_ms": 1882.887
+    },
+    "latency_from_schedule_ms": {
+      "count": 1199989,
+      "p50_ms": 4.438,
+      "p95_ms": 144.965,
+      "p99_ms": 642.911,
+      "max_ms": 1892.795
+    },
+    "dispatch_lag_ms": {
+      "count": 1199989,
+      "p50_ms": 0.865,
+      "p95_ms": 3.566,
+      "p99_ms": 7.486,
+      "max_ms": 28.625
+    }
+  },
+  "counters_during_load": {
+    "changes_ins": 1199705,
+    "changes_upd": 64,
+    "checkpoints": 5,
+    "decisions": 1199888,
+    "jobs_del": 67534,
+    "jobs_ins": 67523,
+    "jobs_upd": 57178,
+    "members_ins": 0,
+    "members_upd": 0,
+    "wal_bytes": 19058175593,
+    "xact_commit": 4083070
+  },
+  "counters_including_drain": {
+    "changes_ins": 1199925,
+    "changes_upd": 64,
+    "checkpoints": 5,
+    "decisions": 1199989,
+    "jobs_del": 67546,
+    "jobs_ins": 67546,
+    "jobs_upd": 57184,
+    "members_ins": 0,
+    "members_upd": 0,
+    "wal_bytes": 19059440034,
+    "xact_commit": 4087726
+  },
+  "reevaluate_running": {
+    "seconds_sampled": 204,
+    "seconds_with_running_reevaluate": 82
+  },
+  "incremental_latency_s": null,
+  "members_after": null,
+  "docker_stats_cpu": [
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-worker-1",
+      "samples": 121,
+      "mean_cpu_pct": 104.6,
+      "max_cpu_pct": 122.0
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-scheduler-1",
+      "samples": 121,
+      "mean_cpu_pct": 0.1,
+      "max_cpu_pct": 0.2
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-1",
+      "samples": 121,
+      "mean_cpu_pct": 126.6,
+      "max_cpu_pct": 171.4
+    },
+    {
+      "container": "zirv-flow-m4bench10m-postgres-1",
+      "samples": 121,
+      "mean_cpu_pct": 400.8,
+      "max_cpu_pct": 519.8
+    }
+  ],
+  "queue_depth": [
+    {
+      "series": "none/none",
+      "samples": 203,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "person_changes/rows",
+      "samples": 203,
+      "mean": 36.93,
+      "max": 496
+    },
+    {
+      "series": "ingest.drain/running",
+      "samples": 188,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "segment.reevaluate/ready",
+      "samples": 26,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "ingest_inbox/rows",
+      "samples": 203,
+      "mean": 124.64,
+      "max": 1917
+    },
+    {
+      "series": "ingest.drain/ready",
+      "samples": 7,
+      "mean": 1.00,
+      "max": 1
+    },
+    {
+      "series": "segment.reevaluate/running",
+      "samples": 82,
+      "mean": 1.00,
+      "max": 1
+    }
+  ]
+}
