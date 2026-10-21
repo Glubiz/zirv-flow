@@ -228,7 +228,7 @@ pub(crate) enum Restore {
     /// The literals of a saved segment definition that were masked.
     Segment(Placeholders),
     /// The literals of a flow's saved draft that were masked.
-    Flow(Placeholders),
+    Flow(flow_context::FlowTable),
 }
 
 /// One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -599,7 +599,9 @@ async fn dry_run_manifest(
     }
 }
 
-/// Drafts a mapping or a manifest with the assistant: the model is asked, its answer validated
+/// Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or
+/// `flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few
+/// synthetic people) with the assistant: the model is asked, its answer validated
 /// with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
 /// repairs. The answer is the validated draft with its diff against the saved version and a dry
 /// run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
@@ -735,6 +737,7 @@ pub(crate) async fn create(
     // What the model may know, read by the server: through the registered tool for a source, from
     // the workspace's catalog for a segment.
     let mut placeholders = Placeholders::default();
+    let mut flow_table = flow_context::FlowTable::default();
     let known = match (kind, request.source_id) {
         (DraftKind::Segment, _) => {
             let details = segment_details(&state, workspace.id).await?;
@@ -757,7 +760,7 @@ pub(crate) async fn create(
                 context.privacy,
             )
             .map_err(|_| ApiError::ai_flow_too_large())?;
-            placeholders = table;
+            flow_table = table;
             parts
         }
         (DraftKind::Manifest, None) => render_manifest_context(&ManifestContext::default()),
@@ -795,7 +798,7 @@ pub(crate) async fn create(
     let restorable = Arc::new(match (kind, &saved) {
         (DraftKind::Manifest, Some(saved)) => Restore::Manifest(saved.clone()),
         (DraftKind::Segment, _) => Restore::Segment(placeholders),
-        (DraftKind::Flow, _) => Restore::Flow(placeholders),
+        (DraftKind::Flow, _) => Restore::Flow(flow_table),
         _ => Restore::Nothing,
     });
     let outcome = zirv_flow_ai::repair(
@@ -814,6 +817,15 @@ pub(crate) async fn create(
     let body = match outcome {
         Ok(RepairOutcome::Valid(content, attempts)) => {
             let changes = diff::changes(saved.as_ref(), &content, keys(kind));
+            // A flow has the walks of a few synthetic people: test mode, nothing written. They are
+            // computed before the draft is stored, so a failure leaves no draft behind.
+            let simulation = match (kind, flow_id) {
+                (DraftKind::Flow, Some(flow_id)) => Some(
+                    simulation_of(&state, &workspace.timezone, workspace.id, flow_id, &content)
+                        .await?,
+                ),
+                _ => None,
+            };
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
             zirv_flow_store::insert_ai_draft(
                 &mut tx,
@@ -841,14 +853,6 @@ pub(crate) async fn create(
                     Some(dry_run_mapping(&context, source_id, stream, &content).await)
                 }
                 _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
-            };
-            // A flow has the walks of a few synthetic people instead: test mode, nothing written.
-            let simulation = match (kind, flow_id) {
-                (DraftKind::Flow, Some(flow_id)) => Some(
-                    simulation_of(&state, &workspace.timezone, workspace.id, flow_id, &content)
-                        .await?,
-                ),
-                _ => None,
             };
             run_outcome(kind, "valid");
             DraftBody {
@@ -1208,8 +1212,8 @@ fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such draft of this user in this workspace, or it expired", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The draft never validated (`ai_draft_invalid`), or the saved version changed since (`ai_draft_outdated`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

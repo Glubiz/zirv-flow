@@ -3402,4 +3402,127 @@ mod tests {
         );
         assert_eq!(broke.fake.call_count(), sent);
     }
+
+    // ---- fix round 1 of #168 part A ----
+
+    /// A flow of `MAX_NODES + 1` waits whose last node sets a personal trait.
+    fn oversized_flow() -> Value {
+        let count = zirv_flow_core::flow::MAX_NODES + 1;
+        let mut nodes: Vec<Value> = (0..count - 1)
+            .map(|index| json!({"id": format!("w{index}"), "type": "wait.duration", "seconds": 60}))
+            .collect();
+        nodes.push(
+            json!({"id": "last", "type": "action.update_trait", "key": "city",
+            "change": {"op": "set", "value": "Skagen"}}),
+        );
+        let edges: Vec<Value> = (0..count - 1)
+            .map(|index| {
+                let to = if index + 2 == count {
+                    "last".to_owned()
+                } else {
+                    format!("w{}", index + 1)
+                };
+                json!({"id": format!("e{index}"), "from": format!("w{index}"), "port": "next", "to": to})
+            })
+            .collect();
+        json!({"v": 1, "nodes": nodes, "edges": edges})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_saved_flow_over_the_node_limit_is_refused_before_anything_is_sent(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let flow = fx.flow_named("Huge", Some(oversized_flow())).await;
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(flow_run(&flow)).await;
+        let explained = fx.ai_explain_flow(&fx.admin, &flow, None).await;
+
+        for reply in [&drafted, &explained] {
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+            assert_eq!(reply.body["code"], "ai_flow_too_large");
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn webhook_urls_are_masked_before_the_provider_and_restored_after(pool: PgPool) {
+        const URL: &str = "https://hooks.example.com/hook?email=a@b.dk";
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let secret = fx
+            .path_as(&fx.admin, "POST", "/webhook-signing-secret", None)
+            .await;
+        assert_eq!(secret.status, StatusCode::CREATED, "{:?}", secret.body);
+        let saved = json!({"v": 1, "nodes": [
+            {"id": "hook", "type": "action.webhook", "url": URL, "trait_keys": ["plan"]},
+            {"id": "end", "type": "exit"}
+        ], "edges": [{"id": "e1", "from": "hook", "port": "next", "to": "end"}]});
+        let flow = fx.flow_named("Hooked", Some(saved.clone())).await;
+        let sent = fx.fake.call_count();
+        // The model keeps the node, shown with a placeholder, and adds a wait before it.
+        let kept = json!({
+            "graph": {"v": 1, "nodes": [
+                {"id": "pause", "type": "wait.duration", "seconds": 60},
+                {"id": "hook", "type": "action.webhook", "url": "(kept-url:1)", "trait_keys": ["plan"]},
+                {"id": "end", "type": "exit"}
+            ], "edges": [
+                {"id": "e0", "from": "pause", "port": "next", "to": "hook"},
+                {"id": "e1", "from": "hook", "port": "next", "to": "end"}
+            ]},
+            "settings": manual_settings()
+        });
+        let mut moved = kept.clone();
+        moved["graph"]["nodes"][2]["id"] = json!("(kept-url:1)");
+        fx.fake.push(answer("draft_flow", moved));
+        fx.fake.push(answer("draft_flow", kept));
+
+        let reply = fx.draft(flow_run(&flow)).await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_eq!(reply.body["attempts"], 2);
+        // The URL never reached the provider, and a placeholder in a node id was fed back.
+        for request in fx.requests_after(sent) {
+            let text = everything(&request);
+            assert!(
+                !text.contains("a@b.dk") && !text.contains("hooks.example.com"),
+                "{text}"
+            );
+            assert!(text.contains("(kept-url:1)"), "{text}");
+        }
+        let feedback = last_feedback(&fx.requests_after(sent)[1]);
+        assert!(
+            feedback.contains("placeholder_invented at nodes/(kept-url:1)"),
+            "{feedback}"
+        );
+        // The draft keeps the original URL, and the diff shows the new wait only.
+        assert_eq!(reply.body["content"]["graph"]["nodes"][1]["url"], URL);
+        let accepted = fx
+            .accept(&fx.admin, reply.body["id"].as_str().unwrap())
+            .await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(fx.flow_detail(&flow).await["graph"]["nodes"][1]["url"], URL);
+        // An explanation gets the URL back too, and never sent it.
+        let sent = fx.fake.call_count();
+        fx.fake.push(answer(
+            "explain_flow",
+            json!({"summary": "Calls (kept-url:1).", "nodes": [
+                {"id": "pause", "text": "Waits."},
+                {"id": "hook", "text": "Posts to (kept-url:1)."}]}),
+        ));
+        let explained = fx.ai_explain_flow(&fx.admin, &flow, None).await;
+        assert_eq!(explained.status, StatusCode::OK, "{:?}", explained.body);
+        assert_eq!(
+            explained.body["nodes"][1]["text"],
+            format!("Posts to {URL}.")
+        );
+        assert!(!everything(&fx.requests_after(sent)[0]).contains("a@b.dk"));
+    }
 }
