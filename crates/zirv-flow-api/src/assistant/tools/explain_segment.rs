@@ -50,7 +50,7 @@ pub(crate) struct ExplainArgs {
 }
 
 /// Whether a text is plain text: no control characters. It is shown as text and never as markup.
-fn is_plain(text: &str) -> bool {
+pub(super) fn is_plain(text: &str) -> bool {
     !text.chars().any(char::is_control)
 }
 

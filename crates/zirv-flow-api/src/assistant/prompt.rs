@@ -13,6 +13,7 @@ use zirv_flow_ai::{AiError, ChatRequest, Content, Privacy, RequestBuilder, ToolS
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::DraftKind;
 
+use super::flow_context::{FLOW_INSTRUCTIONS, FLOW_REFERENCE};
 use super::segment_context::{SEGMENT_INSTRUCTIONS, SEGMENT_REFERENCE};
 
 /// The most output tokens a draft may take, for both kinds.
@@ -406,6 +407,10 @@ pub(crate) fn build_request(
             .system(Content::Instruction(MANIFEST_REFERENCE.into()))?,
         DraftKind::Segment => builder
             .system(Content::Instruction(SEGMENT_INSTRUCTIONS.into()))?
+            .system(Content::Instruction(SEGMENT_REFERENCE.into()))?,
+        DraftKind::Flow => builder
+            .system(Content::Instruction(FLOW_INSTRUCTIONS.into()))?
+            .system(Content::Instruction(FLOW_REFERENCE.into()))?
             .system(Content::Instruction(SEGMENT_REFERENCE.into()))?,
     };
     let mut message = context;

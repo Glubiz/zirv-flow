@@ -8,6 +8,8 @@ pub(crate) mod dispatch;
 pub(crate) mod drafts;
 pub(crate) mod evaluation;
 pub(crate) mod explain;
+pub(crate) mod flow_context;
+pub(crate) mod flow_explain;
 pub(crate) mod prompt;
 pub(crate) mod runtime;
 pub(crate) mod schema;

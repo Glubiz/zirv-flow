@@ -304,6 +304,14 @@ fn routes() -> Router<AppState> {
             post(assistant::explain::explain),
         )
         .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/ai/explain",
+            post(assistant::flow_explain::explain_flow),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain",
+            post(assistant::flow_explain::explain_trace),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}",
             get(people::profile::get),
         )

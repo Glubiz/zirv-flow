@@ -1,20 +1,26 @@
 //! The assistant's tools (architecture 5.3, 13.2): the only things a model can ask the product to
-//! do. There are five, and the registry below is the only list of them:
+//! do. There are eight, and the registry below is the only list of them:
 //!
 //! - `read_source` (read): what the model may know about a source's stream or manifest;
 //! - `draft_mapping` (draft): checks a mapping with the validator a stream save uses;
 //! - `draft_manifest` (draft): checks a manifest with the validator a source save uses.
 //! - `draft_segment` (draft): checks a segment definition with the rules a builder save applies;
-//! - `explain_segment` (read): checks an explanation of a saved segment against its definition.
+//! - `explain_segment` (read): checks an explanation of a saved segment against its definition;
+//! - `draft_flow` (draft): checks a flow graph and its settings with the publish validation;
+//! - `explain_flow` (read): checks an explanation of a flow against its nodes;
+//! - `explain_trace` (read): checks an explanation of a trace against its decision records.
 //!
 //! A tool never writes. It is told who is asking and in which workspace, and it authorizes that
 //! user again on every call; the model cannot name a target, only fill in the artifact. A new
 //! tool is one module and one line in [`registry`].
 
+pub(crate) mod draft_flow;
 pub(crate) mod draft_manifest;
 pub(crate) mod draft_mapping;
 pub(crate) mod draft_segment;
+pub(crate) mod explain_flow;
 pub(crate) mod explain_segment;
+pub(crate) mod explain_trace;
 pub(crate) mod read_source;
 
 use serde_json::Value;
@@ -37,6 +43,17 @@ pub(crate) enum DraftTarget {
     Segment { segment_id: Option<Uuid> },
     /// The saved definition of a segment version, which an explanation is checked against.
     Explain { definition: Value },
+    /// A flow's draft graph and settings. The flow is the one being edited, checked when the run
+    /// began; the tool checks the document only.
+    Flow,
+    /// The nodes of a flow's graph, which an explanation must cite: every id the graph has, and
+    /// the ones it has to cite.
+    ExplainFlow {
+        node_ids: Vec<String>,
+        required: Vec<String>,
+    },
+    /// The decision records of a trace the model was shown, in the order of their labels.
+    ExplainTrace { record_ids: Vec<Uuid> },
 }
 
 /// The caller of a tool: the signed-in user and the workspace, taken from the authorized request.
@@ -61,6 +78,9 @@ pub(crate) fn registry() -> Vec<Tool> {
         Box::new(draft_manifest::DraftManifest),
         Box::new(draft_segment::DraftSegment),
         Box::new(explain_segment::ExplainSegment),
+        Box::new(draft_flow::DraftFlow),
+        Box::new(explain_flow::ExplainFlow),
+        Box::new(explain_trace::ExplainTrace),
     ]
 }
 
@@ -122,7 +142,10 @@ mod tests {
                 "draft_mapping",
                 "draft_manifest",
                 "draft_segment",
-                "explain_segment"
+                "explain_segment",
+                "draft_flow",
+                "explain_flow",
+                "explain_trace"
             ]
         );
         assert_eq!(names.iter().collect::<HashSet<_>>().len(), names.len());
@@ -140,6 +163,12 @@ mod tests {
                 "sync",
                 "update",
                 "set",
+                "pause",
+                "resume",
+                "archive",
+                "enroll",
+                "retry",
+                "skip",
             ] {
                 assert!(!name.contains(forbidden), "{name} contains {forbidden}");
             }
@@ -154,7 +183,15 @@ mod tests {
             })
             .map(|tool| tool.name())
             .collect();
-        assert_eq!(reads, ["read_source", "explain_segment"]);
+        assert_eq!(
+            reads,
+            [
+                "read_source",
+                "explain_segment",
+                "explain_flow",
+                "explain_trace"
+            ]
+        );
         for tool in &tools {
             let spec = tool.spec().unwrap();
             assert_eq!(spec.name, tool.name());
@@ -178,6 +215,9 @@ mod tests {
             include_str!("draft_manifest.rs"),
             include_str!("draft_segment.rs"),
             include_str!("explain_segment.rs"),
+            include_str!("draft_flow.rs"),
+            include_str!("explain_flow.rs"),
+            include_str!("explain_trace.rs"),
         ];
         for source in sources {
             // The tests of a module may name what it must not do.
@@ -191,6 +231,14 @@ mod tests {
                 "set_stream_mapping",
                 "configure(",
                 "queue_run",
+                "update_flow",
+                "publish_flow",
+                "lock_flow",
+                "archive_flow",
+                "pause_flow",
+                "resume_flow",
+                "enroll(",
+                "mark_ai_draft",
             ] {
                 assert!(!code.contains(forbidden), "{forbidden}");
             }
