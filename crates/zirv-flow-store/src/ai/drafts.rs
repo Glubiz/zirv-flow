@@ -22,6 +22,8 @@ pub enum DraftKind {
     Manifest,
     /// A segment definition. It names a segment (or none, for a new one) and no source.
     Segment,
+    /// A flow graph with its settings. It names the flow whose draft it would replace.
+    Flow,
 }
 
 impl DraftKind {
@@ -30,6 +32,7 @@ impl DraftKind {
             Self::Mapping => "mapping",
             Self::Manifest => "manifest",
             Self::Segment => "segment",
+            Self::Flow => "flow",
         }
     }
 
@@ -38,6 +41,7 @@ impl DraftKind {
             "mapping" => Some(Self::Mapping),
             "manifest" => Some(Self::Manifest),
             "segment" => Some(Self::Segment),
+            "flow" => Some(Self::Flow),
             _ => None,
         }
     }
@@ -84,6 +88,8 @@ pub struct NewAiDraft<'a> {
     pub stream_name: Option<&'a str>,
     /// The segment a segment draft would change; none for a new segment and for other kinds.
     pub segment_id: Option<Uuid>,
+    /// The flow a flow draft would change; none for the other kinds.
+    pub flow_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<&'a Value>,
     /// SHA-256 of the saved artifact the draft was compared with.
@@ -100,6 +106,7 @@ pub struct AiDraft {
     pub source_id: Option<Uuid>,
     pub stream_name: Option<String>,
     pub segment_id: Option<Uuid>,
+    pub flow_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<Value>,
     pub base_digest: Option<[u8; 32]>,
@@ -117,6 +124,7 @@ struct Row {
     source_id: Option<Uuid>,
     stream_name: Option<String>,
     segment_id: Option<Uuid>,
+    flow_id: Option<Uuid>,
     status: String,
     content: Option<Value>,
     base_digest: Option<Vec<u8>>,
@@ -138,6 +146,7 @@ impl TryFrom<Row> for AiDraft {
             source_id: row.source_id,
             stream_name: row.stream_name,
             segment_id: row.segment_id,
+            flow_id: row.flow_id,
             status: DraftStatus::parse(&row.status).ok_or_else(corrupt)?,
             content: row.content,
             base_digest: row
@@ -152,7 +161,7 @@ impl TryFrom<Row> for AiDraft {
 }
 
 const COLUMNS: &str = "id, workspace_id, user_id, kind, source_id, stream_name, \
-    segment_id, status, content, base_digest, created_at, accepted_at, expires_at";
+    segment_id, flow_id, status, content, base_digest, created_at, accepted_at, expires_at";
 
 /// Stores a draft. The table's checks refuse an invalid draft with content, a valid one without,
 /// and a mapping without its source and stream.
@@ -162,8 +171,8 @@ pub async fn insert_ai_draft(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO ai_drafts (id, workspace_id, user_id, kind, source_id, stream_name, \
-            segment_id, status, content, base_digest, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            segment_id, flow_id, status, content, base_digest, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(new.id)
     .bind(new.workspace_id.as_uuid())
@@ -172,6 +181,7 @@ pub async fn insert_ai_draft(
     .bind(new.source_id)
     .bind(new.stream_name)
     .bind(new.segment_id)
+    .bind(new.flow_id)
     .bind(new.status.as_str())
     .bind(new.content)
     .bind(new.base_digest.as_ref().map(<[u8; 32]>::as_slice))
@@ -316,6 +326,7 @@ mod tests {
             source_id: Some(source_id),
             stream_name: Some("contacts"),
             segment_id: None,
+            flow_id: None,
             status: if content.is_some() {
                 DraftStatus::Valid
             } else {
@@ -588,6 +599,7 @@ mod tests {
             source_id: None,
             stream_name: None,
             segment_id,
+            flow_id: None,
             status: DraftStatus::Valid,
             content: Some(content),
             base_digest: Some([3; 32]),
@@ -716,5 +728,76 @@ mod tests {
         .await;
 
         assert!(refused.is_err());
+    }
+    async fn flow(pool: &PgPool, ws: WorkspaceId, name: &str) -> Uuid {
+        let mut tx = crate::begin(pool).await.unwrap();
+        let new = crate::NewFlow {
+            id: Uuid::now_v7(),
+            name: name.to_owned(),
+            graph: json!({"v": 1, "nodes": [], "edges": []}),
+            settings: json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
+        };
+        let made = crate::create_flow(&mut tx, ws, &new, None).await.unwrap();
+        crate::commit(tx).await.unwrap();
+        made.id
+    }
+
+    fn flow_draft<'a>(
+        ws: WorkspaceId,
+        user: UserId,
+        flow_id: Option<Uuid>,
+        content: &'a Value,
+        expires_at: OffsetDateTime,
+    ) -> NewAiDraft<'a> {
+        NewAiDraft {
+            kind: DraftKind::Flow,
+            flow_id,
+            source_id: None,
+            stream_name: None,
+            segment_id: None,
+            ..segment_draft(ws, user, None, content, expires_at)
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flow_draft_names_one_flow_of_its_own_workspace_and_nothing_else(pool: PgPool) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let ada = user(&pool, "ada@example.com").await;
+        let mine = flow(&pool, one, "Welcome").await;
+        let foreign = flow(&pool, two, "Elsewhere").await;
+        let source_id = source(&pool, one).await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let later = now + Duration::days(7);
+        let content = json!({"graph": {}, "settings": {}});
+        let mut connection = pool.acquire().await.unwrap();
+
+        let good = flow_draft(one, ada, Some(mine), &content, later);
+        insert_ai_draft(&mut connection, &good).await.unwrap();
+        let found = find_ai_draft(&pool, one, ada, good.id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.kind, DraftKind::Flow);
+        assert_eq!(found.flow_id, Some(mine));
+        assert_eq!(DraftKind::parse("flow"), Some(DraftKind::Flow));
+        assert_eq!(found.segment_id, None);
+
+        // A flow draft without a flow, of a flow of another workspace, or that also names a
+        // source or a segment, is refused; so is a flow named by another kind of draft.
+        for refused in [
+            flow_draft(one, ada, None, &content, later),
+            flow_draft(one, ada, Some(foreign), &content, later),
+            NewAiDraft {
+                source_id: Some(source_id),
+                ..flow_draft(one, ada, Some(mine), &content, later)
+            },
+            NewAiDraft {
+                kind: DraftKind::Segment,
+                ..flow_draft(one, ada, Some(mine), &content, later)
+            },
+        ] {
+            assert!(insert_ai_draft(&mut connection, &refused).await.is_err());
+        }
     }
 }

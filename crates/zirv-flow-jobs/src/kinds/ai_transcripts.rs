@@ -192,6 +192,7 @@ mod tests {
                     source_id: Some(source),
                     stream_name: Some("contacts"),
                     segment_id: None,
+                    flow_id: None,
                     status: DraftStatus::Valid,
                     content: Some(&content),
                     base_digest: None,
