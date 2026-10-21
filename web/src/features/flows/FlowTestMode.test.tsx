@@ -149,6 +149,9 @@ describe("test mode", () => {
     // The effects are captured, not sent, and the envelope is shown.
     const effect = within(sheet).getByText("Not sent").closest(".fl-effect") as HTMLElement;
     expect(within(effect).getByText("POST https://crm.example.com/hooks")).toBeInTheDocument();
+    // The kind is not said twice: the step's own label already starts with "Webhook".
+    expect(effect).not.toHaveTextContent(/Webhook\s*·\s*Webhook/);
+    expect(within(effect).getByText(/^Webhook: /)).toBeInTheDocument();
     expect(within(effect).getByLabelText("Webhook envelope")).toHaveTextContent(`"city": "Copenhagen"`);
 
     // The path is on the canvas: numbered, and what is off it is dimmed.
@@ -236,6 +239,39 @@ describe("test mode", () => {
     expect(within(sheet).queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("explains an invalid draft in plain words next to the Start button, never as the HTTP title", async () => {
+    mockApi({
+      ...flowRoutes(),
+      [TEST]: () =>
+        new Response(
+          JSON.stringify({
+            type: "about:blank",
+            title: "Unprocessable Entity",
+            status: 422,
+            detail: "the flow is not valid",
+            code: "flow_invalid",
+            trace_id: "abc",
+            request_id: null,
+            flow_issues: [{ code: "port_not_wired", node: "n1", at: "/ports/next" }],
+          }),
+          { status: 422, headers: { "content-type": "application/problem+json" } },
+        ),
+    });
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openTest(user);
+    await user.click(within(sheet).getByRole("radio", { name: /made-up person/ }));
+    await user.click(within(sheet).getByRole("button", { name: "Start the test" }));
+
+    const note = await within(sheet).findByRole("alert");
+    expect(note).toHaveTextContent("The draft has issues that stop a test. Fix them, then start again.");
+    expect(within(note).getByRole("list", { name: "Issues that stop the test" })).toHaveTextContent("Wait: 1 day");
+    expect(sheet).not.toHaveTextContent("Unprocessable Entity");
+    // It sits right after the button, not at the bottom of the sheet.
+    const start = within(sheet).getByRole("button", { name: "Start the test" });
+    expect(start.parentElement?.nextElementSibling).toBe(note);
+  });
+
   it("says plainly that the walk cannot decide a condition, with the partial path", async () => {
     mockApi({
       ...flowRoutes(),
@@ -266,6 +302,10 @@ describe("test mode", () => {
     expect(alert).toHaveTextContent("Unable to evaluate");
     expect(alert).toHaveTextContent("The branch reads an event the snapshot cut off.");
     expect(alert).toHaveTextContent("order");
+    // The reason and the place are separate lines, not one run of text.
+    const lines = Array.from(alert.querySelectorAll("div")).map((line) => line.textContent);
+    expect(lines[0]).toBe("The branch reads an event the snapshot cut off.");
+    expect(lines[1]).toMatch(/^At Branch: /);
     expect(within(sheet).getByRole("list", { name: "Steps of the test path" })).toHaveTextContent("Unable to evaluate");
   });
 

@@ -1980,6 +1980,17 @@ main:focus {
   color: var(--error-text);
 }
 
+.fl-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.fl-radio input {
+  flex: none;
+  margin-top: 4px;
+}
+
 .fl-fieldset {
   display: flex;
   flex-direction: column;

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, SelectField, Sheet, TextAreaField, TextField } from "../../ui";
-import type { Graph } from "./model";
+import { issueText } from "./issues";
+import type { FlowIssue, Graph } from "./model";
 import {
   advanceBy,
   isObject,
@@ -57,6 +58,8 @@ export function TestSheet(props: Props) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  /** The issues that stopped the walk: the draft is not valid. */
+  const [invalid, setInvalid] = useState<ApiError | null>(null);
   const inFlight = useRef(false);
   /** Bumped when the run starts over or the sheet goes, so a late answer is dropped. */
   const run = useRef(0);
@@ -99,6 +102,7 @@ export function TestSheet(props: Props) {
     }
     setProblem(null);
     setFailure(null);
+    setInvalid(null);
     const ticket = run.current;
     inFlight.current = true;
     setBusy(true);
@@ -120,7 +124,10 @@ export function TestSheet(props: Props) {
       );
       return true;
     } catch (error) {
-      if (ticket === run.current) setFailure(describeError(error));
+      if (ticket === run.current) {
+        if (error instanceof ApiError && error.code === "flow_invalid") setInvalid(error);
+        else setFailure(describeError(error));
+      }
       return false;
     } finally {
       if (ticket === run.current) {
@@ -130,6 +137,25 @@ export function TestSheet(props: Props) {
     }
   }
 
+  /** Why the draft cannot be walked, in words and next to the button that was pressed. */
+  const invalidNote = invalid ? (
+    <div className="form-error" role="alert">
+      <span className="strong">The draft has issues that stop a test. Fix them, then start again.</span>
+      {invalid.flowIssues.length > 0 ? (
+        <ul className="list-plain" aria-label="Issues that stop the test">
+          {invalid.flowIssues.map((issue, index) => (
+            <li key={`${index}:${issue.code}`}>
+              {issue.node ? `${props.describeStep(issue.node)}: ` : ""}
+              {issueText(issue as FlowIssue, props.graph)}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span>The issues are marked on the canvas and listed in the editor.</span>
+      )}
+    </div>
+  ) : null;
+
   function startOver() {
     run.current += 1;
     inFlight.current = false;
@@ -137,6 +163,7 @@ export function TestSheet(props: Props) {
     setScript([]);
     setForm(null);
     setFailure(null);
+    setInvalid(null);
     setProblem(null);
     setBusy(false);
     props.onResult(null);
@@ -154,7 +181,7 @@ export function TestSheet(props: Props) {
           <>
             <fieldset className="fl-fieldset">
               <legend className="strong">Who walks the flow</legend>
-              <label className="row">
+              <label className="fl-radio">
                 <input
                   type="radio"
                   name="test-who"
@@ -162,14 +189,14 @@ export function TestSheet(props: Props) {
                   disabled={!props.canSeePeople}
                   onChange={() => setWho("person")}
                 />
-                A real person
+                <span>A real person</span>
               </label>
               {!props.canSeePeople ? (
                 <p className="faint">Walking a real person shows their values, which needs a workspace admin.</p>
               ) : null}
-              <label className="row">
+              <label className="fl-radio">
                 <input type="radio" name="test-who" checked={who === "snapshot"} onChange={() => setWho("snapshot")} />
-                A made-up person, from an editable snapshot
+                <span>A made-up person, from an editable snapshot</span>
               </label>
             </fieldset>
             {who === "person" ? (
@@ -197,6 +224,7 @@ export function TestSheet(props: Props) {
                 {busy ? "Walking…" : "Start the test"}
               </Button>
             </div>
+            {invalidNote}
           </>
         ) : (
           <>
@@ -239,6 +267,7 @@ export function TestSheet(props: Props) {
                 }}
               />
             ) : null}
+            {invalidNote}
           </>
         )}
         {problem ? <InlineError title={problem} /> : null}
@@ -471,13 +500,13 @@ function Outcome({
       {halted ? (
         <div className="form-error" role="alert">
           <span className="strong">{halted.reason === "unable_to_evaluate" ? "Unable to evaluate" : "The walk stopped"}</span>
-          <span>{halted.message}</span>
-          {halted.node ? <span>At {describeStep(halted.node)}.</span> : null}
+          <div>{halted.message}</div>
+          {halted.node ? <div>At {describeStep(halted.node)}.</div> : null}
           {halted.capped_events.length > 0 ? (
-            <span>
+            <div>
               The snapshot holds too many of {halted.capped_events.join(", ")}
               {halted.cap != null ? ` (it keeps ${halted.cap})` : ""}, so the condition cannot be decided.
-            </span>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -558,6 +587,12 @@ const EFFECT_NAMES: Record<string, string> = {
   goal: "Goal",
 };
 
+/** The effect's kind and its step, said once when the step's own label already starts with the kind ("Webhook: ..."). */
+function effectTitle(kind: string, step: string): string {
+  const name = EFFECT_NAMES[kind] ?? kind;
+  return step.toLowerCase().startsWith(name.toLowerCase()) ? step : `${name} · ${step}`;
+}
+
 function EffectCard({ effect, sent, describeStep }: { effect: Effect; sent: boolean; describeStep: Props["describeStep"] }) {
   const detail = effect.detail as Record<string, unknown>;
   const url = typeof detail["url"] === "string" ? detail["url"] : null;
@@ -566,7 +601,7 @@ function EffectCard({ effect, sent, describeStep }: { effect: Effect; sent: bool
     <div className="fl-effect">
       <div className="row">
         <span className="strong">
-          {EFFECT_NAMES[effect.kind] ?? effect.kind} · {describeStep(effect.node)}
+          {effectTitle(effect.kind, describeStep(effect.node))}
         </span>
         <Pill>{sent ? "Not sent" : "Not changed"}</Pill>
       </div>
