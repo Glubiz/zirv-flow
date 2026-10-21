@@ -685,7 +685,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out after {}s waiting for the queue to reach the expected counts;                  last counts {counts:?}, {} effects written",
+                "timed out after {}s waiting for the queue to reach the expected counts; last counts {counts:?}, {} effects written",
                 WAIT_LIMIT.as_secs(),
                 effect_count(pool).await
             );
