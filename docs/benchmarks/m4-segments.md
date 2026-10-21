@@ -440,7 +440,7 @@ changed. Not covered: the 0.56.0 to 0.57.1 attribution, a run with `synchronous_
 `wal_buffers`, and a reference-hardware run.
 
 Data: [`data/m4/151-ab/`](data/m4/151-ab/): per run `ab-<condition>-<seed>.json` with its loadgen report,
-the `docker stats` samples, the queue samples per kind and the counters of the window.
+the CPU and queue summaries (from the per-3 s `docker stats` and per-2 s queue samples, not kept) and the counters of the window.
 
 ### 6.6 Incremental on 0.57.1 (after #149)
 
