@@ -424,28 +424,29 @@ pub(crate) fn issue_line(issue: &Issue) -> String {
     }
 }
 
-/// The ids of the nodes of a graph document, in document order.
-pub(crate) fn node_ids(graph: &Value) -> Vec<String> {
+/// The nodes of a graph document as `(id, type)`, in document order.
+fn graph_nodes(graph: &Value) -> impl Iterator<Item = (&str, Option<&str>)> {
     graph
         .get("nodes")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|node| node.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
+        .filter_map(|node| {
+            let id = node.get("id").and_then(Value::as_str)?;
+            Some((id, node.get("type").and_then(Value::as_str)))
+        })
+}
+
+/// The ids of the nodes of a graph document, in document order.
+pub(crate) fn node_ids(graph: &Value) -> Vec<String> {
+    graph_nodes(graph).map(|(id, _)| id.to_owned()).collect()
 }
 
 /// The node ids that an explanation of the graph must cite: every node but an exit.
 pub(crate) fn nodes_to_cite(graph: &Value) -> Vec<String> {
-    graph
-        .get("nodes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|node| node.get("type").and_then(Value::as_str) != Some("exit"))
-        .filter_map(|node| node.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
+    graph_nodes(graph)
+        .filter(|(_, kind)| *kind != Some("exit"))
+        .map(|(id, _)| id.to_owned())
         .collect()
 }
 

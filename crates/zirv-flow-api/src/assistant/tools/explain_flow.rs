@@ -16,7 +16,7 @@ use zirv_flow_ai::{
 };
 
 use super::draft_segment::line;
-use super::explain_segment::{MAX_NODE_TEXT_CHARS, MAX_SUMMARY_CHARS, is_plain};
+use super::explain_segment::{MAX_NODE_TEXT_CHARS, MAX_SUMMARY_CHARS, check_text};
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::problem::ApiError;
@@ -60,14 +60,13 @@ pub(crate) fn check_explanation(
     let ids: HashSet<&str> = known.iter().map(String::as_str).collect();
 
     let mut issues = Vec::new();
-    let summary = explained.summary.trim();
-    if summary.is_empty() {
-        issues.push(line("summary_empty", "/summary"));
-    } else if summary.chars().count() > MAX_SUMMARY_CHARS {
-        issues.push(line("text_too_long", "/summary"));
-    } else if !is_plain(summary) {
-        issues.push(line("text_not_plain", "/summary"));
-    }
+    let summary = check_text(
+        &mut issues,
+        &explained.summary,
+        "summary_empty",
+        "/summary",
+        MAX_SUMMARY_CHARS,
+    );
     if explained.nodes.len() > ids.len() {
         issues.push(line("too_many_nodes", "/nodes"));
     }
@@ -80,14 +79,13 @@ pub(crate) fn check_explanation(
         } else if !cited.insert(entry.id.as_str()) {
             issues.push(line("duplicate_node", &at("id")));
         }
-        let text = entry.text.trim();
-        if text.is_empty() {
-            issues.push(line("text_empty", &at("text")));
-        } else if text.chars().count() > MAX_NODE_TEXT_CHARS {
-            issues.push(line("text_too_long", &at("text")));
-        } else if !is_plain(text) {
-            issues.push(line("text_not_plain", &at("text")));
-        }
+        let text = check_text(
+            &mut issues,
+            &entry.text,
+            "text_empty",
+            &at("text"),
+            MAX_NODE_TEXT_CHARS,
+        );
         texts.push(json!({"id": entry.id, "text": text}));
     }
     // The nodes in the order of the graph, so the feedback reads in that order.

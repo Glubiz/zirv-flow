@@ -14,8 +14,6 @@
 //! all there is. The call is made as the signed-in user, who must be a workspace admin: every
 //! attempt spends the workspace's budget.
 
-use std::sync::Arc;
-
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -23,16 +21,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_ai::{
-    BoxFuture, ChatRequest, ChatResponse, Privacy, RepairError, RepairOutcome, ToolError,
-    ToolOutput, Verdict,
-};
+use zirv_flow_ai::Privacy;
 use zirv_flow_core::TraceId;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::Decision;
 
 use super::dispatch::{DispatchError, Dispatcher};
-use super::drafts::{DraftIssue, expected_call, segment_details, wrong_answer};
+use super::drafts::{DraftIssue, segment_details};
+use super::explain::run;
 use super::flow_context;
 use super::segment_context::Placeholders;
 use super::tools::{self, DraftTarget, ToolContext};
@@ -114,36 +110,6 @@ fn read_request(body: &Bytes) -> Result<AiFlowExplainRequest, ApiError> {
     })
 }
 
-/// Checks one answer: exactly one call of `tool`, run through the registry as the signed-in user.
-/// Anything else is feedback, and a refusal ends the run.
-async fn explain_turn(
-    context: &ToolContext,
-    tool: &'static str,
-    response: &ChatResponse,
-) -> Verdict<Value, DraftIssue, ApiError> {
-    let feedback = || Verdict::Invalid(vec![wrong_answer(tool)]);
-    let Some(arguments) = expected_call(response, tool) else {
-        return feedback();
-    };
-    let Some(found) = tools::find(tool) else {
-        return feedback();
-    };
-    match found.call(context, arguments).await {
-        Ok(ToolOutput::Draft(explained)) => Verdict::Valid(explained),
-        Ok(ToolOutput::Context(_)) => feedback(),
-        Err(ToolError::Invalid(lines)) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
-        Err(ToolError::Failed(error)) => Verdict::Abort(error),
-    }
-}
-
-fn turn<'a>(
-    context: Arc<ToolContext>,
-    tool: &'static str,
-    response: &'a ChatResponse,
-) -> BoxFuture<'a, Verdict<Value, DraftIssue, ApiError>> {
-    Box::pin(async move { explain_turn(&context, tool, response).await })
-}
-
 /// The issues of the last attempt as the problem lists them: a code and where.
 fn problem_issues(issues: &[DraftIssue]) -> Vec<SegmentIssueProblem> {
     issues
@@ -153,34 +119,6 @@ fn problem_issues(issues: &[DraftIssue]) -> Vec<SegmentIssueProblem> {
             code: issue.code().to_owned(),
         })
         .collect()
-}
-
-/// Runs the repair loop of an explanation and returns the checked answer.
-async fn run(
-    state: &AppState,
-    dispatcher: &Dispatcher<'_>,
-    context: ToolContext,
-    tool: &'static str,
-    chat: &ChatRequest,
-    what: &str,
-) -> Result<Value, ApiError> {
-    let context = Arc::new(context);
-    let outcome = zirv_flow_ai::repair(
-        state.ai.config.max_repair_attempts,
-        chat,
-        dispatcher,
-        move |response| turn(Arc::clone(&context), tool, response),
-    )
-    .await;
-    match outcome {
-        Ok(RepairOutcome::Valid(explained, _)) => Ok(explained),
-        Ok(RepairOutcome::Exhausted(issues, _)) => Err(ApiError::ai_explain_failed_for(
-            what,
-            problem_issues(&issues),
-        )),
-        Err(RepairError::Dispatch(error)) => Err(DispatchError::Ai(error).into()),
-        Err(RepairError::Aborted(error)) => Err(error),
-    }
 }
 
 fn tool_context(
@@ -351,7 +289,10 @@ pub(crate) async fn explain_flow(
             required: flow_context::nodes_to_cite(&graph),
         },
     );
-    let explained = run(&state, &dispatcher, context, FLOW_TOOL, &chat, "flow").await?;
+    let explained = run(&state, &dispatcher, context, FLOW_TOOL, &chat, |issues| {
+        ApiError::ai_explain_failed_for("flow", problem_issues(issues))
+    })
+    .await?;
     Ok(Json(flow_body(source, version, &explained, &table)))
 }
 
@@ -430,7 +371,10 @@ pub(crate) async fn explain_trace(
             record_ids: shown.iter().map(|record| record.id).collect(),
         },
     );
-    let explained = run(&state, &dispatcher, context, TRACE_TOOL, &chat, "trace").await?;
+    let explained = run(&state, &dispatcher, context, TRACE_TOOL, &chat, |issues| {
+        ApiError::ai_explain_failed_for("trace", problem_issues(issues))
+    })
+    .await?;
     Ok(Json(trace_body(trace_id, &explained, omitted)))
 }
 

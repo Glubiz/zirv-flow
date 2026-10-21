@@ -24,9 +24,9 @@ use crate::problem::ApiError;
 pub(crate) struct ExplainSegment;
 
 /// The longest text for one node, in characters.
-pub(crate) const MAX_NODE_TEXT_CHARS: usize = 500;
+pub(super) const MAX_NODE_TEXT_CHARS: usize = 500;
 /// The longest summary, in characters.
-pub(crate) const MAX_SUMMARY_CHARS: usize = 1000;
+pub(super) const MAX_SUMMARY_CHARS: usize = 1000;
 
 /// What the model says about one node.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -50,8 +50,28 @@ pub(crate) struct ExplainArgs {
 }
 
 /// Whether a text is plain text: no control characters. It is shown as text and never as markup.
-pub(super) fn is_plain(text: &str) -> bool {
+fn is_plain(text: &str) -> bool {
     !text.chars().any(char::is_control)
+}
+
+/// Trims a text and notes in `issues` what is wrong with it: empty (`empty`), longer than `max`
+/// characters, or not plain. Returns the trimmed text.
+pub(super) fn check_text<'a>(
+    issues: &mut Vec<String>,
+    text: &'a str,
+    empty: &str,
+    at: &str,
+    max: usize,
+) -> &'a str {
+    let text = text.trim();
+    if text.is_empty() {
+        issues.push(line(empty, at));
+    } else if text.chars().count() > max {
+        issues.push(line("text_too_long", at));
+    } else if !is_plain(text) {
+        issues.push(line("text_not_plain", at));
+    }
+    text
 }
 
 /// The pure part of the tool: the arguments against the schema and the definition. It returns the
@@ -69,14 +89,13 @@ pub(crate) fn check_explanation(
     let known: HashSet<&str> = all.iter().map(|node| node.pointer.as_str()).collect();
 
     let mut issues = Vec::new();
-    let summary = explained.summary.trim();
-    if summary.is_empty() {
-        issues.push(line("summary_empty", "/summary"));
-    } else if summary.chars().count() > MAX_SUMMARY_CHARS {
-        issues.push(line("text_too_long", "/summary"));
-    } else if !is_plain(summary) {
-        issues.push(line("text_not_plain", "/summary"));
-    }
+    let summary = check_text(
+        &mut issues,
+        &explained.summary,
+        "summary_empty",
+        "/summary",
+        MAX_SUMMARY_CHARS,
+    );
     if explained.nodes.len() > known.len() {
         issues.push(line("too_many_nodes", "/nodes"));
     }
@@ -89,14 +108,13 @@ pub(crate) fn check_explanation(
         } else if !cited.insert(entry.pointer.as_str()) {
             issues.push(line("duplicate_pointer", &at("pointer")));
         }
-        let text = entry.text.trim();
-        if text.is_empty() {
-            issues.push(line("text_empty", &at("text")));
-        } else if text.chars().count() > MAX_NODE_TEXT_CHARS {
-            issues.push(line("text_too_long", &at("text")));
-        } else if !is_plain(text) {
-            issues.push(line("text_not_plain", &at("text")));
-        }
+        let text = check_text(
+            &mut issues,
+            &entry.text,
+            "text_empty",
+            &at("text"),
+            MAX_NODE_TEXT_CHARS,
+        );
         texts.push(json!({"pointer": entry.pointer, "text": text}));
     }
     // The leaves in document order, so the feedback reads in the order of the definition.

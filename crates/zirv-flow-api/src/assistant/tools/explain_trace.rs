@@ -18,7 +18,7 @@ use zirv_flow_ai::{
 };
 
 use super::draft_segment::line;
-use super::explain_segment::{MAX_NODE_TEXT_CHARS, MAX_SUMMARY_CHARS, is_plain};
+use super::explain_segment::{MAX_NODE_TEXT_CHARS, MAX_SUMMARY_CHARS, check_text};
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::flow_context::record_label;
 use crate::assistant::schema::tool_parameters;
@@ -58,14 +58,13 @@ pub(crate) fn check_explanation(arguments: &Value, shown: &[Uuid]) -> Result<Val
     let labels: Vec<String> = (0..shown.len()).map(record_label).collect();
 
     let mut issues = Vec::new();
-    let summary = explained.summary.trim();
-    if summary.is_empty() {
-        issues.push(line("summary_empty", "/summary"));
-    } else if summary.chars().count() > MAX_SUMMARY_CHARS {
-        issues.push(line("text_too_long", "/summary"));
-    } else if !is_plain(summary) {
-        issues.push(line("text_not_plain", "/summary"));
-    }
+    let summary = check_text(
+        &mut issues,
+        &explained.summary,
+        "summary_empty",
+        "/summary",
+        MAX_SUMMARY_CHARS,
+    );
     if explained.records.len() > shown.len() {
         issues.push(line("too_many_records", "/records"));
     }
@@ -81,14 +80,13 @@ pub(crate) fn check_explanation(arguments: &Value, shown: &[Uuid]) -> Result<Val
             }
             Some(_) => {}
         }
-        let text = entry.text.trim();
-        if text.is_empty() {
-            issues.push(line("text_empty", &at("text")));
-        } else if text.chars().count() > MAX_NODE_TEXT_CHARS {
-            issues.push(line("text_too_long", &at("text")));
-        } else if !is_plain(text) {
-            issues.push(line("text_not_plain", &at("text")));
-        }
+        let text = check_text(
+            &mut issues,
+            &entry.text,
+            "text_empty",
+            &at("text"),
+            MAX_NODE_TEXT_CHARS,
+        );
         if let Some(position) = position {
             texts.push(json!({"id": shown[position], "text": text}));
         }
