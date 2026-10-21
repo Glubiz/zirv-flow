@@ -87,6 +87,19 @@ describe("FlowChanges", () => {
     expect(screen.getByText("a/b~c")).toBeInTheDocument();
   });
 
+  it("names a removed step from the diff once the canvas no longer has it", () => {
+    render(
+      <FlowChanges
+        names={names}
+        before={before}
+        after={before}
+        changes={[{ path: "/graph/nodes/gone", change: "removed", before: { id: "gone", type: "wait.duration", seconds: 86_400 }, after: null } as unknown as DraftChange]}
+      />,
+    );
+
+    expect(screen.getByRole("list", { name: "What the draft changes" })).toHaveTextContent(/Removed · Wait: 1 day\s*gone/);
+  });
+
   it("does not list a change of the graph as a setting", () => {
     render(<FlowChanges names={names} before={before} after={before} changes={[change("/graph/v", 1, 2)]} />);
 

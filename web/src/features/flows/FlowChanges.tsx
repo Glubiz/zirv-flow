@@ -1,6 +1,6 @@
 import { DraftChanges, type DraftChange } from "../assistant";
 import type { Names } from "./describe";
-import type { Graph } from "./model";
+import type { FlowNode, Graph } from "./model";
 import { stepTitle } from "./SimulationSummary";
 
 interface Props {
@@ -15,6 +15,8 @@ interface Props {
 interface StepLine {
   kind: "Added" | "Removed" | "Changed";
   id: string;
+  /** A removed step as the diff reports it, so it keeps its title once the canvas no longer has it. */
+  removed?: FlowNode;
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -48,7 +50,12 @@ export function FlowChanges({ changes, before, after, names }: Props) {
       const whole = parts.length === 3;
       if (whole) {
         seen.add(id);
-        steps.push({ kind: change.change === "added" ? "Added" : change.change === "removed" ? "Removed" : "Changed", id });
+        const removed = change.change === "removed" && typeof change.before === "object" && change.before !== null;
+        steps.push({
+          kind: change.change === "added" ? "Added" : change.change === "removed" ? "Removed" : "Changed",
+          id,
+          ...(removed ? { removed: { ...(change.before as unknown as FlowNode), id } } : {}),
+        });
       } else if (!seen.has(id)) {
         seen.add(id);
         steps.push({ kind: "Changed", id });
@@ -69,7 +76,7 @@ export function FlowChanges({ changes, before, after, names }: Props) {
     <div className="stack-tight">
       <ul className="list-plain stack-tight" aria-label="What the draft changes">
         {steps.map((line) => {
-          const was = stepTitle(before, names, line.id);
+          const was = stepTitle(line.removed ? { ...before, nodes: [line.removed] } : before, names, line.id);
           const now = stepTitle(after, names, line.id);
           const text =
             line.kind === "Added"
