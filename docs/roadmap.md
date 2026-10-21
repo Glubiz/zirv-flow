@@ -259,14 +259,14 @@ and run waits, branches and actions as designed, testable before publishing.
 enrollments, A/B test statistics.
 
 **Exit criteria.**
-- [ ] Simulation: thousands of enrollments over 90 virtual days with a crash after every effect. No internal effect applied twice; every external effect enqueued with a stable key; no timer fires early.
-- [ ] Publishing v2 leaves existing v1 enrollments on v1 (test).
-- [ ] When an awaited event races its timeout, exactly one path is taken (test).
-- [ ] A segment-entry trigger for 100,000 people enrolls each exactly once under re-entry rule `once`.
-- [ ] Test mode in the UI walks a person through a flow and shows the path and captured effects, with no side effects.
-- [ ] A segment-triggered enrollment and every step, retry and skip remain under the originating trace; the UI tree and API include the same nodes and gate or failure reasons.
-- [ ] The fake provider cannot publish a repaired flow; accepting it changes only a draft after the normal validator passes, and its explanation and trace explanation cite the graph nodes and decision records they describe.
-- [ ] Timer lateness at 1 million waiting enrollments is measured and attached against the section 19 target.
+- [x] Simulation: thousands of enrollments over 90 virtual days with a crash after every effect. No internal effect applied twice; every external effect enqueued with a stable key; no timer fires early.
+- [x] Publishing v2 leaves existing v1 enrollments on v1 (test).
+- [x] When an awaited event races its timeout, exactly one path is taken (test).
+- [x] A segment-entry trigger for 100,000 people enrolls each exactly once under re-entry rule `once`.
+- [x] Test mode in the UI walks a person through a flow and shows the path and captured effects, with no side effects.
+- [x] A segment-triggered enrollment and every step, retry and skip remain under the originating trace; the UI tree and API include the same nodes and gate or failure reasons.
+- [x] The fake provider cannot publish a repaired flow; accepting it changes only a draft after the normal validator passes, and its explanation and trace explanation cite the graph nodes and decision records they describe.
+- [x] Timer lateness at 1 million waiting enrollments is measured and attached against the section 19 target.
 
 **Dependencies.** M4 (and through it M2 and M1).
 
