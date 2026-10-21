@@ -305,7 +305,11 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     match (outcome, failure) {
         (Outcome::Completed, _) => info!(duration_ms, "job completed"),
-        (Outcome::Retried | Outcome::Dead | Outcome::Purged, Some(reason)) => warn!(
+        (Outcome::Purged, _) => info!(
+            duration_ms,
+            "job dropped: a person it named was erased while it ran"
+        ),
+        (Outcome::Retried | Outcome::Dead, Some(reason)) => warn!(
             duration_ms,
             reason = %reason,
             retry = outcome == Outcome::Retried,
