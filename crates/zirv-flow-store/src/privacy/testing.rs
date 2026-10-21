@@ -449,6 +449,64 @@ pub(crate) async fn rows_naming_records(pool: &PgPool, records: &[Uuid]) -> Vec<
     found
 }
 
+/// How long a test waits for a condition before it fails, and how often it looks.
+const POLL_CAP: std::time::Duration = std::time::Duration::from_secs(10);
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Polls `condition` every 20 ms until it holds, and panics with `what` after 10 s.
+pub(crate) async fn poll_until<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let started = std::time::Instant::now();
+    while !condition().await {
+        assert!(started.elapsed() < POLL_CAP, "timed out waiting for {what}");
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+}
+
+/// Waits until the backend `pid` waits for a lock held by another transaction: the barrier that
+/// orders transactions in the tests, in place of a guessed pause.
+pub(crate) async fn wait_until_blocked(pool: &PgPool, pid: i32) {
+    poll_until("the backend to wait for a lock", || async move {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE pid = $1 AND wait_event_type = 'Lock')",
+        )
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    })
+    .await;
+}
+
+/// Waits until the backend `pid` waits for a lock held by the backend `blocker`.
+pub(crate) async fn wait_until_blocked_by(pool: &PgPool, pid: i32, blocker: i32) {
+    poll_until("the backend to wait for the other backend", || async move {
+        sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+            .bind(pid)
+            .bind(blocker)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    })
+    .await;
+}
+
+/// Waits until the lease of the job has run out by the database's clock.
+pub(crate) async fn wait_until_lease_expired(pool: &PgPool, id: Uuid) {
+    poll_until("the lease to expire", || async move {
+        sqlx::query_scalar("SELECT lease_expires_at < now() FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

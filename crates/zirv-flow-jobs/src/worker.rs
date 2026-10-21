@@ -305,6 +305,10 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     match (outcome, failure) {
         (Outcome::Completed, _) => info!(duration_ms, "job completed"),
+        (Outcome::Purged, _) => info!(
+            duration_ms,
+            "job dropped: a person it named was erased while it ran"
+        ),
         (Outcome::Retried | Outcome::Dead, Some(reason)) => warn!(
             duration_ms,
             reason = %reason,
@@ -318,7 +322,7 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
 
 /// How long to wait before the next attempt: the backoff, or the wait the handler asked for
 /// (a `Retry-After`) when that is longer, but never past the backoff cap.
-fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Duration) -> Duration {
+pub(crate) fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Duration) -> Duration {
     asked.map_or(backoff, |asked| backoff.max(asked.min(cap)))
 }
 
@@ -342,6 +346,7 @@ async fn settle_failure(
     match fail_job(&shared.pool, job.id, job.lease_token, delay, reason).await {
         Ok(Some(FailOutcome::Retried)) => Outcome::Retried,
         Ok(Some(FailOutcome::Dead)) => Outcome::Dead,
+        Ok(Some(FailOutcome::Purged)) => Outcome::Purged,
         Ok(None) => Outcome::LeaseLost,
         Err(error) => {
             // The lease runs out and the reaper takes the job from here.

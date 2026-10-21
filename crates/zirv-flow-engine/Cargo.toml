@@ -6,6 +6,12 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# TEST ONLY: the simulation's seeded generators (`sim`), for the PostgreSQL simulation in
+# `zirv-flow-jobs` (architecture section 18, layer 2). Enabled by dev-dependencies; never in a
+# normal build.
+test-support = []
+
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 chrono-tz.workspace = true

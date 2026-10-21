@@ -30,6 +30,9 @@ mod traits_recompute;
 mod traits_slot;
 mod webhook_call;
 
+#[cfg(test)]
+mod simulation;
+
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
     &person_merge_rewrite::PersonMergeRewrite,

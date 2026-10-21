@@ -18,9 +18,13 @@ on:
         required: false
         default: '2000'
       enrollments:
-        description: 'Enrollments in the flow simulation'
+        description: 'Enrollments in the flow simulation (layer 1, no database)'
         required: false
         default: '200000'
+      pg_enrollments:
+        description: 'Enrollments in the PostgreSQL flow simulation (layer 2)'
+        required: false
+        default: '3000'
 
 permissions:
   contents: read
@@ -154,5 +158,85 @@ jobs:
       # and only this test reads them.
       - name: Simulate
         run: >-
-          cargo test -p zirv-flow-engine --lib sim::tests::the_population_holds_all_four_invariants
+          cargo test -p zirv-flow-engine --lib sim::harness::tests::the_population_holds_all_four_invariants
           -- --nocapture
+
+  # The flow simulation's second layer (architecture section 18): the real runtime on PostgreSQL.
+  # `flow.enroll`, `flow.step` and `webhook.call` jobs over 90 virtual days, with every job put
+  # through seeded rollbacks, commits without the acknowledgement and concurrent duplicate
+  # executions, and wakes claimed before they are due; the four invariants are then checked from
+  # the tables. CI runs two tests, one per fixed seed, with a few hundred enrollments. This job
+  # names its seed, and then only the first of the two tests runs it. Each PostgreSQL version draws
+  # its own seed; a failure prints its seed and population in the log,
+  # and the `seed` and `pg_enrollments` inputs rerun it.
+  flow-simulation-postgres:
+    name: Flow Simulation On PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Set Up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo Build
+        uses: actions/cache@v4.3.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Choose The Seed And The Population
+        env:
+          INPUT_SEED: ${{ github.event.inputs.seed }}
+          INPUT_ENROLLMENTS: ${{ github.event.inputs.pg_enrollments }}
+        run: |
+          seed="${INPUT_SEED:-}"
+          if [ -z "$seed" ]; then
+            seed="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
+          fi
+          enrollments="${INPUT_ENROLLMENTS:-3000}"
+          case "$seed$enrollments" in
+            *[!0-9]*) echo "the seed and the enrollment count must be numbers" >&2; exit 1 ;;
+          esac
+          echo "ZIRV_FLOW_SIM_SEED=$seed" >> "$GITHUB_ENV"
+          echo "ZIRV_FLOW_PG_SIM_ENROLLMENTS=$enrollments" >> "$GITHUB_ENV"
+          echo "PostgreSQL ${{ matrix.pg }} flow simulation: seed $seed, $enrollments enrollments"
+
+      # `cargo test`, not nextest: the seed and population come from the environment, only these
+      # tests read them, and nextest's slow-test timeout would end a large population. The name
+      # matches the test of each CI seed; with a seed in the environment the second has nothing
+      # to run.
+      - name: Simulate On PostgreSQL
+        run: >-
+          cargo test -p zirv-flow-jobs --lib
+          kinds::simulation::the_population_holds_all_four_invariants_under_crash_injection
+          -- --ignored --nocapture

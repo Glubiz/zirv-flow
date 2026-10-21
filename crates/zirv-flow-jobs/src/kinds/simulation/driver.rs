@@ -1,0 +1,645 @@
+//! The virtual-time loop. The clock moves from one instant to the next at which something is
+//! due (a job's `run_at` or a scheduled event); at each instant every due job runs, in a seeded
+//! order, until nothing is due. Which jobs are claimable is controlled by rewriting `run_at`, as
+//! the existing tests do: the database's own `now()` is the real time, so a job at a virtual
+//! instant is held back until the driver makes it due.
+
+use std::collections::BTreeMap;
+
+use hashbrown::{HashMap, HashSet};
+
+use serde_json::{Value, json};
+use time::Duration as Span;
+use time::OffsetDateTime;
+use uuid::Uuid;
+use zirv_flow_core::events::WEBHOOK_SUCCEEDED_EVENT;
+use zirv_flow_core::flow::NodeKind;
+use zirv_flow_engine::sim::generate::EVENTS;
+use zirv_flow_engine::sim::rng::{Rng, mix};
+use zirv_flow_store::{ENROLL_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB_KIND};
+
+use super::mock::Script;
+use super::world::{EPOCH, World, end};
+
+/// Streams of the seed, so each decision draws from its own and one never shifts another.
+pub(super) const LANE_PLAN: u64 = 20;
+pub(super) const LANE_ORDER: u64 = 21;
+pub(super) const LANE_EARLY: u64 = 22;
+const LANE_EVENTS: u64 = 23;
+const LANE_NOISE: u64 = 24;
+
+/// The kinds of job the driver runs. Anything else the runtime enqueues (a segment re-evaluation
+/// request, say) is left alone.
+/// How far ahead of the clock a wake must be to be claimed early: more than the lease expiries
+/// of a job's re-claims move the clock.
+const EARLY_MARGIN_SECONDS: i64 = 300;
+
+pub(super) const KINDS: [&str; 3] = [ENROLL_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB_KIND];
+
+/// A wake that moved an enrollment on: the timer it answered, and the virtual time it ran.
+#[derive(Clone, Debug)]
+pub(super) struct WakeMove {
+    pub(super) enrollment: Uuid,
+    /// The timer the enrollment held when the job claimed it; none means it had none due.
+    pub(super) wake_at: Option<OffsetDateTime>,
+    pub(super) at: OffsetDateTime,
+}
+
+/// What a call is made to go through, so that each failure the checks cover is certain to occur
+/// in every run: the first calls of a run take these parts in turn, by the order of their labels.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Scenario {
+    /// How the destination answers the call.
+    pub(super) script: Option<Script>,
+    /// The job is failed five times, which uses up its attempts: it goes dead.
+    pub(super) dead: bool,
+    /// Its first crash is a commit without the ack, and a wait for its outcome is registered: the
+    /// outcome event is written twice.
+    pub(super) duplicate: bool,
+}
+
+/// The scripts the first calls take, in turn. The calls after them follow the seed's classes.
+const SCRIPTS: [(Option<Script>, bool); 5] = [
+    (Some(Script::Healthy), true),
+    (Some(Script::RetryAfter), false),
+    (Some(Script::Down), false),
+    (Some(Script::Refusing), false),
+    (Some(Script::Healthy), true),
+];
+/// How many calls are made to write their outcome twice into a wait that is registered.
+const DUPLICATES: usize = 3;
+
+/// A job that is due.
+#[derive(Clone, Debug)]
+pub(super) struct Due {
+    pub(super) id: Uuid,
+    pub(super) kind: &'static str,
+    /// A name for the job that does not depend on random ids, so a seed gives the same plan.
+    pub(super) label: u64,
+    pub(super) scenario: Scenario,
+}
+
+struct Pending {
+    email: String,
+    name: String,
+    total: u64,
+}
+
+pub(super) struct Driver<'w> {
+    pub(super) w: &'w World,
+    pub(super) now: OffsetDateTime,
+    pending: BTreeMap<(OffsetDateTime, u64), Pending>,
+    seq: u64,
+    scheduled: HashSet<(Uuid, i64)>,
+    person_index: HashMap<Uuid, usize>,
+    owner: HashMap<Uuid, usize>,
+    /// How often each thing happened, by name.
+    pub(super) counts: BTreeMap<String, usize>,
+    pub(super) wake_moves: Vec<WakeMove>,
+    /// The outcome events (`webhook.succeeded` or `webhook.failed`) each call has committed, by
+    /// the call's idempotency key: one per committed execution that reached a terminal outcome.
+    pub(super) outcomes: HashMap<String, usize>,
+    /// The calls whose `webhook.call` job ran out of attempts.
+    pub(super) dead_webhooks: HashSet<String>,
+    /// How often an enrollment was moved out of each state version. A wait settles once, so
+    /// no entry may pass one.
+    pub(super) advances: HashMap<(Uuid, i64), usize>,
+    /// The outcome event that settled a wait, by the call it reports (enrollment and node).
+    pub(super) outcome_settlers: HashMap<(Uuid, String), Uuid>,
+    /// The scenario of each call, by idempotency key, and how many were handed out.
+    scenarios: HashMap<String, Scenario>,
+    scripted: usize,
+    duplicated: usize,
+    /// How often each label has been planned, so a plan does not depend on the clock.
+    pub(super) planned: HashMap<u64, u64>,
+    /// The concurrent duplicates and the webhook executions so far, per kind.
+    pub(super) concurrents: HashMap<&'static str, usize>,
+    pub(super) webhook_runs: usize,
+    /// What went wrong during the run itself (a handler that failed, a fence that let a stale
+    /// execution through), apart from what the tables show afterwards.
+    pub(super) problems: Vec<String>,
+}
+
+/// A stable 64-bit name for a text.
+pub(super) fn hash_text(text: &str) -> u64 {
+    text.bytes()
+        .fold(0x9e37_79b9, |state, byte| mix(state ^ u64::from(byte)))
+}
+
+/// A virtual instant as seconds since the Unix epoch, for seeding.
+pub(super) fn seconds_of(at: OffsetDateTime) -> u64 {
+    u64::try_from(at.unix_timestamp()).unwrap_or(0)
+}
+
+/// Puts the jobs due at one instant in the seeded order of that round: a hash of the seed, the
+/// instant, the round and the job's label, so the order follows the labels and not the order the
+/// database returned the rows in.
+fn sort_due(due: &mut [Due], seed: u64, at: OffsetDateTime, round: u64) {
+    due.sort_by_key(|job| {
+        (
+            mix(seed ^ LANE_ORDER ^ job.label ^ seconds_of(at) ^ round),
+            job.label,
+        )
+    });
+}
+
+impl<'w> Driver<'w> {
+    pub(super) fn new(w: &'w World) -> Self {
+        let person_index = w
+            .people
+            .iter()
+            .enumerate()
+            .map(|(index, person)| (person.id, index))
+            .collect();
+        let mut driver = Self {
+            w,
+            now: EPOCH,
+            pending: BTreeMap::new(),
+            seq: 0,
+            scheduled: HashSet::new(),
+            person_index,
+            owner: HashMap::new(),
+            counts: BTreeMap::new(),
+            wake_moves: Vec::new(),
+            outcomes: HashMap::new(),
+            dead_webhooks: HashSet::new(),
+            advances: HashMap::new(),
+            outcome_settlers: HashMap::new(),
+            scenarios: HashMap::new(),
+            scripted: 0,
+            duplicated: 0,
+            planned: HashMap::new(),
+            concurrents: HashMap::new(),
+            webhook_runs: 0,
+            problems: Vec::new(),
+        };
+        driver.schedule_noise();
+        driver
+    }
+
+    pub(super) fn bump(&mut self, key: impl Into<String>) {
+        *self.counts.entry(key.into()).or_default() += 1;
+    }
+
+    pub(super) fn problem(&mut self, text: String) {
+        println!("PROBLEM: {text}");
+        if self.problems.len() < 50 {
+            self.problems.push(text);
+        }
+    }
+
+    /// Events that no wait asked for, at seeded instants: most match nothing, some arrive while
+    /// a person waits for them.
+    fn schedule_noise(&mut self) {
+        let w = self.w;
+        let mut rng = Rng::derive(w.seed, &[LANE_NOISE]);
+        for _ in 0..w.people.len() / 2 {
+            let person = rng.index(w.people.len());
+            let name = (*rng.pick(&EVENTS)).to_owned();
+            let at = EPOCH + Span::seconds(i64::try_from(rng.below(80 * 86_400)).unwrap_or(0));
+            let total = rng.below(600);
+            let email = w.people[person].email.clone();
+            self.add_event(at, email, name, total);
+        }
+    }
+
+    fn add_event(&mut self, at: OffsetDateTime, email: String, name: String, total: u64) {
+        self.seq += 1;
+        self.pending
+            .insert((at, self.seq), Pending { email, name, total });
+    }
+
+    /// Runs the 90 days.
+    pub(super) async fn run(&mut self) {
+        let stop = end();
+        let mut at = EPOCH;
+        loop {
+            self.now = at;
+            self.w.env.clock.set(at);
+            self.deliver_events(at).await;
+            self.drain(at).await;
+            let next_job: Option<OffsetDateTime> = sqlx::query_scalar(
+                "SELECT min(run_at) FROM jobs \
+                 WHERE workspace_id = $1 AND state = 'ready' AND kind = ANY($2) AND run_at > $3",
+            )
+            .bind(self.w.env.ws.as_uuid())
+            .bind(KINDS.as_slice())
+            .bind(at)
+            .fetch_one(&self.w.env.pool)
+            .await
+            .unwrap();
+            let next_event = self.pending.keys().next().map(|key| key.0);
+            match [next_job, next_event].into_iter().flatten().min() {
+                // Lease expiries and retry delays move the clock on within an instant; time
+                // never runs back.
+                Some(next) if next <= stop => at = next.max(at).max(self.w.env.clock.now()),
+                _ => break,
+            }
+        }
+    }
+
+    /// Applies the events that are due, as ingestion does. Each event wakes the enrollments
+    /// that wait for it by enqueueing `flow.step` jobs.
+    async fn deliver_events(&mut self, at: OffsetDateTime) {
+        let due: Vec<(OffsetDateTime, u64)> = self
+            .pending
+            .range(..=(at, u64::MAX))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in due {
+            if let Some(event) = self.pending.remove(&key) {
+                self.w
+                    .env
+                    .apply_event(
+                        &event.email,
+                        &event.name,
+                        json!({"total": event.total, "seq": key.1}),
+                    )
+                    .await;
+                self.bump("events applied");
+            }
+        }
+    }
+
+    /// Runs every job that is due at `at` until none is, in a seeded order that mixes the jobs
+    /// of an instant: an event that arrives at a timeout's instant and the timeout are both
+    /// due, and either may run first.
+    async fn drain(&mut self, at: OffsetDateTime) {
+        self.early_wake(at).await;
+        for round in 0..200_u64 {
+            let mut due = self.due_jobs(at).await;
+            if due.is_empty() {
+                return;
+            }
+            let seed = self.w.seed;
+            // Jobs with one label cannot be told apart by anything seeded.
+            let distinct = due
+                .iter()
+                .map(|job| job.label)
+                .collect::<HashSet<_>>()
+                .len();
+            for _ in distinct..due.len() {
+                self.bump("jobs sharing a label with another due job");
+            }
+            sort_due(&mut due, seed, at, round);
+            for job in due {
+                self.run_job(&job, false).await;
+            }
+        }
+        self.problem(format!("jobs were still due after 200 rounds at {at}"));
+    }
+
+    async fn due_jobs(&mut self, at: OffsetDateTime) -> Vec<Due> {
+        let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(
+            "SELECT id, kind, payload FROM jobs \
+             WHERE workspace_id = $1 AND state = 'ready' AND kind = ANY($2) AND run_at <= $3",
+        )
+        .bind(self.w.env.ws.as_uuid())
+        .bind(KINDS.as_slice())
+        .bind(at)
+        .fetch_all(&self.w.env.pool)
+        .await
+        .unwrap();
+        let mut labelled = Vec::with_capacity(rows.len());
+        for (id, kind, payload) in rows {
+            let Some(kind) = KINDS.iter().copied().find(|known| *known == kind) else {
+                continue;
+            };
+            let label = self.label(kind, &payload).await;
+            labelled.push((label, id, kind, payload));
+        }
+        // The scenarios go to the calls in the order of their labels, not of the rows the
+        // database happens to return.
+        labelled.sort_by_key(|(label, ..)| *label);
+        let mut due = Vec::with_capacity(labelled.len());
+        for (label, id, kind, payload) in labelled {
+            let scenario = if kind == WEBHOOK_JOB_KIND {
+                self.scenario_of(&payload).await
+            } else {
+                Scenario::default()
+            };
+            due.push(Due {
+                id,
+                kind,
+                label,
+                scenario,
+            });
+        }
+        due
+    }
+
+    /// The scenario of the call a `webhook.call` payload carries: given when the call is first
+    /// seen, and kept. A call whose node is followed by a wait for `webhook.succeeded` is one of
+    /// the first few to write its outcome twice; the others take the scripts in turn.
+    async fn scenario_of(&mut self, payload: &Value) -> Scenario {
+        let key = payload
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(scenario) = self.scenarios.get(&key) {
+            return *scenario;
+        }
+        let enrollment = payload
+            .get("enrollment_id")
+            .and_then(Value::as_str)
+            .and_then(|text| Uuid::parse_str(text).ok())
+            .unwrap_or_default();
+        let node = payload
+            .get("node_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let person = self.person_of_enrollment(enrollment).await;
+        let graph = &self.w.flows[self.w.people[person].flow].graph;
+        let waits_for_success = graph
+            .edges
+            .iter()
+            .find(|edge| edge.from == node && edge.port == "next")
+            .and_then(|edge| graph.node(&edge.to))
+            .is_some_and(|next| {
+                matches!(&next.kind, NodeKind::WaitUntilEvent { event, .. }
+                    if event.name == WEBHOOK_SUCCEEDED_EVENT)
+            });
+        let scenario = if waits_for_success && self.duplicated < DUPLICATES {
+            self.duplicated += 1;
+            Scenario {
+                script: Some(Script::Healthy),
+                dead: false,
+                duplicate: true,
+            }
+        } else if let Some((script, dead)) = SCRIPTS.get(self.scripted).copied() {
+            self.scripted += 1;
+            Scenario {
+                script,
+                dead,
+                duplicate: false,
+            }
+        } else {
+            Scenario::default()
+        };
+        if let Some(script) = scenario.script {
+            self.w.mock.script(&key, script);
+        }
+        self.scenarios.insert(key, scenario);
+        scenario
+    }
+
+    /// Which person a job is about, in the population's order.
+    async fn person_of_enrollment(&mut self, enrollment: Uuid) -> usize {
+        if let Some(index) = self.owner.get(&enrollment) {
+            return *index;
+        }
+        let rows: Vec<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT id, person_id FROM enrollments WHERE workspace_id = $1")
+                .bind(self.w.env.ws.as_uuid())
+                .fetch_all(&self.w.env.pool)
+                .await
+                .unwrap();
+        for (id, person) in rows {
+            if let Some(index) = self.person_index.get(&person) {
+                self.owner.insert(id, *index);
+            }
+        }
+        self.owner.get(&enrollment).copied().unwrap_or(0)
+    }
+
+    async fn label(&mut self, kind: &str, payload: &Value) -> u64 {
+        let uuid = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_str)
+                .and_then(|text| Uuid::parse_str(text).ok())
+        };
+        let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default();
+        if kind == ENROLL_JOB_KIND {
+            let first = uuid(payload.pointer("/people/0/0")).unwrap_or_default();
+            let index = self.person_index.get(&first).copied().unwrap_or(0);
+            return mix(index as u64 ^ hash_text(ENROLL_JOB_KIND));
+        }
+        let enrollment = uuid(payload.get("enrollment_id")).unwrap_or_default();
+        let index = self.person_of_enrollment(enrollment).await;
+        if kind == WEBHOOK_JOB_KIND {
+            // The destination's answers to this call follow the seed: the person and the node,
+            // not the random ids of the key.
+            let key = text("idempotency_key");
+            self.w
+                .mock
+                .name(key, mix(index as u64 ^ hash_text(text("node_id"))));
+        }
+        let version = payload
+            .get("state_version")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let mut rest = hash_text(kind) ^ hash_text(text("input")) ^ hash_text(text("node_id"));
+        // Two events can wake the same enrollment at the same version; their payloads differ only
+        // by random ids, so the event's own seeded data tells the two jobs apart.
+        if let Some(event) = uuid(payload.get("event_id")) {
+            rest ^= self.event_tie(event).await;
+        }
+        mix(mix(index as u64 ^ rest) ^ u64::try_from(version).unwrap_or(0))
+    }
+
+    /// A name for an event that does not depend on its random id: the sequence number the driver
+    /// gave an event it sent, or for an outcome event of the runtime, the call it reports.
+    async fn event_tie(&self, event: Uuid) -> u64 {
+        let row: Option<(String, Value)> =
+            sqlx::query_as("SELECT name, properties FROM events WHERE id = $1")
+                .bind(event)
+                .fetch_optional(&self.w.env.pool)
+                .await
+                .unwrap();
+        let Some((name, properties)) = row else {
+            return 0;
+        };
+        let text = |key: &str| {
+            properties
+                .get(key)
+                .map(Value::to_string)
+                .unwrap_or_default()
+        };
+        let named = properties.get("seq").and_then(Value::as_u64).map_or_else(
+            || {
+                hash_text(&format!(
+                    "{}|{}|{}",
+                    text("node_id"),
+                    text("attempts"),
+                    text("status")
+                ))
+            },
+            mix,
+        );
+        hash_text(&name) ^ named
+    }
+
+    /// Some wakes are claimed before they are due, as a worker with a fast clock would: the
+    /// handler must put them back and not fire them.
+    async fn early_wake(&mut self, at: OffsetDateTime) {
+        let mut rng = Rng::derive(self.w.seed, &[LANE_EARLY, seconds_of(at)]);
+        if !rng.chance(20) {
+            return;
+        }
+        let rows: Vec<(Uuid, OffsetDateTime, Value)> = sqlx::query_as(
+            "SELECT id, run_at, payload FROM jobs \
+             WHERE workspace_id = $1 AND state = 'ready' AND kind = $2 \
+               AND payload ->> 'input' = 'wake' AND run_at > $3",
+        )
+        .bind(self.w.env.ws.as_uuid())
+        .bind(STEP_JOB_KIND)
+        // Early by more than the clock moves while the job is re-claimed (a lease and a retry
+        // delay at most per failure): a wake that time itself makes due is not an early one.
+        .bind(at + Span::seconds(EARLY_MARGIN_SECONDS))
+        .fetch_all(&self.w.env.pool)
+        .await
+        .unwrap();
+        // The earliest few by timer, ties broken by the label (the person and the node), never by
+        // a random id.
+        let mut candidates = Vec::with_capacity(rows.len());
+        for (id, run_at, payload) in rows {
+            let label = self.label(STEP_JOB_KIND, &payload).await;
+            candidates.push((run_at, label, id));
+        }
+        candidates.sort_by_key(|(run_at, label, _)| (*run_at, *label));
+        candidates.truncate(6);
+        if candidates.is_empty() {
+            return;
+        }
+        let (_, label, id) = candidates[rng.index(candidates.len())];
+        let job = Due {
+            id,
+            kind: STEP_JOB_KIND,
+            label,
+            scenario: Scenario::default(),
+        };
+        self.run_job(&job, true).await;
+    }
+
+    /// After a step committed: if the enrollment now waits for an event, decide whether and
+    /// when one arrives. Some arrive early, some at the timeout's instant, some a second
+    /// either side of it, so the event and the timeout race.
+    pub(super) async fn plan_events(&mut self, enrollment: Uuid) {
+        let waits: Vec<(String, i64, OffsetDateTime, Uuid)> = sqlx::query_as(
+            "SELECT event_name, wake_version, timeout_at, person_id FROM enrollment_waits \
+             WHERE enrollment_id = $1",
+        )
+        .bind(enrollment)
+        .fetch_all(&self.w.env.pool)
+        .await
+        .unwrap();
+        for (name, version, timeout, person) in waits {
+            if !self.scheduled.insert((enrollment, version)) {
+                continue;
+            }
+            // The outcome of a webhook call is written by the runtime, not sent in.
+            if name.starts_with("webhook.") {
+                self.bump("waits on a webhook outcome");
+                continue;
+            }
+            let Some(index) = self.person_index.get(&person).copied() else {
+                continue;
+            };
+            let mut rng = Rng::derive(
+                self.w.seed,
+                &[
+                    LANE_EVENTS,
+                    index as u64,
+                    u64::try_from(version).unwrap_or(0),
+                ],
+            );
+            let now = self.w.env.clock.now();
+            let window = (timeout - now).whole_seconds().max(2);
+            let second = Span::seconds(1);
+            let mut times = Vec::new();
+            match rng.below(100) {
+                0..=29 => {}
+                30..=54 => {
+                    times.push(
+                        now + Span::seconds(
+                            1 + i64::try_from(rng.below(window.unsigned_abs())).unwrap_or(0),
+                        ),
+                    );
+                }
+                55..=66 => times.push(timeout - second),
+                67..=79 => times.push(timeout),
+                80..=89 => times.push(timeout + second),
+                _ => {
+                    times.push(timeout);
+                    times.push(timeout + second);
+                }
+            }
+            let email = self.w.people[index].email.clone();
+            for at in times {
+                let total = rng.below(600);
+                self.add_event(at.max(now), email.clone(), name.clone(), total);
+                self.bump("events planned for a wait");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    fn job(label: u64) -> Due {
+        Due {
+            id: Uuid::from_u128(u128::from(label)),
+            kind: STEP_JOB_KIND,
+            label,
+            scenario: Scenario::default(),
+        }
+    }
+
+    fn labels(due: &[Due]) -> Vec<u64> {
+        due.iter().map(|job| job.label).collect()
+    }
+
+    #[test]
+    fn the_order_of_due_jobs_follows_their_labels_not_the_order_they_arrived_in() {
+        let at = datetime!(2030-01-05 12:00 UTC);
+        let mut forward: Vec<Due> = (1..=12).map(job).collect();
+        let mut backward: Vec<Due> = (1..=12).rev().map(job).collect();
+        let mut shuffled: Vec<Due> = [5, 11, 2, 8, 1, 12, 3, 9, 6, 4, 10, 7]
+            .into_iter()
+            .map(job)
+            .collect();
+        sort_due(&mut forward, 7, at, 0);
+        sort_due(&mut backward, 7, at, 0);
+        sort_due(&mut shuffled, 7, at, 0);
+        assert_eq!(labels(&forward), labels(&backward));
+        assert_eq!(labels(&forward), labels(&shuffled));
+    }
+
+    #[test]
+    fn the_order_is_the_seeds_and_changes_with_the_seed_the_instant_and_the_round() {
+        let at = datetime!(2030-01-05 12:00 UTC);
+        let ordered = |seed, at, round| {
+            let mut due: Vec<Due> = (1..=12).map(job).collect();
+            sort_due(&mut due, seed, at, round);
+            labels(&due)
+        };
+        let base = ordered(7, at, 0);
+        assert_eq!(base, ordered(7, at, 0));
+        assert_ne!(base, ordered(8, at, 0));
+        assert_ne!(base, ordered(7, datetime!(2030-01-05 12:00:01 UTC), 0));
+        assert_ne!(base, ordered(7, at, 1));
+    }
+
+    #[test]
+    fn the_first_calls_are_scripted_for_every_failure_the_checks_cover() {
+        let scripts: Vec<Option<Script>> = SCRIPTS.iter().map(|(script, _)| *script).collect();
+        for wanted in [Script::RetryAfter, Script::Down, Script::Refusing] {
+            assert!(
+                scripts.contains(&Some(wanted)),
+                "{wanted:?} is never scripted"
+            );
+        }
+        assert!(SCRIPTS.iter().any(|(_, dead)| *dead), "no call goes dead");
+    }
+
+    #[test]
+    fn names_for_texts_are_stable() {
+        assert_eq!(hash_text("n1"), hash_text("n1"));
+        assert_ne!(hash_text("n1"), hash_text("n2"));
+    }
+}
