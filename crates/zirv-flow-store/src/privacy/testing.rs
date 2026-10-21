@@ -482,6 +482,19 @@ pub(crate) async fn wait_until_blocked(pool: &PgPool, pid: i32) {
     .await;
 }
 
+/// Waits until the backend `pid` waits for a lock held by the backend `blocker`.
+pub(crate) async fn wait_until_blocked_by(pool: &PgPool, pid: i32, blocker: i32) {
+    poll_until("the backend to wait for the other backend", || async move {
+        sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+            .bind(pid)
+            .bind(blocker)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    })
+    .await;
+}
+
 /// Waits until the lease of the job has run out by the database's clock.
 pub(crate) async fn wait_until_lease_expired(pool: &PgPool, id: Uuid) {
     poll_until("the lease to expire", || async move {

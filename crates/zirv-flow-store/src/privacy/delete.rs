@@ -1108,7 +1108,7 @@ mod tests {
                 );
             }
             Release::Reap => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                crate::privacy::testing::wait_until_lease_expired(&pool, claimed.id).await;
                 let reaped = crate::reap_expired(&pool).await.unwrap();
                 assert_eq!(
                     reaped,
@@ -1368,12 +1368,10 @@ mod tests {
         handler
     }
 
-    /// Starts an erasure and gives it time to reach the statement that waits on the handler.
+    /// Starts an erasure and returns once its backend waits on a lock the handler holds.
     async fn erasing(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> tokio::task::JoinHandle<()> {
-        let pool = pool.clone();
-        let erasure = tokio::spawn(async move { erase(&pool, ws, person).await });
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        assert!(!erasure.is_finished(), "the erasure should be waiting");
+        let (erasure, pid) = spawn_erasure(pool, ws, person).await;
+        crate::privacy::testing::wait_until_blocked(pool, pid).await;
         erasure
     }
 
@@ -1496,14 +1494,21 @@ mod tests {
         .unwrap();
     }
 
-    async fn lock_job(pool: &PgPool, id: u128) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    async fn lock_job(
+        pool: &PgPool,
+        id: u128,
+    ) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
         let mut tx = begin(pool).await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE")
             .bind(Uuid::from_u128(id))
             .execute(&mut *tx)
             .await
             .unwrap();
-        tx
+        (tx, pid)
     }
 
     /// The erasure statements run at different snapshots. Two other transactions hold a running
@@ -1514,6 +1519,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_job_that_changes_state_while_the_erasure_waits_cannot_outlive_it(pool: PgPool) {
+        use crate::privacy::testing::wait_until_blocked_by;
         let Seeded { ws, person, .. } = seed_everything(&pool).await;
         sqlx::query("DELETE FROM jobs")
             .execute(&pool)
@@ -1523,29 +1529,25 @@ mod tests {
         insert_webhook_job(&pool, ws, 1, person, -5, false).await;
         insert_webhook_job(&pool, ws, 2, person, 0, true).await;
         insert_webhook_job(&pool, ws, 3, person, 0, false).await;
-        let running_blocker = lock_job(&pool, 2).await;
-        let ready_blocker = lock_job(&pool, 3).await;
+        let (running_blocker, running_pid) = lock_job(&pool, 2).await;
+        let (ready_blocker, ready_pid) = lock_job(&pool, 3).await;
 
-        let erasure = {
-            let pool = pool.clone();
-            tokio::spawn(async move { erase(&pool, ws, person).await })
-        };
-        let pause = std::time::Duration::from_millis(500);
-        tokio::time::sleep(pause).await;
-        assert!(!erasure.is_finished());
+        // The erasure marks the racing job first (lowest id), then waits for the running
+        // blocker's job.
+        let (erasure, erasure_pid) = spawn_erasure(&pool, ws, person).await;
+        wait_until_blocked_by(&pool, erasure_pid, running_pid).await;
 
-        // The worker claims the racing job, if the erasure left it claimable.
+        // The worker cannot claim the racing job: the erasure holds it.
         let claimed = crate::claim_job(&pool, "w", &["webhook.call"], LEASE, None)
             .await
             .unwrap();
+        assert!(
+            claimed.is_none(),
+            "the erasure left a job claimable while it waited"
+        );
         commit(running_blocker).await.unwrap();
-        tokio::time::sleep(pause).await;
-        assert!(!erasure.is_finished());
-        // And fails it back to ready while the erasure waits for the third job.
-        if let Some(claimed) = &claimed {
-            let released = tokio::time::timeout(pause * 4, fail(&pool, claimed)).await;
-            assert!(matches!(released, Ok(Some(_))), "{released:?}");
-        }
+        // Now it waits for the ready blocker's job.
+        wait_until_blocked_by(&pool, erasure_pid, ready_pid).await;
         commit(ready_blocker).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), erasure)
             .await
@@ -1561,8 +1563,7 @@ mod tests {
         assert_eq!(
             left,
             [(Uuid::from_u128(2), true)],
-            "a job survived the erasure (claimed during the wait: {})",
-            claimed.is_some()
+            "a job survived the erasure"
         );
     }
 
@@ -1588,7 +1589,7 @@ mod tests {
             after,
             entered_by: None,
         };
-        lease_alone(
+        let claimed = lease_alone(
             &pool,
             ws,
             "flow.enroll",
@@ -1600,7 +1601,7 @@ mod tests {
         .await;
 
         erase(&pool, ws, person).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::privacy::testing::wait_until_lease_expired(&pool, claimed.id).await;
         let reaped = crate::reap_expired(&pool).await.unwrap();
 
         assert_eq!(
@@ -1732,7 +1733,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let blocker = lock_job(&pool, 2).await;
+        let (blocker, _) = lock_job(&pool, 2).await;
 
         let (erasure, pid) = spawn_erasure(&pool, ws, person).await;
         wait_until_blocked(&pool, pid).await;
