@@ -1,8 +1,8 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { aiSettings, FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
+import { aiSettings, FLOW_ID, flowDetail, flowRoutes, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, saves, type User } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -356,7 +356,7 @@ const DIMMED = ".fl-node-dim";
 
 describe("accepting while the editor has unsaved work", () => {
   /** A save that fails the first time, so the edit stays unsaved. */
-  function failingSave(accept: Handler) {
+  function failingSave(accept: Handler, extra: Record<string, Handler> = {}) {
     const save = flowRoutes()[`PATCH ${FLOW}`]!;
     let patches = 0;
     return routes({
@@ -366,6 +366,7 @@ describe("accepting while the editor has unsaved work", () => {
           return patches === 1 ? problem(500, "Internal Server Error", "the save failed") : save(request);
         },
         [ACCEPT]: accept,
+        ...extra,
       },
     });
   }
@@ -427,6 +428,79 @@ describe("accepting while the editor has unsaved work", () => {
     expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add a step" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Flow name" })).toBeEnabled();
+  });
+
+  it("sends no save, publish or explain request while the accept is in flight", async () => {
+    const wait = gate();
+    const calls = mockApi(
+      failingSave(async () => {
+        await wait.opened;
+        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT });
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await reachDialog(user);
+    await screen.findByText("Loading the draft…");
+    const before = saves(calls).length;
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Archive…" })).toBeDisabled();
+    expect(within(sheet).getByRole("button", { name: "Explain the draft" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(saves(calls)).toHaveLength(before);
+    expect(calls.some((call) => call.path.endsWith("/publish") || call.path.endsWith("/ai/explain"))).toBe(false);
+
+    await act(async () => {
+      wait.open();
+      await wait.opened;
+    });
+    await screen.findByRole("group", { name: /^Wait: 1 hour/ });
+  });
+
+  it("loads the server's draft instead of saving the old edits when the accept failed after it committed", async () => {
+    // The accept commits on the server, then its reply is lost.
+    let committed = false;
+    const original = flowRoutes()[`GET ${FLOW}`]!;
+    const calls = mockApi(
+      failingSave(
+        () => {
+          committed = true;
+          return problem(502, "Bad Gateway", "the reply was lost");
+        },
+        {
+          [`GET ${FLOW}`]: (request) =>
+            committed ? json(flowDetail({ graph: CONTENT.graph, settings: CONTENT.settings })) : original(request),
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await reachDialog(user);
+
+    expect((await within(sheet).findAllByText(/The draft was accepted, but the reply was lost/)).length).toBeGreaterThan(0);
+    expect(await screen.findByRole("group", { name: /^Wait: 1 hour/ })).toBeInTheDocument();
+    expect(within(sheet).queryByText("Bad Gateway")).not.toBeInTheDocument();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 1000)));
+    expect(saves(calls)).toHaveLength(1);
+  });
+
+  it("sends one accept request however fast Accept is clicked", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openAssistant(user);
+    await draftIt(user, sheet);
+    const accept = within(sheet).getByRole("button", { name: "Accept" });
+
+    fireEvent.click(accept);
+    fireEvent.click(accept);
+
+    await within(sheet).findByText(/Loaded into the editor and saved/);
+    expect(calledWith(calls, "POST", "/ai/drafts/d1/accept")).toHaveLength(1);
   });
 });
 
