@@ -14,9 +14,9 @@ export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-export function problem(status: number, title: string, detail: string, traceId?: string): Response {
+export function problem(status: number, title: string, detail: string, traceId?: string, code?: string): Response {
   return new Response(
-    JSON.stringify({ type: "about:blank", title, status, detail, trace_id: traceId ?? null, request_id: null }),
+    JSON.stringify({ type: "about:blank", title, status, detail, trace_id: traceId ?? null, request_id: null, ...(code ? { code } : {}) }),
     { status, headers: { "content-type": "application/problem+json" } },
   );
 }

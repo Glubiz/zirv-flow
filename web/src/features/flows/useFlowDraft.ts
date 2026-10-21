@@ -22,6 +22,8 @@ interface FlowDraft {
   retry: () => void;
   /** Whether the draft holds changes the server does not have yet. */
   unsaved: boolean;
+  /** Whether the draft's settings (trigger, goal, exit) differ from the saved ones, as after a failed save. */
+  settingsUnsaved: boolean;
   /**
    * The issues of the saved draft, less those of a step or connection the draft no longer has; null
    * until the first check, and always null for a reader.
@@ -286,6 +288,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     retry,
     unsaved:
       draft.name.trim() !== saved.name || !sameJson(draft.graph, saved.graph) || !sameJson(draft.settings, saved.settings),
+    settingsUnsaved: !sameJson(draft.settings, saved.settings),
     issues: editable ? current : null,
     checking: editable && checking,
     saveNow,
