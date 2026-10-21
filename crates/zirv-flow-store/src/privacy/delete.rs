@@ -168,19 +168,23 @@ macro_rules! names_erased_person {
 /// conflict. `fail_job` and `reap_expired` then delete a marked job rather than requeue it or
 /// bury it dead, and `complete_job` deletes it as always.
 ///
-/// Marking runs before and after the delete: a job claimed between the two statements is not
-/// pending for the delete, and the second mark finds it running. A job the delete removed is
-/// locked until commit, so no worker can claim it.
+/// One statement marks every matching job, whatever its state, locking the rows in id order (the
+/// order `reap_expired` locks in). The erasure then holds each row until commit: `claim_job`
+/// (`FOR UPDATE SKIP LOCKED`) skips it, and `fail_job`, `reap_expired` and `heartbeat_job` wait
+/// for it. So after the mark no matching job changes state, and the delete that follows sees
+/// the rows as they were marked. Marking only the running jobs would miss one that is ready at
+/// the mark, claimed before the delete's snapshot and failed back to ready after it.
 async fn purge_jobs(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
     enrollments: &[String],
 ) -> Result<(), StoreError> {
-    mark_running(connection, workspace, people, enrollments).await?;
     sqlx::query(concat!(
-        "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ",
-        names_erased_person!()
+        "UPDATE jobs SET purge_on_release = true WHERE id IN ( \
+             SELECT id FROM jobs WHERE workspace_id = $1 AND ",
+        names_erased_person!(),
+        " ORDER BY id FOR NO KEY UPDATE)"
     ))
     .bind(workspace.as_uuid())
     .bind(people)
@@ -188,18 +192,8 @@ async fn purge_jobs(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    mark_running(connection, workspace, people, enrollments).await
-}
-
-async fn mark_running(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    people: &[Uuid],
-    enrollments: &[String],
-) -> Result<(), StoreError> {
     sqlx::query(concat!(
-        "UPDATE jobs SET purge_on_release = true \
-         WHERE workspace_id = $1 AND state = 'running' AND NOT purge_on_release AND ",
+        "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ",
         names_erased_person!()
     ))
     .bind(workspace.as_uuid())
@@ -1483,6 +1477,103 @@ mod tests {
         assert_eq!(
             left, 0,
             "a job that was requeued first is deleted by the erasure"
+        );
+    }
+
+    async fn insert_webhook_job(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        id: u128,
+        person: Uuid,
+        priority: i16,
+        running: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, priority, state, lease_token, \
+                lease_expires_at, attempts, unique_key, cause_kind, cause_id, trace_id) \
+             VALUES ($1, $2, 'webhook.call', jsonb_build_object('person_id', $3::text), $4, \
+                CASE WHEN $5 THEN 'running' ELSE 'ready' END, \
+                CASE WHEN $5 THEN gen_random_uuid() END, \
+                CASE WHEN $5 THEN now() + interval '1 hour' END, \
+                CASE WHEN $5 THEN 1 ELSE 0 END, $1::text, 'api', 't', gen_random_uuid())",
+        )
+        .bind(Uuid::from_u128(id))
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(priority)
+        .bind(running)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn lock_job(pool: &PgPool, id: u128) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut tx = begin(pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE")
+            .bind(Uuid::from_u128(id))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx
+    }
+
+    /// The erasure statements run at different snapshots. Two other transactions hold a running
+    /// job and a ready one that name the person, so the erasure stops twice; while it is stopped
+    /// a worker claims the third job and fails it back to ready, once in each gap. The job must
+    /// not survive: the erasure locks every matching job in its first statement, so the claim
+    /// finds nothing.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_changes_state_while_the_erasure_waits_cannot_outlive_it(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The ids fix the order the erasure locks in: the racing job first.
+        insert_webhook_job(&pool, ws, 1, person, -5, false).await;
+        insert_webhook_job(&pool, ws, 2, person, 0, true).await;
+        insert_webhook_job(&pool, ws, 3, person, 0, false).await;
+        let running_blocker = lock_job(&pool, 2).await;
+        let ready_blocker = lock_job(&pool, 3).await;
+
+        let erasure = {
+            let pool = pool.clone();
+            tokio::spawn(async move { erase(&pool, ws, person).await })
+        };
+        let pause = std::time::Duration::from_millis(500);
+        tokio::time::sleep(pause).await;
+        assert!(!erasure.is_finished());
+
+        // The worker claims the racing job, if the erasure left it claimable.
+        let claimed = crate::claim_job(&pool, "w", &["webhook.call"], LEASE, None)
+            .await
+            .unwrap();
+        commit(running_blocker).await.unwrap();
+        tokio::time::sleep(pause).await;
+        assert!(!erasure.is_finished());
+        // And fails it back to ready while the erasure waits for the third job.
+        if let Some(claimed) = &claimed {
+            let released = tokio::time::timeout(pause * 4, fail(&pool, claimed)).await;
+            assert!(matches!(released, Ok(Some(_))), "{released:?}");
+        }
+        commit(ready_blocker).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), erasure)
+            .await
+            .expect("the erasure did not finish")
+            .unwrap();
+
+        // Only the job that was running all along is left, and it is marked.
+        let left: Vec<(Uuid, bool)> =
+            sqlx::query_as("SELECT id, purge_on_release FROM jobs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            [(Uuid::from_u128(2), true)],
+            "a job survived the erasure (claimed during the wait: {})",
+            claimed.is_some()
         );
     }
 }
