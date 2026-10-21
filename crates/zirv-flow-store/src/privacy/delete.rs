@@ -169,9 +169,9 @@ macro_rules! names_erased_person {
 /// bury it dead, and `complete_job` deletes it as always.
 ///
 /// One statement marks every matching job, whatever its state, locking the rows in id order (the
-/// order `reap_expired` locks in). The erasure then holds each row until commit: `claim_job`
-/// (`FOR UPDATE SKIP LOCKED`) skips it, and `fail_job`, `reap_expired` and `heartbeat_job` wait
-/// for it. So after the mark no matching job changes state, and the delete that follows sees
+/// order `strip_enrolls` locks in). The erasure then holds each row until commit: `claim_job`
+/// and `reap_expired` (both `FOR UPDATE SKIP LOCKED`) skip it, and `fail_job` and `heartbeat_job`
+/// wait for it. So after the mark no matching job changes state, and the delete that follows sees
 /// the rows as they were marked. Marking only the running jobs would miss one that is ready at
 /// the mark, claimed before the delete's snapshot and failed back to ready after it.
 async fn purge_jobs(
@@ -226,14 +226,19 @@ async fn strip_enrolls(
     people: &[Uuid],
 ) -> Result<(), StoreError> {
     let erased: Vec<String> = people.iter().map(Uuid::to_string).collect();
+    // Every multi-row statement on `jobs` picks its rows first, `ORDER BY id` with the lock it
+    // needs, so two erasures in one workspace take shared `flow.enroll` rows in the same order
+    // and cannot deadlock.
     sqlx::query(
         "UPDATE jobs j SET payload = jsonb_set(j.payload, '{people}', \
              COALESCE((SELECT jsonb_agg(pair) FROM jsonb_array_elements(j.payload -> 'people') pair \
                        WHERE pair ->> 0 <> ALL($2)), '[]'::jsonb)) \
-         WHERE j.workspace_id = $1 AND j.kind = 'flow.enroll' \
-           AND NOT j.purge_on_release AND jsonb_typeof(j.payload -> 'people') = 'array' \
-           AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.payload -> 'people') pair \
-                       WHERE pair ->> 0 = ANY($2))",
+         WHERE j.id IN (SELECT t.id FROM jobs t \
+             WHERE t.workspace_id = $1 AND t.kind = 'flow.enroll' \
+               AND NOT t.purge_on_release AND jsonb_typeof(t.payload -> 'people') = 'array' \
+               AND EXISTS (SELECT 1 FROM jsonb_array_elements(t.payload -> 'people') pair \
+                           WHERE pair ->> 0 = ANY($2)) \
+             ORDER BY t.id FOR NO KEY UPDATE)",
     )
     .bind(workspace.as_uuid())
     .bind(&erased)
@@ -243,17 +248,20 @@ async fn strip_enrolls(
     // A job left with nobody: deleted when pending, marked when running (it has no work to put
     // back, and a marked job is deleted on any release).
     sqlx::query(
-        "DELETE FROM jobs WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
-           AND payload -> 'people' = '[]'::jsonb",
+        "DELETE FROM jobs WHERE id IN (SELECT id FROM jobs \
+             WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
+               AND payload -> 'people' = '[]'::jsonb \
+             ORDER BY id FOR UPDATE)",
     )
     .bind(workspace.as_uuid())
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     sqlx::query(
-        "UPDATE jobs SET purge_on_release = true \
-         WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state = 'running' \
-           AND NOT purge_on_release AND payload -> 'people' = '[]'::jsonb",
+        "UPDATE jobs SET purge_on_release = true WHERE id IN (SELECT id FROM jobs \
+             WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state = 'running' \
+               AND NOT purge_on_release AND payload -> 'people' = '[]'::jsonb \
+             ORDER BY id FOR NO KEY UPDATE)",
     )
     .bind(workspace.as_uuid())
     .execute(&mut *connection)
@@ -1659,5 +1667,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pages, 1, "the queued fallback page is the only one left");
+    }
+
+    /// Starts an erasure on a connection of its own and returns once its backend pid is known,
+    /// so a test can wait for that backend to block on a lock.
+    async fn spawn_erasure(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+    ) -> (tokio::task::JoinHandle<()>, i32) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let pool = pool.clone();
+        let handle = tokio::spawn(async move {
+            let mut tx = begin(&pool).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            sender.send(pid).unwrap();
+            delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+        });
+        (handle, receiver.await.unwrap())
+    }
+
+    /// The enroll jobs an erasure strips are locked in id order, whatever order they sit in on
+    /// disk, so two erasures cannot take shared rows in opposite orders. The heap order here is
+    /// the reverse of the id order; the erasure, blocked at job 2, must already hold job 1.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_locks_the_enroll_jobs_it_strips_in_id_order(pool: PgPool) {
+        use crate::privacy::testing::wait_until_blocked;
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let occurrence = Uuid::from_u128(5);
+        for id in [3_u128, 2, 1] {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+                    cause_id, trace_id) \
+                 VALUES ($1, $2, 'flow.enroll', $3, $1::text, 'api', 't', gen_random_uuid())",
+            )
+            .bind(Uuid::from_u128(id))
+            .bind(ws.as_uuid())
+            .bind(enroll_payload(
+                ws,
+                crate::EnrollWork::People(vec![(person, occurrence), (bystander, occurrence)]),
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let blocker = lock_job(&pool, 2).await;
+
+        let (erasure, pid) = spawn_erasure(&pool, ws, person).await;
+        wait_until_blocked(&pool, pid).await;
+        let first_is_held = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(Uuid::from_u128(1))
+            .fetch_optional(&pool)
+            .await
+            .is_err();
+        commit(blocker).await.unwrap();
+        erasure.await.unwrap();
+
+        assert!(first_is_held, "the erasure locks the lowest id first");
+        assert_eq!(jobs_naming(&pool, &[person]).await, 0);
     }
 }
