@@ -3407,7 +3407,8 @@ mod tests {
 
     /// A flow of `MAX_NODES + 1` waits whose last node sets a personal trait.
     fn oversized_flow() -> Value {
-        let count = zirv_flow_core::flow::MAX_NODES + 1;
+        // Two over: the walk of the masking once covered index 200, so the literal is at 201.
+        let count = zirv_flow_core::flow::MAX_NODES + 2;
         let mut nodes: Vec<Value> = (0..count - 1)
             .map(|index| json!({"id": format!("w{index}"), "type": "wait.duration", "seconds": 60}))
             .collect();
@@ -3499,7 +3500,7 @@ mod tests {
         }
         let feedback = last_feedback(&fx.requests_after(sent)[1]);
         assert!(
-            feedback.contains("placeholder_invented at nodes/(kept-url:1)"),
+            feedback.contains("placeholder_moved at nodes/(kept-url:1)"),
             "{feedback}"
         );
         // The draft keeps the original URL, and the diff shows the new wait only.
@@ -3524,5 +3525,95 @@ mod tests {
             format!("Posts to {URL}.")
         );
         assert!(!everything(&fx.requests_after(sent)[0]).contains("a@b.dk"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn webhook_urls_are_masked_under_the_opt_in_too_and_a_placeholder_stays_with_its_node(
+        pool: PgPool,
+    ) {
+        const A: &str = "https://hooks.example.com/a?token=AAA-SECRET";
+        const B: &str = "https://hooks.example.com/b?token=BBB-SECRET";
+        let fx = setup(&pool, true, 100_000_000).await;
+        fx.segment_traits().await;
+        let secret = fx
+            .path_as(&fx.admin, "POST", "/webhook-signing-secret", None)
+            .await;
+        assert_eq!(secret.status, StatusCode::CREATED, "{:?}", secret.body);
+        let saved = json!({"v": 1, "nodes": [
+            {"id": "a", "type": "action.webhook", "url": A},
+            {"id": "b", "type": "action.webhook", "url": B},
+            {"id": "end", "type": "exit"}
+        ], "edges": [
+            {"id": "e1", "from": "a", "port": "next", "to": "b"},
+            {"id": "e2", "from": "b", "port": "next", "to": "end"}
+        ]});
+        let flow = fx.flow_named("Hooks", Some(saved.clone())).await;
+        let sent = fx.fake.call_count();
+        let answer_with = |a: &str, b: &str, extra: Option<&str>| {
+            let mut graph = saved.clone();
+            graph["nodes"][0]["url"] = json!(a);
+            graph["nodes"][1]["url"] = json!(b);
+            if let Some(extra) = extra {
+                graph["nodes"][2] = json!({"id": "end", "type": "action.webhook", "url": extra});
+            }
+            json!({"graph": graph, "settings": manual_settings()})
+        };
+        // Swapped; copied into another node; embedded in a longer URL; then kept as sent.
+        fx.fake.push(answer(
+            "draft_flow",
+            answer_with("(kept-url:2)", "(kept-url:1)", None),
+        ));
+        fx.fake.push(answer(
+            "draft_flow",
+            answer_with("(kept-url:1)", "(kept-url:2)", Some("(kept-url:1)")),
+        ));
+        fx.fake.push(answer(
+            "draft_flow",
+            answer_with("https://x.example/(kept-url:1)", "(kept-url:2)", None),
+        ));
+        fx.fake.push(answer(
+            "draft_flow",
+            answer_with("(kept-url:1)", "(kept-url:2)", None),
+        ));
+
+        let first = fx.draft(flow_run(&flow)).await;
+
+        // Three attempts (the first answer and two repairs), none of them valid.
+        assert_eq!(first.body["status"], "invalid", "{:?}", first.body);
+        assert_eq!(first.body["attempts"], 3);
+        let requests = fx.requests_after(sent);
+        for request in &requests {
+            let text = everything(request);
+            assert!(
+                !text.contains("SECRET") && !text.contains("hooks.example.com"),
+                "{text}"
+            );
+        }
+        let swapped = last_feedback(&requests[1]);
+        assert!(
+            swapped.contains("placeholder_moved at nodes/a/url"),
+            "{swapped}"
+        );
+        let copied = last_feedback(&requests[2]);
+        assert!(
+            copied.contains("placeholder_moved at nodes/end/url"),
+            "{copied}"
+        );
+        // The kept answer drafts, restores each URL into its own node and is accepted.
+        let second = fx.draft(flow_run(&flow)).await;
+        assert_eq!(second.body["status"], "valid", "{:?}", second.body);
+        assert_eq!(second.body["content"]["graph"]["nodes"][0]["url"], A);
+        assert_eq!(second.body["content"]["graph"]["nodes"][1]["url"], B);
+        let accepted = fx
+            .accept(&fx.admin, second.body["id"].as_str().unwrap())
+            .await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        let detail = fx.flow_detail(&flow).await;
+        assert_eq!(detail["graph"]["nodes"][0]["url"], A);
+        assert_eq!(detail["graph"]["nodes"][1]["url"], B);
+        for request in fx.requests_after(sent) {
+            assert!(!everything(&request).contains("SECRET"));
+        }
     }
 }
