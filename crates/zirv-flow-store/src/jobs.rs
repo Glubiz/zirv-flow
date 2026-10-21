@@ -456,21 +456,28 @@ pub async fn heartbeat_job<'e>(
 /// their attempts are used up (the attempt was counted at claim time). Each reaped
 /// workspace job gets a `job.attempt` decision, `lease_expired` or `exhausted`.
 ///
-/// The reaper never waits: it takes the expired rows `FOR UPDATE SKIP LOCKED`, so it skips a row
-/// another transaction holds (a handler's `lock_lease`, an erasure's mark, another reaper). A
-/// skipped row is reaped on a later pass, or released by its own handler. Waiting instead would
-/// stall every other expired job behind one zombie handler, and would deadlock with a handler
-/// that completes: the reaper's `DELETE` of a marked row waits for the handler while the
-/// handler's `complete_job` waits for the reaper. A job an erasure marked `purge_on_release` is
-/// deleted, not requeued or buried.
+/// The expired rows are taken `FOR NO KEY UPDATE` in id order (the order an erasure marks them
+/// in). That lock does not conflict with a zombie handler's `lock_lease` (`FOR KEY SHARE`), so a
+/// job whose handler is still open is requeued all the same, and the late ack is refused.
+///
+/// A job an erasure marked `purge_on_release` is deleted, not requeued or buried. A `DELETE`
+/// needs `FOR UPDATE`, which a handler's `KEY SHARE` blocks, so the rows to delete are taken
+/// `FOR UPDATE OF j SKIP LOCKED` first and a marked row a handler still holds is left alone on
+/// this pass: its handler's `complete_job` or `fail_job` deletes it, or a later reap does. The
+/// reaper therefore never waits on a handler, which would stall every other expired job behind
+/// one zombie and deadlock with a handler that completes.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
         "WITH locked AS ( \
              SELECT id, purge_on_release FROM jobs \
              WHERE state = 'running' AND lease_expires_at < now() \
-             ORDER BY id FOR UPDATE SKIP LOCKED), \
+             ORDER BY id FOR NO KEY UPDATE), \
+         purgeable AS ( \
+             SELECT j.id FROM jobs j \
+             WHERE j.id IN (SELECT id FROM locked WHERE purge_on_release) \
+             FOR UPDATE OF j SKIP LOCKED), \
          purged AS ( \
-             DELETE FROM jobs WHERE id IN (SELECT id FROM locked WHERE purge_on_release) \
+             DELETE FROM jobs WHERE id IN (SELECT id FROM purgeable) \
              RETURNING id), \
          updated AS ( \
              UPDATE jobs SET \
@@ -1929,5 +1936,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0, "the job ends up deleted");
+    }
+
+    /// A zombie handler still holds an unmarked expired job in an open transaction. The reaper
+    /// must requeue it anyway, or no other worker could take the job over; the late ack is then
+    /// refused.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_requeues_an_unmarked_expired_job_a_zombie_handler_still_holds(
+        pool: PgPool,
+    ) {
+        let token = Uuid::new_v4();
+        insert_expired(&pool, 1, token, false).await;
+        let mut zombie = pool.begin().await.unwrap();
+        assert!(
+            lock_lease(&mut zombie, Uuid::from_u128(1), token)
+                .await
+                .unwrap()
+        );
+
+        let reaped = tokio::time::timeout(Duration::from_secs(10), reap_expired(&pool))
+            .await
+            .expect("the reaper waited for the zombie handler")
+            .unwrap();
+
+        assert_eq!(
+            reaped,
+            Reaped {
+                requeued: 1,
+                dead: 0,
+                purged: 0
+            }
+        );
+        let acked = complete_job(&mut *zombie, Uuid::from_u128(1), token)
+            .await
+            .unwrap();
+        assert!(!acked, "the late ack of the old lease is refused");
+        zombie.commit().await.unwrap();
+        let again = claim(&pool, &["a.kind"]).await.unwrap();
+        assert_eq!(again.id, Uuid::from_u128(1));
     }
 }
