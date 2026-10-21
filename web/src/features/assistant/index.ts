@@ -1,5 +1,7 @@
 export { AiSettingsPage } from "./AiSettingsPage";
 export { AssistantPanel } from "./AssistantPanel";
-export { failureText } from "./labels";
+export { assistantGone, failureText } from "./labels";
 export type { Failure } from "./labels";
-export { useAssistantEnabled } from "./useAssistantEnabled";
+export { DraftChanges } from "./DraftChanges";
+export type { DraftChange } from "./labels";
+export { useAssistantAccess, useAssistantEnabled } from "./useAssistantEnabled";

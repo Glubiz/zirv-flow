@@ -9,13 +9,14 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useUpdateNodeInternals,
   type Connection,
   type Edge,
   type FinalConnectionState,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { MenuButton } from "../../ui";
 import { wordsFor, triggerWords, type Names } from "./describe";
@@ -144,6 +145,8 @@ export interface IssueItem {
 export interface FocusRequest {
   id: string;
   nonce: number;
+  /** Also bring the step into view and mark it for a moment, as when an explanation points at it. */
+  reveal?: boolean;
 }
 
 interface CanvasProps {
@@ -173,6 +176,8 @@ interface CanvasProps {
   overlay?: Overlay;
   /** Fit the view again whenever this changes, such as when another version is drawn. */
   fitKey?: string | number;
+  /** Draw the steps afresh and fit the view whenever this changes, such as when a whole new draft is loaded. */
+  layoutKey?: number;
   children?: ReactNode;
 }
 
@@ -356,6 +361,12 @@ function Surface(props: CanvasProps) {
   const container = useRef<HTMLDivElement>(null);
   const flow = useReactFlow();
   const fitted = useRef(props.fitKey);
+  const updateInternals = useUpdateNodeInternals();
+  const laidOut = useRef(props.layoutKey);
+  /** The step an explanation just pointed at; it is marked until the timer ends. */
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
   const plan = useMemo(() => layout(graph), [graph]);
 
   const nodes = useMemo(() => {
@@ -377,7 +388,7 @@ function Surface(props: CanvasProps) {
         width: spot.width,
         height: spot.height,
         draggable: false,
-        className: "nopan",
+        className: flash === id ? "nopan fl-node-flash" : "nopan",
         deletable: false,
         selected: selectedId === id,
       } as const;
@@ -426,7 +437,7 @@ function Surface(props: CanvasProps) {
       });
     }
     return list;
-  }, [plan, graph.nodes, settings, names, placed, selectedId, editable, overlay]);
+  }, [plan, graph.nodes, settings, names, placed, selectedId, editable, overlay, flash]);
 
   const edges = useMemo(() => {
     const known = new Set(plan.order);
@@ -474,6 +485,28 @@ function Surface(props: CanvasProps) {
     return () => clearTimeout(timer);
   }, [props.fitKey, flow]);
 
+  useEffect(() => {
+    if (laidOut.current === props.layoutKey) return;
+    laidOut.current = props.layoutKey;
+    // The steps are new, so their handles are measured again before the wires are drawn, then the view is fitted.
+    const timer = setTimeout(() => {
+      updateInternals(plan.order);
+      void flow.fitView({ maxZoom: 1, padding: 0.2 });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [props.layoutKey, plan, flow, updateInternals]);
+
+  /** Brings a step into view and marks it for a moment: a mouse click leaves no focus ring to show where it is. */
+  const reveal = useCallback(
+    (id: string) => {
+      void flow.fitView({ nodes: [{ id }], maxZoom: 1, padding: 0.5, duration: 200 });
+      clearTimeout(flashTimer.current);
+      setFlash(id);
+      flashTimer.current = setTimeout(() => setFlash(null), 2500);
+    },
+    [flow],
+  );
+
   function focusNode(id: string) {
     const target = Array.from(container.current?.querySelectorAll<HTMLElement>(".react-flow__node") ?? []).find(
       (element) => element.dataset["id"] === id,
@@ -482,7 +515,14 @@ function Surface(props: CanvasProps) {
   }
 
   useEffect(() => {
-    if (focusRequest) focusNode(focusRequest.id);
+    if (focusRequest) {
+      focusNode(focusRequest.id);
+      if (focusRequest.reveal) {
+        const id = focusRequest.id;
+        const timer = setTimeout(() => reveal(id), 0);
+        return () => clearTimeout(timer);
+      }
+    }
     // Only a new request moves focus; the same request seen again must not.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce]);

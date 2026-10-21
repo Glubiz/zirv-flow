@@ -42,6 +42,8 @@ interface Props {
   canAdmin: boolean;
   /** Whether the assistant is on and the person may use it: a trace can then be explained. */
   assistantOn: boolean;
+  /** The assistant refused a request because it is off or no longer the person's to use. */
+  onAssistantGone: () => void;
   names: Names;
   catalog: Catalog | null;
   announce: (text: string) => void;
@@ -357,12 +359,14 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                   {(data) =>
                     data ? (
                       <EnrollmentDetail
+                        key={data.enrollment.id}
                         path={data}
                         workspaceId={workspaceId}
                         graph={graphs.get(data.enrollment.version)?.graph}
                         names={names}
                         canAdmin={props.canAdmin}
                         assistantOn={props.assistantOn}
+                        onAssistantGone={props.onAssistantGone}
                         acting={acting}
                         reason={stepReason}
                         refreshing={detail.status === "ready" && detail.refreshing}
@@ -628,6 +632,7 @@ function EnrollmentDetail({
   names,
   canAdmin,
   assistantOn,
+  onAssistantGone,
   acting,
   reason,
   refreshing,
@@ -642,6 +647,7 @@ function EnrollmentDetail({
   names: Names;
   canAdmin: boolean;
   assistantOn: boolean;
+  onAssistantGone: () => void;
   acting: boolean;
   /** Why Retry and Skip are refused, when the flow's state forbids them. */
   reason: string | null;
@@ -761,6 +767,7 @@ function EnrollmentDetail({
             workspaceId={workspaceId}
             traceId={enrollment.trace_id}
             recordLabel={recordLabel}
+            onGone={onAssistantGone}
             onCited={(ids) => {
               setActive(null);
               setCited(new Set(ids.filter((id) => shownIds.has(id))));

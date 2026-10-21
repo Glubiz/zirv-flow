@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { client, unwrap, type components } from "../../api";
 import { Button, EmptyState, InlineError, LoadingState, Sheet } from "../../ui";
-import { AssistantPanel, failureText, type Failure } from "../assistant";
+import { AssistantPanel, assistantGone, failureText, type Failure } from "../assistant";
 import type { Names } from "./describe";
+import { FlowChanges } from "./FlowChanges";
 import { TRIGGER_ID, type Graph } from "./model";
 import { SimulationSummary, stepTitle } from "./SimulationSummary";
 
@@ -25,6 +26,13 @@ interface Props {
   version: number | null;
   /** The graph on the canvas, to name the steps the explanation cites. */
   graph: Graph;
+  /**
+   * What an explanation is of: it is stale as soon as any of these is no longer the same object, such
+   * as the graph or the settings after an edit or an accepted draft.
+   */
+  revision: readonly unknown[];
+  /** A request was refused because the assistant is off or no longer the person's to use. */
+  onGone: () => void;
   names: Names;
   /** Only the draft can be drafted over; a version is read-only. */
   drafting?: FlowDrafting;
@@ -47,7 +55,7 @@ function graphOf(content: unknown): Graph | null {
 
 /** The assistant's right-hand sheet of the flow editor: explain the flow and, for the draft, draft changes to it. */
 export function FlowAssistantSheet(props: Props) {
-  const { workspaceId, flowId, version, graph, names, drafting } = props;
+  const { workspaceId, flowId, version, graph, names, drafting, onGone } = props;
   return (
     <Sheet
       title="Assistant"
@@ -62,7 +70,9 @@ export function FlowAssistantSheet(props: Props) {
           flowId={flowId}
           version={version}
           graph={graph}
+          revision={props.revision}
           names={names}
+          onGone={onGone}
           prepare={props.prepare}
           onReveal={props.onReveal}
           onCited={props.onCited}
@@ -77,6 +87,12 @@ export function FlowAssistantSheet(props: Props) {
             onAccept={drafting.onAccept}
             confirmAccept={drafting.confirmAccept}
             onAcceptFailed={drafting.onAcceptFailed}
+            onFailure={(error) => {
+              if (assistantGone(error)) onGone();
+            }}
+            renderChanges={(changes, draft) => (
+              <FlowChanges changes={changes} before={graph} after={graphOf(draft.content)} names={names} />
+            )}
             renderPreview={(content, draft) =>
               draft.simulation ? <SimulationSummary simulation={draft.simulation} graph={graphOf(content)} names={names} /> : null
             }
@@ -91,20 +107,50 @@ type Run =
   | { status: "idle" }
   | { status: "running" }
   | { status: "failed"; failure: Failure }
-  | { status: "done"; explained: Explained };
+  | { status: "done"; explained: Explained; revision: readonly unknown[] };
+
+function sameRevision(left: readonly unknown[], right: readonly unknown[]): boolean {
+  return left.length === right.length && left.every((item, index) => Object.is(item, right[index]));
+}
+
+const CHANGED_WHILE_ASKING: Failure = {
+  title: "The draft changed while the assistant was answering",
+  detail: "Its answer was about the draft as it was, so it is not shown. Ask again.",
+  traceId: null,
+};
+
+/** Whether the canvas draws this step: the trigger card is not in the graph but is always drawn. */
+function onCanvas(graph: Graph, id: string): boolean {
+  return id === TRIGGER_ID || graph.nodes.some((node) => node.id === id);
+}
 
 function FlowExplanation({
   workspaceId,
   flowId,
   version,
   graph,
+  revision,
   names,
+  onGone,
   prepare,
   onReveal,
   onCited,
-}: Pick<Props, "workspaceId" | "flowId" | "version" | "graph" | "names" | "prepare" | "onReveal" | "onCited">) {
+}: Pick<
+  Props,
+  "workspaceId" | "flowId" | "version" | "graph" | "revision" | "names" | "onGone" | "prepare" | "onReveal" | "onCited"
+>) {
   const [run, setRun] = useState<Run>({ status: "idle" });
   const ticket = useRef(0);
+  const current = useRef(revision);
+  useEffect(() => {
+    current.current = revision;
+  });
+  const stale = run.status === "done" && !sameRevision(run.revision, revision);
+  useEffect(() => {
+    if (stale) onCited([]);
+    // The marks are cleared once, when the shown result goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stale]);
   const heading = useRef<HTMLHeadingElement>(null);
   const noSteps = graph.nodes.length === 0;
   const subject = version === null ? "this flow" : `version ${version}`;
@@ -128,6 +174,7 @@ function FlowExplanation({
     if (run.status === "running") return;
     ticket.current += 1;
     const mine = ticket.current;
+    const asked = revision;
     setRun({ status: "running" });
     onCited([]);
     try {
@@ -151,10 +198,16 @@ function FlowExplanation({
         }),
       );
       if (mine !== ticket.current) return;
-      setRun({ status: "done", explained });
-      onCited(explained.nodes.map((entry) => entry.id).filter((id) => graph.nodes.some((node) => node.id === id)));
+      if (!sameRevision(asked, current.current)) {
+        setRun({ status: "failed", failure: CHANGED_WHILE_ASKING });
+        return;
+      }
+      setRun({ status: "done", explained, revision: asked });
+      onCited(explained.nodes.map((entry) => entry.id).filter((id) => onCanvas(graph, id)));
     } catch (error) {
-      if (mine === ticket.current) setRun({ status: "failed", failure: failureText(error) });
+      if (mine !== ticket.current) return;
+      if (assistantGone(error)) onGone();
+      setRun({ status: "failed", failure: failureText(error) });
     }
   }
 
@@ -180,7 +233,7 @@ function FlowExplanation({
       {run.status === "running" ? <LoadingState label={`Asking the assistant to explain ${subject}. This can take a minute.`} /> : null}
       {run.status === "failed" ? <InlineError {...run.failure} /> : null}
       {run.status === "done" ? (
-        <Explanation explained={run.explained} graph={graph} names={names} heading={heading} onReveal={onReveal} />
+        <Explanation explained={run.explained} stale={stale} graph={graph} names={names} heading={heading} onReveal={onReveal} />
       ) : null}
     </section>
   );
@@ -188,12 +241,14 @@ function FlowExplanation({
 
 function Explanation({
   explained,
+  stale,
   graph,
   names,
   heading,
   onReveal,
 }: {
   explained: Explained;
+  stale: boolean;
   graph: Graph;
   names: Names;
   heading: RefObject<HTMLHeadingElement | null>;
@@ -206,6 +261,11 @@ function Explanation({
           ? `Version ${explained.version}, as the assistant reads it`
           : "The draft, as the assistant reads it"}
       </h4>
+      {stale ? (
+        <p className="form-error" role="alert">
+          The draft changed since this explanation. It describes the draft as it was; use Explain again.
+        </p>
+      ) : null}
       <p className="faint">Written by the assistant. Check it against the steps: the names below are the canvas&rsquo;s own.</p>
       <p>{explained.summary}</p>
       {explained.nodes.length === 0 ? (
@@ -213,16 +273,21 @@ function Explanation({
       ) : (
         <ol className="list-plain fl-cites" aria-label="Step by step">
           {explained.nodes.map((entry) => {
-            const node = graph.nodes.find((candidate) => candidate.id === entry.id);
-            return (
+                        return (
               <li key={entry.id} className="fl-cite">
-                {node && entry.id !== TRIGGER_ID ? (
-                  <Button onClick={() => onReveal(entry.id)}>
-                    Show on the canvas: {stepTitle(graph, names, entry.id)} <span className="faint mono">{entry.id}</span>
-                  </Button>
+                {onCanvas(graph, entry.id) ? (
+                  <button
+                    type="button"
+                    className="fl-cite-link"
+                    aria-label={`Show on the canvas: ${stepTitle(graph, names, entry.id)} ${entry.id}`}
+                    onClick={() => onReveal(entry.id)}
+                  >
+                    <span>{stepTitle(graph, names, entry.id)}</span>
+                    <span className="fl-id mono">{entry.id}</span>
+                  </button>
                 ) : (
                   <span className="muted">
-                    {stepTitle(graph, names, entry.id)} <span className="faint mono">{entry.id}</span> (not on the canvas now)
+                    {stepTitle(graph, names, entry.id)} <span className="faint mono fl-id">{entry.id}</span> (not on the canvas now)
                   </span>
                 )}
                 <span>{entry.text}</span>

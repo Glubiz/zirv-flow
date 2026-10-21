@@ -114,13 +114,15 @@ interface VersionCanvasProps {
   flowId: string;
   /** Whether the assistant is on and the person may use it: the canvas then offers to explain this version. */
   assistantOn: boolean;
+  /** The assistant refused a request because it is off or no longer the person's to use. */
+  onAssistantGone: () => void;
   version: FlowVersion;
   names: Names;
   catalog: Catalog | null;
 }
 
 /** One published version drawn on the editor's canvas, with nothing to change. */
-export function VersionCanvas({ workspaceId, flowId, version, names, catalog, assistantOn }: VersionCanvasProps) {
+export function VersionCanvas({ workspaceId, flowId, version, names, catalog, assistantOn, onAssistantGone }: VersionCanvasProps) {
   const { graph, settings } = version;
   const [selected, setSelected] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
@@ -155,7 +157,7 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
 
   function reveal(id: string) {
     nonce.current += 1;
-    setFocusRequest({ id, nonce: nonce.current });
+    setFocusRequest({ id, nonce: nonce.current, reveal: true });
   }
 
   function close() {
@@ -198,7 +200,9 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
             flowId={flowId}
             version={version.version}
             graph={graph}
+            revision={[graph]}
             names={names}
+            onGone={onAssistantGone}
             onReveal={reveal}
             onCited={setCited}
             onClose={toggleAssistant}

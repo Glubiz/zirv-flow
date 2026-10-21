@@ -118,6 +118,11 @@ export interface Failure {
   traceId: string | null;
 }
 
+/** Whether a refusal means the assistant is off or the person may no longer use it, so the host should read the setting again. */
+export function assistantGone(error: unknown): boolean {
+  return error instanceof ApiError && (error.code === "ai_disabled" || error.status === 403);
+}
+
 /** What went wrong with the whole request, as a title and a detail. */
 export function failureText(error: unknown): Failure {
   if (error instanceof ApiError) {

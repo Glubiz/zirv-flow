@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel } from "../../ui";
-import { useAssistantEnabled } from "../assistant";
+import { useAssistantAccess } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
 import { Canvas, type FocusRequest, type IssueItem } from "./Canvas";
@@ -132,7 +132,10 @@ function Editor({
   const names = useMemo(() => ({ lists: catalog?.lists ?? [], segments: catalog?.segments ?? [] }), [catalog]);
   const guard = useLeaveGuard(store.unsaved);
   /** The assistant is for admins, and only once the workspace has it on. */
-  const assistantOn = useAssistantEnabled(workspaceId, canAdmin);
+  const { enabled: assistantOn, reload: reloadAssistant } = useAssistantAccess(workspaceId, canAdmin);
+  /** An accepted draft is being loaded: the editor is read-only until it lands or is given up. */
+  const busy = store.held;
+  const canEdit = editable && !busy;
 
   const [tab, setTab] = useState<TabId>("canvas");
   const [selected, setSelected] = useState<string | null>(null);
@@ -154,8 +157,19 @@ function Editor({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  /** Bumped when a whole new draft is loaded, so the canvas draws it afresh. */
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   /** The steps the assistant's explanation cites, marked on the canvas while it is open. */
   const [cited, setCited] = useState<readonly string[]>([]);
+  const [assistantSeen, setAssistantSeen] = useState(assistantOn);
+  if (assistantSeen !== assistantOn) {
+    setAssistantSeen(assistantOn);
+    // Turned off, or no longer the person's to use: the sheet and what it marked on the canvas go with it.
+    if (!assistantOn) {
+      setAssistantOpen(false);
+      setCited([]);
+    }
+  }
   /** Set while the person is asked whether the assistant's draft may replace their unsaved edits. */
   const [replacing, setReplacing] = useState<{ resolve: (replace: boolean) => void } | null>(null);
   const nonce = useRef(0);
@@ -250,7 +264,7 @@ function Editor({
   /** Moves focus to a step without opening its sheet, so the assistant's sheet stays. */
   function revealStep(id: string) {
     nonce.current += 1;
-    setFocusRequest({ id, nonce: nonce.current });
+    setFocusRequest({ id, nonce: nonce.current, reveal: true });
   }
 
   function toggleAssistant() {
@@ -288,6 +302,7 @@ function Editor({
     store.adopt({ graph: document.graph, settings: document.settings });
     setSelected(null);
     setCited([]);
+    setLayoutEpoch((epoch) => epoch + 1);
     announce("The assistant's draft is loaded and saved as the flow's draft. Nothing is published.");
   }
 
@@ -564,11 +579,11 @@ function Editor({
   const version = stateLabel(life.state, life.version);
 
   return (
-    <div className="fl-page" ref={pageRef}>
+    <div className="fl-page" ref={pageRef} aria-busy={busy || undefined}>
       <div className="fl-head">
         <Link to={`/w/${workspaceId}/flows`}>← Flows</Link>
         {editable ? (
-          <NameField name={draft.name} onCommit={(name) => store.edit((current) => ({ ...current, name }), "name")} />
+          <NameField disabled={busy} name={draft.name} onCommit={(name) => store.edit((current) => ({ ...current, name }), "name")} />
         ) : (
           <h1 className="fl-name-read">{draft.name}</h1>
         )}
@@ -594,7 +609,9 @@ function Editor({
           ))}
         </div>
         <div className="fl-status" role="status">
-          {!editable ? (
+          {busy ? (
+            <span className="muted">Loading the draft…</span>
+          ) : !editable ? (
             <span className="muted">{archived ? "This flow is archived. You can look at it but not change it." : "You can look at this flow but not change it."}</span>
           ) : store.status === "saving" ? (
             <span className="muted">Saving…</span>
@@ -660,7 +677,8 @@ function Editor({
             issueItems={issueItems}
             checked={store.issues !== null}
             checking={store.checking}
-            editable={editable && !testing}
+            editable={canEdit && !testing}
+            layoutKey={layoutEpoch}
             overlay={testOverlay ?? citedOverlay}
             assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
             selectedId={sheetNode && !testing ? sheetNode.id : null}
@@ -697,7 +715,9 @@ function Editor({
                   flowId={flow.id}
                   version={null}
                   graph={draft.graph}
+                  revision={[draft.graph, draft.settings]}
                   names={names}
+                  onGone={reloadAssistant}
                   drafting={
                     editable
                       ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: store.release }
@@ -721,7 +741,7 @@ function Editor({
                   steps={steps}
                   issues={issuesOfStep(sheetNode.id)}
                   catalog={catalog}
-                  readOnly={!editable}
+                  readOnly={!canEdit}
                   autoFocus={sheetFocus}
                   onClose={closeSheet}
                   onChange={(next: FlowNode, key) => editGraph((graph) => replaceNode(graph, next), key)}
@@ -743,7 +763,7 @@ function Editor({
             workspaceId={workspaceId}
             settings={draft.settings}
             catalog={catalog}
-            readOnly={!editable}
+            readOnly={!canEdit}
             issues={placed.bySection}
             focus={settingsFocus}
             onChange={editSettings}
@@ -775,6 +795,7 @@ function Editor({
           current={life.version}
           canAdmin={canAdmin}
           assistantOn={assistantOn}
+          onAssistantGone={reloadAssistant}
           names={names}
           catalog={catalog}
           announce={announce}
@@ -797,6 +818,7 @@ function Editor({
             names={names}
             catalog={catalog}
             assistantOn={assistantOn}
+            onAssistantGone={reloadAssistant}
           />
         </>
       ) : null}
@@ -884,7 +906,7 @@ function Editor({
 }
 
 /** The name of the flow as a heading that can be typed into; the change is made on Enter or on leaving. */
-function NameField({ name, onCommit }: { name: string; onCommit: (name: string) => void }) {
+function NameField({ name, onCommit, disabled }: { name: string; onCommit: (name: string) => void; disabled: boolean }) {
   const [text, setText] = useState(name);
   const [seen, setSeen] = useState(name);
   if (seen !== name) {
@@ -904,6 +926,7 @@ function NameField({ name, onCommit }: { name: string; onCommit: (name: string) 
       <input
         className="fl-name-input"
         aria-label="Flow name"
+        disabled={disabled}
         value={text}
         maxLength={100}
         autoComplete="off"

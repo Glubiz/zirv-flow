@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { client, unwrap, type components } from "../../api";
 import { Button, InlineError, LoadingState } from "../../ui";
-import { failureText, type Failure } from "../assistant";
+import { assistantGone, failureText, type Failure } from "../assistant";
 
 type Explained = components["schemas"]["AiTraceExplainBody"];
 
@@ -21,17 +21,29 @@ interface Props {
   onCited: (ids: readonly string[]) => void;
   /** Scrolls to a record in the trace tree and highlights it. */
   onShow: (id: string) => void;
+  /** A request was refused because the assistant is off or no longer the person's to use. */
+  onGone: () => void;
 }
 
 /**
  * The assistant's explanation of the trace of one enrollment, in the inspector. The sentences are
  * plain text. Each cites a decision record, and a button takes the reader to that record's row.
  */
-export function TraceExplanation({ workspaceId, traceId, recordLabel, onCited, onShow }: Props) {
+export function TraceExplanation({ workspaceId, traceId, recordLabel, onCited, onShow, onGone }: Props) {
   const [run, setRun] = useState<Run>({ status: "idle" });
+  /** Counts the asks; an answer that is not the latest, or arrives after the explanation is gone, is dropped. */
+  const ticket = useRef(0);
+  useEffect(
+    () => () => {
+      ticket.current += 1;
+    },
+    [],
+  );
 
   async function explain() {
     if (run.status === "running") return;
+    ticket.current += 1;
+    const mine = ticket.current;
     setRun({ status: "running" });
     onCited([]);
     try {
@@ -40,9 +52,12 @@ export function TraceExplanation({ workspaceId, traceId, recordLabel, onCited, o
           params: { path: { ws: workspaceId, trace_id: traceId } },
         }),
       );
+      if (mine !== ticket.current) return;
       setRun({ status: "done", explained });
       onCited(explained.records.map((entry) => entry.id));
     } catch (error) {
+      if (mine !== ticket.current) return;
+      if (assistantGone(error)) onGone();
       setRun({ status: "failed", failure: failureText(error) });
     }
   }
@@ -77,7 +92,14 @@ export function TraceExplanation({ workspaceId, traceId, recordLabel, onCited, o
                 return (
                   <li key={entry.id} className="fl-cite">
                     {label !== null ? (
-                      <Button onClick={() => onShow(entry.id)}>Show the decision: {label}</Button>
+                      <button
+                        type="button"
+                        className="fl-cite-link"
+                        aria-label={`Show the decision: ${label}`}
+                        onClick={() => onShow(entry.id)}
+                      >
+                        {label}
+                      </button>
                     ) : (
                       <span className="muted">A decision that is not in the list below</span>
                     )}

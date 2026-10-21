@@ -45,6 +45,10 @@ interface AssistantPanelProps {
   confirmAccept?: () => boolean | Promise<boolean>;
   /** Called when the accept request failed after `confirmAccept` agreed, so the host can undo what it prepared. */
   onAcceptFailed?: () => void;
+  /** Called with the error of a request that failed, so the host can tell that the assistant has been turned off. */
+  onFailure?: (error: unknown) => void;
+  /** Replaces the field table of the changes, for a kind whose draft is better read in the host's own words. */
+  renderChanges?: (changes: Draft["changes"], draft: Draft) => ReactNode;
   /**
    * Shows what the drafted content makes of the workspace's data, for a kind whose draft has no dry
    * run on the server. The host renders it, so this feature never imports the host. It also gets the
@@ -105,6 +109,8 @@ function Drafting({
   onAccept,
   confirmAccept,
   onAcceptFailed,
+  onFailure,
+  renderChanges,
   renderPreview,
   personal,
 }: AssistantPanelProps & { personal: boolean }) {
@@ -155,6 +161,7 @@ function Drafting({
         setRun({ status: "cancelled" });
         setAnnouncement("Cancelled");
       } else {
+        onFailure?.(error);
         setRun({ status: "failed", failure: failureText(error) });
         setAnnouncement("Drafting failed");
       }
@@ -175,6 +182,7 @@ function Drafting({
       setAnnouncement("Loaded into the editor");
     } catch (error) {
       onAcceptFailed?.();
+      onFailure?.(error);
       setRun({ status: "done", draft: current, accepting: false, accepted: false, acceptFailure: failureText(error) });
     }
   }
@@ -249,7 +257,7 @@ function Drafting({
               {run.draft.attempts === 1 ? "Valid on the first try." : `Valid after ${plural(run.draft.attempts, "attempt", "attempts")}.`}
             </p>
             <h5>Changes</h5>
-            <DraftChanges changes={run.draft.changes} />
+            {renderChanges ? renderChanges(run.draft.changes, run.draft) : <DraftChanges changes={run.draft.changes} />}
             {renderPreview && run.draft.content != null ? (
               <>
                 <h5>Preview</h5>
