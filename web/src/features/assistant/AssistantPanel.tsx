@@ -28,6 +28,8 @@ interface AssistantPanelProps {
   stream?: string;
   /** For a segment: the saved segment being edited; absent when the segment is new. */
   segmentId?: string;
+  /** For a flow: the flow whose draft is being edited. */
+  flowId?: string;
   /**
    * For a webhook stream, which has no source to read: the parsed sample payload, or null while the
    * pasted text does not parse. Absent for any other stream.
@@ -42,10 +44,20 @@ interface AssistantPanelProps {
    */
   confirmAccept?: () => boolean | Promise<boolean>;
   /**
-   * Shows what the drafted content makes of the workspace's data, for a kind whose draft has no dry
-   * run on the server. The host renders it, so this feature never imports the host.
+   * Called when the accept request failed after `confirmAccept` agreed, so the host can undo what it prepared.
+   * It may answer true when it found that the draft was accepted after all and its reply was lost.
    */
-  renderPreview?: (content: unknown) => ReactNode;
+  onAcceptFailed?: () => unknown;
+  /** Called with the error of a request that failed, so the host can tell that the assistant has been turned off. */
+  onFailure?: (error: unknown) => void;
+  /** Replaces the field table of the changes, for a kind whose draft is better read in the host's own words. */
+  renderChanges?: (changes: Draft["changes"], draft: Draft) => ReactNode;
+  /**
+   * Shows what the drafted content makes of the workspace's data, for a kind whose draft has no dry
+   * run on the server. The host renders it, so this feature never imports the host. It also gets the
+   * whole draft, for what only a draft carries, such as a flow's simulation.
+   */
+  renderPreview?: (content: unknown, draft: Draft) => ReactNode;
 }
 
 /**
@@ -95,9 +107,13 @@ function Drafting({
   sourceId,
   stream,
   segmentId,
+  flowId,
   sample,
   onAccept,
   confirmAccept,
+  onAcceptFailed,
+  onFailure,
+  renderChanges,
   renderPreview,
   personal,
 }: AssistantPanelProps & { personal: boolean }) {
@@ -107,6 +123,8 @@ function Drafting({
   const [announcement, setAnnouncement] = useState("");
   const controller = useRef<AbortController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const accepting = useRef(false);
+  const [lateReply, setLateReply] = useState(false);
 
   const doneId = run.status === "done" ? run.draft.id : null;
   useEffect(() => {
@@ -123,6 +141,7 @@ function Drafting({
     const abort = new AbortController();
     controller.current = abort;
     setRun({ status: "running" });
+    setLateReply(false);
     setAnnouncement("Drafting");
     try {
       const result = await unwrap(
@@ -134,6 +153,7 @@ function Drafting({
             ...(sourceId ? { source_id: sourceId } : {}),
             ...(kind === "mapping" && stream ? { stream } : {}),
             ...(kind === "segment" && segmentId ? { segment_id: segmentId } : {}),
+            ...(kind === "flow" && flowId ? { flow_id: flowId } : {}),
             ...(kind === "manifest" && documentation.trim() !== "" ? { documentation } : {}),
             ...(sample ? { sample: sample as never } : {}),
           },
@@ -147,6 +167,7 @@ function Drafting({
         setRun({ status: "cancelled" });
         setAnnouncement("Cancelled");
       } else {
+        onFailure?.(error);
         setRun({ status: "failed", failure: failureText(error) });
         setAnnouncement("Drafting failed");
       }
@@ -154,6 +175,17 @@ function Drafting({
   }
 
   async function accept(current: Draft) {
+    // A second click while the first is still being confirmed or sent would send a second request, which is refused.
+    if (accepting.current) return;
+    accepting.current = true;
+    try {
+      await acceptOnce(current);
+    } finally {
+      accepting.current = false;
+    }
+  }
+
+  async function acceptOnce(current: Draft) {
     if (confirmAccept && !(await confirmAccept())) return;
     setRun({ status: "done", draft: current, accepting: true, accepted: false, acceptFailure: null });
     try {
@@ -166,6 +198,13 @@ function Drafting({
       setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null });
       setAnnouncement("Loaded into the editor");
     } catch (error) {
+      if ((await onAcceptFailed?.()) === true) {
+        setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null });
+        setLateReply(true);
+        setAnnouncement("The draft was accepted, but the reply was lost. It is loaded into the editor.");
+        return;
+      }
+      onFailure?.(error);
       setRun({ status: "done", draft: current, accepting: false, accepted: false, acceptFailure: failureText(error) });
     }
   }
@@ -173,7 +212,11 @@ function Drafting({
   return (
     <div className="stack-tight">
       <p className="faint">
-        {kind === "segment"
+        {kind === "flow"
+          ? personal
+            ? "Sends the steps and settings of the saved draft and the names of your fields, events and lists (personal data is allowed in this workspace)."
+            : "Sends the steps and settings of the saved draft and the names of your fields, events and lists. Values that could be personal are hidden from it."
+          : kind === "segment"
           ? personal
             ? "Sends the names of your fields, events and lists, and the values of the saved definition (personal data is allowed in this workspace)."
             : "Sends the names of your fields, events and lists. Values in the saved definition that could be personal are hidden from it."
@@ -236,11 +279,11 @@ function Drafting({
               {run.draft.attempts === 1 ? "Valid on the first try." : `Valid after ${plural(run.draft.attempts, "attempt", "attempts")}.`}
             </p>
             <h5>Changes</h5>
-            <DraftChanges changes={run.draft.changes} />
+            {renderChanges ? renderChanges(run.draft.changes, run.draft) : <DraftChanges changes={run.draft.changes} />}
             {renderPreview && run.draft.content != null ? (
               <>
                 <h5>Preview</h5>
-                {renderPreview(run.draft.content)}
+                {renderPreview(run.draft.content, run.draft)}
               </>
             ) : null}
             {run.draft.dry_run ? (
@@ -250,8 +293,13 @@ function Drafting({
               </>
             ) : null}
             {run.acceptFailure ? <InlineError {...run.acceptFailure} /> : null}
+            {run.accepted && lateReply ? <p className="strong">The draft was accepted, but the reply was lost. It is loaded into the editor.</p> : null}
             {run.accepted ? (
-              <p className="strong">Loaded into the editor. Save to apply it.</p>
+              <p className="strong">
+                {kind === "flow"
+                  ? "Loaded into the editor and saved as the flow's draft. Nothing is published."
+                  : "Loaded into the editor. Save to apply it."}
+              </p>
             ) : (
               <div className="row">
                 <Button variant="primary" onClick={() => void accept(run.draft)} disabled={run.accepting}>

@@ -33,7 +33,8 @@ export type IconName =
   | "fit"
   | "zoom-in"
   | "zoom-out"
-  | "undo";
+  | "undo"
+  | "assistant";
 
 /** The small drawings of the canvas: one per kind of step, and the tools of the rail. */
 export function FlowIcon({ name, size }: { name: IconName; size?: number }) {
@@ -137,6 +138,13 @@ export function FlowIcon({ name, size }: { name: IconName; size?: number }) {
         <Icon size={size}>
           <circle cx="7" cy="7" r="4.5" />
           <path d="M10.5 10.5l3 3M5 7h4" />
+        </Icon>
+      );
+    case "assistant":
+      return (
+        <Icon size={size}>
+          <path d="M8 1.5l1.4 3.6 3.6 1.4-3.6 1.4L8 11.5 6.6 7.9 3 6.5l3.6-1.4z" />
+          <path d="M12.5 10.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" />
         </Icon>
       );
     case "undo":

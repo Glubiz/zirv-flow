@@ -2416,3 +2416,72 @@ main:focus {
   font-size: 14px;
   font-weight: 600;
 }
+
+.fl-tool[aria-pressed="true"] {
+  background: var(--paper-3);
+  border-color: var(--line);
+}
+
+.fl-cites {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fl-cite {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.trace-record-cited {
+  border-left: 3px solid var(--attention-dot);
+  padding-left: 6px;
+}
+
+.trace-record-active {
+  background: var(--paper-3);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.fl-sheet[hidden] {
+  display: none;
+}
+
+.fl-cite-link {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link, var(--focus));
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.fl-cite-link:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.fl-id {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.react-flow__node.fl-node-flash {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 12px;
+  background: var(--paper-3);
+}

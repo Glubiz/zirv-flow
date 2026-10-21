@@ -40,6 +40,27 @@ interface FlowDraft {
   adoptIssues: (issues: FlowIssue[]) => void;
   /** How many saves have gone through since the editor opened. */
   saves: number;
+  /**
+   * Makes ready to replace the draft with one the server wrote: stops the waiting save and lets one
+   * that is on its way finish. The unsaved draft and its undo history are kept until `adopt` replaces
+   * them. Until `adopt` or `release` the editor takes no edits and starts no save, so nothing races
+   * the replacement.
+   */
+  hold: () => Promise<void>;
+  /** Whether a hold is on: the editor is read-only until the replacement lands or is given up. */
+  held: boolean;
+  /** Shows a draft the server already holds (the graph and settings) as both the draft and the saved state, and ends the hold. */
+  adopt: (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => void;
+  /** Ends a hold without replacing anything: the draft is exactly as it was, and an edit that was waiting to be saved is saved. */
+  release: () => void;
+  /**
+   * For an accept whose outcome is not known: reads the flow from the server and compares its draft
+   * with the saved state from before the hold. Unchanged, the accept did not commit and the hold is
+   * released. Changed, the accept did commit and its reply was lost, so the server's draft is adopted.
+   * When the flow cannot be read either, the hold is released with the edits marked unsaved and
+   * nothing is saved until the person retries.
+   */
+  reconcile: () => Promise<"unchanged" | "adopted" | "unknown">;
 }
 
 interface Options {
@@ -49,9 +70,31 @@ interface Options {
   editable: boolean;
 }
 
+/** Whether a flag is on; read through a function so a check after an await is not folded away. */
+function isOn(ref: { current: boolean }): boolean {
+  return ref.current;
+}
+
 /** Whether a ref holds something; read through a function so a check after an await is not folded away. */
 function isSet(ref: { current: unknown }): boolean {
   return ref.current !== null;
+}
+
+/** The same JSON whatever the order of the keys, which a server need not keep. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sameCanonical(left: unknown, right: unknown): boolean {
+  return canonical(left) === canonical(right);
 }
 
 function draftOf(flow: FlowDetail): Draft {
@@ -88,6 +131,18 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const running = useRef<Promise<void> | null>(null);
   /** Whether the last save failed. */
   const failed = useRef(false);
+  /** Set between `hold` and `adopt`/`release`: no edit is taken and no save starts. */
+  const holding = useRef(false);
+  const [held, setHeld] = useState(false);
+  /** The saved state when the hold began, to tell whether an accept that failed still committed. */
+  const baseAtHold = useRef<Draft | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const check = useCallback(async () => {
     checks.current += 1;
@@ -111,7 +166,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       clearTimeout(timer.current);
       timer.current = null;
     }
-    if (inflight.current) return;
+    if (inflight.current || holding.current) return;
     const sent = draftRef.current;
     const base = savedRef.current;
     const name = sent.name.trim();
@@ -148,6 +203,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
         !sameJson(latest.graph, now.graph) ||
         !sameJson(latest.settings, now.settings);
       if (isSet(timer)) return;
+      if (isOn(holding)) return;
       if (newer) {
         void flushRef.current();
         return;
@@ -161,7 +217,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       setStatus("error");
       // A newer edit is still to be saved and checked, so the issues shown stay stale until then.
       if (edits.current === sentEdit) setChecking(false);
-      else if (!isSet(timer)) void flushRef.current();
+      else if (!isSet(timer) && !isOn(holding)) void flushRef.current();
     }
   }, [workspaceId, flowId, check]);
 
@@ -199,7 +255,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
 
   const edit = useCallback(
     (change: (draft: Draft) => Draft, key?: string) => {
-      if (!editable) return;
+      if (!editable || holding.current) return;
       const before = draftRef.current;
       const next = change(before);
       if (sameJson(next, before)) return;
@@ -223,7 +279,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   );
 
   const undo = useCallback(() => {
-    if (!editable) return;
+    if (!editable || holding.current) return;
     const previous = history.current.at(-1);
     if (previous === undefined) return;
     history.current = history.current.slice(0, -1);
@@ -238,6 +294,8 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   }, [editable, schedule]);
 
   const saveNow = useCallback(async (): Promise<boolean> => {
+    // An accepted draft is on its way: a save now could write the old graph over it.
+    if (holding.current) return false;
     for (let round = 0; round < 20; round += 1) {
       if (running.current !== null) {
         await running.current;
@@ -252,7 +310,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
         if (!waiting) return true;
         await flushRef.current();
       }
-      if (failed.current) return false;
+      if (isOn(holding) || failed.current) return false;
     }
     return false;
   }, []);
@@ -262,6 +320,76 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     setChecking(false);
     setIssues(found);
   }, []);
+
+  const hold = useCallback(async () => {
+    holding.current = true;
+    setHeld(true);
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    while (running.current !== null) await running.current;
+    baseAtHold.current = savedRef.current;
+  }, []);
+
+  const release = useCallback(() => {
+    holding.current = false;
+    setHeld(false);
+    const latest = draftRef.current;
+    const base = savedRef.current;
+    const waiting =
+      latest.name.trim() !== base.name || !sameJson(latest.graph, base.graph) || !sameJson(latest.settings, base.settings);
+    if (waiting && mounted.current) schedule();
+  }, [schedule]);
+
+  const adopt = useCallback(
+    (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => {
+      const before = draftRef.current;
+      // The accepted draft carries no name, so an unsaved rename stays and is saved like any edit.
+      const next: Draft = { name: before.name, graph: document.graph, settings: document.settings };
+      const base: Draft = { ...next, name: savedRef.current.name };
+      history.current = [...history.current.slice(-(UNDO_LIMIT - 1)), before];
+      setUndoDepth(history.current.length);
+      lastEdit.current = null;
+      draftRef.current = next;
+      savedRef.current = base;
+      edits.current += 1;
+      setDraft(next);
+      setSaved(base);
+      setSaves((count) => count + 1);
+      failed.current = false;
+      setFailure(null);
+      setStatus("saved");
+      holding.current = false;
+      setHeld(false);
+      void check();
+      if (next.name.trim() !== base.name && mounted.current) schedule();
+    },
+    [check, schedule],
+  );
+
+  const reconcile = useCallback(async (): Promise<"unchanged" | "adopted" | "unknown"> => {
+    const base = baseAtHold.current;
+    try {
+      const server = await unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flowId } } }),
+      );
+      if (base !== null && sameCanonical(server.graph, base.graph) && sameCanonical(server.settings, base.settings)) {
+        release();
+        return "unchanged";
+      }
+      adopt({ graph: server.graph, settings: server.settings });
+      return "adopted";
+    } catch (error) {
+      // Whether the accept committed is not known, so saving the old edits could overwrite it: they wait for a retry.
+      holding.current = false;
+      setHeld(false);
+      failed.current = true;
+      setFailure(describeError(error));
+      setStatus("error");
+      return "unknown";
+    }
+  }, [workspaceId, flowId, release, adopt]);
 
   const retry = useCallback(() => {
     void flush();
@@ -294,5 +422,10 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     saveNow,
     adoptIssues,
     saves,
+    hold,
+    held,
+    adopt,
+    release,
+    reconcile,
   };
 }

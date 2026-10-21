@@ -9,13 +9,14 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useUpdateNodeInternals,
   type Connection,
   type Edge,
   type FinalConnectionState,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { MenuButton } from "../../ui";
 import { wordsFor, triggerWords, type Names } from "./describe";
@@ -144,6 +145,8 @@ export interface IssueItem {
 export interface FocusRequest {
   id: string;
   nonce: number;
+  /** Also bring the step into view and mark it for a moment, as when an explanation points at it. */
+  reveal?: boolean;
 }
 
 interface CanvasProps {
@@ -167,16 +170,40 @@ interface CanvasProps {
   onUndo: () => void;
   onDeleteRequest: (id: string) => void;
   onPickIssue: (item: IssueItem) => void;
+  /** The assistant's tool on the rail; absent when the person has no assistant to open. */
+  assistant?: { open: boolean; onToggle: () => void };
   /** Test path, counts or an enrollment drawn over the steps; nothing is drawn when absent. */
   overlay?: Overlay;
   /** Fit the view again whenever this changes, such as when another version is drawn. */
   fitKey?: string | number;
+  /** Draw the steps afresh and fit the view whenever this changes, such as when a whole new draft is loaded. */
+  layoutKey?: number;
   children?: ReactNode;
 }
 
-function Tool({ label, icon, onClick, disabled }: { label: string; icon: IconName; onClick: () => void; disabled?: boolean }) {
+function Tool({
+  label,
+  icon,
+  onClick,
+  disabled,
+  pressed,
+}: {
+  label: string;
+  icon: IconName;
+  onClick: () => void;
+  disabled?: boolean;
+  pressed?: boolean;
+}) {
   return (
-    <button type="button" className="fl-tool" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
+    <button
+      type="button"
+      className="fl-tool"
+      aria-label={label}
+      aria-pressed={pressed}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+    >
       <FlowIcon name={icon} size={18} />
     </button>
   );
@@ -187,11 +214,13 @@ function Rail({
   canUndo,
   onAdd,
   onUndo,
+  assistant,
 }: {
   editable: boolean;
   canUndo: boolean;
   onAdd: (type: NodeType) => void;
   onUndo: () => void;
+  assistant: CanvasProps["assistant"];
 }) {
   const flow = useReactFlow();
   return (
@@ -210,6 +239,7 @@ function Rail({
       <Tool label="Zoom in" icon="zoom-in" onClick={() => void flow.zoomIn({ duration: 200 })} />
       <Tool label="Zoom out" icon="zoom-out" onClick={() => void flow.zoomOut({ duration: 200 })} />
       {editable ? <Tool label="Undo" icon="undo" onClick={onUndo} disabled={!canUndo} /> : null}
+      {assistant ? <Tool label="Assistant" icon="assistant" onClick={assistant.onToggle} pressed={assistant.open} /> : null}
     </div>
   );
 }
@@ -331,6 +361,12 @@ function Surface(props: CanvasProps) {
   const container = useRef<HTMLDivElement>(null);
   const flow = useReactFlow();
   const fitted = useRef(props.fitKey);
+  const updateInternals = useUpdateNodeInternals();
+  const laidOut = useRef(props.layoutKey);
+  /** The step an explanation just pointed at; it is marked until the timer ends. */
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
   const plan = useMemo(() => layout(graph), [graph]);
 
   const nodes = useMemo(() => {
@@ -352,7 +388,7 @@ function Surface(props: CanvasProps) {
         width: spot.width,
         height: spot.height,
         draggable: false,
-        className: "nopan",
+        className: flash === id ? "nopan fl-node-flash" : "nopan",
         deletable: false,
         selected: selectedId === id,
       } as const;
@@ -401,7 +437,7 @@ function Surface(props: CanvasProps) {
       });
     }
     return list;
-  }, [plan, graph.nodes, settings, names, placed, selectedId, editable, overlay]);
+  }, [plan, graph.nodes, settings, names, placed, selectedId, editable, overlay, flash]);
 
   const edges = useMemo(() => {
     const known = new Set(plan.order);
@@ -449,6 +485,28 @@ function Surface(props: CanvasProps) {
     return () => clearTimeout(timer);
   }, [props.fitKey, flow]);
 
+  useEffect(() => {
+    if (laidOut.current === props.layoutKey) return;
+    laidOut.current = props.layoutKey;
+    // The steps are new, so their handles are measured again before the wires are drawn, then the view is fitted.
+    const timer = setTimeout(() => {
+      updateInternals(plan.order);
+      void flow.fitView({ maxZoom: 1, padding: 0.2 });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [props.layoutKey, plan, flow, updateInternals]);
+
+  /** Brings a step into view and marks it for a moment: a mouse click leaves no focus ring to show where it is. */
+  const reveal = useCallback(
+    (id: string) => {
+      void flow.fitView({ nodes: [{ id }], maxZoom: 1, padding: 0.5, duration: 200 });
+      clearTimeout(flashTimer.current);
+      setFlash(id);
+      flashTimer.current = setTimeout(() => setFlash(null), 2500);
+    },
+    [flow],
+  );
+
   function focusNode(id: string) {
     const target = Array.from(container.current?.querySelectorAll<HTMLElement>(".react-flow__node") ?? []).find(
       (element) => element.dataset["id"] === id,
@@ -457,7 +515,14 @@ function Surface(props: CanvasProps) {
   }
 
   useEffect(() => {
-    if (focusRequest) focusNode(focusRequest.id);
+    if (focusRequest) {
+      focusNode(focusRequest.id);
+      if (focusRequest.reveal) {
+        const id = focusRequest.id;
+        const timer = setTimeout(() => reveal(id), 0);
+        return () => clearTimeout(timer);
+      }
+    }
     // Only a new request moves focus; the same request seen again must not.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce]);
@@ -529,7 +594,7 @@ function Surface(props: CanvasProps) {
   return (
     <>
       <div className="fl-tools">
-        <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} />
+        <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} assistant={props.assistant} />
         <IssuesButton
           items={props.issueItems}
           graph={graph}

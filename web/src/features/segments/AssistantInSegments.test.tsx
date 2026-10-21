@@ -330,7 +330,7 @@ describe("explaining a segment", () => {
     await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The assistant could not explain this segment");
+    expect(alert).toHaveTextContent("The assistant could not explain this");
     await user.click(within(alert).getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByText("People who live in Aarhus.")).toBeInTheDocument();

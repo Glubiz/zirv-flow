@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { formatDateTime } from "../../ui";
 
 /** The part of a decision record the tree reads; the trace endpoint and an enrollment's path both fit it. */
@@ -24,6 +26,11 @@ interface TraceTreeProps {
    * cause is not the root's: the tree has a neutral root and every record names its own cause.
    */
   truncated?: boolean;
+  /**
+   * Marks records the reader was pointed to. Every row then has an element id from `rowId`, and the
+   * `active` one is drawn stronger, so a link elsewhere can scroll to it and focus it.
+   */
+  cited?: { ids: ReadonlySet<string>; active: string | null; rowId: (recordId: string) => string };
 }
 
 const CAUSES: Record<string, string> = {
@@ -68,6 +75,21 @@ function build(records: readonly TraceTreeRecord[]): { root: TraceTreeRecord | n
   return { root, trunk, branches };
 }
 
+function Row({ record, cited, children }: { record: TraceTreeRecord; cited: TraceTreeProps["cited"]; children: ReactNode }) {
+  const isCited = cited?.ids.has(record.id) === true;
+  const active = cited?.active === record.id;
+  return (
+    <li
+      className={`trace-record${isCited ? " trace-record-cited" : ""}${active ? " trace-record-active" : ""}`}
+      id={cited?.rowId(record.id)}
+      tabIndex={cited ? -1 : undefined}
+      aria-current={active ? "true" : undefined}
+    >
+      {children}
+    </li>
+  );
+}
+
 function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: TraceTreeProps["describe"]; tag?: boolean }) {
   const about = describe?.(record) ?? null;
   return (
@@ -85,7 +107,7 @@ function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: T
 }
 
 /** The decisions of one trace as a tree: what started it, and under it what was decided, with each operator decision opening a branch. */
-export function TraceTree({ records, label, describe, truncated = false }: TraceTreeProps) {
+export function TraceTree({ records, label, describe, truncated = false, cited }: TraceTreeProps) {
   const { root, trunk, branches } = build(records);
   if (!root) return null;
   if (truncated) {
@@ -95,9 +117,9 @@ export function TraceTree({ records, label, describe, truncated = false }: Trace
           <span className="strong">Earlier decisions are not shown</span>
           <ul className="trace-tree">
             {records.map((record) => (
-              <li key={record.id} className="trace-record">
+              <Row key={record.id} record={record} cited={cited}>
                 <Line record={record} describe={describe} tag />
-              </li>
+              </Row>
             ))}
           </ul>
         </li>
@@ -110,23 +132,23 @@ export function TraceTree({ records, label, describe, truncated = false }: Trace
         <span className="strong">{CAUSES[root.cause.kind] ?? root.cause.kind}</span> <span className="faint mono">{root.cause.kind}</span>
         <ul className="trace-tree">
           {trunk.map((record) => (
-            <li key={record.id} className="trace-record">
+            <Row key={record.id} record={record} cited={cited}>
               <Line record={record} describe={describe} />
-            </li>
+            </Row>
           ))}
           {branches.map((branch) => (
-            <li key={branch.record.id} className="trace-record">
+            <Row key={branch.record.id} record={branch.record} cited={cited}>
               <Line record={branch.record} describe={describe} tag />
               {branch.children.length > 0 ? (
                 <ul className="trace-tree">
                   {branch.children.map((record) => (
-                    <li key={record.id} className="trace-record">
+                    <Row key={record.id} record={record} cited={cited}>
                       <Line record={record} describe={describe} />
-                    </li>
+                    </Row>
                   ))}
                 </ul>
               ) : null}
-            </li>
+            </Row>
           ))}
         </ul>
       </li>

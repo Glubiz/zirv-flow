@@ -7,7 +7,7 @@ export type DryRun = components["schemas"]["DryRunBody"];
 export type DraftIssue = components["schemas"]["DraftIssue"];
 
 /** What a draft is of. */
-export type DraftKindName = "mapping" | "manifest" | "segment";
+export type DraftKindName = "mapping" | "manifest" | "segment" | "flow";
 
 /** What a validator code means, in a sentence. The wording of the mapping and manifest editors, kept in step by hand. */
 const ISSUE_TEXT: Record<string, string> = {
@@ -94,7 +94,10 @@ const SEGMENT_ISSUE_TEXT: Record<string, string> = {
 /** A problem of a draft as a sentence, with the place it concerns when there is one. */
 export function issueSentence(issue: DraftIssue, kind: DraftKindName = "mapping"): string {
   const table = kind === "segment" ? SEGMENT_ISSUE_TEXT : ISSUE_TEXT;
-  const text = table[issue.code] ?? "The answer broke a rule that the draft must follow.";
+  const text =
+    kind === "flow"
+      ? `This part of the flow is not valid (${issue.code.replaceAll("_", " ")}).`
+      : (table[issue.code] ?? "The answer broke a rule that the draft must follow.");
   return issue.at ? `${text} (${issue.at})` : text;
 }
 
@@ -113,6 +116,11 @@ export interface Failure {
   title: string;
   detail: string;
   traceId: string | null;
+}
+
+/** Whether a refusal means the assistant is off or the person may no longer use it, so the host should read the setting again. */
+export function assistantGone(error: unknown): boolean {
+  return error instanceof ApiError && (error.code === "ai_disabled" || error.status === 403);
 }
 
 /** What went wrong with the whole request, as a title and a detail. */
@@ -146,8 +154,14 @@ export function failureText(error: unknown): Failure {
       case "ai_explain_failed":
         return {
           traceId,
-          title: "The assistant could not explain this segment",
+          title: "The assistant could not explain this",
           detail: "Its answers did not pass the checks after several tries. Try again.",
+        };
+      case "ai_flow_too_large":
+        return {
+          traceId,
+          title: "This flow is too large for the assistant",
+          detail: "A flow with more than 200 steps, or a condition nested too deeply, cannot be sent without personal data. Simplify the flow first.",
         };
       default:
     }

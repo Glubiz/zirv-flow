@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel } from "../../ui";
+import { useAssistantAccess } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
 import { Canvas, type FocusRequest, type IssueItem } from "./Canvas";
@@ -31,6 +32,7 @@ import { layout } from "./layout";
 import { PublishDialog } from "./PublishDialog";
 import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
+import { FlowAssistantSheet } from "./FlowAssistant";
 import { Inspector } from "./Inspector";
 import { pathOverlay, type Overlay } from "./overlay";
 import { StepSheet } from "./StepSheet";
@@ -129,6 +131,11 @@ function Editor({
   const catalog = catalogState.status === "ready" ? catalogState.catalog : null;
   const names = useMemo(() => ({ lists: catalog?.lists ?? [], segments: catalog?.segments ?? [] }), [catalog]);
   const guard = useLeaveGuard(store.unsaved);
+  /** The assistant is for admins, and only once the workspace has it on. */
+  const { enabled: assistantOn, reload: reloadAssistant } = useAssistantAccess(workspaceId, canAdmin);
+  /** An accepted draft is being loaded: the editor is read-only until it lands or is given up. */
+  const busy = store.held;
+  const canEdit = editable && !busy;
 
   const [tab, setTab] = useState<TabId>("canvas");
   const [selected, setSelected] = useState<string | null>(null);
@@ -149,6 +156,22 @@ function Editor({
   const [notice, setNotice] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  /** Bumped when a whole new draft is loaded, so the canvas draws it afresh. */
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  /** The steps the assistant's explanation cites, marked on the canvas while it is open. */
+  const [cited, setCited] = useState<readonly string[]>([]);
+  const [assistantSeen, setAssistantSeen] = useState(assistantOn);
+  if (assistantSeen !== assistantOn) {
+    setAssistantSeen(assistantOn);
+    // Turned off, or no longer the person's to use: the sheet and what it marked on the canvas go with it.
+    if (!assistantOn) {
+      setAssistantOpen(false);
+      setCited([]);
+    }
+  }
+  /** Set while the person is asked whether the assistant's draft may replace their unsaved edits. */
+  const [replacing, setReplacing] = useState<{ resolve: (replace: boolean) => void } | null>(null);
   const nonce = useRef(0);
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** The editor's own element, so focus is only ever moved inside it. */
@@ -180,6 +203,14 @@ function Editor({
   const testOverlay = useMemo<Overlay | undefined>(
     () => (testResult ? pathOverlay(draft.graph, testResult.path) : undefined),
     [testResult, draft.graph],
+  );
+
+  const citedOverlay = useMemo<Overlay | undefined>(
+    () =>
+      assistantOpen && cited.length > 0
+        ? { steps: new Map(cited.map((id) => [id, [] as number[]])), dimOthers: true }
+        : undefined,
+    [assistantOpen, cited],
   );
 
   function describeStep(id: string): string {
@@ -228,6 +259,62 @@ function Editor({
     setSelected(id);
     setSheetFocus(takeFocus);
     if (!takeFocus) setFocusRequest({ id, nonce: nonce.current });
+  }
+
+  /** Moves focus to a step without opening its sheet, so the assistant's sheet stays. */
+  function revealStep(id: string) {
+    nonce.current += 1;
+    setFocusRequest({ id, nonce: nonce.current, reveal: true });
+  }
+
+  function toggleAssistant() {
+    if (assistantOpen && selected === null) {
+      setAssistantOpen(false);
+      setCited([]);
+      return;
+    }
+    setSelected(null);
+    setAssistantOpen(true);
+  }
+
+  /** Accepting replaces the draft, so edits that are not saved yet are asked about first, then the editor stands still. */
+  async function confirmAssistantAccept(): Promise<boolean> {
+    if (store.unsaved) {
+      const replace = await new Promise<boolean>((resolve) => setReplacing({ resolve }));
+      if (!replace) return false;
+    }
+    await store.hold();
+    return true;
+  }
+
+  /** An accept failed without a known outcome: the server says whether the draft landed. */
+  async function reconcileAccept(): Promise<boolean> {
+    const outcome = await store.reconcile();
+    if (outcome !== "adopted") return false;
+    setSelected(null);
+    setCited([]);
+    setLayoutEpoch((epoch) => epoch + 1);
+    announce("The draft was accepted, but the reply was lost. It is loaded and saved as the flow's draft. Nothing is published.");
+    return true;
+  }
+
+  function answerReplace(replace: boolean) {
+    replacing?.resolve(replace);
+    setReplacing(null);
+  }
+
+  /** The server has written the accepted draft as the flow's draft; the editor shows it. Nothing is published. */
+  function loadAssistantDraft(content: unknown) {
+    const document = content as { graph?: Graph; settings?: Settings } | null;
+    if (!document?.graph || !document.settings) {
+      store.release();
+      return;
+    }
+    store.adopt({ graph: document.graph, settings: document.settings });
+    setSelected(null);
+    setCited([]);
+    setLayoutEpoch((epoch) => epoch + 1);
+    announce("The assistant's draft is loaded and saved as the flow's draft. Nothing is published.");
   }
 
   function openSettings(section: Section) {
@@ -322,7 +409,7 @@ function Editor({
   }
 
   async function lifecycle(action: "pause" | "resume" | "archive") {
-    if (acting || inFlight) return;
+    if (acting || inFlight || busy) return;
     const request = startRequest();
     setActing(true);
     setNotice(null);
@@ -356,7 +443,7 @@ function Editor({
   }
 
   function openPublish() {
-    if (inFlight || acting) return;
+    if (inFlight || acting || busy) return;
     setRefusal(null);
     setRefusedIssues(null);
     setPublishOpen(true);
@@ -449,6 +536,7 @@ function Editor({
   /** Switching tabs leaves a version being looked at. */
   function chooseTab(next: TabId) {
     setViewing(null);
+    setCited([]);
     setTesting(false);
     setTestResult(null);
     setTab(next);
@@ -478,6 +566,8 @@ function Editor({
     }
     setViewing(null);
     setSelected(null);
+    setAssistantOpen(false);
+    setCited([]);
     setTab("canvas");
     setTesting(true);
     announce("Test mode is on. Nothing is sent or changed.");
@@ -500,11 +590,11 @@ function Editor({
   const version = stateLabel(life.state, life.version);
 
   return (
-    <div className="fl-page" ref={pageRef}>
+    <div className="fl-page" ref={pageRef} aria-busy={busy || undefined}>
       <div className="fl-head">
         <Link to={`/w/${workspaceId}/flows`}>← Flows</Link>
         {editable ? (
-          <NameField name={draft.name} onCommit={(name) => store.edit((current) => ({ ...current, name }), "name")} />
+          <NameField disabled={busy} name={draft.name} onCommit={(name) => store.edit((current) => ({ ...current, name }), "name")} />
         ) : (
           <h1 className="fl-name-read">{draft.name}</h1>
         )}
@@ -530,7 +620,9 @@ function Editor({
           ))}
         </div>
         <div className="fl-status" role="status">
-          {!editable ? (
+          {busy ? (
+            <span className="muted">Loading the draft…</span>
+          ) : !editable ? (
             <span className="muted">{archived ? "This flow is archived. You can look at it but not change it." : "You can look at this flow but not change it."}</span>
           ) : store.status === "saving" ? (
             <span className="muted">Saving…</span>
@@ -547,20 +639,20 @@ function Editor({
         ) : null}
         {canAdmin && life.state !== "archived" ? (
           <div className="fl-actions">
-            <Button id="flow-primary-action" variant="primary" disabled={acting} aria-disabled={inFlight || undefined} onClick={openPublish}>
+            <Button id="flow-primary-action" variant="primary" disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={openPublish}>
               {inFlight ? "Publishing…" : "Publish…"}
             </Button>
             {life.state === "published" ? (
-              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
+              <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
                 Pause
               </Button>
             ) : null}
             {life.state === "paused" ? (
-              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("resume")}>
+              <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("resume")}>
                 Resume
               </Button>
             ) : null}
-            <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => !inFlight && setArchiving(true)}>
+            <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => !inFlight && setArchiving(true)}>
               Archive…
             </Button>
           </div>
@@ -568,7 +660,9 @@ function Editor({
         {store.status === "error" ? (
           <div className="fl-retry">
             {store.failure ? <span className="faint">{store.failure.detail}</span> : null}
-            <Button onClick={store.retry}>Retry</Button>
+            <Button disabled={busy} onClick={store.retry}>
+              Retry
+            </Button>
           </div>
         ) : null}
       </div>
@@ -596,8 +690,10 @@ function Editor({
             issueItems={issueItems}
             checked={store.issues !== null}
             checking={store.checking}
-            editable={editable && !testing}
-            overlay={testOverlay}
+            editable={canEdit && !testing}
+            layoutKey={layoutEpoch}
+            overlay={testOverlay ?? citedOverlay}
+            assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
             selectedId={sheetNode && !testing ? sheetNode.id : null}
             focusRequest={focusRequest}
             canUndo={store.canUndo}
@@ -624,7 +720,31 @@ function Editor({
                   announce={announce}
                 />
               </div>
-            ) : sheetNode ? (
+            ) : null}
+            {assistantOn && !testing && assistantOpen ? (
+              <div className="fl-sheet" hidden={sheetNode !== undefined}>
+                <FlowAssistantSheet
+                  workspaceId={workspaceId}
+                  flowId={flow.id}
+                  version={null}
+                  graph={draft.graph}
+                  revision={[draft.graph, draft.settings]}
+                  names={names}
+                  onGone={reloadAssistant}
+                  busy={busy}
+                  drafting={
+                    editable
+                      ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept }
+                      : undefined
+                  }
+                  prepare={editable ? store.saveNow : undefined}
+                  onReveal={revealStep}
+                  onCited={setCited}
+                  onClose={toggleAssistant}
+                />
+              </div>
+            ) : null}
+            {!testing && sheetNode ? (
               <div className="fl-sheet">
                 <StepSheet
                   key={sheetNode.id}
@@ -635,7 +755,7 @@ function Editor({
                   steps={steps}
                   issues={issuesOfStep(sheetNode.id)}
                   catalog={catalog}
-                  readOnly={!editable}
+                  readOnly={!canEdit}
                   autoFocus={sheetFocus}
                   onClose={closeSheet}
                   onChange={(next: FlowNode, key) => editGraph((graph) => replaceNode(graph, next), key)}
@@ -657,7 +777,7 @@ function Editor({
             workspaceId={workspaceId}
             settings={draft.settings}
             catalog={catalog}
-            readOnly={!editable}
+            readOnly={!canEdit}
             issues={placed.bySection}
             focus={settingsFocus}
             onChange={editSettings}
@@ -688,6 +808,8 @@ function Editor({
           state={life.state}
           current={life.version}
           canAdmin={canAdmin}
+          assistantOn={assistantOn}
+          onAssistantGone={reloadAssistant}
           names={names}
           catalog={catalog}
           announce={announce}
@@ -702,7 +824,16 @@ function Editor({
             <Button onClick={() => setViewing(null)}>All versions</Button>
             <Button onClick={() => chooseTab("canvas")}>Back to the draft</Button>
           </div>
-          <VersionCanvas key={viewing.version} workspaceId={workspaceId} version={viewing} names={names} catalog={catalog} />
+          <VersionCanvas
+            key={viewing.version}
+            workspaceId={workspaceId}
+            flowId={flow.id}
+            version={viewing}
+            names={names}
+            catalog={catalog}
+            assistantOn={assistantOn}
+            onAssistantGone={reloadAssistant}
+          />
         </>
       ) : null}
       </div>
@@ -758,6 +889,21 @@ function Editor({
         </Dialog>
       ) : null}
 
+      {replacing !== null ? (
+        <Dialog title="Replace your unsaved changes?" onClose={() => answerReplace(false)}>
+          <p className="muted">
+            The canvas has changes that are not saved yet. Accepting the assistant&rsquo;s draft replaces the steps and settings with
+            its own, and those changes are lost. The draft is saved, and nothing is published.
+          </p>
+          <div className="dialog-actions">
+            <Button onClick={() => answerReplace(false)}>Keep my changes</Button>
+            <Button variant="primary" onClick={() => answerReplace(true)}>
+              Replace with the draft
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
+
       {guard.pending !== null ? (
         <Dialog title="Leave without saving?" onClose={guard.stay}>
           <p className="muted">Your latest changes have not been saved yet. If you leave now, they are lost.</p>
@@ -774,7 +920,7 @@ function Editor({
 }
 
 /** The name of the flow as a heading that can be typed into; the change is made on Enter or on leaving. */
-function NameField({ name, onCommit }: { name: string; onCommit: (name: string) => void }) {
+function NameField({ name, onCommit, disabled }: { name: string; onCommit: (name: string) => void; disabled: boolean }) {
   const [text, setText] = useState(name);
   const [seen, setSeen] = useState(name);
   if (seen !== name) {
@@ -794,6 +940,7 @@ function NameField({ name, onCommit }: { name: string; onCommit: (name: string) 
       <input
         className="fl-name-input"
         aria-label="Flow name"
+        disabled={disabled}
         value={text}
         maxLength={100}
         autoComplete="off"
