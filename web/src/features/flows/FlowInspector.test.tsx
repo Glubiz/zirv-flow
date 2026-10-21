@@ -431,6 +431,26 @@ describe("the enrollment inspector", () => {
     expect(await screen.findByText("Everyone still in version 1 is being ended.")).toBeInTheDocument();
   });
 
+  it("does not carry a bulk exit's focus return into the next enrollment that is opened", async () => {
+    mockApi(routes({ routes: { [`POST ${FLOW}/versions/1/exit-enrollments`]: () => json({ version: 1, trace_id: TRACE }, 202) } }));
+    const user = userEvent.setup();
+    mount();
+    await openInspector(user);
+    const card = screen.getByRole("group", { name: "Counts and versions" });
+    await user.selectOptions(within(card).getByLabelText("Counts for"), "1");
+    await user.click(await within(card).findByRole("button", { name: "Exit them…" }));
+    await user.click(within(await screen.findByRole("dialog", { name: /End everyone/ })).getByRole("button", { name: "End their enrollments" }));
+    await screen.findByText("Everyone still in version 1 is being ended.");
+
+    const list = await screen.findByRole("dialog", { name: "Enrollments" });
+    await user.click(await within(list).findByRole("button", { name: /version 1/ }));
+    const sheet = await screen.findByRole("dialog", { name: "One enrollment" });
+
+    // The Sheet's own autofocus holds: focus did not jump to Retry.
+    await within(sheet).findByRole("button", { name: /^Retry/ });
+    expect(sheet).toHaveFocus();
+  });
+
   it("says so when the bulk exit meets a 409", async () => {
     mockApi(routes({ routes: { [`POST ${FLOW}/versions/1/exit-enrollments`]: () => problem(409, "Conflict", "the flow is paused") } }));
     const user = userEvent.setup();

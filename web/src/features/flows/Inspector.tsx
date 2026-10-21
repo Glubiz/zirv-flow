@@ -161,6 +161,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
 
   function select(item: EnrollmentItem) {
     setSelectedId(item.id);
+    setReturnFocus(false);
     setSheetOpen(true);
     setVersion(item.version);
     props.announce(`Showing the path of one enrollment in version ${item.version}.`);
@@ -168,6 +169,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
 
   function back() {
     setSelectedId(null);
+    setReturnFocus(false);
     props.announce("Back to all enrollments.");
   }
 
@@ -221,7 +223,8 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
     } finally {
       setActing(false);
       setConfirm(null);
-      setReturnFocus(true);
+      // Only Retry and Skip act on the open detail; a bulk exit has nothing to return focus to.
+      if (kind !== "exit") setReturnFocus(true);
     }
   }
 
@@ -262,6 +265,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
           setFilters((value) => ({ ...value, node: id }));
           setSheetOpen(true);
           setSelectedId(null);
+          setReturnFocus(false);
           props.announce(`Showing the enrollments at ${stepTitle(shown.graph, names, id)}.`);
         }}
         onClose={() => undefined}
@@ -278,6 +282,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
             onChange={(event) => {
               setVersion(Number(event.target.value));
               setSelectedId(null);
+              setReturnFocus(false);
               setFilters((value) => ({ ...value, node: "" }));
             }}
           >
