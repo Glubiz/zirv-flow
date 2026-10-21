@@ -456,14 +456,19 @@ pub async fn heartbeat_job<'e>(
 /// their attempts are used up (the attempt was counted at claim time). Each reaped
 /// workspace job gets a `job.attempt` decision, `lease_expired` or `exhausted`.
 ///
-/// The rows are locked in id order, the order an erasure marks them in, so the two cannot
-/// deadlock. A job an erasure marked `purge_on_release` is deleted, not requeued or buried.
+/// The reaper never waits: it takes the expired rows `FOR UPDATE SKIP LOCKED`, so it skips a row
+/// another transaction holds (a handler's `lock_lease`, an erasure's mark, another reaper). A
+/// skipped row is reaped on a later pass, or released by its own handler. Waiting instead would
+/// stall every other expired job behind one zombie handler, and would deadlock with a handler
+/// that completes: the reaper's `DELETE` of a marked row waits for the handler while the
+/// handler's `complete_job` waits for the reaper. A job an erasure marked `purge_on_release` is
+/// deleted, not requeued or buried.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
         "WITH locked AS ( \
              SELECT id, purge_on_release FROM jobs \
              WHERE state = 'running' AND lease_expires_at < now() \
-             ORDER BY id FOR NO KEY UPDATE), \
+             ORDER BY id FOR UPDATE SKIP LOCKED), \
          purged AS ( \
              DELETE FROM jobs WHERE id IN (SELECT id FROM locked WHERE purge_on_release) \
              RETURNING id), \
@@ -1798,48 +1803,131 @@ mod tests {
         assert_eq!(stored.attempts, 1);
     }
 
-    /// The erasure marks jobs in id order, so the reaper locks in id order too: two statements
-    /// that lock the same rows in opposite orders can deadlock. The heap order here is the
-    /// reverse of the id order, and the reaper, stopped at the second job, already holds the
-    /// first.
+    async fn insert_expired(pool: &PgPool, id: u128, token: Uuid, marked: bool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, state, lease_token, lease_expires_at, \
+                attempts, unique_key, cause_kind, cause_id, trace_id, purge_on_release) \
+             VALUES ($1, 'a.kind', '{}', 'running', $2, now() - interval '1 minute', 1, \
+                $1::text, 'api', 't', gen_random_uuid(), $3)",
+        )
+        .bind(Uuid::from_u128(id))
+        .bind(token)
+        .bind(marked)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// One zombie handler must not stall the whole reap: the reaper skips the marked row the
+    /// handler still holds, reaps the free one, and purges the marked one on a later pass.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_reaper_locks_expired_jobs_in_id_order(pool: PgPool) {
-        for id in [3_u128, 2, 1] {
-            sqlx::query(
-                "INSERT INTO jobs (id, kind, payload, state, lease_token, lease_expires_at, \
-                    attempts, unique_key, cause_kind, cause_id, trace_id) \
-                 VALUES ($1, 'a.kind', '{}', 'running', gen_random_uuid(), \
-                    now() - interval '1 minute', 1, $1::text, 'api', 't', gen_random_uuid())",
-            )
-            .bind(Uuid::from_u128(id))
-            .execute(&pool)
+    async fn the_reaper_skips_an_expired_job_a_handler_still_holds_and_purges_it_later(
+        pool: PgPool,
+    ) {
+        let (free, held) = (Uuid::new_v4(), Uuid::new_v4());
+        insert_expired(&pool, 1, free, false).await;
+        insert_expired(&pool, 2, held, true).await;
+        let mut handler = pool.begin().await.unwrap();
+        assert!(
+            lock_lease(&mut handler, Uuid::from_u128(2), held)
+                .await
+                .unwrap()
+        );
+
+        // The timeout is a hang guard only: the reaper has nothing to wait for.
+        let reaped = tokio::time::timeout(Duration::from_secs(10), reap_expired(&pool))
             .await
+            .expect("the reaper waited for a handler's lock")
             .unwrap();
-        }
-        let mut blocker = pool.begin().await.unwrap();
-        sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE")
+
+        assert_eq!(
+            reaped,
+            Reaped {
+                requeued: 1,
+                dead: 0,
+                purged: 0
+            }
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = $1")
             .bind(Uuid::from_u128(2))
-            .execute(&mut *blocker)
+            .fetch_one(&pool)
             .await
             .unwrap();
+        assert_eq!(state, "running", "the held job is left to its handler");
+        handler.commit().await.unwrap();
 
-        let reaper = {
-            let pool = pool.clone();
-            tokio::spawn(async move { reap_expired(&pool).await.unwrap() })
-        };
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(!reaper.is_finished(), "the reaper should wait for job 2");
-
-        let first_is_held = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE NOWAIT")
-            .bind(Uuid::from_u128(1))
-            .fetch_optional(&pool)
+        let reaped = reap_expired(&pool).await.unwrap();
+        assert_eq!(
+            reaped,
+            Reaped {
+                requeued: 0,
+                dead: 0,
+                purged: 1
+            }
+        );
+        let left: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM jobs")
+            .fetch_all(&pool)
             .await
-            .is_err();
-        blocker.commit().await.unwrap();
-        let reaped = reaper.await.unwrap();
+            .unwrap();
+        assert_eq!(left, [Uuid::from_u128(1)]);
+    }
 
-        assert!(first_is_held, "the reaper locks the lowest id first");
-        assert_eq!(reaped.requeued, 3);
+    /// A handler holds a marked, expired job when the reaper runs, then completes. The reaper
+    /// must not take the row and wait on the handler: the handler's `complete_job` would then
+    /// wait on the reaper (40P01).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_and_a_completing_handler_do_not_deadlock_on_a_marked_job(pool: PgPool) {
+        use crate::privacy::testing::poll_until;
+        let token = Uuid::new_v4();
+        insert_expired(&pool, 1, token, true).await;
+        let mut handler = pool.begin().await.unwrap();
+        assert!(
+            lock_lease(&mut handler, Uuid::from_u128(1), token)
+                .await
+                .unwrap()
+        );
+
+        let mut reaper_connection = pool.acquire().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *reaper_connection)
+            .await
+            .unwrap();
+        let reaper = tokio::spawn(async move { reap_expired(&mut *reaper_connection).await });
+        // The reaper either finishes (it skipped the row) or waits for the handler.
+        let (probe, reaper_ref) = (&pool, &reaper);
+        poll_until("the reaper to finish or wait", || async move {
+            reaper_ref.is_finished() || {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE pid = $1 AND wait_event_type = 'Lock')",
+                )
+                .bind(pid)
+                .fetch_one(probe)
+                .await
+                .unwrap();
+                waiting
+            }
+        })
+        .await;
+
+        let completed = complete_job(&mut *handler, Uuid::from_u128(1), token)
+            .await
+            .expect("the handler's completion hit a deadlock");
+        assert!(completed);
+        handler.commit().await.unwrap();
+        let reaped = tokio::time::timeout(Duration::from_secs(10), reaper)
+            .await
+            .expect("the reaper did not finish")
+            .unwrap()
+            .expect("the reaper hit a deadlock");
+
+        assert_eq!(reaped.requeued + reaped.dead, 0);
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "the job ends up deleted");
     }
 }
