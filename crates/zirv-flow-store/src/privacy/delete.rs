@@ -61,8 +61,15 @@ pub async fn delete_person(
         return Ok(false);
     }
 
+    let enrollments: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&people)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     remove_from_lists(connection, workspace, &people).await?;
-    purge_jobs(connection, workspace, &people).await?;
     crate::segments::forget_people(connection, workspace, &people).await?;
     for statement in DELETIONS {
         sqlx::query(*statement)
@@ -91,6 +98,10 @@ pub async fn delete_person(
         .map_err(StoreError::query)?;
     // Last, so a cursor can fall back to a person who is still there.
     strip_enrolls(connection, workspace, &people).await?;
+    // The last job-table work, after every statement that can wait on a handler's row locks:
+    // the marks are held until commit, and a handler waiting on one while the erasure waits on
+    // the handler's rows would deadlock. `flow.step` names an enrollment, which is gone by now.
+    purge_jobs(connection, workspace, &people, &enrollments).await?;
 
     append_decision(
         connection,
@@ -134,13 +145,13 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM identities WHERE workspace_id = $1 AND person_id = ANY($2)",
 ];
 
-/// The jobs that name an erased person: `$1` is the workspace and `$2` the people. It is the one
+/// The jobs that name an erased person: `$1` is the workspace, `$2` the people and `$3` their
+/// enrollment ids as text. It is the one
 /// predicate for deleting a pending job and for marking a running one, so the two cannot drift.
 macro_rules! names_erased_person {
     () => {
         "( \
-            (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \
-                (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \
+            (kind = 'flow.step' AND payload ->> 'enrollment_id' = ANY($3)) \
             OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
@@ -164,24 +175,27 @@ async fn purge_jobs(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
+    enrollments: &[String],
 ) -> Result<(), StoreError> {
-    mark_running(connection, workspace, people).await?;
+    mark_running(connection, workspace, people, enrollments).await?;
     sqlx::query(concat!(
         "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ",
         names_erased_person!()
     ))
     .bind(workspace.as_uuid())
     .bind(people)
+    .bind(enrollments)
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    mark_running(connection, workspace, people).await
+    mark_running(connection, workspace, people, enrollments).await
 }
 
 async fn mark_running(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
+    enrollments: &[String],
 ) -> Result<(), StoreError> {
     sqlx::query(concat!(
         "UPDATE jobs SET purge_on_release = true \
@@ -190,6 +204,7 @@ async fn mark_running(
     ))
     .bind(workspace.as_uuid())
     .bind(people)
+    .bind(enrollments)
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -1343,6 +1358,131 @@ mod tests {
                 .map(|payload| payload.work),
             Some(page(Some(older))),
             "the audience still pages on from the person before the erased cursor"
+        );
+    }
+
+    /// A `flow.step` handler as the worker runs it: it holds the job row and writes the
+    /// enrollment of the person. The erasure then waits for the enrollment row.
+    async fn handler_on_enrollment(
+        pool: &PgPool,
+        claimed: &crate::ClaimedJob,
+        enrollment: Uuid,
+    ) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut handler = begin(pool).await.unwrap();
+        assert!(
+            crate::lock_lease(&mut handler, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE enrollments SET state_version = state_version + 1 WHERE id = $1")
+            .bind(enrollment)
+            .execute(&mut *handler)
+            .await
+            .unwrap();
+        handler
+    }
+
+    /// Starts an erasure and gives it time to reach the statement that waits on the handler.
+    async fn erasing(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> tokio::task::JoinHandle<()> {
+        let pool = pool.clone();
+        let erasure = tokio::spawn(async move { erase(&pool, ws, person).await });
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        assert!(!erasure.is_finished(), "the erasure should be waiting");
+        erasure
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_handler_that_wrote_the_persons_rows_can_complete_while_the_erasure_waits_for_them(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let enrollment = enrollment_of(&pool, person).await;
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "flow.step",
+            serde_json::json!({ "enrollment_id": enrollment }),
+            "running:step",
+            3,
+            LEASE,
+        )
+        .await;
+        let mut handler = handler_on_enrollment(&pool, &claimed, enrollment).await;
+        let erasure = erasing(&pool, ws, person).await;
+
+        // The worker's completion: delete the job and commit.
+        let bound = std::time::Duration::from_secs(10);
+        let done = tokio::time::timeout(
+            bound,
+            crate::complete_job(&mut *handler, claimed.id, claimed.lease_token),
+        )
+        .await;
+        assert_eq!(
+            done.expect("complete_job waited for the erasure").unwrap(),
+            true
+        );
+        commit(handler).await.unwrap();
+        tokio::time::timeout(bound, erasure)
+            .await
+            .expect("the erasure did not finish")
+            .unwrap();
+
+        assert_eq!(jobs_naming(&pool, &[person, merged, enrollment]).await, 0);
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_handler_that_fails_while_the_erasure_waits_for_its_rows_leaves_no_job(pool: PgPool) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let enrollment = enrollment_of(&pool, person).await;
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "flow.step",
+            serde_json::json!({ "enrollment_id": enrollment }),
+            "running:step",
+            3,
+            LEASE,
+        )
+        .await;
+        let handler = handler_on_enrollment(&pool, &claimed, enrollment).await;
+        let erasure = erasing(&pool, ws, person).await;
+
+        let bound = std::time::Duration::from_secs(10);
+        handler.rollback().await.unwrap();
+        let outcome = tokio::time::timeout(bound, fail(&pool, &claimed))
+            .await
+            .expect("fail_job waited for the erasure");
+        assert!(
+            matches!(
+                outcome,
+                Some(crate::FailOutcome::Purged | crate::FailOutcome::Retried)
+            ),
+            "{outcome:?}"
+        );
+        tokio::time::timeout(bound, erasure)
+            .await
+            .expect("the erasure did not finish")
+            .unwrap();
+
+        assert_eq!(jobs_naming(&pool, &[person, merged, enrollment]).await, 0);
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left, 0,
+            "a job that was requeued first is deleted by the erasure"
         );
     }
 }
