@@ -22,7 +22,7 @@ n="${SAMPLE_PEOPLE:-3}"
 mkdir -p "$M4_OUT/sample"
 
 people_ids() { # OFFSET COUNT -> JSON array of person ids
-  pgc -At -v ws="$ws" -v o="$1" -v c="$2" -f - <<'SQL'
+  pg -At -v ws="$ws" -v o="$1" -v c="$2" -f - <<'SQL'
 SELECT coalesce(json_agg(id), '[]') FROM (
   SELECT id FROM people WHERE workspace_id = :'ws' AND merged_into IS NULL ORDER BY id OFFSET :o LIMIT :c) t;
 SQL
@@ -46,7 +46,7 @@ enroll_sample probe M5_FLOW_PROBE M5_LIST_PROBE 20 5
 # Wait for every sample enrollment to be waiting (or the probes already finished).
 deadline=$(( $(date +%s) + 300 ))
 while :; do
-  open="$(pgc -At -v ws="$ws" -f - <<'SQL'
+  open="$(pg -At -v ws="$ws" -f - <<'SQL'
 SELECT count(*) FROM enrollments WHERE workspace_id = :'ws' AND state = 'active';
 SQL
 )"
@@ -59,7 +59,7 @@ done
 capture() {
   local name="$1" flow
   flow="$(state_get "$2")"
-  pgc -At -v flow="$flow" -f - <<'SQL' | jq . >"$M4_OUT/sample/$name.json"
+  pg -At -v flow="$flow" -f - <<'SQL' | jq . >"$M4_OUT/sample/$name.json"
 WITH e AS (SELECT * FROM enrollments WHERE flow_id = :'flow' ORDER BY created_at LIMIT 3)
 SELECT json_build_object(
   'enrollments', (SELECT coalesce(json_agg(to_jsonb(e) ORDER BY created_at), '[]') FROM e),

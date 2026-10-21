@@ -61,49 +61,48 @@ steps=("$@")
 
 stage() {
   local t0
-  t0="$(pgc -At -c "SELECT to_char(now() + $lead * interval '1 minute', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
+  t0="$(pg -At -c "SELECT to_char(now() + $lead * interval '1 minute', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
   log "stage run $run: window opens at $t0 ($lead min from now), $n_spread spread over $window_s s, $n_burst burst at +$burst_at_s s"
-  pgc -v ws="$ws" -v spread_flow="$spread_flow" -v burst_flow="$burst_flow" -v run="$run" -v t0="$t0" \
+  pg -v ws="$ws" -v spread_flow="$spread_flow" -v burst_flow="$burst_flow" -v run="$run" -v t0="$t0" \
     -v window_s="$window_s" -v burst_at_s="$burst_at_s" -v n_spread="$n_spread" -v n_burst="$n_burst" \
     -f - <"$m5_dir/seed-stage.sql"
 }
 
-load() {
-  local set total lo hi started
-  started="$(date +%s)"
-  for set in spread burst; do
-    if [ "$set" = spread ]; then total="$n_spread"; else total="$n_burst"; fi
-    for ((lo = 1; lo <= total; lo += chunk)); do
-      hi=$((lo + chunk - 1)); [ "$hi" -le "$total" ] || hi="$total"
-      pgc -v run="$run" -v set="$set" -v lo="$lo" -v hi="$hi" -f - <"$m5_dir/seed-load.sql"
-      log "loaded $set $hi of $total ($(( $(date +%s) - started )) s since the load began)"
-    done
-  done
-}
-
-vacuum() {
-  local t
-  for t in enrollments step_executions jobs flow_entries decision_records; do
-    log "vacuum (analyze, parallel 0: a parallel vacuum needs more /dev/shm than the stack gives) $t"
-    pgc -c "VACUUM (ANALYZE, PARALLEL 0) $t"
-  done
-  pgc -c "CHECKPOINT"
-}
-
-verify() {
-  pgc -v ws="$ws" -v spread_flow="$spread_flow" -v burst_flow="$burst_flow" -v run="$run" \
-    -v n_spread="$n_spread" -v n_burst="$n_burst" -v margin="$margin" \
-    -At -f - <"$m5_dir/verify.sql" | tee "$M4_OUT/seed-verify-run$run.txt"
-  if grep -q '^FAIL' "$M4_OUT/seed-verify-run$run.txt"; then die "seed validation failed"; fi
-}
-
-clean() {
+# each_chunk FN: calls FN SET LO HI for every chunk of both sets.
+each_chunk() {
   local set total lo hi
   for set in spread burst; do
     if [ "$set" = spread ]; then total="$n_spread"; else total="$n_burst"; fi
     for ((lo = 1; lo <= total; lo += chunk)); do
       hi=$((lo + chunk - 1)); [ "$hi" -le "$total" ] || hi="$total"
-      pgc -v run="$run" -v set="$set" -v lo="$lo" -v hi="$hi" -v ws="$ws" -f - <<'SQL'
+      "$1" "$set" "$lo" "$hi"
+      log "$1 $set $hi of $total"
+    done
+  done
+}
+
+load_chunk() { pg -v run="$run" -v set="$1" -v lo="$2" -v hi="$3" -f - <"$m5_dir/seed-load.sql"; }
+
+load() { each_chunk load_chunk; }
+
+vacuum() {
+  local t
+  for t in enrollments step_executions jobs flow_entries decision_records; do
+    log "vacuum (analyze, parallel 0: a parallel vacuum needs more /dev/shm than the stack gives) $t"
+    pg -c "VACUUM (ANALYZE, PARALLEL 0) $t"
+  done
+  pg -c "CHECKPOINT"
+}
+
+verify() {
+  pg -v ws="$ws" -v spread_flow="$spread_flow" -v burst_flow="$burst_flow" -v run="$run" \
+    -v n_spread="$n_spread" -v n_burst="$n_burst" -v margin="$margin" \
+    -At -f - <"$m5_dir/verify.sql" | tee "$M4_OUT/seed-verify-run$run.txt"
+  if grep -q '^FAIL' "$M4_OUT/seed-verify-run$run.txt"; then die "seed validation failed"; fi
+}
+
+clean_chunk() {
+  pg -v run="$run" -v set="$1" -v lo="$2" -v hi="$3" -v ws="$ws" -f - <<'SQL'
 BEGIN;
 DELETE FROM decision_records d USING m5bench.rows r
  WHERE d.workspace_id = :'ws' AND d.trace_id = r.trace_id
@@ -117,10 +116,11 @@ DELETE FROM enrollments e USING m5bench.rows r
  WHERE e.id = r.enrollment_id AND r.run = :run AND r.set = :'set' AND r.n BETWEEN :lo AND :hi;
 COMMIT;
 SQL
-      log "cleaned $set $hi of $total"
-    done
-  done
-  pgc -v run="$run" -f - <<'SQL'
+}
+
+clean() {
+  each_chunk clean_chunk
+  pg -v run="$run" -f - <<'SQL'
 DELETE FROM m5bench.rows WHERE run = :run;
 DELETE FROM m5bench.runs WHERE run = :run;
 SQL

@@ -52,10 +52,10 @@ seed="${M5_LOAD_SEED:-51}"
 loadgen="${LOADGEN:-$root/target/release/loadgen}"
 out="$M4_OUT/run${run}-${label}"
 
-t0_of() { pgc -At -c "SELECT to_char(t0 AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM m5bench.runs WHERE run = $run"; }
-window_of() { pgc -At -c "SELECT window_s FROM m5bench.runs WHERE run = $run"; }
+t0_of() { pg -At -c "SELECT to_char(t0 AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM m5bench.runs WHERE run = $run"; }
+window_of() { pg -At -c "SELECT window_s FROM m5bench.runs WHERE run = $run"; }
 epoch_of() { date -u -d "$1" +%s; }
-jobs_left() { pgc -At -c "SELECT count(*) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = $run"; }
+jobs_left() { pg -At -c "SELECT count(*) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = $run"; }
 
 # One JSON line per tick: the queue and the job table counters.
 sample_sql() {
@@ -77,7 +77,7 @@ SQL
 sampler_loop() { # runs detached
   local next_docker=0 now
   while [ ! -e "$out/stop" ]; do
-    sample_sql | pgc -At -f - >>"$out/samples.ndjson" 2>>"$out/sampler.err" || true
+    sample_sql | pg -At -f - >>"$out/samples.ndjson" 2>>"$out/sampler.err" || true
     now="$(date +%s)"
     if [ "$now" -ge "$next_docker" ]; then
       next_docker=$((now + 10))
@@ -148,7 +148,7 @@ case "$cmd" in
   collect)
     : >"$out/stop"
     sleep "$((tick + 3))"
-    pgc -At -v run="$run" -f - <"$m5_dir/lateness.sql" | jq . >"$out/lateness.json"
+    pg -At -v run="$run" -f - <"$m5_dir/lateness.sql" | jq . >"$out/lateness.json"
     # Rates per sampling interval, from the cumulative counters.
     jq -rs '
       def secs: sub("\\.[0-9]+Z$"; "Z") | fromdate;
