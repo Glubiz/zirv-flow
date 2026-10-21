@@ -308,8 +308,8 @@ const URL_TOKEN_OPEN: &str = "(kept-url:";
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FlowTable {
     literals: Placeholders,
-    /// Each token and the URL it stands for.
-    urls: Vec<(String, String)>,
+    /// Each token, the id of the webhook node it was sent for, and the URL it stands for.
+    urls: Vec<(String, String, String)>,
 }
 
 impl FlowTable {
@@ -324,8 +324,8 @@ impl FlowTable {
             rest = &rest[at..];
             let end = rest.find(')').map_or(rest.len(), |close| close + 1);
             let candidate = &rest[..end];
-            match self.urls.iter().find(|(token, _)| token == candidate) {
-                Some((_, url)) => out.push_str(url),
+            match self.urls.iter().find(|(token, _, _)| token == candidate) {
+                Some((_, _, url)) => out.push_str(url),
                 None => out.push_str(candidate),
             }
             rest = &rest[end..];
@@ -350,11 +350,27 @@ fn webhook_urls(doc: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Whether the text is a URL placeholder.
-fn is_url_token(text: &str) -> bool {
-    text.strip_prefix(URL_TOKEN_OPEN)
-        .and_then(|rest| rest.strip_suffix(')'))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+/// Replaces the URL of every webhook node of `doc` by a placeholder bound to the node's id, in
+/// `masked`, and returns what each stands for. A URL can carry an address or a credential, so this
+/// happens whatever the workspace allows for personal data.
+fn mask_urls(doc: &Value, masked: &mut Value) -> Vec<(String, String, String)> {
+    let mut urls = Vec::new();
+    for pointer in webhook_urls(doc) {
+        let Some(url) = doc.pointer(&pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        let node = pointer.strip_suffix("/url").unwrap_or(&pointer);
+        let id = doc
+            .pointer(&format!("{node}/id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let token = format!("{URL_TOKEN_OPEN}{})", urls.len() + 1);
+        if let Some(target) = masked.pointer_mut(&pointer) {
+            *target = Value::String(token.clone());
+        }
+        urls.push((token, id.to_owned(), url.to_owned()));
+    }
+    urls
 }
 
 /// Whether a graph has more nodes than a flow may. A save does not apply the limit, so a draft can.
@@ -389,17 +405,7 @@ pub(crate) fn mask_document(
     for (place, root) in places.iter().zip(&masked_roots) {
         place.put_back(&mut masked, root);
     }
-    let mut urls = Vec::new();
-    for pointer in webhook_urls(doc) {
-        let Some(url) = doc.pointer(&pointer).and_then(Value::as_str) else {
-            continue;
-        };
-        let token = format!("{URL_TOKEN_OPEN}{})", urls.len() + 1);
-        if let Some(target) = masked.pointer_mut(&pointer) {
-            *target = Value::String(token.clone());
-        }
-        urls.push((token, url.to_owned()));
-    }
+    let urls = mask_urls(doc, &mut masked);
     Ok((
         masked,
         FlowTable {
@@ -427,28 +433,50 @@ pub(crate) fn restore_document(table: &FlowTable, doc: &mut Value) -> Vec<String
         place.put_back(doc, &root);
         covered.insert(place.literals());
     }
-    // A URL placeholder comes back into a webhook URL, wherever the node moved to.
+    // A URL placeholder comes back into the webhook URL of the node it was sent for, and nowhere
+    // else; in another node, new nodes included, it is left in place and named below.
     for pointer in webhook_urls(doc) {
+        let node = pointer.strip_suffix("/url").unwrap_or(&pointer);
+        let id = doc
+            .pointer(&format!("{node}/id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let url = doc
             .pointer(&pointer)
             .and_then(Value::as_str)
-            .and_then(|text| table.urls.iter().find(|(token, _)| token == text))
-            .map(|(_, url)| url.clone());
+            .and_then(|text| {
+                table
+                    .urls
+                    .iter()
+                    .find(|(token, bound, _)| token == text && *bound == id)
+            })
+            .map(|(_, _, url)| url.clone());
         if let (Some(url), Some(target)) = (url, doc.pointer_mut(&pointer)) {
             *target = Value::String(url);
         }
     }
-    // A placeholder in a part the carriers do not cover (a node id, a note), and a URL placeholder
-    // anywhere it was not put back, is not where it was sent, whatever it says.
+    // A placeholder in a part the carriers do not cover (a node id, a note) is not where it was
+    // sent, whatever it says.
     let mut stray = Vec::new();
     collect_tokens(doc, "", &covered, &mut stray);
-    collect_url_tokens(doc, "", &mut stray);
-    stray.dedup();
     for pointer in stray {
         lines.push(format!(
             "placeholder_invented at {}",
             place_of(doc, &pointer)
         ));
+    }
+    // A string that holds a URL placeholder after the restore is never stored: it is in a node it
+    // was not sent for, or it is only part of a string, or it was never sent.
+    let mut urls = Vec::new();
+    collect_url_tokens(table, doc, "", &mut urls);
+    for (pointer, known) in urls {
+        let code = if known {
+            "placeholder_moved"
+        } else {
+            "placeholder_invented"
+        };
+        lines.push(format!("{code} at {}", place_of(doc, &pointer)));
     }
     lines
 }
@@ -460,22 +488,31 @@ fn is_token(text: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// The pointers of the strings that look like URL placeholders, anywhere.
-fn collect_url_tokens(value: &Value, pointer: &str, out: &mut Vec<String>) {
+/// The pointers of the strings that hold a URL placeholder anywhere in them, and whether the
+/// string is exactly a token that was sent.
+fn collect_url_tokens(
+    table: &FlowTable,
+    value: &Value,
+    pointer: &str,
+    out: &mut Vec<(String, bool)>,
+) {
     if pointer.len() > 4096 {
         return;
     }
     match value {
-        Value::String(text) if is_url_token(text) => out.push(pointer.to_owned()),
+        Value::String(text) if text.contains(URL_TOKEN_OPEN) => {
+            let known = table.urls.iter().any(|(token, _, _)| token == text);
+            out.push((pointer.to_owned(), known));
+        }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                collect_url_tokens(item, &format!("{pointer}/{index}"), out);
+                collect_url_tokens(table, item, &format!("{pointer}/{index}"), out);
             }
         }
         Value::Object(map) => {
             for (key, item) in map {
                 let key = key.replace('~', "~0").replace('/', "~1");
-                collect_url_tokens(item, &format!("{pointer}/{key}"), out);
+                collect_url_tokens(table, item, &format!("{pointer}/{key}"), out);
             }
         }
         _ => {}
@@ -589,10 +626,19 @@ pub(crate) fn render_document(
             let (masked, table) = mask_document(doc, &ClearKeys::of(details))?;
             Ok((Content::Schema(format!("{label}: {masked}\n")), table))
         }
-        Privacy::PersonalAllowed => Ok((
-            Content::Personal(format!("{label}: {doc}\n")),
-            FlowTable::default(),
-        )),
+        // The literals follow the workspace's opt-in. A webhook URL may carry a credential that no
+        // opt-in covers, so it is masked all the same.
+        Privacy::PersonalAllowed => {
+            let mut masked = doc.clone();
+            let urls = mask_urls(doc, &mut masked);
+            Ok((
+                Content::Personal(format!("{label}: {masked}\n")),
+                FlowTable {
+                    literals: Placeholders::default(),
+                    urls,
+                },
+            ))
+        }
     }
 }
 
@@ -980,11 +1026,17 @@ mod tests {
         stray["graph"]["nodes"][1]["id"] = json!("(kept-url:2)");
         stray["graph"]["nodes"][0]["url"] = json!("(kept-url:9)");
         let lines = restore_document(&table, &mut stray);
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        // The renamed node lost its binding too, so its own placeholder is named as well.
+        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(
             lines
                 .iter()
-                .all(|line| line.starts_with("placeholder_invented at "))
+                .any(|line| line.starts_with("placeholder_moved at "))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("placeholder_invented at "))
         );
         assert_eq!(
             table.restore_text("Posts to (kept-url:2) and (kept-url:7)."),
@@ -1006,5 +1058,93 @@ mod tests {
         for privacy in [Privacy::SchemaOnly, Privacy::PersonalAllowed] {
             assert!(flow_context(&details(), "Flow", &doc, privacy).is_err());
         }
+    }
+
+    fn two_hooks() -> Value {
+        json!({"graph": {"nodes": [
+            {"id": "a", "type": "action.webhook", "url": "https://a.example.com/?token=AAA"},
+            {"id": "b", "type": "action.webhook", "url": "https://b.example.com/?token=BBB"}
+        ]}, "settings": {}})
+    }
+
+    #[test]
+    fn a_url_placeholder_is_bound_to_its_node_and_never_restored_elsewhere() {
+        let (masked, table) = mask_document(&two_hooks(), &ClearKeys::default()).unwrap();
+
+        // The model swaps the two placeholders: neither comes back, both are named.
+        let mut swapped = masked.clone();
+        swapped["graph"]["nodes"][0]["url"] = json!("(kept-url:2)");
+        swapped["graph"]["nodes"][1]["url"] = json!("(kept-url:1)");
+        let lines = restore_document(&table, &mut swapped);
+        assert_eq!(
+            lines,
+            [
+                "placeholder_moved at nodes/a/url",
+                "placeholder_moved at nodes/b/url"
+            ]
+        );
+        assert!(!swapped.to_string().contains("token=AAA"));
+        assert!(!swapped.to_string().contains("token=BBB"));
+
+        // A copy into a new webhook node is named too, and the original node still restores.
+        let mut copied = masked.clone();
+        copied["graph"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "c", "type": "action.webhook", "url": "(kept-url:1)"}));
+        let lines = restore_document(&table, &mut copied);
+        assert_eq!(lines, ["placeholder_moved at nodes/c/url"]);
+        assert_eq!(
+            copied["graph"]["nodes"][0]["url"],
+            "https://a.example.com/?token=AAA"
+        );
+        assert_eq!(copied["graph"]["nodes"][2]["url"], "(kept-url:1)");
+    }
+
+    #[test]
+    fn a_string_that_only_holds_a_url_placeholder_is_never_accepted() {
+        let (masked, table) = mask_document(&two_hooks(), &ClearKeys::default()).unwrap();
+        let mut embedded = masked.clone();
+        embedded["graph"]["nodes"][0]["url"] = json!("https://x.example/(kept-url:1)");
+        embedded["graph"]["nodes"][1]["id"] = json!("b(kept-url:2)");
+        embedded["settings"] = json!({"note": "see (kept-url:1) and (kept-url:9)"});
+
+        let lines = restore_document(&table, &mut embedded);
+
+        // The renamed node lost its binding, so its url is named as well as its id.
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("placeholder_invented at "))
+                .count()
+                == 3
+        );
+    }
+
+    #[test]
+    fn under_the_opt_in_the_urls_are_still_masked_and_the_literals_are_not() {
+        let mut doc = two_hooks();
+        doc["graph"]["nodes"].as_array_mut().unwrap().push(json!({
+            "id": "br", "type": "branch",
+            "conditions": [{"trait": "city", "op": "eq", "value": "Aarhus"}]}));
+
+        let (content, table) =
+            render_document("Flow", &doc, &details(), Privacy::PersonalAllowed).unwrap();
+
+        let text = content.render();
+        assert!(matches!(content, Content::Personal(_)));
+        assert!(
+            !text.contains("token=AAA") && !text.contains("token=BBB"),
+            "{text}"
+        );
+        assert!(
+            text.contains("(kept-url:1)") && text.contains("Aarhus"),
+            "{text}"
+        );
+        assert_eq!(
+            table.restore_text("(kept-url:2)"),
+            "https://b.example.com/?token=BBB"
+        );
     }
 }
