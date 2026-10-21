@@ -6,14 +6,18 @@
 //! at the target rate, so retries never stampede.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::ValueEnum;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use serde_json::json;
 use tokio::sync::Semaphore;
+// The tokio clock is the std one until a test pauses it, which lets the timing tests run on
+// virtual time.
+use tokio::time::Instant;
 
 use crate::pacing::{request_due_at, retry_after};
 use crate::payload::{Kind, batch_kind, item};
@@ -150,7 +154,11 @@ impl Shared {
 
     fn remaining_pause(&self) -> Option<Duration> {
         let guard = self.pause_until.lock().expect("pause lock");
-        guard.and_then(|until| until.checked_duration_since(Instant::now()))
+        // A pause that ends exactly now is over: `Some(ZERO)` would make the dispatcher sleep
+        // for nothing and look again, for ever when the clock is paused.
+        guard
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
     }
 }
 
@@ -158,36 +166,67 @@ fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Sends a job once. A 429 sets the shared pause and hands the job back to the dispatcher.
-async fn send_once(
+/// What one send came back with.
+struct Reply {
+    /// The HTTP status, or `None` when the request never got a response.
+    status: Option<u16>,
+    /// The `Retry-After` header, as sent.
+    retry_after: Option<String>,
+}
+
+/// How a request body reaches the server. The dispatcher is generic over it so its timing can be
+/// tested without sockets, whose real latency a paused clock cannot see.
+trait Transport: Clone + Send + Sync + 'static {
+    fn send(&self, body: Arc<Vec<u8>>) -> impl Future<Output = Reply> + Send;
+}
+
+/// The real transport: one POST per request.
+#[derive(Clone)]
+struct Http {
     client: reqwest::Client,
     config: Arc<Config>,
-    shared: Arc<Shared>,
-    mut job: Job,
-) {
-    let url = format!("{}{}", config.url, config.mode.path());
-    let started = Instant::now();
-    let response = client
-        .post(&url)
-        .bearer_auth(&config.key)
-        .header(CONTENT_TYPE, "application/json")
-        .body(job.body.as_ref().clone())
-        .send()
-        .await;
-    let (status, wait) = match response {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let wait = response
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            // Read the body so the latency covers the whole response.
-            let _ = response.bytes().await;
-            (Some(status), retry_after(wait.as_deref()))
+}
+
+impl Transport for Http {
+    async fn send(&self, body: Arc<Vec<u8>>) -> Reply {
+        let url = format!("{}{}", self.config.url, self.config.mode.path());
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.config.key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.as_ref().clone())
+            .send()
+            .await;
+        match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let retry_after = response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                // Read the body so the latency covers the whole response.
+                let _ = response.bytes().await;
+                Reply {
+                    status: Some(status),
+                    retry_after,
+                }
+            }
+            Err(_) => Reply {
+                status: None,
+                retry_after: None,
+            },
         }
-        Err(_) => (None, Duration::ZERO),
-    };
+    }
+}
+
+/// Sends a job once. A 429 sets the shared pause and hands the job back to the dispatcher.
+async fn send_once<T: Transport>(transport: T, shared: Arc<Shared>, mut job: Job) {
+    let started = Instant::now();
+    let reply = transport.send(job.body.clone()).await;
+    let status = reply.status;
+    let wait = retry_after(reply.retry_after.as_deref());
     let done = Instant::now();
     let retry = status == Some(429) && job.attempts + 1 < MAX_ATTEMPTS;
     {
@@ -232,6 +271,19 @@ pub async fn run_phase(
     phase: &Phase,
     first_seq: u64,
 ) -> PhaseOutcome {
+    let transport = Http {
+        client: client.clone(),
+        config: config.clone(),
+    };
+    run_phase_with(transport, config, phase, first_seq).await
+}
+
+async fn run_phase_with<T: Transport>(
+    transport: T,
+    config: &Arc<Config>,
+    phase: &Phase,
+    first_seq: u64,
+) -> PhaseOutcome {
     let shared = Arc::new(Shared {
         pause_until: Mutex::new(None),
         retries: Mutex::new(VecDeque::new()),
@@ -246,8 +298,7 @@ pub async fn run_phase(
 
     // Sends `job` now. At the in-flight cap it waits for a slot and counts as late.
     let dispatch = |job: Job| {
-        let (client, config, shared, cap) =
-            (client.clone(), config.clone(), shared.clone(), cap.clone());
+        let (transport, shared, cap) = (transport.clone(), shared.clone(), cap.clone());
         async move {
             let permit = match cap.clone().try_acquire_owned() {
                 Ok(permit) => permit,
@@ -262,7 +313,7 @@ pub async fn run_phase(
             };
             shared.in_flight.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
-                send_once(client, config, shared, job).await;
+                send_once(transport, shared, job).await;
                 drop(permit);
             });
             tokio::task::yield_now().await;
@@ -375,19 +426,17 @@ mod tests {
     struct Mock {
         url: String,
         bodies: Arc<Mutex<Vec<String>>>,
-        arrivals: Arc<Mutex<Vec<Instant>>>,
     }
 
     async fn serve(behavior: Behavior) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let bodies = Arc::new(Mutex::new(Vec::new()));
-        let arrivals = Arc::new(Mutex::new(Vec::new()));
-        let (log, times) = (bodies.clone(), arrivals.clone());
+        let log = bodies.clone();
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let (log, times) = (log.clone(), times.clone());
+                let log = log.clone();
                 tokio::spawn(async move {
                     let mut data = Vec::new();
                     let mut chunk = [0u8; 8192];
@@ -416,7 +465,6 @@ mod tests {
                     }
                     let body = String::from_utf8_lossy(&data[head_end..]).into_owned();
                     let number = {
-                        times.lock().unwrap().push(Instant::now());
                         let mut log = log.lock().unwrap();
                         log.push(body);
                         log.len()
@@ -445,10 +493,60 @@ mod tests {
                 });
             }
         });
-        Mock {
-            url,
-            bodies,
-            arrivals,
+        Mock { url, bodies }
+    }
+
+    /// A transport with no sockets, for tests on a paused clock. Time advances only when every
+    /// task is waiting on a timer, so the instants it records are exact and do not depend on
+    /// the scheduler or on how busy the machine is.
+    #[derive(Clone)]
+    struct Scripted {
+        /// Answer the first `refuse` sends 429 with `Retry-After: 1`, all together once the
+        /// last of them has been sent.
+        refuse: usize,
+        /// Delay before every other response.
+        delay: Duration,
+        sends: Arc<Mutex<Vec<Instant>>>,
+        sent: Arc<tokio::sync::Notify>,
+    }
+
+    impl Scripted {
+        fn new(refuse: usize, delay: Duration) -> Self {
+            Self {
+                refuse,
+                delay,
+                sends: Arc::default(),
+                sent: Arc::default(),
+            }
+        }
+
+        fn sends(&self) -> Vec<Instant> {
+            self.sends.lock().unwrap().clone()
+        }
+    }
+
+    impl Transport for Scripted {
+        async fn send(&self, _body: Arc<Vec<u8>>) -> Reply {
+            let number = {
+                let mut sends = self.sends.lock().unwrap();
+                sends.push(Instant::now());
+                sends.len()
+            };
+            self.sent.notify_waiters();
+            if number > self.refuse {
+                tokio::time::sleep(self.delay).await;
+                return Reply {
+                    status: Some(202),
+                    retry_after: None,
+                };
+            }
+            while self.sends.lock().unwrap().len() < self.refuse {
+                self.sent.notified().await;
+            }
+            Reply {
+                status: Some(429),
+                retry_after: Some("1".to_owned()),
+            }
         }
     }
 
@@ -504,19 +602,14 @@ mod tests {
         assert_eq!(mock.bodies.lock().unwrap().len() as u64, report.requests);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn slow_responses_do_not_throttle_the_offered_rate() {
         // 200 ms responses at 100 requests/s need 20 in flight. A pool of 4 permits would have
         // held the offered rate to about 20 requests/s; open loop keeps to the schedule.
-        let mock = serve(Behavior {
-            refuse: 0,
-            delay: Duration::from_millis(200),
-            ..Behavior::default()
-        })
-        .await;
-        let outcome = run_phase(
-            &client(),
-            &config(mock.url.clone(), Mode::Identify, 10_000),
+        let transport = Scripted::new(0, Duration::from_millis(200));
+        let outcome = run_phase_with(
+            transport,
+            &config(String::new(), Mode::Identify, 10_000),
             &phase(100, 1.0),
             0,
         )
@@ -637,19 +730,15 @@ mod tests {
         assert!(report.service_latency.p50_ms >= 300.0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn simultaneous_429s_are_resent_paced_after_one_shared_pause() {
         // 60 requests are in flight when the server answers all of them 429 at once. Each waited
         // its own Retry-After and re-entered together, they would arrive as one burst a second
         // later; handed back to the dispatcher they arrive at the 600/s target rate.
-        let mock = serve(Behavior {
-            refuse: 60,
-            ..Behavior::default()
-        })
-        .await;
-        let outcome = run_phase(
-            &client(),
-            &config(mock.url.clone(), Mode::Identify, 10_000),
+        let transport = Scripted::new(60, Duration::ZERO);
+        let outcome = run_phase_with(
+            transport.clone(),
+            &config(String::new(), Mode::Identify, 10_000),
             &phase(600, 0.12),
             0,
         )
@@ -659,7 +748,7 @@ mod tests {
         assert_eq!(report.status.rate_limited_429, 60);
         assert_eq!(report.retries_after_429, 60);
         assert_eq!(report.status.accepted_202, report.requests);
-        let arrivals = mock.arrivals.lock().unwrap().clone();
+        let arrivals = transport.sends();
         let first_wave = arrivals[59];
         let later: Vec<Instant> = arrivals
             .iter()
