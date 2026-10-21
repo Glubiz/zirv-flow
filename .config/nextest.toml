@@ -13,5 +13,5 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 db-throughput = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'package(zirv-flow-jobs) & (test(ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once) | test(jobs_that_fail_once_are_retried_and_still_take_effect_exactly_once))'
+filter = 'package(zirv-flow-jobs) & (test(ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once) | test(jobs_that_fail_once_are_retried_and_still_take_effect_exactly_once) | test(a_segment_entry_trigger_for_100000_people_enrolls_each_exactly_once))'
 test-group = 'db-throughput'
