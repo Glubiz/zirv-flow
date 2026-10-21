@@ -21,6 +21,11 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+/** A token of a JSON pointer as the key it names (RFC 6901: ~1 is a slash, then ~0 is a tilde). */
+function unescapePointer(token: string): string {
+  return token.replaceAll("~1", "/").replaceAll("~0", "~");
+}
+
 function valueWords(value: unknown): string {
   if (value === null || value === undefined) return "nothing";
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -33,10 +38,11 @@ export function FlowChanges({ changes, before, after, names }: Props) {
 
   const steps: StepLine[] = [];
   const seen = new Set<string>();
-  const connections = { added: 0, removed: 0, changed: 0 };
+  /** One entry per connection, whatever number of its fields changed; a change of the whole connection wins. */
+  const edges = new Map<string, DraftChange["change"]>();
   const settings: DraftChange[] = [];
   for (const change of changes) {
-    const parts = change.path.split("/").slice(1);
+    const parts = change.path.split("/").slice(1).map(unescapePointer);
     if (parts[0] === "graph" && parts[1] === "nodes" && parts[2] !== undefined) {
       const id = parts[2];
       const whole = parts.length === 3;
@@ -48,13 +54,16 @@ export function FlowChanges({ changes, before, after, names }: Props) {
         steps.push({ kind: "Changed", id });
       }
     } else if (parts[0] === "graph" && parts[1] === "edges") {
-      connections[change.change] += 1;
-    } else {
+      const id = parts[2];
+      if (id !== undefined && (parts.length === 3 || !edges.has(id))) edges.set(id, parts.length === 3 ? change.change : "changed");
+    } else if (parts[0] === "settings") {
       settings.push(change);
     }
   }
   const touched = steps.length > 0;
-  const wired = connections.added + connections.removed + connections.changed;
+  const connections = { added: 0, removed: 0, changed: 0 };
+  for (const kind of edges.values()) connections[kind] += 1;
+  const wired = edges.size;
 
   return (
     <div className="stack-tight">
@@ -90,7 +99,7 @@ export function FlowChanges({ changes, before, after, names }: Props) {
         ) : null}
         {settings.map((change) => (
           <li key={change.path}>
-            <span className="strong">Settings</span> · {change.path.split("/").slice(2).join(" › ") || "all of them"}:{" "}
+            <span className="strong">Settings</span> · {change.path.split("/").slice(2).map(unescapePointer).join(" › ") || "all of them"}:{" "}
             {valueWords(change.before)} → {valueWords(change.after)}
           </li>
         ))}

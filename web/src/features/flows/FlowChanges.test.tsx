@@ -58,4 +58,40 @@ describe("FlowChanges", () => {
 
     expect(screen.getByText("Same as the saved draft.")).toBeInTheDocument();
   });
+
+  it("counts a connection once however many of its fields changed", () => {
+    render(
+      <FlowChanges
+        names={names}
+        before={before}
+        after={before}
+        changes={[change("/graph/edges/e1/to", "n2", "n3"), change("/graph/edges/e1/port", "next", "else"), change("/graph/edges/e2/to", "n3", "n4")]}
+      />,
+    );
+
+    expect(screen.getByRole("list", { name: "What the draft changes" })).toHaveTextContent("Connections · 2 changed");
+  });
+
+  it("reads JSON pointer escapes in a step id, so the step is found by its real id", () => {
+    const odd: Graph = { ...before, nodes: [{ id: "a/b~c", type: "exit" }] };
+    render(
+      <FlowChanges
+        names={names}
+        before={odd}
+        after={odd}
+        changes={[{ path: "/graph/nodes/a~1b~0c", change: "removed", before: null, after: null } as unknown as DraftChange]}
+      />,
+    );
+
+    expect(screen.getByRole("list", { name: "What the draft changes" })).toHaveTextContent("Removed · Exit");
+    expect(screen.getByText("a/b~c")).toBeInTheDocument();
+  });
+
+  it("does not list a change of the graph as a setting", () => {
+    render(<FlowChanges names={names} before={before} after={before} changes={[change("/graph/v", 1, 2)]} />);
+
+    const list = screen.getByRole("list", { name: "What the draft changes" });
+    expect(list).not.toHaveTextContent("Settings");
+    expect(screen.getByText(/Show every field/)).toBeInTheDocument();
+  });
 });
