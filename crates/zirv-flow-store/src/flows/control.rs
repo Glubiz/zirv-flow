@@ -26,7 +26,7 @@ use super::runtime::{
     EnrollmentStatus, StepJobInput, StepJobPayload, find_enrollment, lock_enrollment,
 };
 use super::state::FlowState;
-use crate::{NewDecision, NewJob, StoreError, append_decisions, enqueue, enqueue_many};
+use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enqueue, enqueue_many};
 
 /// The kind of the job that matches the goal and exit criteria of a batch of enrollments.
 pub const SETTLE_JOB_KIND: &str = "flow.settle";
@@ -259,13 +259,13 @@ async fn end_in_flight(
     now: Option<OffsetDateTime>,
     trace: &TraceContext,
 ) -> Result<usize, StoreError> {
-    let ended: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let ended: Vec<(Uuid, Uuid, Uuid, i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE enrollments SET state = 'exited', exit_reason = $3, \
              state_version = state_version + 1, wake_at = NULL, error = NULL, \
              failed_node = NULL, failure_placed = false, resume_input = NULL, \
              ended_at = COALESCE($4, now()), updated_at = now() \
          WHERE workspace_id = $1 AND {key} = ANY($2) AND state IN {IN_FLIGHT} \
-         RETURNING id, person_id, flow_id"
+         RETURNING id, person_id, flow_id, flow_version, node"
     )))
     .bind(workspace.as_uuid())
     .bind(keys)
@@ -277,7 +277,7 @@ async fn end_in_flight(
     if ended.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<Uuid> = ended.iter().map(|(id, _, _)| *id).collect();
+    let ids: Vec<Uuid> = ended.iter().map(|(id, ..)| *id).collect();
     sqlx::query("DELETE FROM enrollment_waits WHERE enrollment_id = ANY($1)")
         .bind(&ids)
         .execute(&mut *connection)
@@ -285,7 +285,8 @@ async fn end_in_flight(
         .map_err(StoreError::query)?;
     let decisions: Vec<NewDecision> = ended
         .iter()
-        .map(|(id, person, flow)| NewDecision {
+        .map(|(id, person, flow, version, node)| NewDecision {
+            graph: Some(GraphPoint::at(*version, node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -303,6 +304,8 @@ async fn end_in_flight(
 struct HeldRow {
     id: Uuid,
     person_id: Uuid,
+    flow_version: i32,
+    node: String,
     state_version: i64,
     resume_input: Value,
     trace_id: Uuid,
@@ -347,7 +350,7 @@ pub async fn resume_batch(
     let last = found.last().map(|(_, person)| *person);
     let ids = lock_people(connection, workspace, &found).await?;
     let held: Vec<HeldRow> = sqlx::query_as(
-        "SELECT id, person_id, state_version, resume_input, trace_id, cause_kind, cause_id \
+        "SELECT id, person_id, flow_version, node, state_version, resume_input, trace_id, cause_kind, cause_id \
          FROM enrollments WHERE workspace_id = $1 AND id = ANY($2) AND state = 'held' \
          ORDER BY id FOR UPDATE",
     )
@@ -386,6 +389,7 @@ pub async fn resume_batch(
         jobs.push(payload.job(&enrollment_trace, None, key));
         resumed.push((row.id, input.status_before().as_str()));
         decisions.push(NewDecision {
+            graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -420,6 +424,7 @@ pub async fn resume_batch(
         .await
         .map_err(StoreError::query)?;
         decisions.extend(unresumable.iter().map(|row| NewDecision {
+            graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
             action: "flow.enrollment",
@@ -494,7 +499,8 @@ impl std::error::Error for ControlError {}
 /// An operator's retry (`skip: false`) or skip (`skip: true`) of a failed enrollment, in the
 /// caller's transaction. The flow must be published: an archived or a paused flow refuses both
 /// (an operator resumes a paused flow first), and writes nothing. The enrollment is locked (person
-/// first), checked, and a decision under `trace` records the action.
+/// first), checked, and a decision records the action on the enrollment's own trace (the cause is
+/// `trace`'s); that trace id is returned.
 ///
 /// A retry of a step that failed in the runtime puts the enrollment back in the state the step
 /// started from (it kept its node, timer, waits and `state_version`) and enqueues the input that
@@ -507,7 +513,7 @@ pub async fn resume_failed(
     enrollment: Uuid,
     skip: bool,
     trace: &TraceContext,
-) -> Result<(), ControlError> {
+) -> Result<TraceId, ControlError> {
     let Some(known) = find_enrollment(connection, workspace, enrollment).await? else {
         return Err(ControlError::NotFound);
     };
@@ -562,14 +568,26 @@ pub async fn resume_failed(
         if skip { "skip" } else { "retry" }
     );
     enqueue(&mut *connection, &payload.job(&locked.trace, None, key)).await?;
+    // The decision stays on the enrollment's own trace, so one trace reads from the trigger to the
+    // operator's action; its cause is the operator's.
+    let trace_id = locked.trace.trace_id;
+    let decided = TraceContext {
+        trace_id,
+        cause: trace.cause.clone(),
+    };
+    let node = locked
+        .failed_node
+        .clone()
+        .unwrap_or_else(|| locked.node.clone());
     append_decisions(
         connection,
         &[NewDecision {
+            graph: Some(GraphPoint::at(locked.flow_version, &node)),
             workspace_id: workspace,
-            trace: trace.clone(),
+            trace: decided,
             action: "flow.enrollment",
             outcome: if skip { "skipped" } else { "retried" },
-            reason: None,
+            reason: Some("operator"),
             subject_ids: vec![
                 ("flow", flow),
                 ("enrollment", enrollment),
@@ -579,7 +597,7 @@ pub async fn resume_failed(
         }],
     )
     .await?;
-    Ok(())
+    Ok(trace_id)
 }
 
 /// What the goal or the exit criteria of an enrollment's flow noticed.

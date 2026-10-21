@@ -5,6 +5,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::decisions::ID_SUBJECTS;
+
 /// `(table.column, row count)` for every place that holds `person`, sorted by name. It scans
 /// each column named `person_id` or ending in `_person_id`, `people.id`,
 /// `people.merged_into`, and the subjects of `decision_records`. A partition is counted
@@ -46,10 +48,10 @@ pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<
             found.push((format!("{table}.{column}"), count));
         }
     }
-    let decisions: i64 = sqlx::query_scalar(
+    let decisions: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM decision_records d WHERE EXISTS \
-            (SELECT 1 FROM jsonb_each_text(d.subject_ids) s WHERE s.value = $1::text)",
-    )
+            (SELECT 1 FROM {ID_SUBJECTS} AND s.value = $1::text)"
+    )))
     .bind(person)
     .fetch_one(pool)
     .await

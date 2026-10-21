@@ -796,6 +796,7 @@ async fn store_replayed(
     append_decision(
         connection,
         &NewDecision {
+            graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
             action: "event.replayed",

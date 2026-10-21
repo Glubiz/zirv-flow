@@ -195,6 +195,7 @@ impl<'a> JobContext<'a> {
             ));
         };
         let decision = NewDecision {
+            graph: None,
             workspace_id,
             trace: self.job.trace.clone(),
             action,

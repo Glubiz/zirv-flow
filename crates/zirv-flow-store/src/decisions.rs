@@ -41,6 +41,60 @@ pub struct NewDecision {
     pub subject_ids: Vec<(&'static str, Uuid)>,
     /// The job and attempt number that made the decision, when a job did.
     pub job: Option<(Uuid, i32)>,
+    /// Where in a flow's graph the decision was made, for the flow decisions the UI links from.
+    pub graph: Option<GraphPoint>,
+}
+
+/// A point in a flow's published graph: the version an enrollment is pinned to and, when the
+/// decision concerns one, the node. Both are ids the marketer chose, never personal data. They
+/// are stored in `subject_ids` as `version` (a number) and `node` (text).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphPoint {
+    pub version: i32,
+    pub node: Option<String>,
+}
+
+impl GraphPoint {
+    /// The point of a decision about the version as a whole, such as an enrollment.
+    pub fn of_version(version: i32) -> Self {
+        Self {
+            version,
+            node: None,
+        }
+    }
+
+    /// The point of a decision about one node of the version.
+    pub fn at(version: i32, node: &str) -> Self {
+        Self {
+            version,
+            node: Some(node.to_owned()),
+        }
+    }
+}
+
+/// The `FROM` and `WHERE` of a subquery over the rows of a decision's `subject_ids` that hold a
+/// durable id (`s.key` is the name, `s.value` the id), used as `SELECT 1 FROM {ID_SUBJECTS} AND
+/// s.value = ...`. It leaves out the graph point's `node` and `version`, which are text the
+/// marketer chose and can equal anything, a person's id included. Erasure and the erasure scan
+/// match a person only through this, so a node id never reads as a reference to a person. The
+/// decision table must be aliased `d`.
+pub(crate) const ID_SUBJECTS: &str =
+    "jsonb_each_text(d.subject_ids) s WHERE s.key NOT IN ('node', 'version')";
+
+/// The `subject_ids` document of a record: ids by name, then the graph point.
+fn subjects_of(decision: &NewDecision) -> Value {
+    let mut subjects: Map<String, Value> = decision
+        .subject_ids
+        .iter()
+        .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
+        .collect();
+    if let Some(point) = &decision.graph {
+        subjects.insert("version".to_owned(), Value::from(point.version));
+        if let Some(node) = &point.node {
+            subjects.insert("node".to_owned(), Value::String(node.clone()));
+        }
+    }
+    Value::Object(subjects)
 }
 
 /// A record as stored.
@@ -94,6 +148,18 @@ impl DecisionRow {
     }
 }
 
+/// The first `limit` of `rows` (which were read with one more), and whether there were more.
+fn decisions_page(rows: Vec<DecisionRow>, limit: u32) -> Result<(Vec<Decision>, bool), StoreError> {
+    let limit = limit as usize;
+    let truncated = rows.len() > limit;
+    let decisions = rows
+        .into_iter()
+        .take(limit)
+        .map(DecisionRow::into_decision)
+        .collect::<Result<_, _>>()?;
+    Ok((decisions, truncated))
+}
+
 /// Appends a record. Pass the caller's transaction so the record commits with the change
 /// it describes.
 pub async fn append_decision<'e>(
@@ -103,18 +169,13 @@ pub async fn append_decision<'e>(
     if BENCH_NO_DECISIONS {
         return Ok(());
     }
-    let subjects: Map<String, Value> = decision
-        .subject_ids
-        .iter()
-        .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
-        .collect();
     sqlx::query(
         "INSERT INTO decision_records \
             (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
              subject_ids, job_id, attempt) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
-    .bind(Uuid::new_v4())
+    .bind(Uuid::now_v7())
     .bind(decision.workspace_id.as_uuid())
     .bind(decision.trace.trace_id.as_uuid())
     .bind(decision.action)
@@ -122,7 +183,7 @@ pub async fn append_decision<'e>(
     .bind(decision.reason)
     .bind(decision.trace.cause.kind.as_str())
     .bind(&decision.trace.cause.id)
-    .bind(Value::Object(subjects))
+    .bind(subjects_of(decision))
     .bind(decision.job.map(|(id, _)| id))
     .bind(decision.job.map(|(_, attempt)| attempt))
     .execute(executor)
@@ -145,12 +206,7 @@ pub async fn append_decisions(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
         );
         query.push_values(chunk, |mut row, decision| {
-            let subjects: Map<String, Value> = decision
-                .subject_ids
-                .iter()
-                .map(|(name, id)| ((*name).to_owned(), Value::String(id.to_string())))
-                .collect();
-            row.push_bind(Uuid::new_v4())
+            row.push_bind(Uuid::now_v7())
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
                 .push_bind(decision.action)
@@ -158,7 +214,7 @@ pub async fn append_decisions(
                 .push_bind(decision.reason)
                 .push_bind(decision.trace.cause.kind.as_str())
                 .push_bind(decision.trace.cause.id.clone())
-                .push_bind(Value::Object(subjects))
+                .push_bind(subjects_of(decision))
                 .push_bind(decision.job.map(|(id, _)| id))
                 .push_bind(decision.job.map(|(_, attempt)| attempt));
         });
@@ -191,13 +247,7 @@ pub async fn list_trace(
     .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
-    let truncated = rows.len() > limit as usize;
-    let decisions = rows
-        .into_iter()
-        .take(limit as usize)
-        .map(DecisionRow::into_decision)
-        .collect::<Result<_, _>>()?;
-    Ok((decisions, truncated))
+    decisions_page(rows, limit)
 }
 
 /// Creates the monthly partitions for the month of `today` and the next one, if they are
@@ -245,6 +295,39 @@ pub(crate) fn bound(date: Date) -> String {
     )
 }
 
+/// The newest `limit` records that name `enrollment` as a subject, returned oldest first,
+/// recorded at or after `since` (the enrollment's creation, which prunes the partitions). The
+/// flag is true when older records were left out: the failure, retry, skip or exit an operator
+/// came to see is at the end of the walk, so the newest are the ones to keep. Errors are
+/// bounded-read errors, so a timeout is reported as one.
+pub(crate) async fn list_enrollment_decisions(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+    since: OffsetDateTime,
+    limit: u32,
+) -> Result<(Vec<Decision>, bool), StoreError> {
+    let rows: Vec<DecisionRow> = sqlx::query_as(
+        "SELECT id, trace_id, recorded_at, action, outcome, reason, cause_kind, cause_id, \
+                subject_ids, job_id, attempt \
+         FROM decision_records \
+         WHERE workspace_id = $1 AND subject_ids ? 'enrollment' \
+           AND (subject_ids ->> 'enrollment') = $2 AND recorded_at >= $3 \
+         ORDER BY recorded_at DESC, id DESC LIMIT $4",
+    )
+    .bind(workspace.as_uuid())
+    .bind(enrollment.to_string())
+    .bind(since)
+    .bind(i64::from(limit) + 1)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::bounded)?;
+    // Newest first here, so the extra row is the oldest to drop; then flip to oldest first.
+    let (mut newest, truncated) = decisions_page(rows, limit)?;
+    newest.reverse();
+    Ok((newest, truncated))
+}
+
 #[cfg(test)]
 mod tests {
     use time::macros::date;
@@ -265,6 +348,7 @@ mod tests {
         action: &'static str,
     ) -> NewDecision {
         NewDecision {
+            graph: None,
             workspace_id,
             trace: trace.clone(),
             action,
@@ -377,6 +461,7 @@ mod tests {
                         append_decision(
                             &mut *tx,
                             &NewDecision {
+                                graph: None,
                                 workspace_id: ws,
                                 trace: trace.clone(),
                                 action,
@@ -532,6 +617,120 @@ mod tests {
 
         assert_eq!((cut.len(), cut_flag), (2, true));
         assert_eq!((all.len(), all_flag), (3, false));
+    }
+
+    fn numbered(count: usize) -> Vec<&'static str> {
+        (0..count)
+            .map(|n| &*Box::leak(format!("a{n:03}").into_boxed_str()))
+            .collect()
+    }
+
+    fn of_enrollment(
+        ws: WorkspaceId,
+        trace: &TraceContext,
+        enrollment: Uuid,
+        action: &'static str,
+    ) -> NewDecision {
+        let mut record = decision(ws, trace, action);
+        record.subject_ids = vec![("enrollment", enrollment)];
+        record
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn records_of_one_transaction_keep_the_order_they_were_written_in(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let actions = numbered(80);
+        // Both write paths, in one transaction, so every record shares one `recorded_at`.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        for action in &actions[..40] {
+            append_decision(&mut *tx, &of_enrollment(ws, &trace, enrollment, action))
+                .await
+                .unwrap();
+        }
+        let batch: Vec<NewDecision> = actions[40..]
+            .iter()
+            .map(|a| of_enrollment(ws, &trace, enrollment, a))
+            .collect();
+        append_decisions(&mut tx, &batch).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 1000).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let (on_enrollment, _) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            1000,
+        )
+        .await
+        .unwrap();
+
+        for read in [records, on_enrollment] {
+            let read: Vec<&str> = read.iter().map(|r| r.action.as_str()).collect();
+            assert_eq!(read, actions);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_long_enrollment_keeps_its_newest_records_oldest_first(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let actions = numbered(12);
+        for action in &actions {
+            append_decision(&pool, &of_enrollment(ws, &trace, enrollment, action))
+                .await
+                .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let (cut, truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            5,
+        )
+        .await
+        .unwrap();
+        let (all, all_truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            12,
+        )
+        .await
+        .unwrap();
+
+        let cut: Vec<&str> = cut.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(cut, actions[7..]);
+        assert!(truncated, "older records were left out");
+        assert_eq!((all.len(), all_truncated), (12, false));
+
+        // The exact boundary: one record more than the limit.
+        append_decision(&pool, &of_enrollment(ws, &trace, enrollment, "extra"))
+            .await
+            .unwrap();
+        let (edge, edge_truncated) = list_enrollment_decisions(
+            &mut connection,
+            ws,
+            enrollment,
+            OffsetDateTime::UNIX_EPOCH,
+            12,
+        )
+        .await
+        .unwrap();
+        let edge: Vec<&str> = edge.iter().map(|r| r.action.as_str()).collect();
+        let mut newest: Vec<&str> = actions[1..].to_vec();
+        newest.push("extra");
+        assert_eq!(edge, newest);
+        assert!(edge_truncated, "the oldest of 13 was left out");
     }
 
     #[sqlx::test]

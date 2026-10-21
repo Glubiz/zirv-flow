@@ -33,9 +33,9 @@ use zirv_flow_segments::{
 };
 use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
-    NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput, StepJobPayload,
-    StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list,
-    apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
+    GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions,
+    apply_flow_list, apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
     find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment, record_steps,
     register_wait, release_enrollment, reopen_failed_step, run_person_batch, save_enrollment,
     segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
@@ -174,6 +174,7 @@ async fn release(
     // The decision the resume batch would have written, under the enrollment's own trace (the
     // batch's is not known here) and in this transaction, so the trace reads held, resumed, steps.
     let decision = NewDecision {
+        graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",
@@ -216,6 +217,7 @@ async fn hold(
     hold_enrollment(conn, job.workspace, enrollment.id, &job.input).await?;
     if !already {
         let decision = NewDecision {
+            graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
             workspace_id: job.workspace,
             trace: enrollment.trace.clone(),
             action: "flow.enrollment",
@@ -311,6 +313,7 @@ impl Walk<'_> {
         outcome: &'static str,
         reason: Option<&'static str>,
         step: Option<Uuid>,
+        node: Option<&str>,
     ) -> NewDecision {
         let enrollment = self.enrollment;
         let mut subject_ids = vec![
@@ -320,6 +323,10 @@ impl Walk<'_> {
         ];
         subject_ids.extend(step.map(|id| ("step_execution", id)));
         NewDecision {
+            graph: Some(GraphPoint {
+                version: enrollment.flow_version,
+                node: node.map(str::to_owned),
+            }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
             action,
@@ -544,7 +551,7 @@ async fn wake(
     };
     let node = walk.enrollment.node.clone();
     let step = settle_wait_step(&mut *conn, walk.enrollment.id, &node).await?;
-    let decision = walk.decision("flow.wake", outcome, None, step);
+    let decision = walk.decision("flow.wake", outcome, None, step, Some(&node));
     append_decisions(conn, &[decision]).await?;
     Ok(())
 }
@@ -628,7 +635,13 @@ async fn apply(
             ),
             (None, _) => ("done", Some(kind)),
         };
-        decisions.push(walk.decision("flow.step", outcome, reason, Some(record.id)));
+        decisions.push(walk.decision(
+            "flow.step",
+            outcome,
+            reason,
+            Some(record.id),
+            Some(&visit.node),
+        ));
     }
     append_decisions(&mut *conn, &decisions).await?;
 
@@ -716,7 +729,7 @@ async fn apply_effect(
             Ok(None)
         }
         EffectKind::GoalConversion => {
-            decisions.push(walk.decision("flow.goal", "converted", None, step));
+            decisions.push(walk.decision("flow.goal", "converted", None, step, Some(&effect.node)));
             Ok(None)
         }
         EffectKind::Webhook { url, trait_keys } => {
@@ -882,13 +895,14 @@ async fn branch(
             CASES.get(index).copied().unwrap_or("case_more")
         });
     let step = walk.step_of(node);
-    let mut decisions = vec![walk.decision("flow.branch", taken, None, step)];
+    let mut decisions = vec![walk.decision("flow.branch", taken, None, step, Some(node))];
     for (index, matched) in results.iter().enumerate() {
         decisions.push(walk.decision(
             "flow.branch.condition",
             if *matched { "matched" } else { "unmatched" },
             Some(CASES.get(index).copied().unwrap_or("case_more")),
             step,
+            Some(node),
         ));
     }
     append_decisions(&mut *conn, &decisions)
@@ -953,11 +967,29 @@ async fn finish(
                 Some(NodeKind::WaitUntilTime { .. }) => "until_time",
                 _ => "duration",
             };
-            walk.decision("flow.wait", "waiting", Some(reason), step)
+            walk.decision(
+                "flow.wait",
+                "waiting",
+                Some(reason),
+                step,
+                Some(&state.node),
+            )
         }
-        Outcome::Completed => walk.decision("flow.enrollment", "completed", None, step),
-        Outcome::Exited { .. } => walk.decision("flow.enrollment", "exited", exit_reason, step),
-        _ => walk.decision("flow.enrollment", "failed", error, step),
+        Outcome::Completed => walk.decision(
+            "flow.enrollment",
+            "completed",
+            None,
+            step,
+            Some(&state.node),
+        ),
+        Outcome::Exited { .. } => walk.decision(
+            "flow.enrollment",
+            "exited",
+            exit_reason,
+            step,
+            Some(&state.node),
+        ),
+        _ => walk.decision("flow.enrollment", "failed", error, step, Some(&state.node)),
     };
     append_decisions(&mut *conn, &[decision]).await?;
     Ok(())
@@ -1005,6 +1037,7 @@ async fn fail_enrollment(
         return Err(JobError::new("the enrollment moved under its lock"));
     }
     let decision = NewDecision {
+        graph: Some(GraphPoint::at(enrollment.flow_version, failed_node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         action: "flow.enrollment",
@@ -2409,5 +2442,344 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!(reason, "timezone_fallback");
         assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
+    }
+
+    /// The subject ids of every flow decision on `trace`, with the action and outcome.
+    async fn flow_subjects(env: &Env, trace: &TraceContext) -> Vec<(String, String, Value)> {
+        sqlx::query_as(
+            "SELECT action, outcome, subject_ids FROM decision_records \
+             WHERE workspace_id = $1 AND trace_id = $2 AND action LIKE 'flow.%' \
+             ORDER BY recorded_at, id",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(trace.trace_id.as_uuid())
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_flow_decision_of_a_path_names_the_flow_version_node_enrollment_and_person(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let list = env.list("Welcomed").await;
+        let ada = env.person("ada@example.com", json!({})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 30},
+            {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "l"), edge("e2", "l", "next", "end")]});
+        let flow = env.flow("Three", graph).await;
+        let enrolled = env.enroll(flow, 1, &[ada]).await;
+        let id = enrolled.enrolled[0].enrollment;
+        let trace = enrolled.enrolled[0].trace.clone();
+        env.run_due().await;
+        env.advance(31);
+        env.run_due().await;
+
+        let decisions = flow_subjects(&env, &trace).await;
+
+        assert!(decisions.len() >= 7, "{decisions:?}");
+        for (action, outcome, subjects) in &decisions {
+            let label = format!("{action}/{outcome}: {subjects}");
+            assert_eq!(subjects["flow"], json!(flow.to_string()), "{label}");
+            assert_eq!(subjects["version"], json!(1), "{label}");
+            assert_eq!(subjects["enrollment"], json!(id.to_string()), "{label}");
+            assert_eq!(subjects["person"], json!(ada.to_string()), "{label}");
+            if action == "flow.enroll" {
+                assert!(subjects.get("node").is_none(), "{label}");
+            } else {
+                assert!(subjects["node"].is_string(), "{label}");
+            }
+        }
+        let node_of = |action: &str, outcome: &str| -> Vec<String> {
+            decisions
+                .iter()
+                .filter(|(a, o, _)| a == action && o == outcome)
+                .map(|(_, _, subjects)| subjects["node"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(node_of("flow.wait", "waiting"), ["w"]);
+        assert_eq!(node_of("flow.wake", "timer"), ["w"]);
+        assert_eq!(node_of("flow.enrollment", "completed"), ["end"]);
+        let mut done = node_of("flow.step", "done");
+        done.sort();
+        assert_eq!(done, ["end", "l"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_branch_decision_names_the_branch_node(pool: PgPool) {
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "pick", "type": "branch",
+             "conditions": [{"trait": "plan", "op": "eq", "value": "pro"}]},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "pick", "case_0", "end"), edge("e2", "pick", "else", "end")]});
+        let flow = env.flow("Branching", graph).await;
+        let trace = env.enroll(flow, 1, &[ada]).await.enrolled[0].trace.clone();
+
+        env.run_due().await;
+
+        let decisions = flow_subjects(&env, &trace).await;
+        let branches: Vec<_> = decisions
+            .iter()
+            .filter(|(action, _, _)| action.starts_with("flow.branch"))
+            .collect();
+        assert!(!branches.is_empty(), "{decisions:?}");
+        for (action, _, subjects) in branches {
+            assert_eq!(subjects["node"], "pick", "{action}");
+            assert_eq!(subjects["version"], json!(1), "{action}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_triggered_enrollment_that_fails_is_retried_and_skipped_on_one_trace(
+        pool: PgPool,
+    ) {
+        const MESSAGE: &str = "an increment needs a trait whose value is a number";
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "bump", "type": "action.update_trait", "key": "plan",
+             "change": {"op": "increment", "by": 1.0}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "bump", "next", "end")]});
+        let flow = env.flow("Failing", graph).await;
+        // The segment change that triggers the enrollment: its cause is the membership change.
+        let change = Cause::trait_change(Uuid::now_v7());
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let enrolled = zirv_flow_store::enroll(
+            &mut tx,
+            &EnrollRequest {
+                workspace: env.ws,
+                flow,
+                version: 1,
+                people: &[ada],
+                occurrence: Occurrence {
+                    trigger: "segment",
+                    id: Uuid::now_v7(),
+                },
+                now: env.clock.now(),
+                trace: &TraceContext::root(change.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let id = enrolled.enrolled[0].enrollment;
+        let trace = enrolled.enrolled[0].trace.clone();
+        let one_attempt = || async {
+            sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        };
+        one_attempt().await;
+        env.run_due().await;
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
+
+        let operator = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
+            Uuid::new_v4(),
+        )));
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let retried = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, false, &operator)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        one_attempt().await;
+        env.run_due().await;
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let skipped = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, true, &operator)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        one_attempt().await;
+        env.run_due().await;
+
+        assert_eq!(
+            retried, trace.trace_id,
+            "the retry is on the enrollment's trace"
+        );
+        assert_eq!(skipped, trace.trace_id, "so is the skip");
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        // Nothing of the enrollment is on any other trace.
+        let elsewhere: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records \
+             WHERE subject_ids ->> 'enrollment' = $1 AND trace_id <> $2",
+        )
+        .bind(id.to_string())
+        .bind(trace.trace_id.as_uuid())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(elsewhere, 0);
+        // The trace read, as the trace endpoint reads it.
+        let (records, truncated) =
+            zirv_flow_store::list_trace(&env.pool, env.ws, trace.trace_id, 1000)
+                .await
+                .unwrap();
+        assert!(!truncated);
+        let flow_records: Vec<_> = records
+            .iter()
+            .filter(|record| record.action.starts_with("flow."))
+            .collect();
+        for record in &flow_records {
+            for key in ["flow", "version", "enrollment", "person"] {
+                assert!(
+                    record.subject_ids.get(key).is_some(),
+                    "{} {} lacks {key}",
+                    record.action,
+                    record.outcome
+                );
+            }
+        }
+        let of = |outcome: &str| -> Vec<_> {
+            flow_records
+                .iter()
+                .filter(|record| record.action == "flow.enrollment" && record.outcome == outcome)
+                .collect()
+        };
+        let failures = of("failed");
+        assert_eq!(
+            failures.len(),
+            2,
+            "the step failed, and failed again on the retry"
+        );
+        for failure in failures {
+            assert_eq!(failure.reason.as_deref(), Some(MESSAGE), "not truncated");
+            assert_eq!(failure.subject_ids["node"], "bump");
+        }
+        for outcome in ["retried", "skipped"] {
+            let records = of(outcome);
+            assert_eq!(records.len(), 1, "{outcome}");
+            assert_eq!(records[0].reason.as_deref(), Some("operator"));
+            assert_eq!(records[0].subject_ids["node"], "bump");
+            assert_eq!(
+                records[0].cause, operator.cause,
+                "the operator is the cause"
+            );
+        }
+        assert!(
+            flow_records
+                .iter()
+                .any(|r| r.cause == Cause::from_stored(change.kind, change.id.clone()))
+        );
+        // The enrollment's path carries the same decisions.
+        let path = zirv_flow_store::load_enrollment_path(&env.pool, env.ws, flow, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let on_trace: Vec<Uuid> = flow_records.iter().map(|r| r.id).collect();
+        let on_path: Vec<Uuid> = path
+            .decisions
+            .iter()
+            .filter(|r| r.action.starts_with("flow."))
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(on_path, on_trace);
+        assert_eq!(path.enrollment.trace_id, trace.trace_id.as_uuid());
+        // Both reads agree, but they share an ORDER BY, so check the order itself: it is the
+        // order the walk wrote the records in, which the ids follow.
+        let mut by_id = on_path.clone();
+        by_id.sort();
+        assert_eq!(on_path, by_id, "the path is in the order the walk wrote");
+        let walk: Vec<&str> = path
+            .decisions
+            .iter()
+            .filter(|r| r.action == "flow.enrollment" && r.outcome != "enrolled")
+            .map(|r| r.outcome.as_str())
+            .collect();
+        assert_eq!(
+            walk,
+            ["failed", "retried", "failed", "skipped", "completed"]
+        );
+        // The person's timeline shows the same flow decisions, each with the version and node
+        // the walk wrote.
+        let timeline = zirv_flow_store::load_timeline(
+            &env.pool,
+            env.ws,
+            ada,
+            zirv_flow_store::TimelineFilter::default(),
+            100,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut on_timeline: Vec<(Uuid, Option<i64>, Option<String>)> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
+                    Some((
+                        d.id,
+                        d.subject_ids["version"].as_i64(),
+                        d.subject_ids["node"].as_str().map(str::to_owned),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        on_timeline.sort();
+        let mut written: Vec<(Uuid, Option<i64>, Option<String>)> = flow_records
+            .iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.subject_ids["version"].as_i64(),
+                    r.subject_ids["node"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        written.sort();
+        assert_eq!(on_timeline, written);
+        // Each carries the enrollment's trace and names the enrollment.
+        let timeline_flow: Vec<_> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
+                    Some(d)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(timeline_flow.len(), flow_records.len());
+        for d in timeline_flow {
+            assert_eq!(
+                d.trace_id,
+                trace.trace_id.as_uuid(),
+                "{} {} is on the enrollment's trace",
+                d.action,
+                d.outcome
+            );
+            assert_eq!(
+                d.subject_ids["enrollment"].as_str(),
+                Some(id.to_string().as_str()),
+                "{} {} names the enrollment",
+                d.action,
+                d.outcome
+            );
+        }
+        assert!(
+            on_timeline
+                .iter()
+                .all(|(_, version, _)| *version == Some(1)),
+            "every flow decision carries the pinned version"
+        );
+        assert!(
+            on_timeline
+                .iter()
+                .any(|(_, _, node)| node.as_deref() == Some("bump")),
+            "step decisions carry their node"
+        );
     }
 }

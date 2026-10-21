@@ -105,6 +105,7 @@ pub async fn sweep_unreached(
         .await?;
         if let Some(removed) = removed {
             decisions.push(NewDecision {
+                graph: None,
                 workspace_id: unit.workspace,
                 trace: unit.trace.clone(),
                 action: "sync.record",
