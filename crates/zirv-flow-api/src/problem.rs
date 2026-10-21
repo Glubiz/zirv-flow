@@ -612,6 +612,11 @@ impl ApiError {
     /// An explanation that did not pass its checks within the repair attempts: the issue codes
     /// of the last attempt.
     pub(crate) fn ai_explain_failed(issues: Vec<SegmentIssueProblem>) -> Self {
+        Self::ai_explain_failed_for("segment", issues)
+    }
+
+    /// [`Self::ai_explain_failed`] for what was explained: a segment, a flow or a trace.
+    pub(crate) fn ai_explain_failed_for(what: &str, issues: Vec<SegmentIssueProblem>) -> Self {
         Self {
             code: Some("ai_explain_failed"),
             segment: Some(Box::new(SegmentExtra {
@@ -619,7 +624,20 @@ impl ApiError {
                 cycle: None,
                 ..SegmentExtra::default()
             })),
-            ..Self::unprocessable("the assistant could not explain this segment; try again")
+            ..Self::unprocessable(format!(
+                "the assistant could not explain this {what}; try again"
+            ))
+        }
+    }
+
+    /// A flow too large to send to the model with its personal literals masked.
+    pub(crate) fn ai_flow_too_large() -> Self {
+        Self {
+            code: Some("ai_flow_too_large"),
+            ..Self::unprocessable(
+                "this flow is too large to send to the assistant without personal data (more than \
+                 200 nodes, or a condition too deep); simplify it first",
+            )
         }
     }
 

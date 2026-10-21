@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 use zirv_flow_ai::{
-    BoxFuture, ChatResponse, RepairError, RepairOutcome, ToolError, ToolOutput, Verdict,
+    BoxFuture, ChatRequest, ChatResponse, RepairError, RepairOutcome, ToolError, ToolOutput,
+    Verdict,
 };
 
 use super::dispatch::{DispatchError, Dispatcher};
@@ -72,20 +73,21 @@ fn read_request(body: &Bytes) -> Result<AiExplainRequest, ApiError> {
     })
 }
 
-/// Checks one answer: exactly one call of `explain_segment`, run through the registry as the
-/// signed-in user. Anything else is feedback, and a refusal ends the run.
+/// Checks one answer: exactly one call of `tool`, run through the registry as the signed-in user.
+/// Anything else is feedback, and a refusal ends the run.
 async fn explain_turn(
     context: &ToolContext,
+    tool: &'static str,
     response: &ChatResponse,
 ) -> Verdict<Value, DraftIssue, ApiError> {
-    let feedback = || Verdict::Invalid(vec![wrong_answer(TOOL)]);
-    let Some(arguments) = expected_call(response, TOOL) else {
+    let feedback = || Verdict::Invalid(vec![wrong_answer(tool)]);
+    let Some(arguments) = expected_call(response, tool) else {
         return feedback();
     };
-    let Some(tool) = tools::find(TOOL) else {
+    let Some(found) = tools::find(tool) else {
         return feedback();
     };
-    match tool.call(context, arguments).await {
+    match found.call(context, arguments).await {
         Ok(ToolOutput::Draft(explained)) => Verdict::Valid(explained),
         Ok(ToolOutput::Context(_)) => feedback(),
         Err(ToolError::Invalid(lines)) => Verdict::Invalid(DraftIssue::from_lines(&lines)),
@@ -93,11 +95,38 @@ async fn explain_turn(
     }
 }
 
-fn turn(
+fn turn<'a>(
     context: Arc<ToolContext>,
-    response: &ChatResponse,
-) -> BoxFuture<'_, Verdict<Value, DraftIssue, ApiError>> {
-    Box::pin(async move { explain_turn(&context, response).await })
+    tool: &'static str,
+    response: &'a ChatResponse,
+) -> BoxFuture<'a, Verdict<Value, DraftIssue, ApiError>> {
+    Box::pin(async move { explain_turn(&context, tool, response).await })
+}
+
+/// Runs the repair loop of an explanation of any kind and returns the checked answer. `failed`
+/// makes the error of an answer that still did not pass after the last attempt.
+pub(super) async fn run(
+    state: &AppState,
+    dispatcher: &Dispatcher<'_>,
+    context: ToolContext,
+    tool: &'static str,
+    chat: &ChatRequest,
+    failed: impl FnOnce(&[DraftIssue]) -> ApiError,
+) -> Result<Value, ApiError> {
+    let context = Arc::new(context);
+    let outcome = zirv_flow_ai::repair(
+        state.ai.config.max_repair_attempts,
+        chat,
+        dispatcher,
+        move |response| turn(Arc::clone(&context), tool, response),
+    )
+    .await;
+    match outcome {
+        Ok(RepairOutcome::Valid(explained, _)) => Ok(explained),
+        Ok(RepairOutcome::Exhausted(issues, _)) => Err(failed(&issues)),
+        Err(RepairError::Dispatch(error)) => Err(DispatchError::Ai(error).into()),
+        Err(RepairError::Aborted(error)) => Err(error),
+    }
 }
 
 /// The explanation as the response: the model's texts with the literals it was not shown put back,
@@ -206,7 +235,7 @@ pub(crate) async fn explain(
         tool.spec().map_err(|_| ApiError::internal())?,
     )
     .map_err(|error| ApiError::from(DispatchError::Ai(error)))?;
-    let context = Arc::new(ToolContext {
+    let context = ToolContext {
         state: state.clone(),
         principal,
         workspace: workspace.id,
@@ -215,25 +244,12 @@ pub(crate) async fn explain(
             definition: version.definition.clone(),
         },
         sample: None,
-    });
-
-    let outcome = zirv_flow_ai::repair(
-        state.ai.config.max_repair_attempts,
-        &chat,
-        &dispatcher,
-        move |response| turn(Arc::clone(&context), response),
-    )
-    .await;
-    match outcome {
-        Ok(RepairOutcome::Valid(explained, _)) => {
-            Ok(Json(body_of(version.version, &explained, &table)))
-        }
-        Ok(RepairOutcome::Exhausted(issues, _)) => {
-            Err(ApiError::ai_explain_failed(problem_issues(&issues)))
-        }
-        Err(RepairError::Dispatch(error)) => Err(DispatchError::Ai(error).into()),
-        Err(RepairError::Aborted(error)) => Err(error),
-    }
+    };
+    let explained = run(&state, &dispatcher, context, TOOL, &chat, |issues| {
+        ApiError::ai_explain_failed(problem_issues(issues))
+    })
+    .await?;
+    Ok(Json(body_of(version.version, &explained, &table)))
 }
 
 #[cfg(test)]

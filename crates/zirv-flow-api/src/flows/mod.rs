@@ -12,7 +12,7 @@ mod schema;
 pub(crate) mod signing;
 pub(crate) mod test_mode;
 pub(crate) mod triggers;
-mod validation;
+pub(crate) mod validation;
 
 use serde_json::Value;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, Issue};

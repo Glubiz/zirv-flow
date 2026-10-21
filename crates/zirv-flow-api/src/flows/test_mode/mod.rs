@@ -11,6 +11,7 @@
 //! statement timeout (503 `flow_test_timeout`).
 
 pub(crate) mod body;
+pub(crate) mod simulation;
 mod walk;
 
 use std::collections::BTreeMap;

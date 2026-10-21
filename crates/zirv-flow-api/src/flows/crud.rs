@@ -12,6 +12,7 @@ use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_core::ValidationError;
+use zirv_flow_core::flow::{FlowGraph, FlowSettings};
 use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
@@ -55,7 +56,7 @@ fn state_schema() -> Schema {
         .into()
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct FlowBody {
     id: Uuid,
     #[schema(example = "Welcome series")]
@@ -94,7 +95,7 @@ impl From<&Flow> for FlowBody {
 
 /// A flow with its draft. The draft is what the editor changes; published content is in the
 /// versions.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct FlowDetailBody {
     #[serde(flatten)]
     flow: FlowBody,
@@ -203,6 +204,18 @@ pub(super) async fn check_flow(
     flow: &Flow,
 ) -> Result<(super::validation::Checked, OffsetDateTime), ApiError> {
     let (graph, settings) = draft_of(flow)?;
+    check_document(state, connection, workspace, &graph, &settings).await
+}
+
+/// Reads the workspace facts the checks need on `connection` and checks a graph and settings as a
+/// publish would. It writes nothing.
+pub(crate) async fn check_document(
+    state: &AppState,
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    graph: &FlowGraph,
+    settings: &FlowSettings,
+) -> Result<(super::validation::Checked, OffsetDateTime), ApiError> {
     let (catalog, storage) =
         catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
@@ -214,7 +227,21 @@ pub(super) async fn check_flow(
         egress: state.egress_policy(),
         signing_secret,
     };
-    Ok((check(&graph, &settings, &environment), now))
+    Ok((check(graph, settings, &environment), now))
+}
+
+/// [`check_document`] in a read-only transaction of its own that is dropped, for a caller that
+/// holds no connection: the assistant checks a drafted flow this way.
+pub(crate) async fn check_document_read(
+    state: &AppState,
+    workspace: zirv_flow_core::WorkspaceId,
+    graph: &FlowGraph,
+    settings: &FlowSettings,
+) -> Result<super::validation::Checked, ApiError> {
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let (checked, _) = check_document(state, &mut tx, workspace, graph, settings).await?;
+    drop(tx);
+    Ok(checked)
 }
 
 /// The workspace's flows by name; archived ones with `archived=true`.

@@ -342,7 +342,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Drafts a mapping or a manifest with the assistant: the model is asked, its answer validated
+         * Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or
+         *     `flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few
+         *     synthetic people) with the assistant: the model is asked, its answer validated
          *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
          *     repairs. The answer is the validated draft with its diff against the saved version and a dry
          *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
@@ -851,6 +853,32 @@ export interface paths {
          *     A published version is never touched. Audited as `flow.updated`.
          */
         patch: operations["update_flow"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/ai/explain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Explains a flow in plain language: its current draft, or a published version when `version` is
+         *     given. The model gets a summary to write and a sentence for every node but the exit nodes,
+         *     each named by its node id; its answer is checked (every id a node of the graph, every node
+         *     cited once, plain text with a length cap) and, when it fails, asked again at most
+         *     `ai.max_repair_attempts` times. Nothing is stored. Workspace admins who are signed in; an API
+         *     key is refused. Every attempt is a gated model call that counts against the budget and the
+         *     rate limit, and with the assistant off nothing is read or sent. The model is not told any
+         *     trait or event value, count, sample or member.
+         */
+        post: operations["explain_flow_with_ai"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workspaces/{ws}/flows/{id}/archive": {
@@ -2514,6 +2542,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Explains what happened under one trace in plain language: the first read-only consumer of the
+         *     trace API. The model is shown the decision records of the trace (at most 60, oldest first) by
+         *     label, with the action, outcome, attempt, job, cause and the ids each concerns, but no person's
+         *     id and no value of any person; a recorded reason is fenced as data. It writes a summary and a
+         *     sentence for every record shown, each citing the record, and the answer names the records by
+         *     their decision-record ids. It is checked (every record a record of the trace, cited once, plain
+         *     text with a length cap) and, when it fails, asked again at most `ai.max_repair_attempts`
+         *     times. Nothing is stored. Workspace admins who are signed in; an API key is refused. Every
+         *     attempt is a gated model call that counts against the budget and the rate limit, and with the
+         *     assistant off nothing is read or sent.
+         */
+        post: operations["explain_trace_with_ai"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/traits": {
         parameters: {
             query?: never;
@@ -2752,6 +2808,9 @@ export interface components {
         /** @description An accepted draft, for the editor to load. */
         AcceptedDraftBody: {
             content: Record<string, never>;
+            flow?: null | components["schemas"]["FlowDetailBody"];
+            /** Format: uuid */
+            flow_id?: string | null;
             /** Format: uuid */
             id: string;
             kind: components["schemas"]["DraftKindBody"];
@@ -2833,12 +2892,51 @@ export interface components {
              */
             version?: number | null;
         };
+        /** @description What the model said about one node of the flow. */
+        AiExplainedFlowNode: {
+            /** @description The id of the node in the explained graph. */
+            id: string;
+            /** @description Plain text. Show it as text, never as markup. */
+            text: string;
+        };
         /** @description What the model said about one node of the definition. */
         AiExplainedNode: {
             /** @description The JSON pointer of the node in the version's definition; empty for the root. */
             pointer: string;
             /** @description Plain text. Show it as text, never as markup. */
             text: string;
+        };
+        /** @description What the model said about one decision record. */
+        AiExplainedRecord: {
+            /**
+             * Format: uuid
+             * @description The decision-record id, as in `GET .../traces/{trace_id}`.
+             */
+            id: string;
+            /** @description Plain text. Show it as text, never as markup. */
+            text: string;
+        };
+        /** @description The explanation of a flow draft or version. */
+        AiFlowExplainBody: {
+            /** @description One entry for every node but the exit nodes, and for some of those. */
+            nodes: components["schemas"]["AiExplainedFlowNode"][];
+            /** @description `draft` or `version`. */
+            source: string;
+            /** @description Who enters the flow and what happens to them, in plain text. */
+            summary: string;
+            /**
+             * Format: int32
+             * @description The version that was explained; absent for the draft.
+             */
+            version?: number | null;
+        };
+        /** @description Which flow document to explain. */
+        AiFlowExplainRequest: {
+            /**
+             * Format: int32
+             * @description The published version to explain; the flow's current draft when absent.
+             */
+            version?: number | null;
         };
         AiModelsBody: {
             /**
@@ -2871,6 +2969,17 @@ export interface components {
             transcript_days?: number | null;
             /** Format: date-time */
             updated_at?: string | null;
+        };
+        /** @description The explanation of a trace. */
+        AiTraceExplainBody: {
+            /** @description How many later records of the trace the model was not shown (the trace is long). */
+            omitted_records: number;
+            /** @description One entry for every record the model was shown, each citing the record's id. */
+            records: components["schemas"]["AiExplainedRecord"][];
+            /** @description What happened under the trace, in plain text. */
+            summary: string;
+            /** @description The trace id: 32 lowercase hex characters. */
+            trace_id: string;
         };
         AiUsageBody: {
             /**
@@ -3644,6 +3753,7 @@ export interface components {
             /** @description For an invalid draft, the problems of the last attempt. */
             issues: components["schemas"]["DraftIssue"][];
             kind: components["schemas"]["DraftKindBody"];
+            simulation?: null | components["schemas"]["SimulationBody"];
             /**
              * @description `valid`, or `invalid` when no attempt passed validation: then there is no `content` and
              *     the draft cannot be accepted.
@@ -3664,7 +3774,7 @@ export interface components {
          * @description What a draft is of.
          * @enum {string}
          */
-        DraftKindBody: "mapping" | "manifest" | "segment";
+        DraftKindBody: "mapping" | "manifest" | "segment" | "flow";
         /** @description What to draft. */
         DraftRequest: {
             /**
@@ -3672,6 +3782,11 @@ export interface components {
              *     model as data, never as instructions.
              */
             documentation?: string | null;
+            /**
+             * Format: uuid
+             * @description For a flow: the flow whose draft is edited. Required for a flow, refused for the others.
+             */
+            flow_id?: string | null;
             kind: components["schemas"]["DraftKindBody"];
             /**
              * @description What the user wants, 1 to 2000 characters. It is sent as written: do not paste personal
@@ -6228,6 +6343,43 @@ export interface components {
              */
             previous_valid_until?: string | null;
         };
+        /** @description One synthetic person's walk, reduced. */
+        SimulatedPersonBody: {
+            /** @description Who the synthetic person is, in plain text. */
+            description: string;
+            /** @description How many outward calls (a webhook) the flow would make for the person. None was made. */
+            external_effects: number;
+            /** @description The node the walk ended at; null when it was refused. */
+            final_node?: string | null;
+            /**
+             * @description How the walk ended: `completed`, `exited`, `waiting`, `failed` and so on; null when the
+             *     walk was refused.
+             */
+            final_status?: string | null;
+            /** @description Why the walk stopped before the end, when it did, such as `unable_to_evaluate`. */
+            halted?: string | null;
+            /** @description How many changes of the person (a trait, a list) the walk made. */
+            internal_effects: number;
+            /** @description `blank`, `first_case` or `last_case`. */
+            label: string;
+            /** @description The ids of the nodes the person ran, in order. */
+            path: string[];
+            /** @description Set when the walk could not be run: `step_limit` or `no_entry`. */
+            refused?: string | null;
+        };
+        /** @description What a few synthetic people do in the candidate flow. */
+        SimulationBody: {
+            /** @description What a walk cannot do, as stable codes (such as `goal_segment`). */
+            not_simulated: string[];
+            people: components["schemas"]["SimulatedPersonBody"][];
+            /**
+             * Format: date-time
+             * @description The virtual time every walk started at.
+             */
+            start_at: string;
+            /** @description The nodes none of the synthetic people reached. */
+            unreached_nodes: string[];
+        };
         /**
          * @description What the reference evaluator reads about one person. `capped_events` and
          *     `events_complete_after` carry the caps of a real load, and a synthetic snapshot can set them
@@ -8173,7 +8325,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft never validated (`ai_draft_invalid`), or the saved version changed since (`ai_draft_outdated`) */
+            /** @description The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -8182,7 +8334,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save) */
+            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10468,6 +10620,116 @@ export interface operations {
             };
             /** @description An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`) */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explain_flow_with_ai: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["AiFlowExplainRequest"];
+            };
+        };
+        responses: {
+            /** @description The explanation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiFlowExplainBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, flow or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The assistant is off (`ai_disabled`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model's explanation did not pass its checks within the repair attempts (`ai_explain_failed`, with the issue codes), a condition too large to send without personal data (`ai_flow_too_large`), or the body is not a version */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many AI calls (`ai_rate_limited`); try again in a minute */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model provider failed (`ai_provider_error`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the provider key */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17091,6 +17353,121 @@ export interface operations {
             };
             /** @description No such workspace, no access to it, or no records for the trace in it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    explain_trace_with_ai: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Trace id: 32 lowercase hex characters */
+                trace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The explanation, citing the decision records it describes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiTraceExplainBody"];
+                };
+            };
+            /** @description The trace id is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, no access to it, or no records for the trace in it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The assistant is off (`ai_disabled`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model's explanation did not pass its checks within the repair attempts (`ai_explain_failed`, with the issue codes) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many AI calls (`ai_rate_limited`); try again in a minute */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model provider failed (`ai_provider_error`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the provider key */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -32,7 +32,7 @@ pub(crate) const MAX_SEGMENTS: usize = 200;
 pub(crate) const MAX_TOPICS: usize = 200;
 /// How deep the walks below descend. A definition deeper than the compiler allows is refused by
 /// the validator; the walks only have to stop.
-const WALK_DEPTH: usize = 24;
+pub(crate) const WALK_DEPTH: usize = 24;
 
 pub(crate) const SEGMENT_INSTRUCTIONS: &str = "\
 You help a marketer write the rule that decides who is in a segment. Answer by calling the \
@@ -427,26 +427,38 @@ impl Placeholders {
 /// The definition with each personal string literal replaced by a placeholder, and the table to
 /// put them back.
 pub(crate) fn mask(definition: &Value, clear: &ClearKeys) -> (Value, Placeholders) {
-    let mut masked = definition.clone();
+    let (mut masked, table) = mask_many(std::slice::from_ref(definition), clear);
+    (masked.pop().unwrap_or(Value::Null), table)
+}
+
+/// [`mask`] for several definitions that share one table: the placeholders are numbered across all
+/// of them, so a placeholder names one literal wherever it appears. A flow holds many conditions,
+/// each one a definition of its own.
+pub(crate) fn mask_many(definitions: &[Value], clear: &ClearKeys) -> (Vec<Value>, Placeholders) {
     let mut table = Placeholders::default();
-    for slot in literal_slots(definition) {
-        if !clear.is_personal(&slot.owner) {
-            continue;
+    let mut masked_all = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        let mut masked = definition.clone();
+        for slot in literal_slots(definition) {
+            if !clear.is_personal(&slot.owner) {
+                continue;
+            }
+            let Some(original) = masked.pointer(&slot.pointer).cloned() else {
+                continue;
+            };
+            let token = format!("{TOKEN_OPEN}{})", table.entries.len() + 1);
+            if let Some(target) = masked.pointer_mut(&slot.pointer) {
+                *target = Value::String(token.clone());
+            }
+            table.entries.push(Placeholder {
+                token,
+                slot,
+                original,
+            });
         }
-        let Some(original) = masked.pointer(&slot.pointer).cloned() else {
-            continue;
-        };
-        let token = format!("{TOKEN_OPEN}{})", table.entries.len() + 1);
-        if let Some(target) = masked.pointer_mut(&slot.pointer) {
-            *target = Value::String(token.clone());
-        }
-        table.entries.push(Placeholder {
-            token,
-            slot,
-            original,
-        });
+        masked_all.push(masked);
     }
-    (masked, table)
+    (masked_all, table)
 }
 
 /// The catalog as request content: names, types and descriptions, each list capped with a note
