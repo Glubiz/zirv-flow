@@ -673,11 +673,24 @@ mod tests {
     }
 
     /// Polls until `done` is true of the queue's counts.
+    ///
+    /// On a timeout the panic carries the last counts, so a slow drain (jobs still moving)
+    /// can be told from a stalled one (the same counts as before).
     async fn wait_for(pool: &PgPool, done: impl Fn(QueueCounts) -> bool) {
-        eventually("the queue to reach the expected counts", || async {
-            done(queue_counts(pool).await.unwrap())
-        })
-        .await;
+        let deadline = Instant::now() + WAIT_LIMIT;
+        loop {
+            let counts = queue_counts(pool).await.unwrap();
+            if done(counts) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {}s waiting for the queue to reach the expected counts;                  last counts {counts:?}, {} effects written",
+                WAIT_LIMIT.as_secs(),
+                effect_count(pool).await
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Polls until the single-boolean `query` is true.
