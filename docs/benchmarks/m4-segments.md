@@ -434,7 +434,7 @@ What the runs show.
 Verdict. Re-evaluation explains part of the rise (about 0.6 to 1 s of p99 on this database) but not the
 baseline. The ingest path is dominated by WAL flush contention at 17 to 20 GB of WAL per 10 minutes. The
 mechanism by which an active segment adds to that is not established. Two candidates are left for a reviewed
-follow-up: the hot unique key that every ingest transaction contends on, and the write volume per event
+follow-up (#209): the hot unique key that every ingest transaction contends on, and the write volume per event
 (an `events` row, a `decision_records` row, a dedupe row and a mark). Neither was tested, and no code was
 changed. Not covered: the 0.56.0 to 0.57.1 attribution, a run with `synchronous_commit` off or a larger
 `wal_buffers`, and a reference-hardware run.
