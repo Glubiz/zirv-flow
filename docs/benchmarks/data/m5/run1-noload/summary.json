@@ -1,0 +1,92 @@
+{
+  "run": 1,
+  "label": "noload",
+  "lateness": {
+    "burst": {
+      "early": 0,
+      "max_s": 55.772808,
+      "min_s": 0.536804,
+      "p50_s": 28.192877,
+      "p95_s": 53.078895,
+      "p99_s": 55.280596,
+      "woken": 100000,
+      "seeded": 100000
+    },
+    "spread": {
+      "early": 0,
+      "max_s": 55.771744,
+      "min_s": 0.000695,
+      "p50_s": 0.446540,
+      "p95_s": 9.778609,
+      "p99_s": 46.735826,
+      "woken": 900000,
+      "seeded": 900000
+    }
+  },
+  "overall": {
+    "early": 0,
+    "max_s": 55.772808,
+    "min_s": 0.000695,
+    "p50_s": 0.517422,
+    "p95_s": 37.834994,
+    "p99_s": 52.374744,
+    "woken": 1000000,
+    "seeded": 1000000
+  },
+  "spread_in_burst_minute": {
+    "early": 0,
+    "max_s": 55.771744,
+    "min_s": 0.536362,
+    "p50_s": 28.550807,
+    "p95_s": 53.177523,
+    "p99_s": 55.302528,
+    "woken": 22354,
+    "seeded": 22354
+  },
+  "spread_outside_burst_minute": {
+    "early": 0,
+    "max_s": 55.768826,
+    "min_s": 0.000695,
+    "p50_s": 0.431299,
+    "p95_s": 0.985114,
+    "p99_s": 40.797211,
+    "woken": 877646,
+    "seeded": 877646
+  },
+  "dead_wake_jobs": 0,
+  "jobs_left": 0,
+  "max_due_ready": 57311,
+  "max_oldest_due_age_s": 54.452583,
+  "claims_per_s_peak": 1108,
+  "completions_per_s_peak": 1108.1,
+  "docker": [
+    {
+      "container": "zirv-flow-m4bench10m-postgres-1",
+      "samples": 244,
+      "cpu_pct_avg": 82.45377049180333,
+      "cpu_pct_max": 237.37,
+      "mem_usage_last": "14.95GiB / 31.22GiB"
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-1",
+      "samples": 244,
+      "cpu_pct_avg": 0.05135245901639344,
+      "cpu_pct_max": 1.52,
+      "mem_usage_last": "35.11MiB / 3.2GiB"
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-scheduler-1",
+      "samples": 244,
+      "cpu_pct_avg": 0.07012295081967225,
+      "cpu_pct_max": 0.13,
+      "mem_usage_last": "2.062MiB / 819MiB"
+    },
+    {
+      "container": "zirv-flow-m4bench10m-zirv-flow-worker-1",
+      "samples": 244,
+      "cpu_pct_avg": 33.699139344262285,
+      "cpu_pct_max": 97.39,
+      "mem_usage_last": "38.75MiB / 4GiB"
+    }
+  ]
+}

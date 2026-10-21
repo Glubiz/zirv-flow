@@ -258,3 +258,28 @@ and EXPLAIN plans. `measure.sh verify` checks each preview count against a hand-
 over the seeded rows. The seed writes the rows the app writes (checked against an identify and a
 track sent through the API); it does not write the source-record ledger, decisions, event
 deduplication rows or event message ids, which no segment query reads.
+
+## 10. Timer benchmark (M5, issue #169)
+
+`scripts/bench/m5/` measures timer lateness at 1,000,000 waiting enrollments (architecture 9.3 and
+19) on the published image, in the compose project of the M4 10 M-people database
+(`zirv-flow-m4bench10m`). It sources `m4/common.sh` and reuses `m4/stack.sh`. The waiting
+enrollments are **seeded by SQL** (ruling 46fb269a) with rows copied from a sample enrolled through
+the product path, so the benchmark is evidence about timers only, not about enrollment throughput.
+
+```sh
+docker pull ghcr.io/glubiz/zirv-flow:0.76.0                 # BENCH_IMAGE_TAG; pull_policy is never
+cargo build --release -p zirv-flow-loadgen                  # for the loaded run
+scripts/bench/m5/stack.sh up                                # the M4 stack on the M5 defaults
+scripts/bench/m5/setup.sh                                   # three manual-trigger flows and sample lists (API)
+scripts/bench/m5/sample.sh                                  # enroll the sample, capture its rows
+RUN=1 scripts/bench/m5/seed.sh stage load vacuum verify     # 900,000 spread + 100,000 burst, then the checks
+scripts/bench/m5/measure.sh start 1 noload                  # waits for the window, samples; detached
+scripts/bench/m5/measure.sh wait 1 noload && scripts/bench/m5/measure.sh collect 1 noload
+RUN=1 scripts/bench/m5/seed.sh clean                        # delete the run's seeded rows
+scripts/bench/m5/stack.sh stop                              # keep the volumes
+```
+
+`measure.sh start RUN LABEL load` adds `tools/loadgen` at 2,000 track events/s for the window.
+`seed.sh` fixes the window start (`M5_T0_LEAD_MIN` minutes ahead) when it stages; the load and the
+checks must finish before it. Results go to `M4_OUT/run<RUN>-<LABEL>/`.

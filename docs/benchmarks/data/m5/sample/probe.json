@@ -1,0 +1,405 @@
+{
+  "enrollments": [
+    {
+      "id": "01a15e92-e0b7-71d0-9998-d35c37322dff",
+      "node": "w1",
+      "error": null,
+      "state": "waiting",
+      "context": {
+        "trigger": "manual",
+        "occurrence": "01a15e92-e0ae-71f7-8742-93c4da1e265f"
+      },
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "wake_at": "2026-10-21T13:07:46.529956+00:00",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "ended_at": null,
+      "trace_id": "acaa7936-d38c-49f8-8c66-4196390373da",
+      "person_id": "000019bb-2124-8054-c8c4-d1a934400ff9",
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.513895+00:00",
+      "updated_at": "2026-10-21T13:07:26.529552+00:00",
+      "exit_reason": null,
+      "failed_node": null,
+      "flow_version": 1,
+      "resume_input": null,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "occurrence_id": "01a15e92-e0ae-71f7-8742-93c4da1e265f",
+      "state_version": 1,
+      "failure_placed": false
+    },
+    {
+      "id": "01a15e92-e0b7-71d0-9998-d35d2afc0181",
+      "node": "w1",
+      "error": null,
+      "state": "waiting",
+      "context": {
+        "trigger": "manual",
+        "occurrence": "01a15e92-e0ae-71f7-8742-93c4da1e265f"
+      },
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "wake_at": "2026-10-21T13:07:46.530545+00:00",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "ended_at": null,
+      "trace_id": "a2d37eba-5f8f-4f6c-9c4c-a24eab05ac4f",
+      "person_id": "00001a1b-f8ba-b9a0-2006-153a4197409c",
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.513895+00:00",
+      "updated_at": "2026-10-21T13:07:26.530318+00:00",
+      "exit_reason": null,
+      "failed_node": null,
+      "flow_version": 1,
+      "resume_input": null,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "occurrence_id": "01a15e92-e0ae-71f7-8742-93c4da1e265f",
+      "state_version": 1,
+      "failure_placed": false
+    },
+    {
+      "id": "01a15e92-e0b7-71d0-9998-d35e514e4120",
+      "node": "w1",
+      "error": null,
+      "state": "waiting",
+      "context": {
+        "trigger": "manual",
+        "occurrence": "01a15e92-e0ae-71f7-8742-93c4da1e265f"
+      },
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "wake_at": "2026-10-21T13:07:46.530589+00:00",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "ended_at": null,
+      "trace_id": "c469f286-cea5-4a1c-a6ab-00a4f3bc7624",
+      "person_id": "00001b3f-4ea7-eab3-9724-4e1ff898b1a2",
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.513895+00:00",
+      "updated_at": "2026-10-21T13:07:26.530216+00:00",
+      "exit_reason": null,
+      "failed_node": null,
+      "flow_version": 1,
+      "resume_input": null,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "occurrence_id": "01a15e92-e0ae-71f7-8742-93c4da1e265f",
+      "state_version": 1,
+      "failure_placed": false
+    }
+  ],
+  "step_executions": [
+    {
+      "id": "01a15e92-e0c4-77b0-973e-5f3af3516c3d",
+      "error": null,
+      "node_id": "w1",
+      "outcome": "waiting",
+      "attempts": 1,
+      "started_at": "2026-10-21T13:07:26.529552+00:00",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "enrollment_id": "01a15e92-e0b7-71d0-9998-d35c37322dff"
+    },
+    {
+      "id": "01a15e92-e0c6-75ba-a863-187546a08d3b",
+      "error": null,
+      "node_id": "w1",
+      "outcome": "waiting",
+      "attempts": 1,
+      "started_at": "2026-10-21T13:07:26.530216+00:00",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "enrollment_id": "01a15e92-e0b7-71d0-9998-d35e514e4120"
+    },
+    {
+      "id": "01a15e92-e0c4-77b0-973e-5f3dcd739e70",
+      "error": null,
+      "node_id": "w1",
+      "outcome": "waiting",
+      "attempts": 1,
+      "started_at": "2026-10-21T13:07:26.530318+00:00",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "enrollment_id": "01a15e92-e0b7-71d0-9998-d35d2afc0181"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "6dbe41b1-5f2a-47c7-8ef1-0e0291c74e1e",
+      "kind": "flow.step",
+      "state": "ready",
+      "run_at": "2026-10-21T13:07:46.529956+00:00",
+      "dead_at": null,
+      "payload": {
+        "input": "wake",
+        "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+        "enrollment_id": "01a15e92-e0b7-71d0-9998-d35c37322dff",
+        "state_version": 1
+      },
+      "attempts": 0,
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "priority": 0,
+      "trace_id": "acaa7936-d38c-49f8-8c66-4196390373da",
+      "locked_by": null,
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.529552+00:00",
+      "last_error": null,
+      "unique_key": "wake:01a15e92-e0b7-71d0-9998-d35c37322dff:1",
+      "max_attempts": 5,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "lease_expires_at": null,
+      "purge_on_release": false
+    },
+    {
+      "id": "a7261443-07fe-484d-b6c9-6c7f648ad4ce",
+      "kind": "flow.step",
+      "state": "ready",
+      "run_at": "2026-10-21T13:07:46.530589+00:00",
+      "dead_at": null,
+      "payload": {
+        "input": "wake",
+        "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+        "enrollment_id": "01a15e92-e0b7-71d0-9998-d35e514e4120",
+        "state_version": 1
+      },
+      "attempts": 0,
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "priority": 0,
+      "trace_id": "c469f286-cea5-4a1c-a6ab-00a4f3bc7624",
+      "locked_by": null,
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.530216+00:00",
+      "last_error": null,
+      "unique_key": "wake:01a15e92-e0b7-71d0-9998-d35e514e4120:1",
+      "max_attempts": 5,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "lease_expires_at": null,
+      "purge_on_release": false
+    },
+    {
+      "id": "8de4bdd6-3a04-4da6-bb21-6a5f40c5899f",
+      "kind": "flow.step",
+      "state": "ready",
+      "run_at": "2026-10-21T13:07:46.530545+00:00",
+      "dead_at": null,
+      "payload": {
+        "input": "wake",
+        "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+        "enrollment_id": "01a15e92-e0b7-71d0-9998-d35d2afc0181",
+        "state_version": 1
+      },
+      "attempts": 0,
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "priority": 0,
+      "trace_id": "a2d37eba-5f8f-4f6c-9c4c-a24eab05ac4f",
+      "locked_by": null,
+      "cause_kind": "manual",
+      "created_at": "2026-10-21T13:07:26.530318+00:00",
+      "last_error": null,
+      "unique_key": "wake:01a15e92-e0b7-71d0-9998-d35d2afc0181:1",
+      "max_attempts": 5,
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "lease_expires_at": null,
+      "purge_on_release": false
+    }
+  ],
+  "flow_entries": [
+    {
+      "entries": 1,
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "person_id": "00001a1b-f8ba-b9a0-2006-153a4197409c",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "last_entered_at": "2026-10-21T13:07:26.514309+00:00"
+    },
+    {
+      "entries": 1,
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "person_id": "00001b3f-4ea7-eab3-9724-4e1ff898b1a2",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "last_entered_at": "2026-10-21T13:07:26.514309+00:00"
+    },
+    {
+      "entries": 1,
+      "flow_id": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+      "person_id": "000019bb-2124-8054-c8c4-d1a934400ff9",
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1",
+      "last_entered_at": "2026-10-21T13:07:26.514309+00:00"
+    }
+  ],
+  "decision_records": [
+    {
+      "id": "01a15e92-e0b9-767b-a31a-c62527e4f031",
+      "action": "flow.enroll",
+      "job_id": null,
+      "reason": null,
+      "attempt": null,
+      "outcome": "enrolled",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "c469f286-cea5-4a1c-a6ab-00a4f3bc7624",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.513895+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "person": "00001b3f-4ea7-eab3-9724-4e1ff898b1a2",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35e514e4120"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0b9-767b-a31a-c62418dc71d7",
+      "action": "flow.enroll",
+      "job_id": null,
+      "reason": null,
+      "attempt": null,
+      "outcome": "enrolled",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "a2d37eba-5f8f-4f6c-9c4c-a24eab05ac4f",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.513895+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "person": "00001a1b-f8ba-b9a0-2006-153a4197409c",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35d2afc0181"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0b9-767b-a31a-c62347e34c2e",
+      "action": "flow.enroll",
+      "job_id": null,
+      "reason": null,
+      "attempt": null,
+      "outcome": "enrolled",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "acaa7936-d38c-49f8-8c66-4196390373da",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.513895+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "person": "000019bb-2124-8054-c8c4-d1a934400ff9",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35c37322dff"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c5-7599-aeba-b1478cf5e7d2",
+      "action": "flow.wait",
+      "job_id": "695d0883-2405-493b-ab3e-27d92d4f1961",
+      "reason": "duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "acaa7936-d38c-49f8-8c66-4196390373da",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.529552+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "000019bb-2124-8054-c8c4-d1a934400ff9",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35c37322dff",
+        "step_execution": "01a15e92-e0c4-77b0-973e-5f3af3516c3d"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c4-77b0-973e-5f3c8d9cb69a",
+      "action": "flow.step",
+      "job_id": "695d0883-2405-493b-ab3e-27d92d4f1961",
+      "reason": "wait.duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "acaa7936-d38c-49f8-8c66-4196390373da",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.529552+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "000019bb-2124-8054-c8c4-d1a934400ff9",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35c37322dff",
+        "step_execution": "01a15e92-e0c4-77b0-973e-5f3af3516c3d"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c8-734c-a0d9-57c3941dedb0",
+      "action": "flow.wait",
+      "job_id": "3ddc462d-ffb9-4acc-9ce6-9a0b075d4982",
+      "reason": "duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "c469f286-cea5-4a1c-a6ab-00a4f3bc7624",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.530216+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "00001b3f-4ea7-eab3-9724-4e1ff898b1a2",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35e514e4120",
+        "step_execution": "01a15e92-e0c6-75ba-a863-187546a08d3b"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c7-73c8-b07e-a2a7688cfe3d",
+      "action": "flow.step",
+      "job_id": "3ddc462d-ffb9-4acc-9ce6-9a0b075d4982",
+      "reason": "wait.duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "c469f286-cea5-4a1c-a6ab-00a4f3bc7624",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.530216+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "00001b3f-4ea7-eab3-9724-4e1ff898b1a2",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35e514e4120",
+        "step_execution": "01a15e92-e0c6-75ba-a863-187546a08d3b"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c6-75ba-a863-1874f647dd15",
+      "action": "flow.wait",
+      "job_id": "94e7c69d-75f7-4bcf-b7be-07071040cc71",
+      "reason": "duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "a2d37eba-5f8f-4f6c-9c4c-a24eab05ac4f",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.530318+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "00001a1b-f8ba-b9a0-2006-153a4197409c",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35d2afc0181",
+        "step_execution": "01a15e92-e0c4-77b0-973e-5f3dcd739e70"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    },
+    {
+      "id": "01a15e92-e0c5-7599-aeba-b14638a7f4a9",
+      "action": "flow.step",
+      "job_id": "94e7c69d-75f7-4bcf-b7be-07071040cc71",
+      "reason": "wait.duration",
+      "attempt": 1,
+      "outcome": "waiting",
+      "cause_id": "dfd5bdd5-7e5e-4c69-8ba1-46391edebe48",
+      "trace_id": "a2d37eba-5f8f-4f6c-9c4c-a24eab05ac4f",
+      "cause_kind": "manual",
+      "recorded_at": "2026-10-21T13:07:26.530318+00:00",
+      "subject_ids": {
+        "flow": "01a15e92-c967-71fd-90a5-cb5e5ba4208c",
+        "node": "w1",
+        "person": "00001a1b-f8ba-b9a0-2006-153a4197409c",
+        "version": 1,
+        "enrollment": "01a15e92-e0b7-71d0-9998-d35d2afc0181",
+        "step_execution": "01a15e92-e0c4-77b0-973e-5f3dcd739e70"
+      },
+      "workspace_id": "31d6e33b-415a-4559-b314-f0b8d2d0fab1"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+OK burst wakes in one minute got=100000 want=100000
+OK decision shape burst got=0 want=0
+OK decision shape spread got=0 want=0
+OK decisions x3 burst got=300000 want=300000
+OK decisions x3 spread got=2700000 want=2700000
+OK enrollment shape burst got=0 want=0
+OK enrollment shape spread got=0 want=0
+OK enrollments waiting burst got=100000 want=100000
+OK enrollments waiting spread got=900000 want=900000
+OK flow_entries burst got=100000 want=100000
+OK flow_entries spread got=900000 want=900000
+OK job shape burst got=0 want=0
+OK job shape spread got=0 want=0
+OK spread wakes in window got=900000 want=900000
+OK staged burst got=100000 want=100000
+OK staged spread got=900000 want=900000
+OK step_executions waiting burst got=100000 want=100000
+OK step_executions waiting spread got=900000 want=900000
+OK step shape burst got=0 want=0
+OK step shape spread got=0 want=0
+OK wake jobs ready burst got=100000 want=100000
+OK wake jobs ready spread got=900000 want=900000
+OK window opens at least 120 s ahead got=1 want=1
