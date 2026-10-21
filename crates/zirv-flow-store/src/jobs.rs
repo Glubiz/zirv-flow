@@ -145,6 +145,8 @@ pub enum FailOutcome {
     Retried,
     /// Out of attempts.
     Dead,
+    /// An erasure named the job while it ran, so it was deleted and not put back.
+    Purged,
 }
 
 /// What a reaper pass did.
@@ -152,6 +154,8 @@ pub enum FailOutcome {
 pub struct Reaped {
     pub requeued: u64,
     pub dead: u64,
+    /// Expired jobs an erasure had marked, deleted instead of being requeued or buried.
+    pub purged: u64,
 }
 
 /// How many jobs of one kind are in one state.
@@ -392,14 +396,17 @@ pub async fn fail_job<'e>(
     error: &str,
 ) -> Result<Option<FailOutcome>, StoreError> {
     let state: Option<String> = sqlx::query_scalar(
-        "WITH updated AS ( \
+        "WITH purged AS ( \
+             DELETE FROM jobs WHERE id = $1 AND lease_token = $2 AND purge_on_release \
+             RETURNING id), \
+         updated AS ( \
              UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = CASE WHEN attempts >= max_attempts THEN run_at \
                               ELSE now() + make_interval(secs => $3) END, \
                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-             WHERE id = $1 AND lease_token = $2 \
+             WHERE id = $1 AND lease_token = $2 AND NOT purge_on_release \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
          recorded AS ( \
              INSERT INTO decision_records \
@@ -409,7 +416,7 @@ pub async fn fail_job<'e>(
                     CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'failed' END, \
                     $4, cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
-         SELECT state FROM updated",
+         SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
     .bind(id)
     .bind(lease_token)
@@ -419,10 +426,10 @@ pub async fn fail_job<'e>(
     .await
     .map_err(StoreError::query)?;
     Ok(state.map(|state| {
-        if state == "dead" {
-            FailOutcome::Dead
-        } else {
-            FailOutcome::Retried
+        match state.as_str() {
+            "dead" => FailOutcome::Dead,
+            "purged" => FailOutcome::Purged,
+            _ => FailOutcome::Retried,
         }
     }))
 }
@@ -452,13 +459,16 @@ pub async fn heartbeat_job<'e>(
 /// workspace job gets a `job.attempt` decision, `lease_expired` or `exhausted`.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
-        "WITH updated AS ( \
+        "WITH purged AS ( \
+             DELETE FROM jobs WHERE state = 'running' AND lease_expires_at < now() \
+                AND purge_on_release RETURNING id), \
+         updated AS ( \
              UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = now(), last_error = 'lease expired', \
                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-             WHERE state = 'running' AND lease_expires_at < now() \
+             WHERE state = 'running' AND lease_expires_at < now() AND NOT purge_on_release \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
          recorded AS ( \
              INSERT INTO decision_records \
@@ -468,15 +478,17 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
                     CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'lease_expired' END, \
                     'lease expired', cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
-         SELECT state FROM updated",
+         SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
-    let dead = states.iter().filter(|state| *state == "dead").count() as u64;
+    let count = |wanted: &str| states.iter().filter(|state| *state == wanted).count() as u64;
+    let (dead, purged) = (count("dead"), count("purged"));
     Ok(Reaped {
-        requeued: states.len() as u64 - dead,
+        requeued: states.len() as u64 - dead - purged,
         dead,
+        purged,
     })
 }
 
@@ -1297,7 +1309,8 @@ mod tests {
             reaped,
             Reaped {
                 requeued: 1,
-                dead: 0
+                dead: 0,
+                purged: 0
             }
         );
         let again = claim(&pool, &["a.kind"]).await.unwrap();
@@ -1338,7 +1351,8 @@ mod tests {
             reaped,
             Reaped {
                 requeued: 0,
-                dead: 1
+                dead: 1,
+                purged: 0
             }
         );
         assert_eq!(only_job(&pool).await.state, "dead");

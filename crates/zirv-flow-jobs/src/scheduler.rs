@@ -330,11 +330,12 @@ impl Scheduler {
     pub(crate) async fn work_at(&self, now: OffsetDateTime) -> Result<LeaderReport, StoreError> {
         let (fired, skipped) = self.enqueue_due(now).await?;
         let reaped = reap_expired(&self.pool).await?;
-        if reaped.requeued + reaped.dead > 0 {
+        if reaped.requeued + reaped.dead + reaped.purged > 0 {
             warn!(
-                "reaped {} job(s) with expired leases ({} dead)",
-                reaped.requeued + reaped.dead,
-                reaped.dead
+                "reaped {} job(s) with expired leases ({} dead, {} deleted for an erasure)",
+                reaped.requeued + reaped.dead + reaped.purged,
+                reaped.dead,
+                reaped.purged
             );
         }
         let drains = self.wake_stale_inboxes().await?;

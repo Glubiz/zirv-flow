@@ -62,6 +62,7 @@ pub async fn delete_person(
     }
 
     remove_from_lists(connection, workspace, &people).await?;
+    purge_jobs(connection, workspace, &people).await?;
     crate::segments::forget_people(connection, workspace, &people).await?;
     for statement in DELETIONS {
         sqlx::query(*statement)
@@ -89,7 +90,7 @@ pub async fn delete_person(
         .await
         .map_err(StoreError::query)?;
     // Last, so a cursor can fall back to a person who is still there.
-    strip_pending_enrolls(connection, workspace, &people).await?;
+    strip_enrolls(connection, workspace, &people).await?;
 
     append_decision(
         connection,
@@ -111,10 +112,6 @@ pub async fn delete_person(
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
 const DELETIONS: &[&str] = &[
-    // Pending flow jobs and merge rewrites carry the person's ids in their payloads (`flow.enroll`
-    // ones are stripped after the people are gone, below). A running job keeps its lease; a
-    // running rewrite holds the group's rows `FOR KEY SHARE`, so this erasure waits for it.
-    "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ( \n        (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \n            (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \n        OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)) \n        OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \n            (SELECT p::text FROM unnest($2::uuid[]) AS p)))",
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -137,8 +134,73 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM identities WHERE workspace_id = $1 AND person_id = ANY($2)",
 ];
 
-/// Removes `people` from the pending `flow.enroll` jobs of the workspace, after the people are
-/// deleted. A running job keeps its lease, as for the other flow jobs.
+/// The jobs that name an erased person: `$1` is the workspace and `$2` the people. It is the one
+/// predicate for deleting a pending job and for marking a running one, so the two cannot drift.
+macro_rules! names_erased_person {
+    () => {
+        "( \
+            (kind = 'flow.step' AND payload ->> 'enrollment_id' IN \
+                (SELECT id::text FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))) \
+            OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
+            OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)))"
+    };
+}
+
+/// Removes the jobs that carry an erased person's ids from their payloads (`flow.enroll` ones are
+/// handled after the people are gone, in [`strip_enrolls`]).
+///
+/// A pending job is deleted. A running job holds its row `FOR KEY SHARE` (`lock_lease`) and a
+/// `DELETE` would wait for it while the handler waits for the people this erasure holds, so it is
+/// marked `purge_on_release` instead: a plain `UPDATE` takes `FOR NO KEY UPDATE`, which does not
+/// conflict. `fail_job` and `reap_expired` then delete a marked job rather than requeue it or
+/// bury it dead, and `complete_job` deletes it as always.
+///
+/// Marking runs before and after the delete: a job claimed between the two statements is not
+/// pending for the delete, and the second mark finds it running. A job the delete removed is
+/// locked until commit, so no worker can claim it.
+async fn purge_jobs(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    mark_running(connection, workspace, people).await?;
+    sqlx::query(concat!(
+        "DELETE FROM jobs WHERE workspace_id = $1 AND state <> 'running' AND ",
+        names_erased_person!()
+    ))
+    .bind(workspace.as_uuid())
+    .bind(people)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    mark_running(connection, workspace, people).await
+}
+
+async fn mark_running(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    sqlx::query(concat!(
+        "UPDATE jobs SET purge_on_release = true \
+         WHERE workspace_id = $1 AND state = 'running' AND NOT purge_on_release AND ",
+        names_erased_person!()
+    ))
+    .bind(workspace.as_uuid())
+    .bind(people)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// Removes `people` from the `flow.enroll` jobs of the workspace, after the people are deleted.
+///
+/// A running job keeps its lease and its row lock, so only payload columns are updated (a
+/// non-key update does not wait for the handler); a change to its unique key, a key column, is
+/// replaced by marking the job `purge_on_release` and queueing the replacement.
 ///
 /// - A per-person job (`people`: `(person, occurrence)` pairs) loses the pairs of the erased
 ///   people; a job left with no pair is deleted.
@@ -146,7 +208,7 @@ const DELETIONS: &[&str] = &[
 ///   people with an id greater than it, so the cursor becomes the greatest id that is still a
 ///   person in the workspace and is below the erased one: the page then starts at the same
 ///   person. With no such person the cursor is dropped and the audience pages from the start.
-async fn strip_pending_enrolls(
+async fn strip_enrolls(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
@@ -156,8 +218,8 @@ async fn strip_pending_enrolls(
         "UPDATE jobs j SET payload = jsonb_set(j.payload, '{people}', \
              COALESCE((SELECT jsonb_agg(pair) FROM jsonb_array_elements(j.payload -> 'people') pair \
                        WHERE pair ->> 0 <> ALL($2)), '[]'::jsonb)) \
-         WHERE j.workspace_id = $1 AND j.kind = 'flow.enroll' AND j.state <> 'running' \
-           AND jsonb_typeof(j.payload -> 'people') = 'array' \
+         WHERE j.workspace_id = $1 AND j.kind = 'flow.enroll' \
+           AND NOT j.purge_on_release AND jsonb_typeof(j.payload -> 'people') = 'array' \
            AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.payload -> 'people') pair \
                        WHERE pair ->> 0 = ANY($2))",
     )
@@ -166,6 +228,8 @@ async fn strip_pending_enrolls(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    // A job left with nobody: deleted when pending, marked when running (it has no work to put
+    // back, and a marked job is deleted on any release).
     sqlx::query(
         "DELETE FROM jobs WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
            AND payload -> 'people' = '[]'::jsonb",
@@ -174,19 +238,29 @@ async fn strip_pending_enrolls(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    sqlx::query(
+        "UPDATE jobs SET purge_on_release = true \
+         WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state = 'running' \
+           AND NOT purge_on_release AND payload -> 'people' = '[]'::jsonb",
+    )
+    .bind(workspace.as_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     // The cursor of a page job is the erased id; the job's unique key names it too, so both are
     // rewritten together, with the same helper that built the key.
-    let pages: Vec<(Uuid, serde_json::Value, Option<String>)> = sqlx::query_as(
-        "SELECT id, payload, unique_key FROM jobs \
-         WHERE workspace_id = $1 AND kind = 'flow.enroll' AND state <> 'running' \
-           AND payload ->> 'after' = ANY($2) ORDER BY id FOR UPDATE",
+    // `FOR NO KEY UPDATE` does not wait for a running handler's `FOR KEY SHARE`.
+    let pages: Vec<(Uuid, serde_json::Value, Option<String>, bool)> = sqlx::query_as(
+        "SELECT id, payload, unique_key, state = 'running' FROM jobs \
+         WHERE workspace_id = $1 AND kind = 'flow.enroll' AND NOT purge_on_release \
+           AND payload ->> 'after' = ANY($2) ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(&erased)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    for (id, payload, key) in pages {
+    for (id, payload, key, running) in pages {
         let Some(mut job) = crate::EnrollJobPayload::parse(&payload) else {
             continue;
         };
@@ -228,6 +302,32 @@ async fn strip_pending_enrolls(
             .fetch_one(&mut *connection)
             .await
             .map_err(StoreError::query)?;
+            if running {
+                // The unique key is a key column, so a running page's key cannot change without
+                // waiting for its handler. The page is marked, and its replacement (unless the
+                // same page is queued already) starts at the fallback cursor.
+                if !taken {
+                    sqlx::query(
+                        "INSERT INTO jobs (id, workspace_id, kind, payload, priority, run_at, \
+                            max_attempts, unique_key, trace_id, cause_kind, cause_id) \
+                         SELECT gen_random_uuid(), workspace_id, kind, $2, priority, now(), \
+                            max_attempts, $3, trace_id, cause_kind, cause_id \
+                         FROM jobs WHERE id = $1 ON CONFLICT DO NOTHING",
+                    )
+                    .bind(id)
+                    .bind(job.to_value())
+                    .bind(new_key)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
+                }
+                sqlx::query("UPDATE jobs SET purge_on_release = true WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
+                continue;
+            }
             if taken {
                 sqlx::query("DELETE FROM jobs WHERE id = $1")
                     .bind(id)
@@ -236,6 +336,16 @@ async fn strip_pending_enrolls(
                     .map_err(StoreError::query)?;
                 continue;
             }
+        }
+        if running {
+            // A key that names no cursor stays: only the payload's cursor moves back.
+            sqlx::query("UPDATE jobs SET payload = $2 WHERE id = $1")
+                .bind(id)
+                .bind(job.to_value())
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+            continue;
         }
         sqlx::query(
             "UPDATE jobs SET payload = $2, unique_key = COALESCE($3, unique_key) WHERE id = $1",
@@ -345,7 +455,7 @@ mod tests {
         assert_eq!(
             left,
             ["seed:running"],
-            "pending flow jobs go, a running lease stays"
+            "pending flow jobs go, a running lease stays (marked, deleted on release)"
         );
         assert_eq!(rows_referencing_person(&pool, merged).await, []);
         // The other person is untouched.
@@ -865,5 +975,378 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(keys, 2, "the rewritten page and the bystander's page");
+    }
+
+    // A job that is running when its person is erased: the erasure marks it, and every release
+    // (a failure with attempts left, the last failure, an expired lease) deletes it.
+
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    async fn enrollment_of(pool: &PgPool, person: Uuid) -> Uuid {
+        sqlx::query_scalar("SELECT id FROM enrollments WHERE person_id = $1")
+            .bind(person)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Replaces the seeded jobs with one job of `kind`, and leases it.
+    async fn lease_alone(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        kind: &str,
+        payload: serde_json::Value,
+        key: &str,
+        max_attempts: i32,
+        lease: std::time::Duration,
+    ) -> crate::ClaimedJob {
+        sqlx::query("DELETE FROM jobs").execute(pool).await.unwrap();
+        lease_more(pool, ws, kind, payload, key, max_attempts, lease).await
+    }
+
+    async fn lease_more(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        kind: &str,
+        payload: serde_json::Value,
+        key: &str,
+        max_attempts: i32,
+        lease: std::time::Duration,
+    ) -> crate::ClaimedJob {
+        let mut new = crate::NewJob::new(kind, trace());
+        new.workspace_id = Some(ws);
+        new.payload = payload;
+        new.unique_key = Some(key.to_owned());
+        new.max_attempts = max_attempts;
+        assert!(crate::enqueue(pool, &new).await.unwrap());
+        crate::claim_job(pool, "w", &[kind], lease, None)
+            .await
+            .unwrap()
+            .expect("the job is claimable")
+    }
+
+    async fn erase(pool: &PgPool, ws: WorkspaceId, person: Uuid) {
+        let mut tx = begin(pool).await.unwrap();
+        delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+    }
+
+    /// The jobs whose payload or key contains any of `ids`.
+    async fn jobs_naming(pool: &PgPool, ids: &[Uuid]) -> i64 {
+        let ids: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+        sqlx::query_scalar(
+            "SELECT count(*) FROM jobs j WHERE EXISTS (SELECT 1 FROM unnest($1::text[]) AS i \
+               WHERE j.payload::text LIKE '%' || i || '%' OR j.unique_key LIKE '%' || i || '%')",
+        )
+        .bind(&ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn fail(pool: &PgPool, claimed: &crate::ClaimedJob) -> Option<crate::FailOutcome> {
+        crate::fail_job(
+            pool,
+            claimed.id,
+            claimed.lease_token,
+            std::time::Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum Release {
+        Fail,
+        Reap,
+    }
+
+    /// Leases a job of `kind` that names the erased group, erases the group, releases the job and
+    /// checks that no job is left.
+    async fn erased_while_running(
+        pool: PgPool,
+        kind: &'static str,
+        max_attempts: i32,
+        release: Release,
+    ) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let enrollment = enrollment_of(&pool, person).await;
+        let payload = match kind {
+            "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
+            "webhook.call" => serde_json::json!({ "person_id": person }),
+            "person.merge.rewrite" => {
+                serde_json::json!({ "workspace_id": ws, "merged_person_id": merged })
+            }
+            "flow.enroll" => enroll_payload(
+                ws,
+                crate::EnrollWork::People(vec![(person, Uuid::from_u128(5))]),
+            ),
+            other => panic!("no payload for {other}"),
+        };
+        let lease = match release {
+            Release::Fail => LEASE,
+            Release::Reap => std::time::Duration::from_millis(1),
+        };
+        let claimed = lease_alone(&pool, ws, kind, payload, "running:1", max_attempts, lease).await;
+
+        erase(&pool, ws, person).await;
+
+        let marked: bool = sqlx::query_scalar("SELECT purge_on_release FROM jobs WHERE id = $1")
+            .bind(claimed.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(marked, "the erasure marks the running job");
+        match release {
+            Release::Fail => {
+                assert_eq!(
+                    fail(&pool, &claimed).await,
+                    Some(crate::FailOutcome::Purged)
+                );
+            }
+            Release::Reap => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let reaped = crate::reap_expired(&pool).await.unwrap();
+                assert_eq!(
+                    reaped,
+                    crate::Reaped {
+                        requeued: 0,
+                        dead: 0,
+                        purged: 1
+                    }
+                );
+            }
+        }
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "no job is left");
+        assert_eq!(
+            jobs_naming(&pool, &[person, merged, enrollment]).await,
+            0,
+            "no job names the erased group"
+        );
+    }
+
+    macro_rules! erased_while_running_tests {
+        ($($name:ident: $kind:literal,)*) => {$(
+            mod $name {
+                use super::*;
+
+                #[sqlx::test]
+                #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+                async fn a_failure_with_attempts_left_deletes_the_job(pool: PgPool) {
+                    erased_while_running(pool, $kind, 3, Release::Fail).await;
+                }
+
+                #[sqlx::test]
+                #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+                async fn the_last_failed_attempt_deletes_the_job(pool: PgPool) {
+                    erased_while_running(pool, $kind, 1, Release::Fail).await;
+                }
+
+                #[sqlx::test]
+                #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+                async fn an_expired_lease_with_attempts_left_deletes_the_job(pool: PgPool) {
+                    erased_while_running(pool, $kind, 3, Release::Reap).await;
+                }
+
+                #[sqlx::test]
+                #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+                async fn an_expired_lease_on_the_last_attempt_deletes_the_job(pool: PgPool) {
+                    erased_while_running(pool, $kind, 1, Release::Reap).await;
+                }
+            }
+        )*};
+    }
+
+    erased_while_running_tests! {
+        running_flow_step: "flow.step",
+        running_webhook_call: "webhook.call",
+        running_merge_rewrite: "person.merge.rewrite",
+        running_flow_enroll: "flow.enroll",
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_job_that_names_nobody_erased_is_not_marked_and_still_requeues(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let other = lease_alone(
+            &pool,
+            ws,
+            "webhook.call",
+            serde_json::json!({ "person_id": bystander }),
+            "running:other",
+            3,
+            LEASE,
+        )
+        .await;
+        let named = lease_more(
+            &pool,
+            ws,
+            "webhook.call",
+            serde_json::json!({ "person_id": person }),
+            "running:named",
+            3,
+            LEASE,
+        )
+        .await;
+
+        erase(&pool, ws, person).await;
+
+        assert_eq!(
+            fail(&pool, &other).await,
+            Some(crate::FailOutcome::Retried)
+        );
+        assert_eq!(fail(&pool, &named).await, Some(crate::FailOutcome::Purged));
+        let left: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [other.id]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_neither_waits_for_nor_deadlocks_with_a_handler_holding_the_lease(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws, person, merged, ..
+        } = seed_everything(&pool).await;
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "person.merge.rewrite",
+            serde_json::json!({ "workspace_id": ws, "merged_person_id": merged }),
+            "running:held",
+            3,
+            LEASE,
+        )
+        .await;
+        // The handler's transaction holds the row `FOR KEY SHARE`, as `lock_lease` does.
+        let mut handler = begin(&pool).await.unwrap();
+        assert!(
+            crate::lock_lease(&mut handler, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+
+        let erased = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            erase(&pool, ws, person),
+        )
+        .await;
+        assert!(erased.is_ok(), "the erasure waited for the handler's lease");
+
+        // The handler fails and rolls back; its release deletes the marked job.
+        handler.rollback().await.unwrap();
+        assert_eq!(
+            fail(&pool, &claimed).await,
+            Some(crate::FailOutcome::Purged)
+        );
+        assert_eq!(jobs_naming(&pool, &[person, merged]).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_enroll_job_loses_the_erased_person_in_place_and_keeps_the_others(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let occurrence = Uuid::from_u128(5);
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "flow.enroll",
+            enroll_payload(
+                ws,
+                crate::EnrollWork::People(vec![(person, occurrence), (bystander, occurrence)]),
+            ),
+            "running:people",
+            3,
+            LEASE,
+        )
+        .await;
+
+        erase(&pool, ws, person).await;
+
+        assert_eq!(
+            fail(&pool, &claimed).await,
+            Some(crate::FailOutcome::Retried)
+        );
+        assert_eq!(
+            queued_enroll(&pool, "running:people")
+                .await
+                .map(|payload| payload.work),
+            Some(crate::EnrollWork::People(vec![(bystander, occurrence)])),
+            "the bystander's enrollment is still queued"
+        );
+        assert_eq!(jobs_naming(&pool, &[person]).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_audience_page_with_an_erased_cursor_is_replaced_by_the_fallback_page(
+        pool: PgPool,
+    ) {
+        use crate::{AudienceSource, EnrollWork, enroll_page_key};
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let older = Uuid::from_u128(1);
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(older)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let flow = Uuid::from_u128(77);
+        let occurrence = Uuid::from_u128(5);
+        let page = |after| EnrollWork::Audience {
+            source: AudienceSource::Everyone,
+            occurrence: Some(occurrence),
+            after,
+            entered_by: None,
+        };
+        let key = enroll_page_key(flow, occurrence, Some(person));
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "flow.enroll",
+            enroll_payload(ws, page(Some(person))),
+            &key,
+            3,
+            LEASE,
+        )
+        .await;
+
+        erase(&pool, ws, person).await;
+
+        assert_eq!(fail(&pool, &claimed).await, Some(crate::FailOutcome::Purged));
+        assert_eq!(jobs_naming(&pool, &[person]).await, 0);
+        assert_eq!(
+            queued_enroll(&pool, &enroll_page_key(flow, occurrence, Some(older)))
+                .await
+                .map(|payload| payload.work),
+            Some(page(Some(older))),
+            "the audience still pages on from the person before the erased cursor"
+        );
     }
 }
