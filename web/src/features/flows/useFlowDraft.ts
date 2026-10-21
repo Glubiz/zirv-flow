@@ -41,14 +41,17 @@ interface FlowDraft {
   /** How many saves have gone through since the editor opened. */
   saves: number;
   /**
-   * Makes ready to replace the draft with one the server wrote: stops the waiting save, lets one that
-   * is on its way finish, then drops local edits that are not saved. Until `adopt` or `release`
-   * the editor takes no edits and starts no save, so nothing races the replacement.
+   * Makes ready to replace the draft with one the server wrote: stops the waiting save and lets one
+   * that is on its way finish. The unsaved draft and its undo history are kept until `adopt` replaces
+   * them. Until `adopt` or `release` the editor takes no edits and starts no save, so nothing races
+   * the replacement.
    */
   hold: () => Promise<void>;
+  /** Whether a hold is on: the editor is read-only until the replacement lands or is given up. */
+  held: boolean;
   /** Shows a draft the server already holds (the graph and settings) as both the draft and the saved state, and ends the hold. */
   adopt: (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => void;
-  /** Ends a hold without replacing anything. */
+  /** Ends a hold without replacing anything: the draft is exactly as it was, and an edit that was waiting to be saved is saved. */
   release: () => void;
 }
 
@@ -100,6 +103,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const failed = useRef(false);
   /** Set between `hold` and `adopt`/`release`: no edit is taken and no save starts. */
   const holding = useRef(false);
+  const [held, setHeld] = useState(false);
 
   const check = useCallback(async () => {
     checks.current += 1;
@@ -278,26 +282,23 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
 
   const hold = useCallback(async () => {
     holding.current = true;
+    setHeld(true);
     if (timer.current !== null) {
       clearTimeout(timer.current);
       timer.current = null;
     }
     while (running.current !== null) await running.current;
-    // What is left is the saved state: edits that were not saved are the ones the person agreed to lose.
-    const base = savedRef.current;
-    draftRef.current = base;
-    edits.current += 1;
-    checks.current += 1;
-    failed.current = false;
-    setDraft(base);
-    setFailure(null);
-    setStatus("saved");
-    setChecking(false);
   }, []);
 
   const release = useCallback(() => {
     holding.current = false;
-  }, []);
+    setHeld(false);
+    const latest = draftRef.current;
+    const base = savedRef.current;
+    const waiting =
+      latest.name.trim() !== base.name || !sameJson(latest.graph, base.graph) || !sameJson(latest.settings, base.settings);
+    if (waiting) schedule();
+  }, [schedule]);
 
   const adopt = useCallback(
     (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => {
@@ -312,7 +313,11 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       setDraft(next);
       setSaved(next);
       setSaves((count) => count + 1);
+      failed.current = false;
+      setFailure(null);
+      setStatus("saved");
       holding.current = false;
+      setHeld(false);
       void check();
     },
     [check],
@@ -350,6 +355,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     adoptIssues,
     saves,
     hold,
+    held,
     adopt,
     release,
   };

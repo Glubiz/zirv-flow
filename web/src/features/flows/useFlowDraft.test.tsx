@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FLOW_ID, flowDetail, flowRoutes, WS } from "../../test/flowsApi";
 import { json, mockApi, problem } from "../../test/mockApi";
@@ -104,30 +104,70 @@ describe("useFlowDraft replacing the draft", () => {
     settings: { trigger: { type: "manual" }, reentry: { mode: "once" } },
   } as unknown as Pick<FlowDetail, "graph" | "settings">;
 
-  it("drops the waiting save and the unsaved edit, takes no edit while held, and shows the adopted draft as saved", async () => {
-    const calls = mockApi(flowRoutes());
-    const { result } = renderHook(() =>
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const flush = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+
+  function mountDraft() {
+    return renderHook(() =>
       useFlowDraft({ workspaceId: "ws1", flow: flowDetail() as unknown as FlowDetail, editable: true }),
     );
+  }
+
+  it("keeps the unsaved draft and its undo while held, takes no edit, and saves nothing", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result } = mountDraft();
     act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
-    expect(result.current.unsaved).toBe(true);
 
     await act(() => result.current.hold());
-    expect(result.current.unsaved).toBe(false);
-    expect(result.current.draft.name).toBe("Welcome series");
+    expect(result.current.held).toBe(true);
     act(() => result.current.edit((draft) => ({ ...draft, name: "While held" })));
+    await flush(1500);
+
+    expect(result.current.draft.name).toBe("Edited");
+    expect(result.current.unsaved).toBe(true);
+    expect(result.current.canUndo).toBe(true);
+    expect(saves(calls)).toHaveLength(0);
+  });
+
+  it("gives the draft back as it was when the hold is released, and saves what was waiting", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+    await act(() => result.current.hold());
+
+    act(() => result.current.release());
+    expect(result.current.held).toBe(false);
+    expect(result.current.draft.name).toBe("Edited");
+    await flush(1000);
+
+    expect(saves(calls)).toHaveLength(1);
+    expect(saves(calls)[0]).toMatchObject({ name: "Edited" });
+    act(() => result.current.undo());
     expect(result.current.draft.name).toBe("Welcome series");
+  });
+
+  it("shows the adopted draft as saved, makes it one step of undo, and saves nothing", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+    await act(() => result.current.hold());
 
     act(() => result.current.adopt(replacement));
-    await act(() => pause(1200));
+    await flush(1500);
 
     expect(result.current.draft.graph).toEqual(replacement.graph);
+    expect(result.current.held).toBe(false);
     expect(result.current.unsaved).toBe(false);
     expect(saves(calls)).toHaveLength(0);
-    // Edits are taken again once the draft is adopted.
     act(() => result.current.edit((draft) => ({ ...draft, name: "After" })));
-    expect(result.current.draft.name).toBe("After");
-    await waitFor(() => expect(saves(calls)).toHaveLength(1), { timeout: 3000 });
+    await flush(1000);
+    expect(saves(calls)).toHaveLength(1);
   });
 
   it("waits for a save that is on its way and does not start another after it", async () => {
@@ -144,39 +184,25 @@ describe("useFlowDraft replacing the draft", () => {
         return save(request);
       },
     });
-    const { result } = renderHook(() =>
-      useFlowDraft({ workspaceId: "ws1", flow: flowDetail() as unknown as FlowDetail, editable: true }),
-    );
+    const { result } = mountDraft();
     act(() => result.current.edit((draft) => ({ ...draft, name: "One" })));
-    await waitFor(() => expect(saves(calls)).toHaveLength(1), { timeout: 3000 });
+    await flush(1000);
+    expect(saves(calls)).toHaveLength(1);
     act(() => result.current.edit((draft) => ({ ...draft, name: "Two" })));
 
     let finished = false;
     const holding = result.current.hold().then(() => {
       finished = true;
     });
-    await act(() => pause(50));
+    await flush(50);
     expect(finished).toBe(false);
     await act(async () => {
       release();
       await holding;
     });
-    await act(() => pause(1200));
+    await flush(1500);
 
     expect(saves(calls)).toHaveLength(1);
-    expect(result.current.unsaved).toBe(false);
-    expect(result.current.draft.name).toBe("One");
-  });
-
-  it("takes edits again after a hold is released", async () => {
-    mockApi(flowRoutes());
-    const { result } = renderHook(() =>
-      useFlowDraft({ workspaceId: "ws1", flow: flowDetail() as unknown as FlowDetail, editable: true }),
-    );
-    await act(() => result.current.hold());
-    act(() => result.current.release());
-    act(() => result.current.edit((draft) => ({ ...draft, name: "Back" })));
-
-    expect(result.current.draft.name).toBe("Back");
+    expect(result.current.draft.name).toBe("Two");
   });
 });
