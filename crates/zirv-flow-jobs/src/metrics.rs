@@ -12,6 +12,7 @@ pub(crate) enum Outcome {
     Completed,
     Retried,
     Dead,
+    Purged,
     LeaseLost,
 }
 
@@ -21,6 +22,7 @@ impl Outcome {
             Self::Completed => "completed",
             Self::Retried => "retried",
             Self::Dead => "dead",
+            Self::Purged => "purged",
             Self::LeaseLost => "lease_lost",
         }
     }

@@ -238,6 +238,10 @@ impl World {
                 "the last attempt returned a retry instead of recording the failure".to_owned(),
             ),
             Some(FailOutcome::Retried) => Final::Retried(by_retry_after),
+            // The simulation erases nobody, so no job is marked to be purged.
+            Some(FailOutcome::Purged) => {
+                Final::Failed("a job no erasure marked was purged on release".to_owned())
+            }
             None => Final::Failed("the lease was lost before the attempt was failed".to_owned()),
         }
     }
