@@ -1393,10 +1393,7 @@ mod tests {
             crate::complete_job(&mut *handler, claimed.id, claimed.lease_token),
         )
         .await;
-        assert_eq!(
-            done.expect("complete_job waited for the erasure").unwrap(),
-            true
-        );
+        assert!(done.expect("complete_job waited for the erasure").unwrap());
         commit(handler).await.unwrap();
         tokio::time::timeout(bound, erasure)
             .await
