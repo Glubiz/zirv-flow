@@ -718,11 +718,11 @@ impl Driver<'_> {
         }
         if due.kind == WEBHOOK_JOB_KIND {
             self.webhook_runs += 1;
-            plan.concurrent |= self.webhook_runs % 4 == 0;
+            plan.concurrent |= self.webhook_runs.is_multiple_of(4);
         }
         if plan.concurrent {
             let seen = self.concurrents.entry(due.kind).or_default();
-            plan.fenced = *seen % 2 == 0;
+            plan.fenced = seen.is_multiple_of(2);
             *seen += 1;
         }
     }
