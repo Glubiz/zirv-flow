@@ -294,9 +294,75 @@ fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
         .is_none_or(|child| within_walk(child, depth + 1, nodes))
 }
 
-/// Why a document cannot be masked.
+/// Why a document cannot be sent: it has more nodes than a flow may, or a condition larger than
+/// the masking walks cover.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TooLarge;
+
+/// The text a webhook URL is replaced by, numbered across the document.
+const URL_TOKEN_OPEN: &str = "(kept-url:";
+
+/// The literals replaced in the flow a model was shown, to put back in its answer: the personal
+/// literals of conditions, filters and trait values (the table of #126) and the webhook URLs, each
+/// replaced whole, because a URL can carry an address or a token in its path or query.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FlowTable {
+    literals: Placeholders,
+    /// Each token and the URL it stands for.
+    urls: Vec<(String, String)>,
+}
+
+impl FlowTable {
+    /// The text with every placeholder it repeats replaced by what it stands for. For an
+    /// explanation, which goes to the admin who owns the flow and is never stored.
+    pub(crate) fn restore_text(&self, text: &str) -> String {
+        let text = self.literals.restore_text(text);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(URL_TOKEN_OPEN) {
+            out.push_str(&rest[..at]);
+            rest = &rest[at..];
+            let end = rest.find(')').map_or(rest.len(), |close| close + 1);
+            let candidate = &rest[..end];
+            match self.urls.iter().find(|(token, _)| token == candidate) {
+                Some((_, url)) => out.push_str(url),
+                None => out.push_str(candidate),
+            }
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+}
+
+/// The pointers of the webhook nodes of a document that have a URL.
+fn webhook_urls(doc: &Value) -> Vec<String> {
+    doc.pointer("/graph/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.get("type").and_then(Value::as_str) == Some("action.webhook")
+                && node.get("url").is_some_and(Value::is_string)
+        })
+        .map(|(index, _)| format!("/graph/nodes/{index}/url"))
+        .collect()
+}
+
+/// Whether the text is a URL placeholder.
+fn is_url_token(text: &str) -> bool {
+    text.strip_prefix(URL_TOKEN_OPEN)
+        .and_then(|rest| rest.strip_suffix(')'))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether a graph has more nodes than a flow may. A save does not apply the limit, so a draft can.
+fn too_many_nodes(doc: &Value) -> bool {
+    doc.pointer("/graph/nodes")
+        .and_then(Value::as_array)
+        .is_some_and(|nodes| nodes.len() > MAX_NODES)
+}
 
 /// The document with each personal literal replaced by a placeholder, and the table to put them
 /// back. A condition larger than the masking walks cover is refused: its literals could not all be
@@ -304,7 +370,10 @@ pub(crate) struct TooLarge;
 pub(crate) fn mask_document(
     doc: &Value,
     clear: &ClearKeys,
-) -> Result<(Value, Placeholders), TooLarge> {
+) -> Result<(Value, FlowTable), TooLarge> {
+    if too_many_nodes(doc) {
+        return Err(TooLarge);
+    }
     let places = carriers(doc);
     let roots: Vec<Value> = places
         .iter()
@@ -320,19 +389,36 @@ pub(crate) fn mask_document(
     for (place, root) in places.iter().zip(&masked_roots) {
         place.put_back(&mut masked, root);
     }
-    Ok((masked, table))
+    let mut urls = Vec::new();
+    for pointer in webhook_urls(doc) {
+        let Some(url) = doc.pointer(&pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        let token = format!("{URL_TOKEN_OPEN}{})", urls.len() + 1);
+        if let Some(target) = masked.pointer_mut(&pointer) {
+            *target = Value::String(token.clone());
+        }
+        urls.push((token, url.to_owned()));
+    }
+    Ok((
+        masked,
+        FlowTable {
+            literals: table,
+            urls,
+        },
+    ))
 }
 
 /// Puts the placeholders back into the model's answer, each under the trait or event property it
 /// was sent under. Then names every other string that looks like one, as `code at <place>`.
-pub(crate) fn restore_document(table: &Placeholders, doc: &mut Value) -> Vec<String> {
+pub(crate) fn restore_document(table: &FlowTable, doc: &mut Value) -> Vec<String> {
     let mut lines = Vec::new();
     let mut covered: HashSet<String> = HashSet::new();
     for place in carriers(doc) {
         let Some(mut root) = place.root(doc) else {
             continue;
         };
-        for line in table.restore(&mut root) {
+        for line in table.literals.restore(&mut root) {
             if let Some((code, pointer)) = line.split_once(" at ") {
                 let at = place.doc_pointer(pointer);
                 lines.push(format!("{code} at {}", place_of(doc, &at)));
@@ -341,10 +427,23 @@ pub(crate) fn restore_document(table: &Placeholders, doc: &mut Value) -> Vec<Str
         place.put_back(doc, &root);
         covered.insert(place.literals());
     }
-    // A placeholder in a part the carriers do not cover (a node id, a webhook URL, a note) is not
-    // where it was sent, whatever it says.
+    // A URL placeholder comes back into a webhook URL, wherever the node moved to.
+    for pointer in webhook_urls(doc) {
+        let url = doc
+            .pointer(&pointer)
+            .and_then(Value::as_str)
+            .and_then(|text| table.urls.iter().find(|(token, _)| token == text))
+            .map(|(_, url)| url.clone());
+        if let (Some(url), Some(target)) = (url, doc.pointer_mut(&pointer)) {
+            *target = Value::String(url);
+        }
+    }
+    // A placeholder in a part the carriers do not cover (a node id, a note), and a URL placeholder
+    // anywhere it was not put back, is not where it was sent, whatever it says.
     let mut stray = Vec::new();
     collect_tokens(doc, "", &covered, &mut stray);
+    collect_url_tokens(doc, "", &mut stray);
+    stray.dedup();
     for pointer in stray {
         lines.push(format!(
             "placeholder_invented at {}",
@@ -359,6 +458,28 @@ fn is_token(text: &str) -> bool {
     text.strip_prefix("(kept:")
         .and_then(|rest| rest.strip_suffix(')'))
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The pointers of the strings that look like URL placeholders, anywhere.
+fn collect_url_tokens(value: &Value, pointer: &str, out: &mut Vec<String>) {
+    if pointer.len() > 4096 {
+        return;
+    }
+    match value {
+        Value::String(text) if is_url_token(text) => out.push(pointer.to_owned()),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_url_tokens(item, &format!("{pointer}/{index}"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                collect_url_tokens(item, &format!("{pointer}/{key}"), out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The pointers of the strings that look like placeholders outside the covered parts.
@@ -458,7 +579,11 @@ pub(crate) fn render_document(
     doc: &Value,
     details: &CatalogDetails,
     privacy: Privacy,
-) -> Result<(Content, Placeholders), TooLarge> {
+) -> Result<(Content, FlowTable), TooLarge> {
+    // Whatever the privacy, a flow beyond the limit is not sent: the masking would not cover it.
+    if too_many_nodes(doc) {
+        return Err(TooLarge);
+    }
     match privacy {
         Privacy::SchemaOnly => {
             let (masked, table) = mask_document(doc, &ClearKeys::of(details))?;
@@ -466,7 +591,7 @@ pub(crate) fn render_document(
         }
         Privacy::PersonalAllowed => Ok((
             Content::Personal(format!("{label}: {doc}\n")),
-            Placeholders::default(),
+            FlowTable::default(),
         )),
     }
 }
@@ -477,7 +602,7 @@ pub(crate) fn flow_context(
     label: &str,
     doc: &Value,
     privacy: Privacy,
-) -> Result<(Vec<Content>, Placeholders), TooLarge> {
+) -> Result<(Vec<Content>, FlowTable), TooLarge> {
     let (rendered, table) = render_document(label, doc, details, privacy)?;
     Ok((vec![render_catalog(details, None), rendered], table))
 }
@@ -828,5 +953,58 @@ mod tests {
         let text = trace_context(&records, false)[0].render();
         assert!(text.contains("5 later records were left out."), "{text}");
         assert_eq!(record_label(0), "r1");
+    }
+
+    #[test]
+    fn webhook_urls_are_masked_whole_and_come_back_only_into_a_webhook_url() {
+        let doc = json!({"graph": {"nodes": [
+            {"id": "a", "type": "action.webhook", "url": "https://h.example.com/x?email=a@b.dk"},
+            {"id": "b", "type": "action.webhook", "url": "https://h.example.com/y"}
+        ]}, "settings": {}});
+
+        let (masked, table) = mask_document(&doc, &ClearKeys::of(&details())).unwrap();
+
+        assert_eq!(masked["graph"]["nodes"][0]["url"], "(kept-url:1)");
+        assert_eq!(masked["graph"]["nodes"][1]["url"], "(kept-url:2)");
+        assert!(!masked.to_string().contains("example.com"));
+        let mut back = masked.clone();
+        assert!(restore_document(&table, &mut back).is_empty());
+        assert_eq!(back, doc);
+        // A URL the model writes itself stays as written.
+        let mut own = masked.clone();
+        own["graph"]["nodes"][1]["url"] = json!("https://new.example.com/z");
+        assert!(restore_document(&table, &mut own).is_empty());
+        assert_eq!(own["graph"]["nodes"][1]["url"], "https://new.example.com/z");
+        // A URL placeholder anywhere else, or one that was never sent, is an issue.
+        let mut stray = masked.clone();
+        stray["graph"]["nodes"][1]["id"] = json!("(kept-url:2)");
+        stray["graph"]["nodes"][0]["url"] = json!("(kept-url:9)");
+        let lines = restore_document(&table, &mut stray);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("placeholder_invented at "))
+        );
+        assert_eq!(
+            table.restore_text("Posts to (kept-url:2) and (kept-url:7)."),
+            "Posts to https://h.example.com/y and (kept-url:7)."
+        );
+    }
+
+    #[test]
+    fn a_flow_over_the_node_limit_is_never_rendered() {
+        let nodes: Vec<Value> = (0..=MAX_NODES)
+            .map(|index| json!({"id": format!("n{index}"), "type": "exit"}))
+            .collect();
+        let doc = json!({"graph": {"nodes": nodes}, "settings": {}});
+
+        assert_eq!(
+            mask_document(&doc, &ClearKeys::default()).unwrap_err(),
+            TooLarge
+        );
+        for privacy in [Privacy::SchemaOnly, Privacy::PersonalAllowed] {
+            assert!(flow_context(&details(), "Flow", &doc, privacy).is_err());
+        }
     }
 }

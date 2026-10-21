@@ -30,7 +30,6 @@ use super::dispatch::{DispatchError, Dispatcher};
 use super::drafts::{DraftIssue, segment_details};
 use super::explain::run;
 use super::flow_context;
-use super::segment_context::Placeholders;
 use super::tools::{self, DraftTarget, ToolContext};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -144,7 +143,7 @@ fn flow_body(
     source: &'static str,
     version: Option<i32>,
     explained: &Value,
-    table: &Placeholders,
+    table: &flow_context::FlowTable,
 ) -> AiFlowExplainBody {
     let text = |value: Option<&Value>| {
         table.restore_text(value.and_then(Value::as_str).unwrap_or_default())
