@@ -740,6 +740,17 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // The client side lets go at once, but PostgreSQL only notices a dropped client when
+        // the statement it is running ends, so give the server a bounded time to finish
+        // with the abandoned backends before the baseline is read.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while busy_connections(&pool).await != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "no query is still running: a backend stayed busy after the drop"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let left = inbox(&pool).await;
         assert!(left > 0, "the run was cut off with rows remaining");
         // A shard that outlived the handler, even one asleep in its longest retry backoff
@@ -753,7 +764,7 @@ mod tests {
         assert_eq!(
             busy_connections(&pool).await,
             0,
-            "no query is still running"
+            "no query was started after the drop"
         );
     }
 
