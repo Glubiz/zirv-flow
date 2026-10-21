@@ -34,7 +34,8 @@ use zirv_flow_store::{
     claim_job, commit, complete_job, fail_job, lock_lease, reap_expired,
 };
 
-use super::driver::{Driver, Due, LANE_PLAN, WakeMove, hash_text, seconds_of};
+use super::driver::{Driver, Due, LANE_PLAN, WakeMove};
+use super::mock::Script;
 use super::world::{EPOCH, World};
 use crate::worker::retry_delay;
 use crate::{JobContext, JobError, WorkerConfig};
@@ -184,7 +185,7 @@ impl World {
         let unit = f64::from(
             u32::try_from(
                 mix(self.seed
-                    ^ hash_text(key_of(&claimed.payload))
+                    ^ self.mock.name_of(key_of(&claimed.payload))
                     ^ u64::try_from(claimed.attempts).unwrap_or(0))
                     % 1000,
             )
@@ -584,11 +585,13 @@ impl Driver<'_> {
     /// including the ones whose attempts later run out.
     pub(super) async fn run_job(&mut self, due: &Due, early: bool) {
         let w = self.w;
-        let mut rng = Rng::derive(
-            w.seed,
-            &[LANE_PLAN, due.label, seconds_of(self.now), u64::from(early)],
-        );
-        let plan = Plan::draw(&mut rng, due.kind);
+        // The plan follows the job's label and how often that label was planned before, never the
+        // clock: how far a retry delay or a lease moved it must not change what is injected.
+        let times = self.planned.entry(due.label).or_default();
+        *times += 1;
+        let mut rng = Rng::derive(w.seed, &[LANE_PLAN, due.label, *times, u64::from(early)]);
+        let mut plan = Plan::draw(&mut rng, due.kind);
+        self.arrange(&mut plan, due, &mut rng);
         if early {
             self.bump("early wake claimed");
         }
@@ -689,6 +692,39 @@ impl Driver<'_> {
             "{} job {} was still not done after {MAX_FINAL_ROUNDS} attempts",
             due.kind, due.id
         ));
+    }
+
+    /// Settles what the seed must not leave to chance: the calls with a scenario take their
+    /// part, and the concurrent duplicates are spread over both variants for every kind (every
+    /// other one fenced), over every fourth webhook call.
+    fn arrange(&mut self, plan: &mut Plan, due: &Due, rng: &mut Rng) {
+        if due.scenario.dead {
+            while plan.modes.len() < 5 {
+                plan.modes.push(if rng.chance(50) {
+                    Mode::Rollback
+                } else {
+                    Mode::CommitWithoutAck
+                });
+            }
+        }
+        if due.scenario.duplicate {
+            plan.modes[0] = Mode::CommitWithoutAck;
+        }
+        if due.scenario.script == Some(Script::Down) {
+            // Every send fails, so the last attempt records the failure; its crash must be a commit
+            // without the ack for that record to survive (a rollback would take it back).
+            plan.modes = vec![Mode::CommitWithoutAck];
+            plan.concurrent = false;
+        }
+        if due.kind == WEBHOOK_JOB_KIND {
+            self.webhook_runs += 1;
+            plan.concurrent |= self.webhook_runs % 4 == 0;
+        }
+        if plan.concurrent {
+            let seen = self.concurrents.entry(due.kind).or_default();
+            plan.fenced = *seen % 2 == 0;
+            *seen += 1;
+        }
     }
 
     /// A retryable answer sent the job back to the queue after the worker's delay.

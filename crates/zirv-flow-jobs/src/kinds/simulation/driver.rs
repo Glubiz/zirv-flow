@@ -12,10 +12,13 @@ use serde_json::{Value, json};
 use time::Duration as Span;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::events::WEBHOOK_SUCCEEDED_EVENT;
+use zirv_flow_core::flow::NodeKind;
 use zirv_flow_engine::sim::generate::EVENTS;
 use zirv_flow_engine::sim::rng::{Rng, mix};
 use zirv_flow_store::{ENROLL_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB_KIND};
 
+use super::mock::Script;
 use super::world::{EPOCH, World, end};
 
 /// Streams of the seed, so each decision draws from its own and one never shifts another.
@@ -42,6 +45,30 @@ pub(super) struct WakeMove {
     pub(super) at: OffsetDateTime,
 }
 
+/// What a call is made to go through, so that each failure the checks cover is certain to occur
+/// in every run: the first calls of a run take these parts in turn, by the order of their labels.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Scenario {
+    /// How the destination answers the call.
+    pub(super) script: Option<Script>,
+    /// The job is failed five times, which uses up its attempts: it goes dead.
+    pub(super) dead: bool,
+    /// Its first crash is a commit without the ack, and a wait for its outcome is registered: the
+    /// outcome event is written twice.
+    pub(super) duplicate: bool,
+}
+
+/// The scripts the first calls take, in turn. The calls after them follow the seed's classes.
+const SCRIPTS: [(Option<Script>, bool); 5] = [
+    (Some(Script::Healthy), true),
+    (Some(Script::RetryAfter), false),
+    (Some(Script::Down), false),
+    (Some(Script::Refusing), false),
+    (Some(Script::Healthy), true),
+];
+/// How many calls are made to write their outcome twice into a wait that is registered.
+const DUPLICATES: usize = 3;
+
 /// A job that is due.
 #[derive(Clone, Debug)]
 pub(super) struct Due {
@@ -49,6 +76,7 @@ pub(super) struct Due {
     pub(super) kind: &'static str,
     /// A name for the job that does not depend on random ids, so a seed gives the same plan.
     pub(super) label: u64,
+    pub(super) scenario: Scenario,
 }
 
 struct Pending {
@@ -78,6 +106,15 @@ pub(super) struct Driver<'w> {
     pub(super) advances: HashMap<(Uuid, i64), usize>,
     /// The outcome event that settled a wait, by the call it reports (enrollment and node).
     pub(super) outcome_settlers: HashMap<(Uuid, String), Uuid>,
+    /// The scenario of each call, by idempotency key, and how many were handed out.
+    scenarios: HashMap<String, Scenario>,
+    scripted: usize,
+    duplicated: usize,
+    /// How often each label has been planned, so a plan does not depend on the clock.
+    pub(super) planned: HashMap<u64, u64>,
+    /// The concurrent duplicates and the webhook executions so far, per kind.
+    pub(super) concurrents: HashMap<&'static str, usize>,
+    pub(super) webhook_runs: usize,
     /// What went wrong during the run itself (a handler that failed, a fence that let a stale
     /// execution through), apart from what the tables show afterwards.
     pub(super) problems: Vec<String>,
@@ -116,6 +153,12 @@ impl<'w> Driver<'w> {
             dead_webhooks: HashSet::new(),
             advances: HashMap::new(),
             outcome_settlers: HashMap::new(),
+            scenarios: HashMap::new(),
+            scripted: 0,
+            duplicated: 0,
+            planned: HashMap::new(),
+            concurrents: HashMap::new(),
+            webhook_runs: 0,
             problems: Vec::new(),
         };
         driver.schedule_noise();
@@ -250,15 +293,88 @@ impl<'w> Driver<'w> {
         .fetch_all(&self.w.env.pool)
         .await
         .unwrap();
-        let mut due = Vec::with_capacity(rows.len());
+        let mut labelled = Vec::with_capacity(rows.len());
         for (id, kind, payload) in rows {
             let Some(kind) = KINDS.iter().copied().find(|known| *known == kind) else {
                 continue;
             };
             let label = self.label(kind, &payload).await;
-            due.push(Due { id, kind, label });
+            labelled.push((label, id, kind, payload));
+        }
+        // The scenarios go to the calls in the order of their labels, not of the rows the
+        // database happens to return.
+        labelled.sort_by_key(|(label, ..)| *label);
+        let mut due = Vec::with_capacity(labelled.len());
+        for (label, id, kind, payload) in labelled {
+            let scenario = if kind == WEBHOOK_JOB_KIND {
+                self.scenario_of(&payload).await
+            } else {
+                Scenario::default()
+            };
+            due.push(Due {
+                id,
+                kind,
+                label,
+                scenario,
+            });
         }
         due
+    }
+
+    /// The scenario of the call a `webhook.call` payload carries: given when the call is first
+    /// seen, and kept. A call whose node is followed by a wait for `webhook.succeeded` is one of
+    /// the first few to write its outcome twice; the others take the scripts in turn.
+    async fn scenario_of(&mut self, payload: &Value) -> Scenario {
+        let key = payload
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(scenario) = self.scenarios.get(&key) {
+            return *scenario;
+        }
+        let enrollment = payload
+            .get("enrollment_id")
+            .and_then(Value::as_str)
+            .and_then(|text| Uuid::parse_str(text).ok())
+            .unwrap_or_default();
+        let node = payload
+            .get("node_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let person = self.person_of_enrollment(enrollment).await;
+        let graph = &self.w.flows[self.w.people[person].flow].graph;
+        let waits_for_success = graph
+            .edges
+            .iter()
+            .find(|edge| edge.from == node && edge.port == "next")
+            .and_then(|edge| graph.node(&edge.to))
+            .is_some_and(|next| {
+                matches!(&next.kind, NodeKind::WaitUntilEvent { event, .. }
+                    if event.name == WEBHOOK_SUCCEEDED_EVENT)
+            });
+        let scenario = if waits_for_success && self.duplicated < DUPLICATES {
+            self.duplicated += 1;
+            Scenario {
+                script: Some(Script::Healthy),
+                dead: false,
+                duplicate: true,
+            }
+        } else if let Some((script, dead)) = SCRIPTS.get(self.scripted).copied() {
+            self.scripted += 1;
+            Scenario {
+                script,
+                dead,
+                duplicate: false,
+            }
+        } else {
+            Scenario::default()
+        };
+        if let Some(script) = scenario.script {
+            self.w.mock.script(&key, script);
+        }
+        self.scenarios.insert(key, scenario);
+        scenario
     }
 
     /// Which person a job is about, in the population's order.
@@ -384,6 +500,7 @@ impl<'w> Driver<'w> {
             id,
             kind: STEP_JOB_KIND,
             label,
+            scenario: Scenario::default(),
         };
         self.run_job(&job, true).await;
     }

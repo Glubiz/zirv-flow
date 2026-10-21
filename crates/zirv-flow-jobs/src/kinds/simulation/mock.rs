@@ -33,6 +33,20 @@ use zirv_flow_engine::sim::rng::mix;
 
 use super::driver::hash_text;
 
+/// What the destination does with a call the driver scripted, so that every kind of failure the
+/// checks cover is guaranteed to occur, whatever the seed's classes happen to hand out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Script {
+    /// The first send is answered with a 429 that asks for a long wait; later ones with a 200.
+    RetryAfter,
+    /// Every send is answered with a 503, so the last attempt records a failure.
+    Down,
+    /// Every send is answered with a 400.
+    Refusing,
+    /// Every send is answered with a 200.
+    Healthy,
+}
+
 /// The stream of the seed the destination draws from.
 const LANE_DESTINATION: u64 = 30;
 /// The statuses a destination answers when it is overloaded or failing; each is retried.
@@ -53,6 +67,8 @@ pub(super) struct Mock {
     hits: Arc<Mutex<Vec<Hit>>>,
     /// A name per call that does not depend on random ids, by idempotency key.
     names: Arc<Mutex<HashMap<String, u64>>>,
+    /// The scripted calls, by idempotency key.
+    scripts: Arc<Mutex<HashMap<String, Script>>>,
 }
 
 impl Mock {
@@ -61,7 +77,26 @@ impl Mock {
             seed,
             hits: Arc::default(),
             names: Arc::default(),
+            scripts: Arc::default(),
         }
+    }
+
+    /// Scripts the call under `key`, before its first send.
+    pub(super) fn script(&self, key: &str, script: Script) {
+        self.scripts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.to_owned(), script);
+    }
+
+    /// The name given to the call under `key`, which does not depend on random ids.
+    pub(super) fn name_of(&self, key: &str) -> u64 {
+        self.names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| hash_text(key))
     }
 
     /// Names the call under `key` before its first send, so its class follows the seed.
@@ -103,7 +138,14 @@ impl Mock {
 }
 
 /// The status the destination answers the `nth` send (from 0) of the call named `name` with.
-pub(super) fn answer(seed: u64, name: u64, nth: usize) -> u16 {
+pub(super) fn answer(seed: u64, name: u64, nth: usize, script: Option<Script>) -> u16 {
+    match script {
+        Some(Script::RetryAfter) => return if nth == 0 { 429 } else { 200 },
+        Some(Script::Down) => return 503,
+        Some(Script::Refusing) => return 400,
+        Some(Script::Healthy) => return 200,
+        None => {}
+    }
     let call = mix(seed ^ LANE_DESTINATION ^ name);
     let class = call % 100;
     let roll = usize::try_from(mix(call ^ (nth as u64 + 1)) % 100).unwrap_or(0);
@@ -134,14 +176,14 @@ async fn receive(State(mock): State<Mock>, headers: HeaderMap, body: Bytes) -> R
     let (status, name, nth_for_wait) = {
         let mut hits = mock.hits.lock().unwrap_or_else(PoisonError::into_inner);
         let nth = hits.iter().filter(|hit| hit.key == key).count();
-        let name = mock
-            .names
+        let name = mock.name_of(&key);
+        let script = mock
+            .scripts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
-            .copied()
-            .unwrap_or_else(|| hash_text(&key));
-        let status = answer(mock.seed, name, nth);
+            .copied();
+        let status = answer(mock.seed, name, nth, script);
         hits.push(Hit {
             key,
             body: body.to_vec(),
@@ -173,7 +215,7 @@ mod tests {
     #[test]
     fn the_answers_are_a_function_of_the_seed_the_call_and_the_send() {
         for nth in 0..4 {
-            assert_eq!(answer(7, 99, nth), answer(7, 99, nth));
+            assert_eq!(answer(7, 99, nth, None), answer(7, 99, nth, None));
         }
     }
 
@@ -183,8 +225,8 @@ mod tests {
         let mut later = BTreeSet::new();
         for call in 0..400 {
             let name = hash_text(&format!("call {call}"));
-            first.insert(answer(11, name, 0));
-            later.insert(answer(11, name, 5));
+            first.insert(answer(11, name, 0, None));
+            later.insert(answer(11, name, 5, None));
         }
         // A server error, a refusal, a rate limit and a success are all answered.
         for status in [200, 400, 429, 503] {

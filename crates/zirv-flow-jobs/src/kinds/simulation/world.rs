@@ -196,6 +196,7 @@ impl World {
                     _ => {}
                 }
             }
+            settle_splits(&mut graph);
             wait_for_outcomes(&mut graph, &mut waits);
             let id = self
                 .env
@@ -356,9 +357,6 @@ fn wait_for_outcomes(graph: &mut FlowGraph, rng: &mut Rng) {
         .map(|node| node.id.clone())
         .collect();
     for (count, hook) in hooks.iter().enumerate() {
-        if !rng.chance(70) {
-            continue;
-        }
         let Some(edge) = graph
             .edges
             .iter_mut()
@@ -397,4 +395,45 @@ fn wait_for_outcomes(graph: &mut FlowGraph, rng: &mut Rng) {
         issues.is_empty(),
         "the outcome waits made an invalid graph: {issues:?}"
     );
+}
+
+/// Makes every arm of a `split.random` lead to the same node. The engine picks the arm from a
+/// hash of the enrollment's id, which the runtime draws at random, so the path a person takes
+/// would differ from run to run and the run could not follow its seed. The node still runs, and
+/// the arm it picks still shows in the decisions; only where it leads no longer depends on it.
+fn settle_splits(graph: &mut FlowGraph) {
+    let splits: Vec<String> = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::SplitRandom { .. }))
+        .map(|node| node.id.clone())
+        .collect();
+    for split in splits {
+        let Some(target) = graph
+            .edges
+            .iter()
+            .find(|edge| edge.from == split)
+            .map(|edge| edge.to.clone())
+        else {
+            continue;
+        };
+        for edge in graph.edges.iter_mut().filter(|edge| edge.from == split) {
+            edge.to.clone_from(&target);
+        }
+    }
+    // What only another arm led to is out of reach now, and a node nothing leads to would be a
+    // second entry: drop what the first node (the entry) no longer reaches.
+    let mut reached: Vec<String> = graph.nodes.iter().take(1).map(|n| n.id.clone()).collect();
+    let mut index = 0;
+    while index < reached.len() {
+        let from = reached[index].clone();
+        for edge in graph.edges.iter().filter(|edge| edge.from == from) {
+            if !reached.contains(&edge.to) {
+                reached.push(edge.to.clone());
+            }
+        }
+        index += 1;
+    }
+    graph.nodes.retain(|node| reached.contains(&node.id));
+    graph.edges.retain(|edge| reached.contains(&edge.from));
 }
