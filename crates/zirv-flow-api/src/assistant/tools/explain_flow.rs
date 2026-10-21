@@ -139,11 +139,7 @@ impl AiTool<ToolContext> for ExplainFlow {
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
             authorize_again(context).await?;
-            let DraftTarget::ExplainFlow {
-                node_ids,
-                required,
-            } = &context.target
-            else {
+            let DraftTarget::ExplainFlow { node_ids, required } = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };
             check_explanation(arguments, node_ids, required)

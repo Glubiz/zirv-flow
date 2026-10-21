@@ -678,7 +678,9 @@ pub(crate) async fn create(
     };
     // The flow being edited, within the workspace.
     let flow = match (kind, request.flow_id) {
-        (DraftKind::Flow, Some(flow_id)) => Some(current_flow(&state, workspace.id, flow_id).await?),
+        (DraftKind::Flow, Some(flow_id)) => {
+            Some(current_flow(&state, workspace.id, flow_id).await?)
+        }
         _ => None,
     };
     let sample = match (&source, &request.sample) {

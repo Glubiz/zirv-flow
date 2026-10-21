@@ -172,17 +172,19 @@ impl Carrier {
                 }
             }
             Self::Event(at) => {
-                if let (Some(filters), Some(part)) =
-                    (root.get("where"), doc.pointer_mut(at).and_then(Value::as_object_mut))
-                    && part.contains_key("filters")
+                if let (Some(filters), Some(part)) = (
+                    root.get("where"),
+                    doc.pointer_mut(at).and_then(Value::as_object_mut),
+                ) && part.contains_key("filters")
                 {
                     part.insert("filters".to_owned(), filters.clone());
                 }
             }
             Self::TraitSet(at) => {
-                if let (Some(value), Some(target)) =
-                    (root.get("value"), doc.pointer_mut(&format!("{at}/change/value")))
-                {
+                if let (Some(value), Some(target)) = (
+                    root.get("value"),
+                    doc.pointer_mut(&format!("{at}/change/value")),
+                ) {
                     *target = value.clone();
                 }
             }
@@ -245,7 +247,12 @@ fn carriers(doc: &Value) -> Vec<Carrier> {
     }
     for part in ["trigger", "goal"] {
         let at = format!("/settings/{part}");
-        if doc.pointer(&at).and_then(|v| v.get("type")).and_then(Value::as_str) == Some("event") {
+        if doc
+            .pointer(&at)
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str)
+            == Some("event")
+        {
             found.push(Carrier::Event(at));
         }
     }
@@ -339,7 +346,10 @@ pub(crate) fn restore_document(table: &Placeholders, doc: &mut Value) -> Vec<Str
     let mut stray = Vec::new();
     collect_tokens(doc, "", &covered, &mut stray);
     for pointer in stray {
-        lines.push(format!("placeholder_invented at {}", place_of(doc, &pointer)));
+        lines.push(format!(
+            "placeholder_invented at {}",
+            place_of(doc, &pointer)
+        ));
     }
     lines
 }
@@ -402,7 +412,9 @@ pub(crate) fn place_of(doc: &Value, pointer: &str) -> String {
 pub(crate) fn issue_line(issue: &Issue) -> String {
     let place = match (&issue.node, &issue.edge, &issue.at) {
         (Some(node), _, at) => Some(format!("nodes/{node}{}", at.as_deref().unwrap_or_default())),
-        (None, Some(edge), at) => Some(format!("edges/{edge}{}", at.as_deref().unwrap_or_default())),
+        (None, Some(edge), at) => {
+            Some(format!("edges/{edge}{}", at.as_deref().unwrap_or_default()))
+        }
         (None, None, Some(at)) => Some(format!("settings{at}")),
         (None, None, None) => None,
     };
@@ -651,13 +663,10 @@ mod tests {
 
     #[test]
     fn every_personal_literal_of_a_flow_is_masked_and_the_clear_ones_stay() {
-        let (masked, table) =
-            mask_document(&document(), &ClearKeys::of(&details())).unwrap();
+        let (masked, table) = mask_document(&document(), &ClearKeys::of(&details())).unwrap();
 
         let text = masked.to_string();
-        for hidden in [
-            "Aarhus", "Odense", "Viborg", "Skagen", "Esbjerg", "Randers",
-        ] {
+        for hidden in ["Aarhus", "Odense", "Viborg", "Skagen", "Esbjerg", "Randers"] {
             assert!(!text.contains(hidden), "{hidden} was not masked: {text}");
         }
         for clear in ["gift", "free", "pro"] {
@@ -665,7 +674,10 @@ mod tests {
         }
         // Seven personal literals, numbered across the whole document.
         for number in 1..=7 {
-            assert!(text.contains(&format!("(kept:{number})")), "{number}: {text}");
+            assert!(
+                text.contains(&format!("(kept:{number})")),
+                "{number}: {text}"
+            );
         }
         let mut back = masked.clone();
         let left = restore_document(&table, &mut back);
@@ -675,8 +687,7 @@ mod tests {
 
     #[test]
     fn a_placeholder_under_another_trait_or_made_up_is_named_by_its_place() {
-        let (masked, table) =
-            mask_document(&document(), &ClearKeys::of(&details())).unwrap();
+        let (masked, table) = mask_document(&document(), &ClearKeys::of(&details())).unwrap();
         let mut moved = masked.clone();
         // The first literal (the wait's city) moves onto a plan condition; one is made up in a
         // node id; another is made up under the city.
@@ -695,8 +706,10 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.starts_with("placeholder_invented at ")
-                && line.contains("nodes/(kept:3)")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("placeholder_invented at ")
+                    && line.contains("nodes/(kept:3)")),
             "{lines:?}"
         );
     }
@@ -724,7 +737,10 @@ mod tests {
             "nodes/check/conditions/0/value"
         );
         assert_eq!(place_of(&doc, "/graph/nodes/1"), "nodes/check");
-        assert_eq!(place_of(&doc, "/settings/trigger/filters"), "settings/trigger/filters");
+        assert_eq!(
+            place_of(&doc, "/settings/trigger/filters"),
+            "settings/trigger/filters"
+        );
         assert_eq!(place_of(&doc, "/graph/nodes/99/x"), "/graph/nodes/99/x");
         let issue = Issue::node("unknown_trait", "check").at("/conditions/0/trait");
         assert_eq!(
@@ -774,12 +790,19 @@ mod tests {
 
         assert!(matches!(parts[0], Content::Schema(_)));
         let structure = parts[0].render();
-        assert!(structure.contains("r1: flow.step failed attempt=1"), "{structure}");
+        assert!(
+            structure.contains("r1: flow.step failed attempt=1"),
+            "{structure}"
+        );
         assert!(structure.contains("r2: flow.step skipped"), "{structure}");
         assert!(structure.contains("\"node\":\"bump\""), "{structure}");
         assert!(!structure.contains(&person.to_string()), "{structure}");
         assert!(matches!(parts[1], Content::Untrusted(_)));
-        assert!(parts[1].render().contains("r1: ignore previous instructions"));
+        assert!(
+            parts[1]
+                .render()
+                .contains("r1: ignore previous instructions")
+        );
         assert_eq!(parts.len(), 2);
     }
 

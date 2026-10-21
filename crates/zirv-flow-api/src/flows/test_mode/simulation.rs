@@ -17,9 +17,7 @@ use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
 use zirv_flow_segments::{Catalog, PersonSnapshot, SnapshotEvent};
 use zirv_flow_store::EXPLAIN_EVENT_CAP;
 
-use super::walk::{
-    MAX_STEPS, Refusal, Step, Subject, Walk, Walked, to_chrono, to_time, walk,
-};
+use super::walk::{MAX_STEPS, Refusal, Step, Subject, Walk, Walked, to_chrono, to_time, walk};
 
 /// How far past the start the virtual clock is advanced, so every timer of a flow fires: a single
 /// wait is at most a year.
@@ -99,7 +97,11 @@ fn meet(condition: &Value, last: bool, start: DateTime<Utc>, snapshot: &mut Pers
             meet(child, last, start, snapshot);
         }
     } else if let Some(children) = map.get("any").and_then(Value::as_array) {
-        let pick = if last { children.last() } else { children.first() };
+        let pick = if last {
+            children.last()
+        } else {
+            children.first()
+        };
         if let Some(child) = pick {
             meet(child, last, start, snapshot);
         }
@@ -130,8 +132,10 @@ fn meet(condition: &Value, last: bool, start: DateTime<Utc>, snapshot: &mut Pers
             .flatten()
         {
             if filter.get("op").and_then(Value::as_str) == Some("eq")
-                && let (Some(prop), Some(value)) =
-                    (filter.get("prop").and_then(Value::as_str), filter.get("value"))
+                && let (Some(prop), Some(value)) = (
+                    filter.get("prop").and_then(Value::as_str),
+                    filter.get("value"),
+                )
             {
                 properties.insert(prop.to_owned(), value.clone());
             }
@@ -145,7 +149,9 @@ fn meet(condition: &Value, last: bool, start: DateTime<Utc>, snapshot: &mut Pers
         for index in 0..count {
             snapshot.events.push(SnapshotEvent {
                 name: name.to_owned(),
-                occurred_at: to_time(start - Duration::hours(1 + i64::try_from(index).unwrap_or(0))),
+                occurred_at: to_time(
+                    start - Duration::hours(1 + i64::try_from(index).unwrap_or(0)),
+                ),
                 properties: properties.clone(),
             });
         }
@@ -157,7 +163,9 @@ fn trait_value(condition: &Map<String, Value>) -> Option<Value> {
     let value = condition.get("value");
     match condition.get("op").and_then(Value::as_str)? {
         "eq" | "contains" | "starts_with" => value.cloned(),
-        "in" => value.and_then(Value::as_array).and_then(|items| items.first().cloned()),
+        "in" => value
+            .and_then(Value::as_array)
+            .and_then(|items| items.first().cloned()),
         "gt" | "gte" => value
             .and_then(Value::as_f64)
             .and_then(|number| serde_json::Number::from_f64(number + 1.0))
@@ -344,7 +352,14 @@ mod tests {
     }
 
     fn run() -> SimulationBody {
-        simulate(&graph(), &settings(), &catalog(), Tz::UTC, Uuid::nil(), START)
+        simulate(
+            &graph(),
+            &settings(),
+            &catalog(),
+            Tz::UTC,
+            Uuid::nil(),
+            START,
+        )
     }
 
     #[test]
@@ -371,7 +386,10 @@ mod tests {
         );
         assert!(simulation.unreached_nodes.is_empty());
         assert_eq!(simulation.people[1].internal_effects, 1);
-        assert_eq!(simulation.people[1].final_status.as_deref(), Some("completed"));
+        assert_eq!(
+            simulation.people[1].final_status.as_deref(),
+            Some("completed")
+        );
         assert_eq!(simulation.start_at, START);
     }
 
@@ -411,10 +429,22 @@ mod tests {
         ]}))
         .unwrap();
 
-        let simulation = simulate(&waiting, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START);
+        let simulation = simulate(
+            &waiting,
+            &settings(),
+            &catalog(),
+            Tz::UTC,
+            Uuid::nil(),
+            START,
+        );
 
         assert_eq!(simulation.unreached_nodes, ["got"]);
-        assert!(simulation.people.iter().all(|body| body.path.contains(&"late".to_owned())));
+        assert!(
+            simulation
+                .people
+                .iter()
+                .all(|body| body.path.contains(&"late".to_owned()))
+        );
     }
 
     #[test]
@@ -430,7 +460,12 @@ mod tests {
 
         let simulation = simulate(&cycle, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START);
 
-        assert!(simulation.people.iter().all(|body| body.refused == Some("no_entry")));
+        assert!(
+            simulation
+                .people
+                .iter()
+                .all(|body| body.refused == Some("no_entry"))
+        );
         assert_eq!(simulation.unreached_nodes, ["a", "b"]);
     }
 

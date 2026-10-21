@@ -22,8 +22,7 @@ pub(crate) const SEGMENT_KEYS: &[(&str, &str)] = &[];
 /// A flow draft is `{"graph", "settings"}`: the nodes and the edges are lists of rules matched by
 /// their ids, so moving a node in the list is not a change and a change inside a node is reported
 /// at the field. Every other array (the conditions of a branch, say) is compared whole.
-pub(crate) const FLOW_KEYS: &[(&str, &str)] =
-    &[("/graph/nodes", "id"), ("/graph/edges", "id")];
+pub(crate) const FLOW_KEYS: &[(&str, &str)] = &[("/graph/nodes", "id"), ("/graph/edges", "id")];
 
 /// The arrays of a manifest that are lists of rules, as `(path, key field)`.
 pub(crate) const MANIFEST_KEYS: &[(&str, &str)] = &[

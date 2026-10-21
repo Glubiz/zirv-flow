@@ -233,11 +233,7 @@ fn flow_body(
 }
 
 /// The explanation of a trace as the response.
-fn trace_body(
-    trace_id: TraceId,
-    explained: &Value,
-    omitted_records: usize,
-) -> AiTraceExplainBody {
+fn trace_body(trace_id: TraceId, explained: &Value, omitted_records: usize) -> AiTraceExplainBody {
     AiTraceExplainBody {
         trace_id: trace_id.to_string(),
         summary: explained
@@ -466,11 +462,9 @@ mod tests {
         let doc = json!({"graph": {"nodes": [
             {"id": "check", "type": "branch", "conditions": [
                 {"trait": "city", "op": "eq", "value": "Aarhus"}]}]}, "settings": {}});
-        let (_, table) = flow_context::mask_document(
-            &doc,
-            &super::super::segment_context::ClearKeys::default(),
-        )
-        .unwrap();
+        let (_, table) =
+            flow_context::mask_document(&doc, &super::super::segment_context::ClearKeys::default())
+                .unwrap();
         let explained = json!({
             "summary": "People in (kept:1).",
             "nodes": [{"id": "check", "text": "Only people in (kept:1) go on."}]

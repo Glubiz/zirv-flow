@@ -50,10 +50,7 @@ pub(crate) struct ExplainTraceArgs {
 /// are in the order of their labels. It returns the explanation with each record named by its
 /// decision-record id, or the feedback lines. Pointers in the lines name where in the arguments
 /// the problem is (`/records/2/record`), except `record_not_explained`, which names the label.
-pub(crate) fn check_explanation(
-    arguments: &Value,
-    shown: &[Uuid],
-) -> Result<Value, Vec<String>> {
+pub(crate) fn check_explanation(arguments: &Value, shown: &[Uuid]) -> Result<Value, Vec<String>> {
     let schema = ExplainTrace::parameters().map_err(|_| arguments_invalid_lines())?;
     schema.validate_value(arguments)?;
     let explained: ExplainTraceArgs =
@@ -210,7 +207,10 @@ mod tests {
 
         assert_eq!(
             lines,
-            ["unknown_record at /records/1/record", "record_not_explained at r2"]
+            [
+                "unknown_record at /records/1/record",
+                "record_not_explained at r2"
+            ]
         );
         assert!(!lines.join("").contains("SECRET"));
     }

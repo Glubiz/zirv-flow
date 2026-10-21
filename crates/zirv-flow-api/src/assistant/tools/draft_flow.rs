@@ -207,10 +207,9 @@ impl AiTool<ToolContext> for DraftFlow {
             };
             let (graph, settings, document) =
                 parse_document(arguments).map_err(ToolError::Invalid)?;
-            let checked =
-                check_document_read(&context.state, context.workspace, &graph, &settings)
-                    .await
-                    .map_err(ToolError::Failed)?;
+            let checked = check_document_read(&context.state, context.workspace, &graph, &settings)
+                .await
+                .map_err(ToolError::Failed)?;
             if checked.issues.is_empty() {
                 Ok(ToolOutput::Draft(document))
             } else {

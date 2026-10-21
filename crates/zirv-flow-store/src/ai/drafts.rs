@@ -345,7 +345,12 @@ mod tests {
 
     #[test]
     fn kinds_and_statuses_round_trip_through_text() {
-        for kind in [DraftKind::Mapping, DraftKind::Manifest, DraftKind::Segment] {
+        for kind in [
+            DraftKind::Mapping,
+            DraftKind::Manifest,
+            DraftKind::Segment,
+            DraftKind::Flow,
+        ] {
             assert_eq!(DraftKind::parse(kind.as_str()), Some(kind));
         }
         for status in [
@@ -355,7 +360,7 @@ mod tests {
         ] {
             assert_eq!(DraftStatus::parse(status.as_str()), Some(status));
         }
-        assert_eq!(DraftKind::parse("flow"), None);
+        assert_eq!(DraftKind::parse("publish"), None);
         assert_eq!(DraftStatus::parse("published"), None);
     }
 
