@@ -131,7 +131,7 @@ async fn receive(State(mock): State<Mock>, headers: HeaderMap, body: Bytes) -> R
         .to_owned();
     // Counting the earlier sends and recording this one is one step, so concurrent sends of one
     // call get different positions.
-    let status = {
+    let (status, name, nth_for_wait) = {
         let mut hits = mock.hits.lock().unwrap_or_else(PoisonError::into_inner);
         let nth = hits.iter().filter(|hit| hit.key == key).count();
         let name = mock
@@ -147,15 +147,19 @@ async fn receive(State(mock): State<Mock>, headers: HeaderMap, body: Bytes) -> R
             body: body.to_vec(),
             status,
         });
-        status
+        (status, name, nth as u64)
     };
     let mut response = StatusCode::from_u16(status)
         .unwrap_or(StatusCode::OK)
         .into_response();
     if status == 429 {
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        // Longer than the worker's backoff at the attempts a call has, so that honouring it is
+        // visible: 60 to 299 s.
+        let wait = 60 + mix(name ^ nth_for_wait) % 240;
+        response.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&wait.to_string()).unwrap_or(HeaderValue::from_static("60")),
+        );
     }
     response
 }

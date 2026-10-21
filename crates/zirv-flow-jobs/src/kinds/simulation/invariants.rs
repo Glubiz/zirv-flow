@@ -427,7 +427,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
 
     liveness(driver, w, &mut found, &enrollments, &graphs).await;
 
-    if population >= 100 {
+    if population >= super::COVERAGE_MIN_POPULATION {
         let missing: Vec<&str> = NODE_TYPES
             .iter()
             .copied()

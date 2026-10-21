@@ -46,6 +46,10 @@ const POPULATION_VAR: &str = "ZIRV_FLOW_PG_SIM_ENROLLMENTS";
 const FIXED_SEEDS: [u64; 2] = [0x5eed_0163_0001, 0x0163_f10e];
 /// The population of each CI seed.
 const DEFAULT_POPULATION: usize = 120;
+/// The smallest population for which the coverage assertions mean something: below it a rare
+/// mode, variant or destination class may not occur at all. A smaller run keeps the invariants
+/// and the executions check, prints that it skips the rest, and does not fail on a rare mode.
+pub(super) const COVERAGE_MIN_POPULATION: usize = 100;
 
 /// The number in a variable, or `None` when it is unset or blank. Any other value panics: a run
 /// that silently fell back would claim to reproduce a seed it never ran.
@@ -128,43 +132,97 @@ async fn simulate(pool: PgPool, ordinal: usize) {
             .collect::<Vec<_>>()
             .join("\n")
     );
+    let count = |what: &str| driver.counts.get(what).copied().unwrap_or(0);
+
+    // The issue asks for a failure after every effect: every execution meets a real crash (a
+    // rollback or a commit without the ack that happened, or an overlap) before its final run.
+    // An answer of the destination that makes the handler return a retry is not one. Jobs whose
+    // attempts run out count on both sides. This holds at any population.
+    println!(
+        "seed {seed}: {} of {} job executions were injected before their final run",
+        count("injected executions"),
+        count("executions")
+    );
+    assert!(
+        count("executions") > 0 && count("injected executions") == count("executions"),
+        "seed {seed}, population {population}: {} of {} job executions met a real crash",
+        count("injected executions"),
+        count("executions")
+    );
+
+    // The coverage assertions need enough jobs, calls and waits for every mode, variant and
+    // destination class to occur: that takes about a hundred enrollments (the CI default is
+    // 120). Below that the invariants above still hold, but a rare mode may not show up, and
+    // saying so beats failing on it.
+    if population < COVERAGE_MIN_POPULATION {
+        println!(
+            "seed {seed}: {population} enrollments is below the {COVERAGE_MIN_POPULATION} the \
+             coverage assertions need; they are skipped"
+        );
+        return;
+    }
+    let need = |what: &str| {
+        assert!(
+            count(what) > 0,
+            "seed {seed}, population {population}: the run never exercised {what:?} (the \
+             coverage assertions are meant for at least {COVERAGE_MIN_POPULATION} enrollments)"
+        );
+    };
     for mode in [
-        "rollback flow.step",
-        "commit without ack flow.step",
-        "concurrent duplicate flow.step",
-        "rollback webhook.call",
-        "commit without ack webhook.call",
-        "concurrent duplicate webhook.call",
-        "rollback flow.enroll",
-        "commit without ack flow.enroll",
-        "concurrent duplicate flow.enroll",
         "early wake claimed",
         "early wake put back",
         "wake moved an enrollment",
-        // The concurrent duplicates overlap for real, and each variant shows it: the fenced
-        // claim was skipped while A was open, the unfenced B was blocked on A, and A's ack was
-        // refused every way. A webhook B never waits on A, so only its finish is counted.
-        "fenced: A open while B claimed flow.step",
-        "fenced: claim skipped flow.step",
-        "fenced: claim skipped webhook.call",
-        "fenced: A's ack refused flow.step",
-        "fenced: A's ack refused webhook.call",
-        "unfenced: B blocked on A flow.step",
-        "unfenced: B finished without waiting on A webhook.call",
-        "unfenced: A's ack refused flow.step",
-        "unfenced: A's ack refused webhook.call",
         // The destination fails too: calls are retried, some use up their attempts through
-        // lease expiry, some record a failure on their last attempt, and the outcome events a
-        // call writes twice settle each wait once.
+        // lease expiry, and the outcome events a call writes twice settle each wait once.
         "webhook.call attempts retried",
+        "retries delayed by the Retry-After of the destination",
         "webhook.call jobs dead",
         "waits on a webhook outcome",
         "outcome events that settled a wait",
         "outcome events that settled nothing",
+        "duplicate outcome events that settled nothing",
     ] {
+        need(mode);
+    }
+    // Every kind of job goes through every mode, and through both concurrent variants.
+    for kind in ["flow.step", "webhook.call", "flow.enroll"] {
+        for mode in ["rollback", "commit without ack", "concurrent duplicate"] {
+            need(&format!("{mode} {kind}"));
+        }
+        // Fenced: B's claim runs while A's transaction is open, the claim query skips the job,
+        // and A's ack is refused. All three happen for every fenced run.
+        for what in ["A open while B claimed", "claim skipped", "A's ack refused"] {
+            need(&format!("fenced: {what} {kind}"));
+        }
+        let fenced = count(&format!("fenced: A open while B claimed {kind}"));
         assert!(
-            driver.counts.get(mode).copied().unwrap_or(0) > 0,
-            "seed {seed}: the run never exercised {mode:?}"
+            fenced == count(&format!("fenced: claim skipped {kind}"))
+                && fenced == count(&format!("fenced: A's ack refused {kind}")),
+            "seed {seed}, population {population}: fenced runs of {kind} differ in what they saw"
+        );
+        // Unfenced: A's ack is refused every time. A step or an enrollment job makes B wait on
+        // a row A wrote (the enrollment row, or the enrollments A inserted), so B is blocked on
+        // A every time. A webhook call has nothing for B to wait on (A holds no lock on the job
+        // row, and the rows A inserted are ones B does not touch), so B finishes first.
+        need(&format!("unfenced: A's ack refused {kind}"));
+        let refused = count(&format!("unfenced: A's ack refused {kind}"));
+        let (waits, expected_name, other_name) = if kind == "webhook.call" {
+            (
+                count(&format!("unfenced: B finished without waiting on A {kind}")),
+                "finished without waiting",
+                "blocked",
+            )
+        } else {
+            (
+                count(&format!("unfenced: B blocked on A {kind}")),
+                "blocked",
+                "finished without waiting",
+            )
+        };
+        assert!(
+            waits == refused,
+            "seed {seed}, population {population}: of {refused} unfenced runs of {kind}, {waits} \
+             were B {expected_name}; the rest were B {other_name} or neither"
         );
     }
     for what in [
@@ -173,22 +231,9 @@ async fn simulate(pool: PgPool, ordinal: usize) {
     ] {
         assert!(
             found.summary.get(what).copied().unwrap_or(0) > 0,
-            "seed {seed}: the run never recorded {what:?}"
+            "seed {seed}, population {population}: the run never recorded {what:?}"
         );
     }
-    // The issue asks for a failure after every effect: no job runs once without one.
-    let count = |what: &str| driver.counts.get(what).copied().unwrap_or(0);
-    println!(
-        "seed {seed}: {} of {} job executions were injected before their final run",
-        count("injected executions"),
-        count("executions")
-    );
-    assert!(
-        count("executions") > 0 && count("injected executions") == count("executions"),
-        "seed {seed}: {} of {} job executions were injected",
-        count("injected executions"),
-        count("executions")
-    );
 }
 
 #[sqlx::test]

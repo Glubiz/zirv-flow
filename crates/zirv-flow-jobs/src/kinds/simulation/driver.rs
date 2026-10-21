@@ -27,6 +27,10 @@ const LANE_NOISE: u64 = 24;
 
 /// The kinds of job the driver runs. Anything else the runtime enqueues (a segment re-evaluation
 /// request, say) is left alone.
+/// How far ahead of the clock a wake must be to be claimed early: more than the lease expiries
+/// of a job's re-claims move the clock.
+const EARLY_MARGIN_SECONDS: i64 = 300;
+
 pub(super) const KINDS: [&str; 3] = [ENROLL_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB_KIND];
 
 /// A wake that moved an enrollment on: the timer it answered, and the virtual time it ran.
@@ -72,6 +76,8 @@ pub(super) struct Driver<'w> {
     /// How often an enrollment was moved out of each state version. A wait settles once, so
     /// no entry may pass one.
     pub(super) advances: HashMap<(Uuid, i64), usize>,
+    /// The outcome event that settled a wait, by the call it reports (enrollment and node).
+    pub(super) outcome_settlers: HashMap<(Uuid, String), Uuid>,
     /// What went wrong during the run itself (a handler that failed, a fence that let a stale
     /// execution through), apart from what the tables show afterwards.
     pub(super) problems: Vec<String>,
@@ -109,6 +115,7 @@ impl<'w> Driver<'w> {
             outcomes: HashMap::new(),
             dead_webhooks: HashSet::new(),
             advances: HashMap::new(),
+            outcome_settlers: HashMap::new(),
             problems: Vec::new(),
         };
         driver.schedule_noise();
@@ -168,7 +175,9 @@ impl<'w> Driver<'w> {
             .unwrap();
             let next_event = self.pending.keys().next().map(|key| key.0);
             match [next_job, next_event].into_iter().flatten().min() {
-                Some(next) if next <= stop => at = next.max(at),
+                // Lease expiries and retry delays move the clock on within an instant; time
+                // never runs back.
+                Some(next) if next <= stop => at = next.max(at).max(self.w.env.clock.now()),
                 _ => break,
             }
         }
@@ -352,7 +361,9 @@ impl<'w> Driver<'w> {
         )
         .bind(self.w.env.ws.as_uuid())
         .bind(STEP_JOB_KIND)
-        .bind(at)
+        // Early by more than the clock moves while the job is re-claimed (a lease and a retry
+        // delay at most per failure): a wake that time itself makes due is not an early one.
+        .bind(at + Span::seconds(EARLY_MARGIN_SECONDS))
         .fetch_all(&self.w.env.pool)
         .await
         .unwrap();
@@ -409,7 +420,7 @@ impl<'w> Driver<'w> {
                     u64::try_from(version).unwrap_or(0),
                 ],
             );
-            let now = self.now;
+            let now = self.w.env.clock.now();
             let window = (timeout - now).whole_seconds().max(2);
             let second = Span::seconds(1);
             let mut times = Vec::new();
