@@ -2074,6 +2074,8 @@ a cold cache can take about 15 s. D4.1 on `jsonb` was not re-run. The figures ar
 
 M5 measures timer lateness at 1 million waiting enrollments (exit criterion 8). The 10 million row stays the target for the M8 reference-hardware run.
 
+**As measured (M5, provisional until the M8 hardware run).** Timer lateness at 1,000,000 waiting enrollments (900,000 spread over 40 minutes plus 100,000 waking in one minute, seeded by SQL from rows a product-path sample wrote, so no evidence of enrollment throughput) on a development machine, image 0.76.0, in [docs/benchmarks/m5-flows.md](benchmarks/m5-flows.md). With no ingest load the target is met, with a thin margin: p99 52.4 s and 51.8 s in two runs (max 55.8 s), the tail being the burst backlog, since one worker at concurrency 4 drains about 1,100 wake jobs/s (the job throughput row). With 2,000 events/s running at the same time it is missed: p99 136.4 s, max 141.7 s, the drain falling to 832 jobs/s with PostgreSQL at 480% CPU (#207). The ingest API p99 in that run was 1,016 ms server-side, beside #151.
+
 ## 20. Key decisions
 
 ADR-001 to ADR-005 are **Accepted (M0)**. ADR-006 to ADR-009 are **Accepted**;

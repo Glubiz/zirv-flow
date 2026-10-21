@@ -1,0 +1,5 @@
+[m5 17:05:01] run 3 loaded: window opens 2026-10-21T17:21:10.966274Z (spread 2400 s); waiting for cargo.exe to end
+[m5 17:20:13] sampler starts
+[m5 17:21:10] loadgen starts: 2000 track events/s for 2400 s over 100000 people, seed 77
+[m5 18:01:10] loadgen ended
+[m5 18:01:34] run finished: 0 wake jobs left

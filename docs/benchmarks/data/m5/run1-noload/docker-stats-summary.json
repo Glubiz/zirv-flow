@@ -1,0 +1,30 @@
+[
+  {
+    "container": "zirv-flow-m4bench10m-postgres-1",
+    "samples": 244,
+    "cpu_pct_avg": 82.45377049180333,
+    "cpu_pct_max": 237.37,
+    "mem_usage_last": "14.95GiB / 31.22GiB"
+  },
+  {
+    "container": "zirv-flow-m4bench10m-zirv-flow-1",
+    "samples": 244,
+    "cpu_pct_avg": 0.05135245901639344,
+    "cpu_pct_max": 1.52,
+    "mem_usage_last": "35.11MiB / 3.2GiB"
+  },
+  {
+    "container": "zirv-flow-m4bench10m-zirv-flow-scheduler-1",
+    "samples": 244,
+    "cpu_pct_avg": 0.07012295081967225,
+    "cpu_pct_max": 0.13,
+    "mem_usage_last": "2.062MiB / 819MiB"
+  },
+  {
+    "container": "zirv-flow-m4bench10m-zirv-flow-worker-1",
+    "samples": 244,
+    "cpu_pct_avg": 33.699139344262285,
+    "cpu_pct_max": 97.39,
+    "mem_usage_last": "38.75MiB / 4GiB"
+  }
+]
