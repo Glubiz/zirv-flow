@@ -630,12 +630,13 @@ impl ApiError {
         }
     }
 
-    /// A flow with a condition too large to send to the model without its personal literals.
+    /// A flow too large to send to the model with its personal literals masked.
     pub(crate) fn ai_flow_too_large() -> Self {
         Self {
             code: Some("ai_flow_too_large"),
             ..Self::unprocessable(
-                "a condition of this flow is too large to send to the assistant without personal                  data; simplify it first",
+                "this flow is too large to send to the assistant without personal data (more than \
+                 200 nodes, or a condition too deep); simplify it first",
             )
         }
     }
