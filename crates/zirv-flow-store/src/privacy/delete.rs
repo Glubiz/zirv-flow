@@ -310,19 +310,33 @@ async fn strip_enrolls(
             }
             _ => None,
         };
-        if let Some(new_key) = &new_key {
-            // The page that starts at the fallback cursor is already queued: this one is the
-            // same work, and the unique key allows one.
-            let taken: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM jobs WHERE unique_key = $1 AND id <> $2 \
-                   AND state IN ('ready', 'running'))",
-            )
-            .bind(new_key)
-            .bind(id)
-            .fetch_one(&mut *connection)
+        // The rewrite runs in a savepoint: if the page that starts at the fallback cursor is
+        // queued already, the unique key refuses the new key (23505) and only the savepoint is
+        // undone. Asking first would leave a gap between the check and the update.
+        sqlx::query("SAVEPOINT strip_page")
+            .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
-            if taken {
+        let rewritten = sqlx::query(
+            "UPDATE jobs SET payload = $2, unique_key = COALESCE($3, unique_key) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(job.to_value())
+        .bind(new_key)
+        .execute(&mut *connection)
+        .await;
+        match rewritten {
+            Ok(_) => {
+                sqlx::query("RELEASE SAVEPOINT strip_page")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
+            }
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23505") => {
+                sqlx::query("ROLLBACK TO SAVEPOINT strip_page")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
                 // The same page is queued already, and the unique key allows one. A pending
                 // page goes. A running one is not deleted (the delete would wait for its
                 // handler's lease while the handler waits for the people this erasure holds):
@@ -337,18 +351,9 @@ async fn strip_enrolls(
                     .execute(&mut *connection)
                     .await
                     .map_err(StoreError::query)?;
-                continue;
             }
+            Err(error) => return Err(StoreError::query(error)),
         }
-        sqlx::query(
-            "UPDATE jobs SET payload = $2, unique_key = COALESCE($3, unique_key) WHERE id = $1",
-        )
-        .bind(id)
-        .bind(job.to_value())
-        .bind(new_key)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
     }
     Ok(())
 }
@@ -1741,5 +1746,48 @@ mod tests {
 
         assert!(first_is_held, "the erasure locks the lowest id first");
         assert_eq!(jobs_naming(&pool, &[person]).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_whose_fallback_page_is_queued_already_is_dropped_without_an_error(
+        pool: PgPool,
+    ) {
+        use crate::{AudienceSource, EnrollWork, enroll_page_key};
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let older = Uuid::from_u128(1);
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(older)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let flow = Uuid::from_u128(77);
+        let occurrence = Uuid::from_u128(5);
+        let page = |after| EnrollWork::Audience {
+            source: AudienceSource::Everyone,
+            occurrence: Some(occurrence),
+            after,
+            entered_by: None,
+        };
+        for after in [person, older] {
+            queue_enroll(
+                &pool,
+                ws,
+                &enroll_page_key(flow, occurrence, Some(after)),
+                enroll_payload(ws, page(Some(after))),
+            )
+            .await;
+        }
+
+        // The erasure unwraps every statement: a unique violation would fail it here.
+        erase(&pool, ws, person).await;
+
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'flow.enroll'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [enroll_page_key(flow, occurrence, Some(older))]);
     }
 }
