@@ -167,6 +167,8 @@ interface CanvasProps {
   onUndo: () => void;
   onDeleteRequest: (id: string) => void;
   onPickIssue: (item: IssueItem) => void;
+  /** The assistant's tool on the rail; absent when the person has no assistant to open. */
+  assistant?: { open: boolean; onToggle: () => void };
   /** Test path, counts or an enrollment drawn over the steps; nothing is drawn when absent. */
   overlay?: Overlay;
   /** Fit the view again whenever this changes, such as when another version is drawn. */
@@ -174,9 +176,29 @@ interface CanvasProps {
   children?: ReactNode;
 }
 
-function Tool({ label, icon, onClick, disabled }: { label: string; icon: IconName; onClick: () => void; disabled?: boolean }) {
+function Tool({
+  label,
+  icon,
+  onClick,
+  disabled,
+  pressed,
+}: {
+  label: string;
+  icon: IconName;
+  onClick: () => void;
+  disabled?: boolean;
+  pressed?: boolean;
+}) {
   return (
-    <button type="button" className="fl-tool" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
+    <button
+      type="button"
+      className="fl-tool"
+      aria-label={label}
+      aria-pressed={pressed}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+    >
       <FlowIcon name={icon} size={18} />
     </button>
   );
@@ -187,11 +209,13 @@ function Rail({
   canUndo,
   onAdd,
   onUndo,
+  assistant,
 }: {
   editable: boolean;
   canUndo: boolean;
   onAdd: (type: NodeType) => void;
   onUndo: () => void;
+  assistant: CanvasProps["assistant"];
 }) {
   const flow = useReactFlow();
   return (
@@ -210,6 +234,7 @@ function Rail({
       <Tool label="Zoom in" icon="zoom-in" onClick={() => void flow.zoomIn({ duration: 200 })} />
       <Tool label="Zoom out" icon="zoom-out" onClick={() => void flow.zoomOut({ duration: 200 })} />
       {editable ? <Tool label="Undo" icon="undo" onClick={onUndo} disabled={!canUndo} /> : null}
+      {assistant ? <Tool label="Assistant" icon="assistant" onClick={assistant.onToggle} pressed={assistant.open} /> : null}
     </div>
   );
 }
@@ -529,7 +554,7 @@ function Surface(props: CanvasProps) {
   return (
     <>
       <div className="fl-tools">
-        <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} />
+        <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} assistant={props.assistant} />
         <IssuesButton
           items={props.issueItems}
           graph={graph}

@@ -6,9 +6,11 @@ import { useMembers } from "../members";
 import type { Catalog } from "../segments";
 import { Canvas, type FocusRequest } from "./Canvas";
 import type { Names } from "./describe";
+import { FlowAssistantSheet } from "./FlowAssistant";
 import { placeIssues } from "./issues";
 import { layout } from "./layout";
 import { TRIGGER_ID, type FlowDetail } from "./model";
+import type { Overlay } from "./overlay";
 import { StepSheet } from "./StepSheet";
 
 export type FlowVersion = components["schemas"]["FlowVersionBody"];
@@ -109,16 +111,21 @@ export function VersionsView({
 
 interface VersionCanvasProps {
   workspaceId: string;
+  flowId: string;
+  /** Whether the assistant is on and the person may use it: the canvas then offers to explain this version. */
+  assistantOn: boolean;
   version: FlowVersion;
   names: Names;
   catalog: Catalog | null;
 }
 
 /** One published version drawn on the editor's canvas, with nothing to change. */
-export function VersionCanvas({ workspaceId, version, names, catalog }: VersionCanvasProps) {
+export function VersionCanvas({ workspaceId, flowId, version, names, catalog, assistantOn }: VersionCanvasProps) {
   const { graph, settings } = version;
   const [selected, setSelected] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [cited, setCited] = useState<readonly string[]>([]);
   const nonce = useRef(0);
   const none = useMemo(() => placeIssues([]), []);
   const plan = useMemo(() => layout(graph), [graph]);
@@ -127,6 +134,29 @@ export function VersionCanvas({ workspaceId, version, names, catalog }: VersionC
     [plan],
   );
   const node = selected === null ? undefined : graph.nodes.find((candidate) => candidate.id === selected);
+
+  const citedOverlay = useMemo<Overlay | undefined>(
+    () =>
+      assistantOpen && cited.length > 0
+        ? { steps: new Map(cited.map((id) => [id, [] as number[]])), dimOthers: true }
+        : undefined,
+    [assistantOpen, cited],
+  );
+
+  function toggleAssistant() {
+    if (assistantOpen && node === undefined) {
+      setAssistantOpen(false);
+      setCited([]);
+      return;
+    }
+    setSelected(null);
+    setAssistantOpen(true);
+  }
+
+  function reveal(id: string) {
+    nonce.current += 1;
+    setFocusRequest({ id, nonce: nonce.current });
+  }
 
   function close() {
     if (selected !== null) {
@@ -149,6 +179,8 @@ export function VersionCanvas({ workspaceId, version, names, catalog }: VersionC
       selectedId={node ? node.id : null}
       focusRequest={focusRequest}
       canUndo={false}
+      overlay={citedOverlay}
+      assistant={assistantOn ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
       onOpen={(id) => {
         if (id !== TRIGGER_ID) setSelected(id);
       }}
@@ -159,6 +191,20 @@ export function VersionCanvas({ workspaceId, version, names, catalog }: VersionC
       onDeleteRequest={() => undefined}
       onPickIssue={() => undefined}
     >
+      {assistantOn && assistantOpen ? (
+        <div className="fl-sheet" hidden={node !== undefined}>
+          <FlowAssistantSheet
+            workspaceId={workspaceId}
+            flowId={flowId}
+            version={version.version}
+            graph={graph}
+            names={names}
+            onReveal={reveal}
+            onCited={setCited}
+            onClose={toggleAssistant}
+          />
+        </div>
+      ) : null}
       {node ? (
         <div className="fl-sheet">
           <StepSheet

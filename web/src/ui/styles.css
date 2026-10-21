@@ -2416,3 +2416,36 @@ main:focus {
   font-size: 14px;
   font-weight: 600;
 }
+
+.fl-tool[aria-pressed="true"] {
+  background: var(--paper-3);
+  border-color: var(--line);
+}
+
+.fl-cites {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fl-cite {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.trace-record-cited {
+  border-left: 3px solid var(--attention-dot);
+  padding-left: 6px;
+}
+
+.trace-record-active {
+  background: var(--paper-3);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.fl-sheet[hidden] {
+  display: none;
+}

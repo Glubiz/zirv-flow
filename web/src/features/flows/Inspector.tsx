@@ -20,6 +20,7 @@ import { TraceTree, traceHref, type TraceTreeRecord } from "../traces";
 import { Canvas } from "./Canvas";
 import { wordsFor, type Names } from "./describe";
 import { placeIssues } from "./issues";
+import { TraceExplanation } from "./TraceExplanation";
 import { kindLabel, TRIGGER_ID, type FlowDetail, type Graph } from "./model";
 import { pathOverlay, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import type { FlowVersion } from "./VersionsView";
@@ -39,6 +40,8 @@ interface Props {
   /** The newest published version of the flow. */
   current: number | null;
   canAdmin: boolean;
+  /** Whether the assistant is on and the person may use it: a trace can then be explained. */
+  assistantOn: boolean;
   names: Names;
   catalog: Catalog | null;
   announce: (text: string) => void;
@@ -359,6 +362,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                         graph={graphs.get(data.enrollment.version)?.graph}
                         names={names}
                         canAdmin={props.canAdmin}
+                        assistantOn={props.assistantOn}
                         acting={acting}
                         reason={stepReason}
                         refreshing={detail.status === "ready" && detail.refreshing}
@@ -589,6 +593,11 @@ function EnrollmentList({
   );
 }
 
+/** The element id of a decision's row in the trace tree, so an explanation can take the reader to it. */
+function decisionRowId(recordId: string): string {
+  return `decision-${recordId}`;
+}
+
 const STEP_OUTCOMES: Record<string, string> = { done: "Done", waiting: "Waiting here", failed: "Failed" };
 
 /** The operator decisions of an enrollment by step: the steps that were retried and skipped. */
@@ -618,6 +627,7 @@ function EnrollmentDetail({
   graph,
   names,
   canAdmin,
+  assistantOn,
   acting,
   reason,
   refreshing,
@@ -631,6 +641,7 @@ function EnrollmentDetail({
   graph: Graph | undefined;
   names: Names;
   canAdmin: boolean;
+  assistantOn: boolean;
   acting: boolean;
   /** Why Retry and Skip are refused, when the flow's state forbids them. */
   reason: string | null;
@@ -649,6 +660,15 @@ function EnrollmentDetail({
     (actions.current?.querySelector<HTMLElement>("button") ?? heading.current)?.focus();
     onFocused();
   }, [returnFocus, refreshing, onFocused]);
+  const [cited, setCited] = useState<ReadonlySet<string>>(new Set());
+  const [active, setActive] = useState<string | null>(null);
+  const shownIds = useMemo(() => new Set(path.decisions.map((record) => record.id)), [path.decisions]);
+  useEffect(() => {
+    if (active === null) return;
+    const row = document.getElementById(decisionRowId(active));
+    row?.scrollIntoView({ block: "center" });
+    row?.focus();
+  }, [active]);
   const failedAt = enrollment.failed_node ? stepTitle(graph, names, enrollment.failed_node) : null;
   const retried = operatorDecisions(path, "retried");
   const skipped = operatorDecisions(path, "skipped");
@@ -656,6 +676,12 @@ function EnrollmentDetail({
   const describe = (record: TraceTreeRecord) => {
     const node = record.subject_ids["node"];
     return typeof node === "string" ? stepTitle(graph, names, node) : null;
+  };
+  const recordLabel = (id: string) => {
+    const record = path.decisions.find((candidate) => candidate.id === id);
+    if (!record) return null;
+    const about = describe(record);
+    return `${record.action} ${record.outcome}${about ? ` ${about}` : ""}`;
   };
 
   return (
@@ -729,11 +755,29 @@ function EnrollmentDetail({
           <h3>Trace</h3>
           <Link to={traceHref(workspaceId, enrollment.trace_id)}>Open in Traces</Link>
         </div>
+        {assistantOn ? (
+          <TraceExplanation
+            key={enrollment.trace_id}
+            workspaceId={workspaceId}
+            traceId={enrollment.trace_id}
+            recordLabel={recordLabel}
+            onCited={(ids) => {
+              setActive(null);
+              setCited(new Set(ids.filter((id) => shownIds.has(id))));
+            }}
+            onShow={(id) => {
+              setActive(null);
+              // The same record twice in a row must still scroll, so the state is cleared first.
+              setTimeout(() => setActive(id), 0);
+            }}
+          />
+        ) : null}
         <TraceTree
           records={path.decisions}
           label="Decisions on the trace of this enrollment"
           describe={describe}
           truncated={path.truncated}
+          cited={assistantOn ? { ids: cited, active, rowId: decisionRowId } : undefined}
         />
       </div>
     </>

@@ -451,7 +451,7 @@ describe("the assistant panel for a segment", () => {
 
     expect(await screen.findByRole("heading", { name: "Preview" })).toBeInTheDocument();
     expect(screen.getByText(`Would match ${JSON.stringify(SEGMENT_CONTENT)}`)).toBeInTheDocument();
-    expect(renderPreview).toHaveBeenCalledWith(SEGMENT_CONTENT);
+    expect(renderPreview).toHaveBeenCalledWith(SEGMENT_CONTENT, expect.objectContaining({ id: "d1", status: "valid" }));
   });
 
   it("renders no preview for a draft that never validated", async () => {

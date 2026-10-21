@@ -28,6 +28,8 @@ interface AssistantPanelProps {
   stream?: string;
   /** For a segment: the saved segment being edited; absent when the segment is new. */
   segmentId?: string;
+  /** For a flow: the flow whose draft is being edited. */
+  flowId?: string;
   /**
    * For a webhook stream, which has no source to read: the parsed sample payload, or null while the
    * pasted text does not parse. Absent for any other stream.
@@ -41,11 +43,14 @@ interface AssistantPanelProps {
    * the person in a dialog of its own and answer when they have.
    */
   confirmAccept?: () => boolean | Promise<boolean>;
+  /** Called when the accept request failed after `confirmAccept` agreed, so the host can undo what it prepared. */
+  onAcceptFailed?: () => void;
   /**
    * Shows what the drafted content makes of the workspace's data, for a kind whose draft has no dry
-   * run on the server. The host renders it, so this feature never imports the host.
+   * run on the server. The host renders it, so this feature never imports the host. It also gets the
+   * whole draft, for what only a draft carries, such as a flow's simulation.
    */
-  renderPreview?: (content: unknown) => ReactNode;
+  renderPreview?: (content: unknown, draft: Draft) => ReactNode;
 }
 
 /**
@@ -95,9 +100,11 @@ function Drafting({
   sourceId,
   stream,
   segmentId,
+  flowId,
   sample,
   onAccept,
   confirmAccept,
+  onAcceptFailed,
   renderPreview,
   personal,
 }: AssistantPanelProps & { personal: boolean }) {
@@ -134,6 +141,7 @@ function Drafting({
             ...(sourceId ? { source_id: sourceId } : {}),
             ...(kind === "mapping" && stream ? { stream } : {}),
             ...(kind === "segment" && segmentId ? { segment_id: segmentId } : {}),
+            ...(kind === "flow" && flowId ? { flow_id: flowId } : {}),
             ...(kind === "manifest" && documentation.trim() !== "" ? { documentation } : {}),
             ...(sample ? { sample: sample as never } : {}),
           },
@@ -166,6 +174,7 @@ function Drafting({
       setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null });
       setAnnouncement("Loaded into the editor");
     } catch (error) {
+      onAcceptFailed?.();
       setRun({ status: "done", draft: current, accepting: false, accepted: false, acceptFailure: failureText(error) });
     }
   }
@@ -173,7 +182,11 @@ function Drafting({
   return (
     <div className="stack-tight">
       <p className="faint">
-        {kind === "segment"
+        {kind === "flow"
+          ? personal
+            ? "Sends the steps and settings of the saved draft and the names of your fields, events and lists (personal data is allowed in this workspace)."
+            : "Sends the steps and settings of the saved draft and the names of your fields, events and lists. Values that could be personal are hidden from it."
+          : kind === "segment"
           ? personal
             ? "Sends the names of your fields, events and lists, and the values of the saved definition (personal data is allowed in this workspace)."
             : "Sends the names of your fields, events and lists. Values in the saved definition that could be personal are hidden from it."
@@ -240,7 +253,7 @@ function Drafting({
             {renderPreview && run.draft.content != null ? (
               <>
                 <h5>Preview</h5>
-                {renderPreview(run.draft.content)}
+                {renderPreview(run.draft.content, run.draft)}
               </>
             ) : null}
             {run.draft.dry_run ? (
@@ -251,7 +264,11 @@ function Drafting({
             ) : null}
             {run.acceptFailure ? <InlineError {...run.acceptFailure} /> : null}
             {run.accepted ? (
-              <p className="strong">Loaded into the editor. Save to apply it.</p>
+              <p className="strong">
+                {kind === "flow"
+                  ? "Loaded into the editor and saved as the flow's draft. Nothing is published."
+                  : "Loaded into the editor. Save to apply it."}
+              </p>
             ) : (
               <div className="row">
                 <Button variant="primary" onClick={() => void accept(run.draft)} disabled={run.accepting}>
