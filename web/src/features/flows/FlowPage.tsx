@@ -287,6 +287,17 @@ function Editor({
     return true;
   }
 
+  /** An accept failed without a known outcome: the server says whether the draft landed. */
+  async function reconcileAccept(): Promise<boolean> {
+    const outcome = await store.reconcile();
+    if (outcome !== "adopted") return false;
+    setSelected(null);
+    setCited([]);
+    setLayoutEpoch((epoch) => epoch + 1);
+    announce("The draft was accepted, but the reply was lost. It is loaded and saved as the flow's draft. Nothing is published.");
+    return true;
+  }
+
   function answerReplace(replace: boolean) {
     replacing?.resolve(replace);
     setReplacing(null);
@@ -398,7 +409,7 @@ function Editor({
   }
 
   async function lifecycle(action: "pause" | "resume" | "archive") {
-    if (acting || inFlight) return;
+    if (acting || inFlight || busy) return;
     const request = startRequest();
     setActing(true);
     setNotice(null);
@@ -432,7 +443,7 @@ function Editor({
   }
 
   function openPublish() {
-    if (inFlight || acting) return;
+    if (inFlight || acting || busy) return;
     setRefusal(null);
     setRefusedIssues(null);
     setPublishOpen(true);
@@ -628,20 +639,20 @@ function Editor({
         ) : null}
         {canAdmin && life.state !== "archived" ? (
           <div className="fl-actions">
-            <Button id="flow-primary-action" variant="primary" disabled={acting} aria-disabled={inFlight || undefined} onClick={openPublish}>
+            <Button id="flow-primary-action" variant="primary" disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={openPublish}>
               {inFlight ? "Publishing…" : "Publish…"}
             </Button>
             {life.state === "published" ? (
-              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
+              <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
                 Pause
               </Button>
             ) : null}
             {life.state === "paused" ? (
-              <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("resume")}>
+              <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("resume")}>
                 Resume
               </Button>
             ) : null}
-            <Button disabled={acting} aria-disabled={inFlight || undefined} onClick={() => !inFlight && setArchiving(true)}>
+            <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => !inFlight && setArchiving(true)}>
               Archive…
             </Button>
           </div>
@@ -649,7 +660,9 @@ function Editor({
         {store.status === "error" ? (
           <div className="fl-retry">
             {store.failure ? <span className="faint">{store.failure.detail}</span> : null}
-            <Button onClick={store.retry}>Retry</Button>
+            <Button disabled={busy} onClick={store.retry}>
+              Retry
+            </Button>
           </div>
         ) : null}
       </div>
@@ -718,9 +731,10 @@ function Editor({
                   revision={[draft.graph, draft.settings]}
                   names={names}
                   onGone={reloadAssistant}
+                  busy={busy}
                   drafting={
                     editable
-                      ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: store.release }
+                      ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept }
                       : undefined
                   }
                   prepare={editable ? store.saveNow : undefined}

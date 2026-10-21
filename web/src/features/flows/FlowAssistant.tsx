@@ -16,7 +16,7 @@ export interface FlowDrafting {
   /** Loads the accepted draft (graph and settings) into the editor. */
   onAccept: (content: unknown) => void;
   /** The accept request failed after the editor was made ready for it. */
-  onAcceptFailed: () => void;
+  onAcceptFailed: () => unknown;
 }
 
 interface Props {
@@ -33,6 +33,8 @@ interface Props {
   revision: readonly unknown[];
   /** A request was refused because the assistant is off or no longer the person's to use. */
   onGone: () => void;
+  /** An accepted draft is loading: nothing is asked of the server about the draft until it lands. */
+  busy?: boolean;
   names: Names;
   /** Only the draft can be drafted over; a version is read-only. */
   drafting?: FlowDrafting;
@@ -55,7 +57,7 @@ function graphOf(content: unknown): Graph | null {
 
 /** The assistant's right-hand sheet of the flow editor: explain the flow and, for the draft, draft changes to it. */
 export function FlowAssistantSheet(props: Props) {
-  const { workspaceId, flowId, version, graph, names, drafting, onGone } = props;
+  const { workspaceId, flowId, version, graph, names, drafting, onGone, busy } = props;
   return (
     <Sheet
       title="Assistant"
@@ -73,6 +75,7 @@ export function FlowAssistantSheet(props: Props) {
           revision={props.revision}
           names={names}
           onGone={onGone}
+          busy={busy}
           prepare={props.prepare}
           onReveal={props.onReveal}
           onCited={props.onCited}
@@ -132,12 +135,13 @@ function FlowExplanation({
   revision,
   names,
   onGone,
+  busy = false,
   prepare,
   onReveal,
   onCited,
 }: Pick<
   Props,
-  "workspaceId" | "flowId" | "version" | "graph" | "revision" | "names" | "onGone" | "prepare" | "onReveal" | "onCited"
+  "workspaceId" | "flowId" | "version" | "graph" | "revision" | "names" | "onGone" | "busy" | "prepare" | "onReveal" | "onCited"
 >) {
   const [run, setRun] = useState<Run>({ status: "idle" });
   const ticket = useRef(0);
@@ -218,7 +222,7 @@ function FlowExplanation({
         <EmptyState title="Nothing to explain yet">Add a step to the flow first.</EmptyState>
       ) : (
         <div className="row">
-          <Button variant={run.status === "done" ? "quiet" : "primary"} onClick={() => void explain()} disabled={run.status === "running"}>
+          <Button variant={run.status === "done" ? "quiet" : "primary"} onClick={() => void explain()} disabled={run.status === "running" || busy}>
             {run.status === "done" || run.status === "failed"
               ? "Explain again"
               : version === null

@@ -155,7 +155,7 @@ describe("useFlowDraft replacing the draft", () => {
   it("shows the adopted draft as saved, makes it one step of undo, and saves nothing", async () => {
     const calls = mockApi(flowRoutes());
     const { result } = mountDraft();
-    act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+    act(() => result.current.edit((draft) => ({ ...draft, settings: replacement.settings, graph: { ...draft.graph, edges: [] } })));
     await act(() => result.current.hold());
 
     act(() => result.current.adopt(replacement));
@@ -204,5 +204,122 @@ describe("useFlowDraft replacing the draft", () => {
 
     expect(saves(calls)).toHaveLength(1);
     expect(result.current.draft.name).toBe("Two");
+  });
+
+  it("saves nothing while held: saveNow answers false and retry does nothing", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+    await act(() => result.current.hold());
+
+    let saved = true;
+    await act(async () => {
+      saved = await result.current.saveNow();
+    });
+    act(() => result.current.retry());
+    await flush(1500);
+
+    expect(saved).toBe(false);
+    expect(saves(calls)).toHaveLength(0);
+  });
+
+  it("keeps a rename the person made when the accepted draft is adopted, and saves it", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Renamed" })));
+    await act(() => result.current.hold());
+
+    act(() => result.current.adopt(replacement));
+
+    expect(result.current.draft.name).toBe("Renamed");
+    expect(result.current.draft.graph).toEqual(replacement.graph);
+    expect(result.current.unsaved).toBe(true);
+    await flush(1000);
+    expect(saves(calls)).toEqual([{ name: "Renamed" }]);
+  });
+
+  it("schedules nothing when the hold is released after the editor is gone", async () => {
+    const calls = mockApi(flowRoutes());
+    const { result, unmount } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+    await act(() => result.current.hold());
+    const { release } = result.current;
+
+    unmount();
+    release();
+    await flush(2000);
+
+    expect(saves(calls)).toHaveLength(0);
+  });
+
+  describe("reconciling an accept that failed", () => {
+    const FLOW = `${WS}/flows/${FLOW_ID}`;
+
+    it("releases the hold and keeps the edits when the server's draft is unchanged", async () => {
+      const calls = mockApi(flowRoutes());
+      const { result } = mountDraft();
+      act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+      await act(() => result.current.hold());
+
+      let outcome = "";
+      await act(async () => {
+        outcome = await result.current.reconcile();
+      });
+      await flush(1000);
+
+      expect(outcome).toBe("unchanged");
+      expect(result.current.held).toBe(false);
+      expect(result.current.draft.name).toBe("Edited");
+      expect(saves(calls)).toEqual([{ name: "Edited" }]);
+    });
+
+    it("adopts the server's draft when it changed, and never saves the old edits over it", async () => {
+      const routes = flowRoutes();
+      const calls = mockApi({
+        ...routes,
+        [`GET ${FLOW}`]: () => json(flowDetail({ graph: replacement.graph, settings: replacement.settings })),
+      });
+      const { result } = mountDraft();
+      act(() => result.current.edit((draft) => ({ ...draft, settings: { ...draft.settings, reentry: { mode: "always" } } })));
+      await act(() => result.current.hold());
+
+      let outcome = "";
+      await act(async () => {
+        outcome = await result.current.reconcile();
+      });
+      await flush(2000);
+
+      expect(outcome).toBe("adopted");
+      expect(result.current.draft.graph).toEqual(replacement.graph);
+      expect(result.current.draft.settings).toEqual(replacement.settings);
+      expect(result.current.unsaved).toBe(false);
+      expect(saves(calls)).toHaveLength(0);
+    });
+
+    it("saves nothing until a retry when the flow cannot be read either", async () => {
+      const calls = mockApi({
+        ...flowRoutes(),
+        [`GET ${FLOW}`]: () => problem(503, "Service Unavailable", "down"),
+      });
+      const { result } = mountDraft();
+      act(() => result.current.edit((draft) => ({ ...draft, name: "Edited" })));
+      await act(() => result.current.hold());
+
+      let outcome = "";
+      await act(async () => {
+        outcome = await result.current.reconcile();
+      });
+      await flush(2000);
+
+      expect(outcome).toBe("unknown");
+      expect(result.current.held).toBe(false);
+      expect(result.current.status).toBe("error");
+      expect(result.current.unsaved).toBe(true);
+      expect(saves(calls)).toHaveLength(0);
+
+      act(() => result.current.retry());
+      await flush(100);
+      expect(saves(calls)).toEqual([{ name: "Edited" }]);
+    });
   });
 });
