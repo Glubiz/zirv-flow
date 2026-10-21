@@ -1175,9 +1175,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_running_job_that_names_nobody_erased_is_not_marked_and_still_requeues(
-        pool: PgPool,
-    ) {
+    async fn a_running_job_that_names_nobody_erased_is_not_marked_and_still_requeues(pool: PgPool) {
         let Seeded {
             ws,
             person,
@@ -1207,10 +1205,7 @@ mod tests {
 
         erase(&pool, ws, person).await;
 
-        assert_eq!(
-            fail(&pool, &other).await,
-            Some(crate::FailOutcome::Retried)
-        );
+        assert_eq!(fail(&pool, &other).await, Some(crate::FailOutcome::Retried));
         assert_eq!(fail(&pool, &named).await, Some(crate::FailOutcome::Purged));
         let left: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM jobs")
             .fetch_all(&pool)
@@ -1245,11 +1240,9 @@ mod tests {
                 .unwrap()
         );
 
-        let erased = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            erase(&pool, ws, person),
-        )
-        .await;
+        let erased =
+            tokio::time::timeout(std::time::Duration::from_secs(10), erase(&pool, ws, person))
+                .await;
         assert!(erased.is_ok(), "the erasure waited for the handler's lease");
 
         // The handler fails and rolls back; its release deletes the marked job.
@@ -1339,7 +1332,10 @@ mod tests {
 
         erase(&pool, ws, person).await;
 
-        assert_eq!(fail(&pool, &claimed).await, Some(crate::FailOutcome::Purged));
+        assert_eq!(
+            fail(&pool, &claimed).await,
+            Some(crate::FailOutcome::Purged)
+        );
         assert_eq!(jobs_naming(&pool, &[person]).await, 0);
         assert_eq!(
             queued_enroll(&pool, &enroll_page_key(flow, occurrence, Some(older)))

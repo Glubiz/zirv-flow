@@ -425,12 +425,10 @@ pub async fn fail_job<'e>(
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
-    Ok(state.map(|state| {
-        match state.as_str() {
-            "dead" => FailOutcome::Dead,
-            "purged" => FailOutcome::Purged,
-            _ => FailOutcome::Retried,
-        }
+    Ok(state.map(|state| match state.as_str() {
+        "dead" => FailOutcome::Dead,
+        "purged" => FailOutcome::Purged,
+        _ => FailOutcome::Retried,
     }))
 }
 
