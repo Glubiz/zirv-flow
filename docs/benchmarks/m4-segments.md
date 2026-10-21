@@ -411,20 +411,20 @@ Every run accepted all of its events (about 1,200,000; no 429, no 5xx, no late d
 What the runs show.
 
 - Segment re-evaluation matters. The A p99 is 1.35 and 1.71 s against 0.64 to 0.74 s for B, and the A p95 is
-  700 to 1,040 ms against 143 to 186 ms. The order held in every pair and the spread within a condition is
+  700 to 1,040 ms against 143 to 186 ms (3.7 to 7.3 times, pairwise). The order held in every pair and the spread within a condition is
   narrow next to the gap.
 - It is not the whole story. B has no active segment and still misses 100 ms by 6 to 7 times, and sits at or
   above the 635 ms of 0.57.1 in 6.6. The p50 (3.4 to 3.5 ms) is the same in every run.
 - Condition B still runs the re-evaluation machinery. Every accepted event batch marks its people in
-  `person_changes` and enqueues a `segment.reevaluate` job (`request_reevaluation`, whether or not a segment
+  `person_changes` and requests a (deduplicated) `segment.reevaluate` job (`request_reevaluation`, called unconditionally at `apply.rs:86`, whether or not a segment
   exists), so the job is claimed in B as well: a running `segment.reevaluate` job was seen in 82 to 101 of
   about 203 one-second queue samples, against 103 to 110 in A. In B it claims the marks and finds no segment
   to evaluate. So the check "no `segment.reevaluate` job is claimed in B" does not hold; what holds is "no
   segment is evaluated in B" (`members_ins` and `members_upd` are 0).
 - PostgreSQL and app CPU are the same in both conditions, so the extra latency of A is not CPU. The WAL
-  volume is also the same: 17 to 20 GB per 600 s run, about 14 KB per event, 4 to 5 checkpoints, against
+  volume is also the same: 17 to 20 GB per 600 s run, 14 to 17 KB per event, 4 to 5 checkpoints, against
   `max_wal_size` 8 GB.
-- Wait events of the client backends, sampled once per second during B3 (3,747 samples,
+- Wait events of the client backends, sampled once per second during B3 only (the sampler overhead was not measured and its own queries appear in the samples; waits were not sampled in A, so they say nothing about what A adds; 3,747 samples,
   `data/m4/151-ab/diag-waits.csv`): 43 % on CPU, 31 % `LWLock:WALWrite` and 11 % `IO:WALSync`, nearly all on
   `COMMIT`; 5 % `Lock:transactionid`, mostly on the `INSERT INTO jobs` that enqueues the workspace's single
   `segment.reevaluate:<workspace>` unique key. So the commits of the ingest path queue behind the WAL flush.
@@ -432,12 +432,14 @@ What the runs show.
   timed checkpoints, `wal_compression` off.
 
 Verdict. Re-evaluation explains part of the rise (about 0.6 to 1 s of p99 on this database) but not the
-baseline. The ingest path is bound by WAL flush contention at 17 to 20 GB of WAL per 10 minutes. The
+baseline. The ingest path is dominated by WAL flush contention at 17 to 20 GB of WAL per 10 minutes. The
 mechanism by which an active segment adds to that is not established. Two candidates are left for a reviewed
 follow-up: the hot unique key that every ingest transaction contends on, and the write volume per event
 (an `events` row, a `decision_records` row, a dedupe row and a mark). Neither was tested, and no code was
 changed. Not covered: the 0.56.0 to 0.57.1 attribution, a run with `synchronous_commit` off or a larger
 `wal_buffers`, and a reference-hardware run.
+
+Drift between runs. Each A run adds about 250 k `segment_members` rows (archived afterwards), the order was A B A B B so B3 ran on the most-grown database and is not alternated, and A1 followed a recreation of the PostgreSQL container. None of this is controlled for.
 
 Data: [`data/m4/151-ab/`](data/m4/151-ab/): per run `ab-<condition>-<seed>.json` with its loadgen report,
 the CPU and queue summaries (from the per-3 s `docker stats` and per-2 s queue samples, not kept) and the counters of the window.
