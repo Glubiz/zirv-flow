@@ -113,3 +113,18 @@ export function versionBody(version: number, overrides: Record<string, unknown> 
     ...overrides,
   };
 }
+
+/** The assistant's settings with the assistant switched `enabled` or not. */
+export function aiSettings(enabled: boolean) {
+  return {
+    enabled,
+    provider_id: "openai",
+    model: "big",
+    monthly_budget_micros: 1_000_000,
+    pii_opt_in: false,
+    transcript_days: null,
+    provider_key_set: true,
+    last_probe: null,
+    updated_at: "2026-10-01T09:00:00Z",
+  };
+}

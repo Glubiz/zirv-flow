@@ -3,8 +3,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { client, unwrap, type components } from "../../api";
 import { Button, EmptyState, InlineError, LoadingState, Sheet } from "../../ui";
 import { AssistantPanel, failureText, type Failure } from "../assistant";
-import { wordsFor, type Names } from "./describe";
-import { kindLabel, TRIGGER_ID, type Graph } from "./model";
+import type { Names } from "./describe";
+import { TRIGGER_ID, type Graph } from "./model";
 import { SimulationSummary, stepTitle } from "./SimulationSummary";
 
 type Explained = components["schemas"]["AiFlowExplainBody"];
@@ -214,12 +214,11 @@ function Explanation({
         <ol className="list-plain fl-cites" aria-label="Step by step">
           {explained.nodes.map((entry) => {
             const node = graph.nodes.find((candidate) => candidate.id === entry.id);
-            const label = node ? `${kindLabel(node.type)}: ${wordsFor(node, names).title}` : null;
             return (
               <li key={entry.id} className="fl-cite">
                 {node && entry.id !== TRIGGER_ID ? (
                   <Button onClick={() => onReveal(entry.id)}>
-                    Show on the canvas: {label} <span className="faint mono">{entry.id}</span>
+                    Show on the canvas: {stepTitle(graph, names, entry.id)} <span className="faint mono">{entry.id}</span>
                   </Button>
                 ) : (
                   <span className="muted">

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
+import { aiSettings, FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, saves, type User } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -15,20 +15,6 @@ const FLOW = `${WS}/flows/${FLOW_ID}`;
 const DRAFT = `POST ${WS}/ai/drafts`;
 const ACCEPT = `POST ${WS}/ai/drafts/d1/accept`;
 const EXPLAIN = `POST ${FLOW}/ai/explain`;
-
-function settings(enabled: boolean) {
-  return {
-    enabled,
-    provider_id: "openai",
-    model: "big",
-    monthly_budget_micros: 1_000_000,
-    pii_opt_in: false,
-    transcript_days: null,
-    provider_key_set: true,
-    last_probe: null,
-    updated_at: "2026-10-01T09:00:00Z",
-  };
-}
 
 /** The flow the assistant drafts: an hour's wait, then the exit. */
 const CONTENT = {
@@ -99,7 +85,7 @@ interface Options {
 function routes({ role = "writer", enabled = true, routes: extra = {} }: Options = {}): Record<string, Handler> {
   return {
     ...flowRoutes({ role }),
-    [`GET ${WS}/ai/settings`]: () => json(settings(enabled)),
+    [`GET ${WS}/ai/settings`]: () => json(aiSettings(enabled)),
     [DRAFT]: () => json(VALID, 201),
     [ACCEPT]: () =>
       json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT, flow: { id: FLOW_ID, name: "Welcome series", ...CONTENT } }),

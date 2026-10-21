@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
+import { aiSettings, FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, type User } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -63,24 +63,10 @@ const EXPLAINED = {
   ],
 };
 
-function settings(enabled: boolean) {
-  return {
-    enabled,
-    provider_id: "openai",
-    model: "big",
-    monthly_budget_micros: 1_000_000,
-    pii_opt_in: false,
-    transcript_days: null,
-    provider_key_set: true,
-    last_probe: null,
-    updated_at: "2026-10-01T09:00:00Z",
-  };
-}
-
 function routes(extra: Record<string, Handler> = {}, enabled = true): Record<string, Handler> {
   return {
     ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
-    [`GET ${WS}/ai/settings`]: () => json(settings(enabled)),
+    [`GET ${WS}/ai/settings`]: () => json(aiSettings(enabled)),
     [`GET ${FLOW}/versions`]: () => json([versionBody(1), versionBody(2)]),
     [`GET ${FLOW}/versions/2/counts`]: () => json({ version: 2, nodes: [] }),
     [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [PATH.enrollment], next_before: null }),
