@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -76,11 +76,11 @@ function routes(extra: Record<string, Handler> = {}, enabled = true): Record<str
   };
 }
 
-async function openEnrollment(user: User) {
+async function openEnrollment(user: User, which: RegExp = /Open the enrollment/) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
   await user.click(screen.getByRole("tab", { name: "Enrollments" }));
   const list = await screen.findByRole("dialog", { name: "Enrollments" });
-  await user.click(await within(list).findByRole("button", { name: /Open the enrollment/ }));
+  await user.click(await within(list).findByRole("button", { name: which }));
   return screen.findByRole("dialog", { name: "One enrollment" });
 }
 
@@ -139,5 +139,46 @@ describe("explaining a trace in the inspector", () => {
 
     await within(sheet).findByRole("list", { name: "Decisions on the trace of this enrollment" });
     expect(within(sheet).queryByRole("button", { name: "Explain this trace" })).not.toBeInTheDocument();
+  });
+});
+
+describe("explaining a trace after switching enrollments", () => {
+  it("drops an answer that arrives after another enrollment was opened", async () => {
+    const E2 = "99999999-0000-4000-8000-000000000002";
+    let open: () => void = () => undefined;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    mockApi(
+      routes({
+        [`GET ${FLOW}/enrollments`]: () =>
+          json({ enrollments: [PATH.enrollment, { ...PATH.enrollment, id: E2, state: "waiting", trace_id: "f".repeat(32) }], next_before: null }),
+        [`GET ${FLOW}/enrollments/${E2}`]: () => json({ ...PATH, enrollment: { ...PATH.enrollment, id: E2, state: "waiting", trace_id: "f".repeat(32) } }),
+        [EXPLAIN]: async () => {
+          await opened;
+          return json(EXPLAINED);
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openEnrollment(user, /completed, version 2/);
+    await user.click(await within(sheet).findByRole("button", { name: "Explain this trace" }));
+    await within(sheet).findByText(/Asking the assistant to explain this trace/);
+
+    await user.click(within(sheet).getByRole("button", { name: "Back to all" }));
+    const list = await screen.findByRole("dialog", { name: "Enrollments" });
+    await user.click(await within(list).findByRole("button", { name: /waiting, version 2/ }));
+    const next = await screen.findByRole("dialog", { name: "One enrollment" });
+    await within(next).findByRole("list", { name: "Decisions on the trace of this enrollment" });
+    await act(async () => {
+      open();
+      await opened;
+    });
+
+    // The late answer is about the first enrollment: nothing of it shows on the second.
+    expect(within(next).queryByText("The person entered, waited a day and finished.")).not.toBeInTheDocument();
+    expect(document.querySelector(".trace-record-cited")).toBeNull();
+    expect(within(next).getByRole("button", { name: "Explain this trace" })).toBeEnabled();
   });
 });

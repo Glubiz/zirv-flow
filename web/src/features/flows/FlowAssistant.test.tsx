@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -62,7 +62,11 @@ const VALID = {
   attempts: 1,
   content: CONTENT,
   issues: [],
-  changes: [{ path: "/graph/nodes/a1", change: "added", before: null, after: CONTENT.graph.nodes[0] }],
+  changes: [
+    { path: "/graph/nodes/a1", change: "added", before: null, after: CONTENT.graph.nodes[0] },
+    { path: "/graph/nodes/n1", change: "removed", before: { id: "n1", type: "wait.duration", seconds: 86_400 }, after: null },
+    { path: "/graph/edges/x1", change: "added", before: null, after: CONTENT.graph.edges[0] },
+  ],
   simulation: SIMULATION,
 };
 
@@ -120,7 +124,12 @@ describe("the assistant in the flow editor", () => {
     await draftIt(user, sheet);
 
     expect(calledWith(calls, "POST", "/ai/drafts")[0]?.body).toMatchObject({ kind: "flow", flow_id: FLOW_ID });
-    expect(within(sheet).getByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
+    const changes = within(sheet).getByRole("list", { name: "What the draft changes" });
+    expect(changes).toHaveTextContent(/Added · Wait: 1 hour *a1/);
+    expect(changes).toHaveTextContent(/Removed · Wait: 1 day *n1/);
+    expect(changes).toHaveTextContent("Connections · 1 added");
+    // The raw field diff stays one disclosure away.
+    expect(within(sheet).getByText(/Show every field/)).toBeInTheDocument();
     const summary = within(sheet).getByRole("group", { name: "Simulation of the draft" });
     expect(within(summary).getByText("A person nothing is known about")).toBeInTheDocument();
     expect(within(summary).getByText("Exited")).toBeInTheDocument();
@@ -148,11 +157,13 @@ describe("the assistant in the flow editor", () => {
     expect(await screen.findByRole("group", { name: /^Wait: 1 hour/ })).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: /^Wait: 1 day/ })).not.toBeInTheDocument();
     expect(calledWith(calls, "POST", "/ai/drafts/d1/accept")).toHaveLength(1);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await act(() => Promise.resolve());
     expect(calls.some((call) => call.path.endsWith("/publish"))).toBe(false);
     // The server wrote the draft, so the editor has nothing of its own to save.
     expect(saves(calls)).toHaveLength(0);
     expect(screen.queryByText(/Couldn.t save/)).not.toBeInTheDocument();
+    // The new first step is wired from the trigger, as when a draft is loaded.
+    await waitFor(() => expect(document.querySelector('[data-testid="rf__edge-__trigger-edge"]')).not.toBeNull());
   });
 
   it("asks before replacing edits that are not saved, and accepts nothing when they are kept", async () => {
@@ -321,5 +332,209 @@ describe("explaining a flow", () => {
     expect(calledWith(calls, "POST", "/ai/explain")[0]?.body).toEqual({ version: 1 });
     await user.click(within(sheet).getByRole("button", { name: /^Show on the canvas: Branch/ }));
     await waitFor(() => expect(screen.getByRole("group", { name: /^Branch: / })).toHaveFocus());
+  });
+});
+
+/** A request that waits until the test lets it go. */
+function gate() {
+  let open: () => void = () => undefined;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+}
+
+async function editWait(user: User, amount: string) {
+  await user.click(await screen.findByRole("group", { name: /^Wait: / }));
+  const step = await screen.findByRole("dialog", { name: /^\d/ });
+  const field = within(step).getByLabelText("Amount");
+  await user.clear(field);
+  await user.type(field, amount);
+}
+
+const DIMMED = ".fl-node-dim";
+
+describe("accepting while the editor has unsaved work", () => {
+  /** A save that fails the first time, so the edit stays unsaved. */
+  function failingSave(accept: Handler) {
+    const save = flowRoutes()[`PATCH ${FLOW}`]!;
+    let patches = 0;
+    return routes({
+      routes: {
+        [`PATCH ${FLOW}`]: (request) => {
+          patches += 1;
+          return patches === 1 ? problem(500, "Internal Server Error", "the save failed") : save(request);
+        },
+        [ACCEPT]: accept,
+      },
+    });
+  }
+
+  async function reachDialog(user: User) {
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    await editWait(user, "3");
+    expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    const sheet = await screen.findByRole("dialog", { name: "Assistant" });
+    await draftIt(user, sheet);
+    await user.click(within(sheet).getByRole("button", { name: "Accept" }));
+    const dialog = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
+    await user.click(within(dialog).getByRole("button", { name: "Replace with the draft" }));
+    return sheet;
+  }
+
+  it("keeps the unsaved edits and their undo when the accept fails", async () => {
+    const calls = mockApi(failingSave(() => problem(500, "Internal Server Error", "the accept failed")));
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await reachDialog(user);
+
+    expect(await within(sheet).findByText("Internal Server Error")).toBeInTheDocument();
+    expect(calledWith(calls, "POST", "/ai/drafts/d1/accept")).toHaveLength(1);
+    // What the person had is still there, the editor takes edits again, and undo goes back one step.
+    expect(screen.getByRole("group", { name: /^Wait: 3 days/ })).toBeInTheDocument();
+    expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByRole("group", { name: /^Wait: 1 day/ })).toBeInTheDocument();
+  });
+
+  it("is read-only while the accepted draft loads, and takes edits again afterwards", async () => {
+    const wait = gate();
+    mockApi(
+      failingSave(async () => {
+        await wait.opened;
+        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT });
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await reachDialog(user);
+
+    expect(await screen.findByText("Loading the draft…")).toBeInTheDocument();
+    expect(document.querySelector(".fl-page")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Flow name" })).toBeDisabled();
+
+    await act(async () => {
+      wait.open();
+      await wait.opened;
+    });
+
+    expect(await screen.findByRole("group", { name: /^Wait: 1 hour/ })).toBeInTheDocument();
+    expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add a step" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Flow name" })).toBeEnabled();
+  });
+});
+
+describe("an explanation of a draft that changes", () => {
+  it("drops an answer that arrives after the draft was edited", async () => {
+    const wait = gate();
+    mockApi(
+      routes({
+        routes: {
+          [EXPLAIN]: async () => {
+            await wait.opened;
+            return json(EXPLAINED);
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
+    await within(sheet).findByText(/Asking the assistant to explain this flow/);
+
+    await editWait(user, "3");
+    await act(async () => {
+      wait.open();
+      await wait.opened;
+    });
+
+    await user.keyboard("{Escape}");
+    const back = await screen.findByRole("dialog", { name: "Assistant" });
+    expect(await within(back).findByText("The draft changed while the assistant was answering")).toBeInTheDocument();
+    expect(within(back).queryByText("Everyone waits a day, then the plan decides.")).not.toBeInTheDocument();
+  });
+
+  it("marks a shown explanation stale after an edit, and clears its marks on the canvas", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
+    await within(sheet).findByText("Everyone waits a day, then the plan decides.");
+    // Steps the explanation does not cite are faded while it is current.
+    await waitFor(() => expect(document.querySelector(DIMMED)).not.toBeNull());
+
+    await editWait(user, "3");
+    await user.keyboard("{Escape}");
+
+    const back = await screen.findByRole("dialog", { name: "Assistant" });
+    expect(await within(back).findByText(/The draft changed since this explanation/)).toBeInTheDocument();
+    expect(within(back).getByRole("button", { name: "Explain again" })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector(DIMMED)).toBeNull());
+  });
+});
+
+describe("the assistant going away", () => {
+  it("closes the sheet and hides the tool when a request says the assistant is off", async () => {
+    let off = false;
+    mockApi(
+      routes({
+        routes: {
+          [`GET ${WS}/ai/settings`]: () => {
+            return json(aiSettings(!off));
+          },
+          [DRAFT]: () => {
+            off = true;
+            return problem(409, "Conflict", "off", "t-9", "ai_disabled");
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openAssistant(user);
+    await user.type(await within(sheet).findByLabelText("What do you want?"), "Anything");
+
+    await user.click(within(sheet).getByRole("button", { name: "Draft" }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("dialog", { name: "Assistant" })).not.toBeInTheDocument();
+  });
+});
+
+describe("citations", () => {
+  it("lets a cited trigger be shown, and marks the cited step for a moment", async () => {
+    mockApi(
+      routes({
+        routes: {
+          [EXPLAIN]: () =>
+            json({
+              source: "draft",
+              summary: "It starts at the trigger.",
+              nodes: [
+                { id: "__trigger", text: "Starts here." },
+                { id: "n4", text: "Calls the CRM." },
+              ],
+            }),
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
+
+    await user.click(await within(sheet).findByRole("button", { name: /^Show on the canvas: Trigger/ }));
+    await waitFor(() => expect(screen.getByRole("group", { name: /^Trigger: / })).toHaveFocus());
+
+    await user.click(within(sheet).getByRole("button", { name: /^Show on the canvas: Webhook/ }));
+    await waitFor(() => expect(document.querySelector('.react-flow__node[data-id="n4"]')).toHaveClass("fl-node-flash"));
   });
 });
