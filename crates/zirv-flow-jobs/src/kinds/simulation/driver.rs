@@ -131,6 +131,18 @@ pub(super) fn seconds_of(at: OffsetDateTime) -> u64 {
     u64::try_from(at.unix_timestamp()).unwrap_or(0)
 }
 
+/// Puts the jobs due at one instant in the seeded order of that round: a hash of the seed, the
+/// instant, the round and the job's label, so the order follows the labels and not the order the
+/// database returned the rows in.
+fn sort_due(due: &mut [Due], seed: u64, at: OffsetDateTime, round: u64) {
+    due.sort_by_key(|job| {
+        (
+            mix(seed ^ LANE_ORDER ^ job.label ^ seconds_of(at) ^ round),
+            job.label,
+        )
+    });
+}
+
 impl<'w> Driver<'w> {
     pub(super) fn new(w: &'w World) -> Self {
         let person_index = w
@@ -269,12 +281,7 @@ impl<'w> Driver<'w> {
             for _ in distinct..due.len() {
                 self.bump("jobs sharing a label with another due job");
             }
-            due.sort_by_key(|job| {
-                (
-                    mix(seed ^ LANE_ORDER ^ job.label ^ seconds_of(at) ^ round),
-                    job.label,
-                )
-            });
+            sort_due(&mut due, seed, at, round);
             for job in due {
                 self.run_job(&job, false).await;
             }
@@ -565,5 +572,74 @@ impl<'w> Driver<'w> {
                 self.bump("events planned for a wait");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    fn job(label: u64) -> Due {
+        Due {
+            id: Uuid::from_u128(u128::from(label)),
+            kind: STEP_JOB_KIND,
+            label,
+            scenario: Scenario::default(),
+        }
+    }
+
+    fn labels(due: &[Due]) -> Vec<u64> {
+        due.iter().map(|job| job.label).collect()
+    }
+
+    #[test]
+    fn the_order_of_due_jobs_follows_their_labels_not_the_order_they_arrived_in() {
+        let at = datetime!(2030-01-05 12:00 UTC);
+        let mut forward: Vec<Due> = (1..=12).map(job).collect();
+        let mut backward: Vec<Due> = (1..=12).rev().map(job).collect();
+        let mut shuffled: Vec<Due> = [5, 11, 2, 8, 1, 12, 3, 9, 6, 4, 10, 7]
+            .into_iter()
+            .map(job)
+            .collect();
+        sort_due(&mut forward, 7, at, 0);
+        sort_due(&mut backward, 7, at, 0);
+        sort_due(&mut shuffled, 7, at, 0);
+        assert_eq!(labels(&forward), labels(&backward));
+        assert_eq!(labels(&forward), labels(&shuffled));
+    }
+
+    #[test]
+    fn the_order_is_the_seeds_and_changes_with_the_seed_the_instant_and_the_round() {
+        let at = datetime!(2030-01-05 12:00 UTC);
+        let ordered = |seed, at, round| {
+            let mut due: Vec<Due> = (1..=12).map(job).collect();
+            sort_due(&mut due, seed, at, round);
+            labels(&due)
+        };
+        let base = ordered(7, at, 0);
+        assert_eq!(base, ordered(7, at, 0));
+        assert_ne!(base, ordered(8, at, 0));
+        assert_ne!(base, ordered(7, datetime!(2030-01-05 12:00:01 UTC), 0));
+        assert_ne!(base, ordered(7, at, 1));
+    }
+
+    #[test]
+    fn the_first_calls_are_scripted_for_every_failure_the_checks_cover() {
+        let scripts: Vec<Option<Script>> = SCRIPTS.iter().map(|(script, _)| *script).collect();
+        for wanted in [Script::RetryAfter, Script::Down, Script::Refusing] {
+            assert!(
+                scripts.contains(&Some(wanted)),
+                "{wanted:?} is never scripted"
+            );
+        }
+        assert!(SCRIPTS.iter().any(|(_, dead)| *dead), "no call goes dead");
+    }
+
+    #[test]
+    fn names_for_texts_are_stable() {
+        assert_eq!(hash_text("n1"), hash_text("n1"));
+        assert_ne!(hash_text("n1"), hash_text("n2"));
     }
 }

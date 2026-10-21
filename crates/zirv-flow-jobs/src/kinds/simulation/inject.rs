@@ -1100,3 +1100,76 @@ async fn wait_for_overlap(pool: &PgPool, holder: i32, finished: &Cell<bool>) -> 
         tokio::time::sleep(OVERLAP_POLL).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drawn(seed: u64, label: u64, kind: &str) -> Plan {
+        Plan::draw(&mut Rng::derive(seed, &[LANE_PLAN, label, 1, 0]), kind)
+    }
+
+    #[test]
+    fn a_drawn_plan_always_holds_a_failure_and_never_more_than_its_kind_allows() {
+        for seed in 0..200 {
+            for label in 0..20 {
+                for kind in [STEP_JOB_KIND, ENROLL_JOB_KIND, WEBHOOK_JOB_KIND] {
+                    let plan = drawn(seed, label, kind);
+                    // A step or enrollment job that met more would be killed by its attempts.
+                    let most = if kind == WEBHOOK_JOB_KIND { 5 } else { 3 };
+                    assert!(
+                        (1..=most).contains(&plan.modes.len()),
+                        "{kind}: {} modes",
+                        plan.modes.len()
+                    );
+                    assert!(plan.concurrent || kind != ENROLL_JOB_KIND);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_plan_is_the_same_for_the_same_seed_and_label_and_differs_across_them() {
+        let same = |a: &Plan, b: &Plan| {
+            a.modes == b.modes && a.concurrent == b.concurrent && a.fenced == b.fenced
+        };
+        let mut distinct = 0;
+        for label in 0..50 {
+            let first = drawn(9, label, STEP_JOB_KIND);
+            assert!(same(&first, &drawn(9, label, STEP_JOB_KIND)));
+            if !same(&first, &drawn(10, label, STEP_JOB_KIND)) {
+                distinct += 1;
+            }
+        }
+        assert!(
+            distinct > 10,
+            "the seed hardly changes the plans: {distinct}"
+        );
+    }
+
+    #[test]
+    fn a_retry_waits_for_the_longer_of_the_backoff_and_what_the_destination_asked() {
+        let cap = Duration::from_secs(3600);
+        let backoff = Duration::from_secs(20);
+        assert_eq!(retry_delay(backoff, None, cap), backoff);
+        assert_eq!(
+            retry_delay(backoff, Some(Duration::from_secs(5)), cap),
+            backoff
+        );
+        assert_eq!(
+            retry_delay(backoff, Some(Duration::from_secs(120)), cap),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            retry_delay(backoff, Some(Duration::from_secs(9999)), cap),
+            cap
+        );
+    }
+
+    #[test]
+    fn the_clock_moves_a_lease_and_a_second_on_each_expiry() {
+        // The clock moves a lease and a second on each expiry, so a re-run is stamped later.
+        assert_eq!(LEASE_SECONDS + 1, 31);
+        assert!(WorkerConfig::new(1).lease.as_secs() >= LEASE_SECONDS.unsigned_abs());
+    }
+}

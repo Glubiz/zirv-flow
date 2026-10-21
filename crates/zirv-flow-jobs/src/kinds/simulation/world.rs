@@ -437,3 +437,77 @@ fn settle_splits(graph: &mut FlowGraph) {
     graph.nodes.retain(|node| reached.contains(&node.id));
     graph.edges.retain(|edge| reached.contains(&edge.from));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generated(seed: u64, cover_all: bool) -> FlowGraph {
+        generate::graph(&mut Rng::derive(seed, &[2]), 24, cover_all)
+    }
+
+    fn settled(seed: u64) -> FlowGraph {
+        let mut graph = generated(seed, true);
+        settle_splits(&mut graph);
+        wait_for_outcomes(&mut graph, &mut Rng::derive(seed, &[6]));
+        graph
+    }
+
+    #[test]
+    fn the_same_seed_builds_the_same_flows() {
+        for seed in 0..20 {
+            assert_eq!(settled(seed), settled(seed));
+        }
+        assert_ne!(settled(1), settled(2));
+    }
+
+    #[test]
+    fn every_arm_of_a_split_leads_to_one_node_and_the_graph_stays_valid() {
+        let mut splits = 0;
+        for seed in 0..60 {
+            let graph = settled(seed);
+            assert!(validate_graph(&graph).is_empty(), "seed {seed}");
+            for node in &graph.nodes {
+                if matches!(node.kind, NodeKind::SplitRandom { .. }) {
+                    splits += 1;
+                    let targets: Vec<&str> = graph
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.from == node.id)
+                        .map(|edge| edge.to.as_str())
+                        .collect();
+                    assert!(targets.len() >= 2);
+                    assert!(targets.iter().all(|to| *to == targets[0]), "{targets:?}");
+                }
+            }
+        }
+        assert!(splits > 0, "no generated graph held a split");
+    }
+
+    #[test]
+    fn every_webhook_node_is_followed_by_a_wait_for_its_outcome() {
+        let mut hooks = 0;
+        for seed in 0..60 {
+            let graph = settled(seed);
+            for node in &graph.nodes {
+                if !matches!(node.kind, NodeKind::ActionWebhook { .. }) {
+                    continue;
+                }
+                hooks += 1;
+                let next = graph
+                    .edges
+                    .iter()
+                    .find(|edge| edge.from == node.id && edge.port == PORT_NEXT)
+                    .and_then(|edge| graph.node(&edge.to))
+                    .expect("a webhook node leads on");
+                let NodeKind::WaitUntilEvent { event, .. } = &next.kind else {
+                    panic!("seed {seed}: {} is not followed by a wait", node.id);
+                };
+                assert!(
+                    [WEBHOOK_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT].contains(&event.name.as_str())
+                );
+            }
+        }
+        assert!(hooks > 0, "no generated graph held a webhook node");
+    }
+}
