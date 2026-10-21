@@ -13,7 +13,7 @@ use zirv_flow_core::flow::{
 use super::rng::Rng;
 
 /// The events the generated waits listen for.
-pub(super) const EVENTS: [&str; 3] = ["order", "visit", "signup"];
+pub const EVENTS: [&str; 3] = ["order", "visit", "signup"];
 
 /// One shape of node. `Goal` appears twice because the two forms differ in their ports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +70,11 @@ const TRICKY_LOCAL_TIMES: [&str; 4] = [
     "2030-03-10T02:30:00",
     "2030-11-03T01:30:00",
 ];
+
+/// The id of the `index`th list a generated `action.list` node names (`index` is below four).
+pub const fn list_id(index: u128) -> Uuid {
+    Uuid::from_u128(LIST_BASE + index)
+}
 
 const LIST_BASE: u128 = 0x018f_0000_0000_7000_8000_0000_0000_0010;
 
@@ -165,7 +170,7 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
             change: TraitChange::Unset {},
         },
         Shape::List => NodeKind::ActionList {
-            list_id: Uuid::from_u128(LIST_BASE + u128::from(rng.below(4))),
+            list_id: list_id(u128::from(rng.below(4))),
             change: if rng.chance(70) {
                 ListChange::Add
             } else {
@@ -221,7 +226,7 @@ impl Build {
 }
 
 /// A graph of about `size` nodes. With `cover_all` it holds every node kind, in a random order.
-pub(super) fn graph(rng: &mut Rng, size: usize, cover_all: bool) -> FlowGraph {
+pub fn graph(rng: &mut Rng, size: usize, cover_all: bool) -> FlowGraph {
     // The shapes still owed to the graph: the open ones first, then the ends.
     let mut owed: Vec<Shape> = Vec::new();
     let size = if cover_all {

@@ -13,6 +13,7 @@ import {
   addNode,
   edgeFrom,
   kindLabel,
+  portLabel,
   removeIndexedPort,
   removeNode,
   replaceNode,
@@ -30,7 +31,11 @@ import { layout } from "./layout";
 import { PublishDialog } from "./PublishDialog";
 import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
+import { Inspector } from "./Inspector";
+import { pathOverlay, type Overlay } from "./overlay";
 import { StepSheet } from "./StepSheet";
+import { NOTHING_SENT, TestSheet } from "./TestSheet";
+import type { TestResult } from "./testMode";
 import { useFlowDraft } from "./useFlowDraft";
 
 /** The settings section an issue about no step or connection belongs to, if any. */
@@ -45,6 +50,7 @@ const TABS = [
   { id: "canvas", label: "Canvas" },
   { id: "settings", label: "Flow settings" },
   { id: "versions", label: "Versions" },
+  { id: "enrollments", label: "Enrollments" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -141,6 +147,8 @@ function Editor({
   const [archiving, setArchiving] = useState(false);
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
   const nonce = useRef(0);
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** The editor's own element, so focus is only ever moved inside it. */
@@ -167,6 +175,11 @@ function Editor({
   const steps = useMemo(
     () => plan.order.filter((id) => id !== TRIGGER_ID).map((id, index) => ({ id, step: index + 1 })),
     [plan],
+  );
+
+  const testOverlay = useMemo<Overlay | undefined>(
+    () => (testResult ? pathOverlay(draft.graph, testResult.path) : undefined),
+    [testResult, draft.graph],
   );
 
   function describeStep(id: string): string {
@@ -294,13 +307,13 @@ function Editor({
   }
 
   /** The flow changed somewhere else (a 409): shows it as it is now, with a notice. */
-  async function adoptCurrent() {
+  async function adoptCurrent(withNotice = true) {
     const request = startRequest();
     try {
       const current = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
       );
-      if (applyLife(request, { state: current.state, version: current.current_version ?? null })) {
+      if (applyLife(request, { state: current.state, version: current.current_version ?? null }) && withNotice) {
         setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
       }
     } catch (again) {
@@ -436,6 +449,8 @@ function Editor({
   /** Switching tabs leaves a version being looked at. */
   function chooseTab(next: TabId) {
     setViewing(null);
+    setTesting(false);
+    setTestResult(null);
     setTab(next);
   }
 
@@ -454,6 +469,32 @@ function Editor({
       chooseTab(next.id);
       document.getElementById(`flow-tab-${next.id}`)?.focus();
     }
+  }
+
+  function toggleTest() {
+    if (testing) {
+      exitTest();
+      return;
+    }
+    setViewing(null);
+    setSelected(null);
+    setTab("canvas");
+    setTesting(true);
+    announce("Test mode is on. Nothing is sent or changed.");
+  }
+
+  function exitTest() {
+    setTesting(false);
+    setTestResult(null);
+    announce("Test mode is off.");
+    setTimeout(() => {
+      if (mounted.current) document.getElementById("flow-test-toggle")?.focus();
+    }, 0);
+  }
+
+  function portName(id: string, port: string): string | null {
+    const node = draft.graph.nodes.find((candidate) => candidate.id === id);
+    return node ? portLabel(node, port) : null;
   }
 
   const version = stateLabel(life.state, life.version);
@@ -499,6 +540,11 @@ function Editor({
             <span className="muted">Saved</span>
           ) : null}
         </div>
+        {canWrite ? (
+          <Button id="flow-test-toggle" aria-pressed={testing} onClick={toggleTest}>
+            {testing ? "Exit test" : "Test"}
+          </Button>
+        ) : null}
         {canAdmin && life.state !== "archived" ? (
           <div className="fl-actions">
             <Button id="flow-primary-action" variant="primary" disabled={acting} aria-disabled={inFlight || undefined} onClick={openPublish}>
@@ -533,6 +579,13 @@ function Editor({
         </p>
       ) : null}
 
+      {testing ? (
+        <div className="fl-banner" role="note">
+          <span className="strong">Test mode</span>
+          <span>{NOTHING_SENT}</span>
+        </div>
+      ) : null}
+
       <div role="tabpanel" id="flow-panel" aria-labelledby={`flow-tab-${tab}`} tabIndex={0} className="fl-panel">
       {tab === "canvas" ? (
           <Canvas
@@ -543,11 +596,12 @@ function Editor({
             issueItems={issueItems}
             checked={store.issues !== null}
             checking={store.checking}
-            editable={editable}
-            selectedId={sheetNode ? sheetNode.id : null}
+            editable={editable && !testing}
+            overlay={testOverlay}
+            selectedId={sheetNode && !testing ? sheetNode.id : null}
             focusRequest={focusRequest}
             canUndo={store.canUndo}
-            onOpen={open}
+            onOpen={testing ? () => undefined : open}
             onClose={closeSheet}
             onWire={(from, port, to) => wireStep(from, port, to)}
             onAdd={add}
@@ -555,7 +609,22 @@ function Editor({
             onDeleteRequest={(id) => setDeleting(id)}
             onPickIssue={pick}
           >
-            {sheetNode ? (
+            {testing ? (
+              <div className="fl-sheet">
+                <TestSheet
+                  workspaceId={workspaceId}
+                  flowId={flow.id}
+                  canSeePeople={canAdmin}
+                  describeStep={describeStep}
+                  portName={portName}
+                  graph={draft.graph}
+                  settingsUnsaved={store.settingsUnsaved}
+                  onResult={setTestResult}
+                  onClose={exitTest}
+                  announce={announce}
+                />
+              </div>
+            ) : sheetNode ? (
               <div className="fl-sheet">
                 <StepSheet
                   key={sheetNode.id}
@@ -610,6 +679,20 @@ function Editor({
             onView={view}
           />
         </div>
+      ) : null}
+
+      {tab === "enrollments" ? (
+        <Inspector
+          workspaceId={workspaceId}
+          flowId={flow.id}
+          state={life.state}
+          current={life.version}
+          canAdmin={canAdmin}
+          names={names}
+          catalog={catalog}
+          announce={announce}
+          onConflict={() => adoptCurrent(false)}
+        />
       ) : null}
 
       {tab === "versions" && viewing !== null ? (

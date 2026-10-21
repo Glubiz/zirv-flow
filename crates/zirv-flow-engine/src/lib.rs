@@ -6,8 +6,10 @@
 mod error;
 mod hash;
 mod settle;
-#[cfg(test)]
-mod sim;
+/// TEST ONLY: the seeded generators of the simulation, behind `test-support` for the PostgreSQL
+/// simulation in `zirv-flow-jobs`. Never in a normal build.
+#[cfg(any(test, feature = "test-support"))]
+pub mod sim;
 mod state;
 mod step;
 mod time;

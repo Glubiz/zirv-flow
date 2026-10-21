@@ -1,0 +1,741 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router";
+
+import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
+import {
+  Button,
+  Dialog,
+  EmptyState,
+  formatDateTime,
+  InlineError,
+  Pill,
+  ResourceView,
+  SelectField,
+  Sheet,
+  shortId,
+  type Tone,
+} from "../../ui";
+import type { Catalog } from "../segments";
+import { TraceTree, traceHref, type TraceTreeRecord } from "../traces";
+import { Canvas } from "./Canvas";
+import { wordsFor, type Names } from "./describe";
+import { placeIssues } from "./issues";
+import { kindLabel, TRIGGER_ID, type FlowDetail, type Graph } from "./model";
+import { pathOverlay, type NodeMark, type NodeTally, type Overlay } from "./overlay";
+import type { FlowVersion } from "./VersionsView";
+
+type EnrollmentItem = components["schemas"]["EnrollmentItemBody"];
+type EnrollmentPath = components["schemas"]["EnrollmentPathBody"];
+type NodeCount = components["schemas"]["NodeCountBody"];
+
+const STATES = ["active", "waiting", "held", "completed", "exited", "failed"] as const;
+const PAGE = 25;
+const CHANGED_ELSEWHERE = "This changed somewhere else. It is shown as it is now; nothing was done.";
+
+interface Props {
+  workspaceId: string;
+  flowId: string;
+  state: FlowDetail["state"];
+  /** The newest published version of the flow. */
+  current: number | null;
+  canAdmin: boolean;
+  names: Names;
+  catalog: Catalog | null;
+  announce: (text: string) => void;
+  /** Reads the flow's lifecycle state again after a 409, so the editor shows what the API now says. */
+  onConflict: () => Promise<void>;
+}
+
+/** The Enrollments view: a version on the canvas with its counts, the people in it, and one person's path. */
+export function Inspector(props: Props) {
+  const { workspaceId, flowId } = props;
+  const versions = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flowId } } })),
+    [workspaceId, flowId, props.current],
+  );
+  return (
+    <ResourceView
+      resource={versions}
+      loadingLabel="Loading the versions"
+      isEmpty={(list) => list.length === 0}
+      empty={
+        <div className="fl-pane">
+          <EmptyState title="No one can be in this flow yet">
+            Publish a version first. People enter a published version, and they are listed here with the steps they have reached.
+          </EmptyState>
+        </div>
+      }
+    >
+      {(list) => <InspectorBody {...props} versions={list} />}
+    </ResourceView>
+  );
+}
+
+function stepTitle(graph: Graph | undefined, names: Names, id: string): string {
+  if (id === TRIGGER_ID) return "Trigger";
+  const node = graph?.nodes.find((candidate) => candidate.id === id);
+  if (!node) return id === "settings.goal" ? "Goal setting" : id;
+  return `${kindLabel(node.type)}: ${wordsFor(node, names).title}`;
+}
+
+const STATE_TONE: Record<string, Tone> = { failed: "error", held: "attention" };
+
+interface Filters {
+  state: string;
+  version: string;
+  node: string;
+}
+
+function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[] }) {
+  const { workspaceId, flowId, names, current } = props;
+  const sorted = useMemo(() => [...versions].sort((left, right) => right.version - left.version), [versions]);
+  const newest = sorted[0]?.version ?? 1;
+  const [version, setVersion] = useState<number>(current ?? newest);
+  const [showCounts, setShowCounts] = useState(true);
+  const [sheetOpen, setSheetOpen] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [filters, setFilters] = useState<Filters>({ state: "", version: "", node: "" });
+  /** Bumped when the list must be read again; the counts and the detail reload in place, so what is shown stays. */
+  const [refresh, setRefresh] = useState(0);
+  /** An action has finished, so focus goes back once the detail has been read again. */
+  const [returnFocus, setReturnFocus] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
+  const [confirm, setConfirm] = useState<"skip" | "exit" | null>(null);
+
+  const graphs = useMemo(() => new Map(sorted.map((entry) => [entry.version, entry])), [sorted]);
+  const shown = graphs.get(version) ?? sorted[0];
+  const none = useMemo(() => placeIssues([]), []);
+
+  const counts = useResource(
+    () =>
+      unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts", {
+          params: { path: { ws: workspaceId, id: flowId, n: version } },
+        }),
+      ),
+    [workspaceId, flowId, version],
+  );
+  const detail = useResource(async (): Promise<EnrollmentPath | null> => {
+    if (selectedId === null) return null;
+    return unwrap(
+      client.GET("/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}", {
+        params: { path: { ws: workspaceId, id: flowId, enrollment_id: selectedId } },
+      }),
+    );
+  }, [workspaceId, flowId, selectedId]);
+
+  function reread() {
+    setRefresh((value) => value + 1);
+    counts.reload();
+    detail.reload();
+  }
+
+  const tallies = counts.status === "ready" ? counts.data.nodes : null;
+
+  const picked = detail.status === "ready" ? detail.data : null;
+
+  const overlay = useMemo<Overlay | undefined>(() => {
+    if (!shown) return undefined;
+    const out: {
+      -readonly [K in keyof Overlay]: Overlay[K];
+    } = {};
+    if (showCounts && tallies) {
+      const byNode = new Map<string, NodeTally>(tallies.map((entry) => [entry.node_id, entry]));
+      out.counts = byNode;
+    }
+    if (picked && picked.enrollment.version === shown.version) {
+      Object.assign(
+        out,
+        pathOverlay(
+          shown.graph,
+          picked.steps.map((step) => ({ node: step.node_id })),
+        ),
+      );
+      out.marks = marksOf(picked);
+    }
+    return out;
+  }, [shown, showCounts, tallies, picked]);
+
+  if (!shown) return null;
+
+  function select(item: EnrollmentItem) {
+    setSelectedId(item.id);
+    setReturnFocus(false);
+    setSheetOpen(true);
+    setVersion(item.version);
+    props.announce(`Showing the path of one enrollment in version ${item.version}.`);
+  }
+
+  function back() {
+    setSelectedId(null);
+    setReturnFocus(false);
+    props.announce("Back to all enrollments.");
+  }
+
+  /**
+   * A 409: the flow's state is read again, and the notice names the cause the problem's code gives.
+   * Only a conflict with no such cause says the enrollment changed somewhere else.
+   */
+  async function conflict(error: ApiError, kind: "retry" | "skip" | "exit") {
+    const done = kind === "retry" ? "retried" : kind === "skip" ? "skipped" : "ended";
+    const said =
+      error.code === "flow_paused"
+        ? `The flow is paused, so nothing was ${done}. Resume it first.`
+        : error.code === "flow_archived"
+          ? `The flow is archived, so nothing was ${done}.`
+          : CHANGED_ELSEWHERE;
+    setNotice(said);
+    props.announce(said);
+    reread();
+    await props.onConflict();
+  }
+
+  async function act(kind: "retry" | "skip" | "exit", enrollmentId?: string) {
+    if (acting) return;
+    setActing(true);
+    setNotice(null);
+    try {
+      if (kind === "exit") {
+        await unwrap(
+          client.POST("/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments", {
+            params: { path: { ws: workspaceId, id: flowId, n: version } },
+          }),
+        );
+        props.announce(`Everyone still in version ${version} is being ended.`);
+      } else if (enrollmentId !== undefined) {
+        const params = { params: { path: { ws: workspaceId, id: flowId, enrollment_id: enrollmentId } } };
+        await unwrap(
+          kind === "retry"
+            ? client.POST("/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry", params)
+            : client.POST("/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip", params),
+        );
+        props.announce(kind === "retry" ? "The step will run again." : "The step is skipped.");
+      }
+      reread();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        await conflict(error, kind);
+      } else {
+        const summary = describeError(error);
+        setNotice(summary.detail || summary.title);
+      }
+    } finally {
+      setActing(false);
+      setConfirm(null);
+      // Only Retry and Skip act on the open detail; a bulk exit has nothing to return focus to.
+      if (kind !== "exit") setReturnFocus(true);
+    }
+  }
+
+  const older = props.current !== null && version < props.current;
+  const waitingHere = tallies?.reduce((sum, entry) => sum + entry.waiting, 0) ?? null;
+  const exitReason =
+    props.state !== "published" ? "A paused or archived flow cannot end anyone's enrollment." : null;
+  const stepReason =
+    props.state === "paused"
+      ? "The flow is paused, so a failed step cannot be retried or skipped. Resume it first."
+      : props.state === "archived"
+        ? "The flow is archived, so a failed step cannot be retried or skipped."
+        : null;
+
+  return (
+    <>
+      {notice ? (
+        <p className="fl-notice" role="alert">
+          {notice}
+        </p>
+      ) : null}
+      <Canvas
+        fitKey={shown.version}
+        graph={shown.graph}
+        settings={shown.settings}
+        names={names}
+        placed={none}
+        issueItems={[]}
+        checked={false}
+        checking={false}
+        editable={false}
+        selectedId={null}
+        focusRequest={null}
+        canUndo={false}
+        overlay={overlay}
+        onOpen={(id) => {
+          if (id === TRIGGER_ID) return;
+          setFilters((value) => ({ ...value, node: id }));
+          setSheetOpen(true);
+          setSelectedId(null);
+          setReturnFocus(false);
+          props.announce(`Showing the enrollments at ${stepTitle(shown.graph, names, id)}.`);
+        }}
+        onClose={() => undefined}
+        onWire={() => undefined}
+        onAdd={() => undefined}
+        onUndo={() => undefined}
+        onDeleteRequest={() => undefined}
+        onPickIssue={() => undefined}
+      >
+        <div className="fl-card" role="group" aria-label="Counts and versions">
+          <SelectField
+            label="Counts for"
+            value={String(version)}
+            onChange={(event) => {
+              setVersion(Number(event.target.value));
+              setSelectedId(null);
+              setReturnFocus(false);
+              setFilters((value) => ({ ...value, node: "" }));
+            }}
+          >
+            {sorted.map((entry) => (
+              <option key={entry.version} value={entry.version}>
+                {`v${entry.version}${entry.version === props.current ? " · current" : ""}`}
+              </option>
+            ))}
+          </SelectField>
+          <div className="row">
+            <Button aria-pressed={showCounts} onClick={() => setShowCounts((value) => !value)}>
+              {showCounts ? "Hide" : "Show counts"}
+            </Button>
+            {!sheetOpen ? <Button onClick={() => setSheetOpen(true)}>Show enrollments</Button> : null}
+          </div>
+          <p className="faint">
+            Everyone who entered version {version}, computed when you opened this. Dark badges count step runs (a retried step counts
+            again), light ones the people waiting, red ones failures.
+          </p>
+          <Tally counts={counts} graph={shown.graph} names={names} />
+          {older ? (
+            <div className="stack-tight" role="group" aria-label="People still on this version">
+              <span>
+                {waitingHere === null ? "Counting who is still in this version…" : `${waitingHere} waiting in version ${version}, which is no longer the current one.`}
+              </span>
+              {props.canAdmin ? (
+                <>
+                  <Button
+                    aria-disabled={acting || exitReason !== null || undefined}
+                    onClick={() => {
+                      if (!acting && exitReason === null) setConfirm("exit");
+                    }}
+                  >
+                    Exit them…
+                  </Button>
+                  {exitReason ? <span className="faint">{exitReason}</span> : null}
+                </>
+              ) : (
+                <span className="faint">Ending their enrollments needs a workspace admin.</span>
+              )}
+            </div>
+          ) : null}
+        </div>
+        {sheetOpen ? (
+          <div className="fl-sheet">
+            <Sheet
+              key={selectedId ?? "list"}
+              title={selectedId === null ? "Enrollments" : "One enrollment"}
+              eyebrow={selectedId === null ? `Flow ${shortId(flowId)}` : "Enrollment"}
+              closeLabel={selectedId === null ? "Hide list" : "Back to all"}
+              onClose={() => (selectedId === null ? setSheetOpen(false) : back())}
+              autoFocus={selectedId !== null}
+            >
+              {selectedId === null ? (
+                <EnrollmentList
+                  key={`${filters.state}|${filters.version}|${filters.node}|${refresh}`}
+                  workspaceId={workspaceId}
+                  flowId={flowId}
+                  filters={filters}
+                  onFilters={setFilters}
+                  sorted={sorted}
+                  graph={shown.graph}
+                  graphs={graphs}
+                  names={names}
+                  onSelect={select}
+                />
+              ) : (
+                <ResourceView resource={detail} loadingLabel="Loading the enrollment" isEmpty={(data) => data === null}>
+                  {(data) =>
+                    data ? (
+                      <EnrollmentDetail
+                        path={data}
+                        workspaceId={workspaceId}
+                        graph={graphs.get(data.enrollment.version)?.graph}
+                        names={names}
+                        canAdmin={props.canAdmin}
+                        acting={acting}
+                        reason={stepReason}
+                        refreshing={detail.status === "ready" && detail.refreshing}
+                        returnFocus={returnFocus}
+                        onFocused={() => setReturnFocus(false)}
+                        onRetry={() => !stepReason && void act("retry", data.enrollment.id)}
+                        onSkip={() => !acting && !stepReason && setConfirm("skip")}
+                      />
+                    ) : null
+                  }
+                </ResourceView>
+              )}
+            </Sheet>
+          </div>
+        ) : null}
+      </Canvas>
+      {confirm === "skip" && selectedId !== null ? (
+        <Dialog title="Skip the failed step?" onClose={() => setConfirm(null)}>
+          <p className="muted">
+            The step is not run. The person carries on from the step after it, and the skip is recorded on their trace.
+          </p>
+          <div className="dialog-actions">
+            <Button onClick={() => setConfirm(null)}>Cancel</Button>
+            <Button variant="primary" aria-disabled={acting || undefined} onClick={() => void act("skip", selectedId)}>
+              Skip the step
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
+      {confirm === "exit" ? (
+        <Dialog title={`End everyone still in version ${version}?`} onClose={() => setConfirm(null)}>
+          <p className="muted">
+            Every enrollment of version {version} that has not finished leaves the flow, whichever step it is on. Each is recorded on its own
+            trace. This cannot be undone.
+          </p>
+          <div className="dialog-actions">
+            <Button onClick={() => setConfirm(null)}>Cancel</Button>
+            <Button variant="primary" aria-disabled={acting || undefined} onClick={() => void act("exit")}>
+              End their enrollments
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
+    </>
+  );
+}
+
+/** The counts as text, for those who do not read them off the canvas. */
+function Tally({
+  counts,
+  graph,
+  names,
+}: {
+  counts: ReturnType<typeof useResource<components["schemas"]["VersionCountsBody"]>>;
+  graph: Graph;
+  names: Names;
+}) {
+  if (counts.status === "loading") {
+    return (
+      <p className="muted" role="status">
+        Loading the counts
+      </p>
+    );
+  }
+  if (counts.status === "error") {
+    return <InlineError {...describeError(counts.error)} />;
+  }
+  return (
+    <details>
+      <summary>Counts as a list</summary>
+      <table className="table">
+        <caption className="visually-hidden">Counts per step of version {counts.data.version}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Step</th>
+            <th scope="col">Entered (step runs)</th>
+            <th scope="col">Waiting</th>
+            <th scope="col">Failed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {counts.data.nodes.map((entry: NodeCount) => (
+            <tr key={entry.node_id}>
+              <th scope="row">{stepTitle(graph, names, entry.node_id)}</th>
+              <td>{entry.entered}</td>
+              <td>{entry.waiting}</td>
+              <td>{entry.failed}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="faint">Entered counts the runs of a step, so a step that was retried counts again. It is not a count of people.</p>
+    </details>
+  );
+}
+
+function EnrollmentList({
+  workspaceId,
+  flowId,
+  filters,
+  onFilters,
+  sorted,
+  graph,
+  graphs,
+  names,
+  onSelect,
+}: {
+  workspaceId: string;
+  flowId: string;
+  filters: Filters;
+  onFilters: (next: Filters) => void;
+  sorted: readonly FlowVersion[];
+  graph: Graph;
+  graphs: ReadonlyMap<number, FlowVersion>;
+  names: Names;
+  onSelect: (item: EnrollmentItem) => void;
+}) {
+  const query = {
+    limit: PAGE,
+    ...(filters.state ? { state: filters.state } : {}),
+    ...(filters.version ? { version: Number(filters.version) } : {}),
+    ...(filters.node ? { node: filters.node } : {}),
+  };
+  const first = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/enrollments", { params: { path: { ws: workspaceId, id: flowId }, query } })),
+    [workspaceId, flowId, filters.state, filters.version, filters.node],
+  );
+  const [more, setMore] = useState<{ items: EnrollmentItem[]; next: string | null } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<unknown>(null);
+
+  async function loadMore(before: string) {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}/enrollments", {
+          params: { path: { ws: workspaceId, id: flowId }, query: { ...query, before } },
+        }),
+      );
+      setMore((value) => ({ items: [...(value?.items ?? []), ...page.enrollments], next: page.next_before ?? null }));
+    } catch (error) {
+      setMoreError(error);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  const filtered = filters.state !== "" || filters.version !== "" || filters.node !== "";
+
+  return (
+    <>
+      <form className="fl-sheet-section" aria-label="Filter enrollments" onSubmit={(event) => event.preventDefault()}>
+        <SelectField label="State" value={filters.state} onChange={(event) => onFilters({ ...filters, state: event.target.value })}>
+          <option value="">Any state</option>
+          {STATES.map((state) => (
+            <option key={state} value={state}>
+              {state}
+            </option>
+          ))}
+        </SelectField>
+        <SelectField label="Version" value={filters.version} onChange={(event) => onFilters({ ...filters, version: event.target.value })}>
+          <option value="">Any version</option>
+          {sorted.map((entry) => (
+            <option key={entry.version} value={entry.version}>
+              {`v${entry.version}`}
+            </option>
+          ))}
+        </SelectField>
+        <SelectField label="Step" value={filters.node} onChange={(event) => onFilters({ ...filters, node: event.target.value })}>
+          <option value="">Any step</option>
+          {graph.nodes.map((node) => (
+            <option key={node.id} value={node.id}>
+              {stepTitle(graph, names, node.id)}
+            </option>
+          ))}
+        </SelectField>
+      </form>
+      <ResourceView
+        resource={first}
+        loadingLabel="Loading the enrollments"
+        isEmpty={(page) => page.enrollments.length === 0}
+        empty={
+          <EmptyState
+            title={filtered ? "No enrollments match these filters" : "No one has entered this flow yet"}
+            action={filtered ? <Button onClick={() => onFilters({ state: "", version: "", node: "" })}>Clear the filters</Button> : undefined}
+          >
+            {filtered ? "Change a filter to see more." : "People appear here once the flow is live and they enter it."}
+          </EmptyState>
+        }
+      >
+        {(page) => {
+          const items = [...page.enrollments, ...(more?.items ?? [])];
+          const next = more ? more.next : (page.next_before ?? null);
+          return (
+            <>
+              <ul className="fl-versions" aria-label="Enrollments">
+                {items.map((item) => (
+                  <li key={item.id} className="fl-version">
+                    <Button
+                      aria-label={`Open the enrollment of person ${shortId(item.person_id)}, ${item.state}, version ${item.version}`}
+                      onClick={() => onSelect(item)}
+                    >
+                      Person {shortId(item.person_id)}
+                    </Button>
+                    <Pill tone={STATE_TONE[item.state] ?? "neutral"}>{item.state}</Pill>
+                    <span className="fl-version-meta">
+                      v{item.version} · at {stepTitle(graphs.get(item.version)?.graph, names, item.failed_node ?? item.node)} ·{" "}
+                      <time dateTime={item.created_at}>{formatDateTime(item.created_at)}</time>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {moreError ? <InlineError {...describeError(moreError)} /> : null}
+              {next !== null ? (
+                <div>
+                  <Button aria-disabled={loadingMore || undefined} onClick={() => void loadMore(next)}>
+                    {loadingMore ? "Loading…" : "Show more"}
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          );
+        }}
+      </ResourceView>
+    </>
+  );
+}
+
+const STEP_OUTCOMES: Record<string, string> = { done: "Done", waiting: "Waiting here", failed: "Failed" };
+
+/** The operator decisions of an enrollment by step: the steps that were retried and skipped. */
+function operatorDecisions(path: EnrollmentPath, outcome: "retried" | "skipped"): Set<string> {
+  const nodes = new Set<string>();
+  for (const record of path.decisions) {
+    const node = record.subject_ids["node"];
+    if (record.action === "flow.enrollment" && record.outcome === outcome && typeof node === "string") nodes.add(node);
+  }
+  return nodes;
+}
+
+function marksOf(path: EnrollmentPath): Map<string, NodeMark> {
+  const marks = new Map<string, NodeMark>();
+  for (const node of operatorDecisions(path, "retried")) marks.set(node, { tone: "retried", text: "Retried" });
+  for (const node of operatorDecisions(path, "skipped")) marks.set(node, { tone: "skipped", text: "Skipped" });
+  const { enrollment } = path;
+  if (enrollment.state === "failed" && enrollment.failed_node) {
+    marks.set(enrollment.failed_node, { tone: "failed", text: "Failed here" });
+  }
+  return marks;
+}
+
+function EnrollmentDetail({
+  path,
+  workspaceId,
+  graph,
+  names,
+  canAdmin,
+  acting,
+  reason,
+  refreshing,
+  returnFocus,
+  onFocused,
+  onRetry,
+  onSkip,
+}: {
+  path: EnrollmentPath;
+  workspaceId: string;
+  graph: Graph | undefined;
+  names: Names;
+  canAdmin: boolean;
+  acting: boolean;
+  /** Why Retry and Skip are refused, when the flow's state forbids them. */
+  reason: string | null;
+  refreshing: boolean;
+  /** An action just finished: once the detail is read again, focus goes to Retry if it is still there, else to the heading. */
+  returnFocus: boolean;
+  onFocused: () => void;
+  onRetry: () => void;
+  onSkip: () => void;
+}) {
+  const { enrollment } = path;
+  const heading = useRef<HTMLHeadingElement>(null);
+  const actions = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!returnFocus || refreshing) return;
+    (actions.current?.querySelector<HTMLElement>("button") ?? heading.current)?.focus();
+    onFocused();
+  }, [returnFocus, refreshing, onFocused]);
+  const failedAt = enrollment.failed_node ? stepTitle(graph, names, enrollment.failed_node) : null;
+  const retried = operatorDecisions(path, "retried");
+  const skipped = operatorDecisions(path, "skipped");
+  const failed = enrollment.state === "failed";
+  const describe = (record: TraceTreeRecord) => {
+    const node = record.subject_ids["node"];
+    return typeof node === "string" ? stepTitle(graph, names, node) : null;
+  };
+
+  return (
+    <>
+      <div className="stack-tight">
+        <h3 ref={heading} tabIndex={-1} className="strong">
+          Person {shortId(enrollment.person_id)}
+        </h3>
+        <div className="row">
+          <Pill tone={STATE_TONE[enrollment.state] ?? "neutral"}>{failed && failedAt ? `Failed at ${failedAt}` : enrollment.state}</Pill>
+          <span className="faint">
+            Version {enrollment.version} · entered <time dateTime={enrollment.created_at}>{formatDateTime(enrollment.created_at)}</time>
+          </span>
+        </div>
+        {enrollment.exit_reason ? <span className="muted">Ended: {enrollment.exit_reason}</span> : null}
+        {failed && enrollment.error ? <span className="form-error">{enrollment.error}</span> : null}
+      </div>
+      {failed ? (
+        canAdmin ? (
+          <>
+            <div ref={actions} className="row" role="group" aria-label="Admin actions">
+              <Button variant="primary" aria-disabled={acting || reason !== null || undefined} onClick={onRetry}>
+                {failedAt ? `Retry ${failedAt}` : "Retry"}
+              </Button>
+              <Button aria-disabled={acting || reason !== null || undefined} onClick={onSkip}>
+                Skip it…
+              </Button>
+            </div>
+            {reason ? <p className="faint">{reason}</p> : null}
+          </>
+        ) : (
+          <p className="faint">Retrying or skipping a failed step needs a workspace admin.</p>
+        )
+      ) : null}
+      <div className="fl-sheet-section">
+        <h3>Path</h3>
+        {path.steps.length === 0 ? (
+          <p className="muted">The enrollment has not run a step yet.</p>
+        ) : (
+          <ol className="fl-steps" aria-label="Steps this enrollment has run">
+            {path.steps.map((step, index) => (
+              <li key={`${index}:${step.node_id}`} className="fl-step-row">
+                <span className={step.outcome === "failed" ? "fl-step-n fl-step-n-bad" : "fl-step-n"}>{index + 1}</span>
+                <div className="stack-tight">
+                  <div>
+                    <span className="strong">{stepTitle(graph, names, step.node_id)}</span>{" "}
+                    <span className="faint mono">{formatDateTime(step.started_at)}</span>
+                  </div>
+                  <div className="muted">
+                    {step.outcome === "failed"
+                      ? `Failed after ${step.attempts} ${step.attempts === 1 ? "attempt" : "attempts"}${step.error ? `: ${step.error}` : ""}`
+                      : (STEP_OUTCOMES[step.outcome] ?? step.outcome)}
+                  </div>
+                  {retried.has(step.node_id) ? <div className="faint">Retried by an operator</div> : null}
+                  {skipped.has(step.node_id) ? <div className="faint">Skipped by an operator</div> : null}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+        {path.waits.map((wait) => (
+          <p key={wait.kind === "event" ? `event:${wait.event}` : "timer"} className="muted">
+            {wait.kind === "event"
+              ? `Waiting for ${wait.event} until ${formatDateTime(wait.timeout_at)}`
+              : `Waiting until ${formatDateTime(wait.wake_at)}`}
+          </p>
+        ))}
+      </div>
+      <div className="fl-sheet-section">
+        <div className="row">
+          <h3>Trace</h3>
+          <Link to={traceHref(workspaceId, enrollment.trace_id)}>Open in Traces</Link>
+        </div>
+        <TraceTree
+          records={path.decisions}
+          label="Decisions on the trace of this enrollment"
+          describe={describe}
+          truncated={path.truncated}
+        />
+      </div>
+    </>
+  );
+}

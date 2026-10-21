@@ -322,7 +322,7 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
 
 /// How long to wait before the next attempt: the backoff, or the wait the handler asked for
 /// (a `Retry-After`) when that is longer, but never past the backoff cap.
-fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Duration) -> Duration {
+pub(crate) fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Duration) -> Duration {
     asked.map_or(backoff, |asked| backoff.max(asked.min(cap)))
 }
 
