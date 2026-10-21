@@ -618,6 +618,7 @@ function Editor({
                   describeStep={describeStep}
                   portName={portName}
                   graph={draft.graph}
+                  settingsUnsaved={store.settingsUnsaved}
                   onResult={setTestResult}
                   onClose={exitTest}
                   announce={announce}

@@ -210,6 +210,32 @@ describe("test mode", () => {
     expect(saves(calls)).toHaveLength(failedSaves);
   });
 
+  it("notes that unsaved settings are not walked, and only then", async () => {
+    mockApi({
+      ...flowRoutes(),
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: () => problem(500, "Internal Server Error", "internal error"),
+      [TEST]: () => json(walk()),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    // Clean settings: no note.
+    let sheet = await openTest(user);
+    expect(within(sheet).queryByText(/settings changes aren.t saved/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Exit test" }));
+
+    // A settings edit whose save failed stays unsaved, and the sheet says the test uses the saved settings.
+    await user.click(screen.getByRole("tab", { name: "Flow settings" }));
+    await user.selectOptions(await screen.findByLabelText("When a person"), "exited");
+    expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Canvas" }));
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    sheet = await screen.findByRole("dialog", { name: "Set up a test run" });
+    expect(within(sheet).getByText(/settings changes aren.t saved yet/)).toBeInTheDocument();
+    expect(within(sheet).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("says plainly that the walk cannot decide a condition, with the partial path", async () => {
     mockApi({
       ...flowRoutes(),

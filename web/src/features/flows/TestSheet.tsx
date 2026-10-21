@@ -37,6 +37,8 @@ interface Props {
   portName: (id: string, port: string) => string | null;
   /** The draft as it is on the canvas, saved or not: every walk carries it, so a test writes nothing. */
   graph: Graph;
+  /** The draft's settings are not saved. The walk takes the goal and exit settings from the saved draft, as the request has no field for them. */
+  settingsUnsaved: boolean;
   onResult: (result: TestResult | null) => void;
   onClose: () => void;
   announce: (text: string) => void;
@@ -144,6 +146,9 @@ export function TestSheet(props: Props) {
   return (
     <Sheet title={result ? "Test run" : "Set up a test run"} eyebrow="Test mode · the draft" closeLabel="Close" onClose={props.onClose}>
       <p className="muted">{NOTHING_SENT}</p>
+      {props.settingsUnsaved ? (
+        <p className="muted">Your settings changes aren&apos;t saved yet. This test uses the saved trigger, goal and exit settings.</p>
+      ) : null}
       <div className="fl-sheet-section">
         {result === null ? (
           <>
