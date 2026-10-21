@@ -2,7 +2,7 @@
 -- step_executions.started_at, the transaction start of the flow.step wake job) minus the wake
 -- instant the seed chose (m5bench.rows.wake_at; the runtime clears enrollments.wake_at on completion).
 -- Percentiles are nearest-rank (percentile_disc), as m4's stats. Prints one JSON document.
--- psql variables: run, x1 (the node after the wait, default x1).
+-- psql variables: run.
 WITH r AS (SELECT * FROM m5bench.rows WHERE run = :run),
 run AS (SELECT * FROM m5bench.runs WHERE run = :run),
 late AS (

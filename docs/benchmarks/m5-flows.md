@@ -32,7 +32,7 @@ filed (section 5).
 - **Stack.** The M4 10 M-people database (compose project `zirv-flow-m4bench10m`, volumes kept from
   M4, migrated from 0.57.1 to 0.76.0 by the image), app tier M (4 vCPU cpuset `0-3` for serve, worker
   and scheduler; worker concurrency 4), PostgreSQL 16.15 on cpuset `8-31` (`shared_buffers=4GB`, stock
-  otherwise; `/dev/shm` 1 GB, as `compose up` recreated the container with the script default).
+  otherwise; `/dev/shm` 1 GB, as `compose up` recreated the container with the script default; M4 ran with 8 GB, `BENCH_PG_SHM=8gb`).
   Host: 13th Gen Intel Core i9-13900K, Docker Desktop 29.2.1 (32 CPUs, 31 GiB), WSL 3.0.3.0
   (`data/m5/stack.txt`). No `cargo.exe` ran during any window (`cargo.log` in each run directory).
 - **Flows (through the API).** `m5-spread`: manual trigger, `wait.duration` (86,400 s) then exit.
@@ -48,9 +48,8 @@ filed (section 5).
   enrollments with `wake_at` uniform over a 40 minute window (375 per second), and 100,000 `m5-burst`
   enrollments waking in one minute, 20 minutes into the window (1,667 per second on top). Validated by
   `verify.sql` before each window: all counts (enrollments, steps, ready jobs, entries, 3 decisions
-  each) and the shape against the sample, 23 of 23 checks OK per run (`data/m5/seed-verify-run*.txt`).
-  The tables were vacuumed and analysed and a checkpoint taken after seeding; seeding finished at
-  least 30 minutes before the window. Rows were deleted between runs, so each run started from the same
+  each) and the shape against the sample, 23 of 23 checks OK per run (`data/m5/seed-verify-run*.txt`). `flow_entries` was checked by count, not column by column.
+  The tables were vacuumed and analysed and a checkpoint taken after seeding; verify.sql refuses to pass when the window is less than `SEED_MIN_MARGIN_S` (120 s by default) away. Rows were deleted between runs, so each run started from the same
   table sizes. Not seeded: the start job (deleted by the runtime when it completes).
 - **Lateness** = `step_executions.started_at` of the step after the wait (the transaction start of the
   wake job) minus the seeded wake instant, nearest-rank percentiles over all 1,000,000 timers. The
@@ -106,16 +105,14 @@ Ingest API under load (run 3, 4,800,000 requests, all 202, achieved 1,999.99/s):
 Beside #151 (target p99 < 100 ms; 0.56.0: 57.7 ms, 0.57.1: 461 to 635 ms server-side at 1 M people):
 1,016 ms on 0.76.0, during timer wakes, on the 10 M database, with the loadgen dispatch lag p99 at
 9.4 ms. This run does not isolate the cause (the wake load, the database state and the version all
-differ from #151's runs), so it is evidence for #151, not a new finding.
+differ from #151's runs), so it is evidence for #151, not a new finding. The stacks also differ in `/dev/shm` (1 GB here, 8 GB in M4).
 
 ## 4. Misses and causes
 
 1. **Timer lateness under ingest load: p99 136.4 s against 60 s** (run 3). Established: the wake jobs
    and the ingest work share the PostgreSQL instance and the worker pool. With 2,000 events/s the
    database runs at 480% CPU on average against 82% without load, and the worker's peak claim rate falls
-   from 1,108 to 832 jobs/s, so the 1,667/s burst backlog grows to 91,000 and takes about 3 minutes to
-   drain. Lateness is also 8 to 15 s at p99 in the minutes outside the burst, where no load-free minute
-   exceeds 1 s. Not established: how much comes from ingest-side jobs holding the 4 worker slots and how
+   from 1,108 to 832 jobs/s, so the 1,667/s burst backlog grows to 91,000. After the burst (minute 20) the spread set's p99 stays above 50 s through minute 25 (about 6 minutes) and returns to about 16 s at minute 28, about 8 minutes after the burst. Before the burst the per-minute p99s range from 0.07 to 15.9 s; after recovery (minutes 28 to 39) they stay at 13 to 15 s, against about 1 s in every minute outside the burst without load. Not established: how much comes from ingest-side jobs holding the 4 worker slots and how
    much from database contention; the sampler records the queue as a whole, not by job kind. Filed as #207.
 2. The no-load runs meet the target with a thin margin. The burst backlog alone produces the whole tail (57,000 jobs, 54 s): the backlog grows roughly in proportion to the burst, so one about 10% larger in the same minute would miss at this tier even unloaded (an estimate, not measured). Not extrapolated to 10 M.
 
