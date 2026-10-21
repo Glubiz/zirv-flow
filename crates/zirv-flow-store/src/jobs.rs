@@ -455,18 +455,25 @@ pub async fn heartbeat_job<'e>(
 /// Moves running jobs whose lease expired back to `ready`, to run now, or to `dead` when
 /// their attempts are used up (the attempt was counted at claim time). Each reaped
 /// workspace job gets a `job.attempt` decision, `lease_expired` or `exhausted`.
+///
+/// The rows are locked in id order, the order an erasure marks them in, so the two cannot
+/// deadlock. A job an erasure marked `purge_on_release` is deleted, not requeued or buried.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
-        "WITH purged AS ( \
-             DELETE FROM jobs WHERE state = 'running' AND lease_expires_at < now() \
-                AND purge_on_release RETURNING id), \
+        "WITH locked AS ( \
+             SELECT id, purge_on_release FROM jobs \
+             WHERE state = 'running' AND lease_expires_at < now() \
+             ORDER BY id FOR NO KEY UPDATE), \
+         purged AS ( \
+             DELETE FROM jobs WHERE id IN (SELECT id FROM locked WHERE purge_on_release) \
+             RETURNING id), \
          updated AS ( \
              UPDATE jobs SET \
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = now(), last_error = 'lease expired', \
                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-             WHERE state = 'running' AND lease_expires_at < now() AND NOT purge_on_release \
+             WHERE id IN (SELECT id FROM locked WHERE NOT purge_on_release) \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
          recorded AS ( \
              INSERT INTO decision_records \
@@ -1789,5 +1796,50 @@ mod tests {
         assert_eq!(stored.state, "dead");
         assert!(stored.dead_at.is_some());
         assert_eq!(stored.attempts, 1);
+    }
+
+    /// The erasure marks jobs in id order, so the reaper locks in id order too: two statements
+    /// that lock the same rows in opposite orders can deadlock. The heap order here is the
+    /// reverse of the id order, and the reaper, stopped at the second job, already holds the
+    /// first.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reaper_locks_expired_jobs_in_id_order(pool: PgPool) {
+        for id in [3_u128, 2, 1] {
+            sqlx::query(
+                "INSERT INTO jobs (id, kind, payload, state, lease_token, lease_expires_at, \
+                    attempts, unique_key, cause_kind, cause_id, trace_id) \
+                 VALUES ($1, 'a.kind', '{}', 'running', gen_random_uuid(), \
+                    now() - interval '1 minute', 1, $1::text, 'api', 't', gen_random_uuid())",
+            )
+            .bind(Uuid::from_u128(id))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE")
+            .bind(Uuid::from_u128(2))
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let reaper = {
+            let pool = pool.clone();
+            tokio::spawn(async move { reap_expired(&pool).await.unwrap() })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!reaper.is_finished(), "the reaper should wait for job 2");
+
+        let first_is_held = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(Uuid::from_u128(1))
+            .fetch_optional(&pool)
+            .await
+            .is_err();
+        blocker.commit().await.unwrap();
+        let reaped = reaper.await.unwrap();
+
+        assert!(first_is_held, "the reaper locks the lowest id first");
+        assert_eq!(reaped.requeued, 3);
     }
 }
