@@ -13,6 +13,7 @@
 //! - [`rewrite_links`] and [`unsubscribe_headers`] are the pure post-render steps.
 
 mod callables;
+mod content;
 mod context;
 mod document;
 mod error;
@@ -23,7 +24,13 @@ mod sandbox;
 mod validate;
 mod wire;
 
-pub use context::{MessageContext, RenderContext, SystemValues};
+pub use content::{
+    ContentError, RenderKind, TemplateContent, content_type, content_type_ids, content_type_of,
+    validate_document,
+};
+pub use context::{
+    MessageContext, RenderContext, SAMPLE_PREFERENCES_URL, SAMPLE_UNSUBSCRIBE_URL, SystemValues,
+};
 pub use document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
 };

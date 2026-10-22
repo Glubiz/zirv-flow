@@ -10,9 +10,11 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::{ContentError, validate_document};
 use crate::context::RenderContext;
 use crate::document::TemplateDocument;
 use crate::error::RenderError;
+use crate::issue::{FieldCatalog, Issue};
 use crate::links::Hooks;
 use crate::render::{Rendered, RenderedWebhook, render_email, render_webhook};
 
@@ -28,6 +30,11 @@ pub enum RenderRequest<'a> {
         doc: Cow<'a, TemplateDocument>,
         context: Cow<'a, RenderContext>,
     },
+    /// The publish checks of `validate`, whose sample render runs in the child like any other.
+    Validate {
+        doc: Cow<'a, TemplateDocument>,
+        catalog: Cow<'a, FieldCatalog>,
+    },
 }
 
 /// The answer to one [`RenderRequest`].
@@ -36,6 +43,12 @@ pub enum RenderRequest<'a> {
 pub enum RenderResponse {
     Email(Rendered),
     Webhook(RenderedWebhook),
+    /// The answer to a validate request.
+    Issues {
+        issues: Vec<Issue>,
+    },
+    /// The answer to a validate request for a document no registered content type owns.
+    UnsupportedDocument,
     /// The renderer's own error: a fixed code and the field concerned, never template data.
     Error {
         code: String,
@@ -51,6 +64,12 @@ impl RenderRequest<'_> {
             Self::Email { doc, context } => {
                 RenderResponse::from_email(render_email(doc, context, &Hooks::untracked()))
             }
+            Self::Validate { doc, catalog } => match validate_document(doc, catalog) {
+                Ok(issues) => RenderResponse::Issues { issues },
+                Err(ContentError::UnsupportedDocument | ContentError::Unregistered(_)) => {
+                    RenderResponse::UnsupportedDocument
+                }
+            },
             Self::Webhook { doc, context } => {
                 RenderResponse::from_webhook(render_webhook(doc, context))
             }
@@ -92,7 +111,18 @@ impl RenderResponse {
         match self {
             Self::Email(rendered) => Some(Ok(rendered)),
             Self::Error { code, field } => Self::typed_error(&code, field.as_deref()),
-            Self::Webhook(_) => None,
+            Self::Webhook(_) | Self::Issues { .. } | Self::UnsupportedDocument => None,
+        }
+    }
+
+    /// The issues of a validate request, or the typed refusal of a document no registered content
+    /// type owns; `None` when this response is not the answer to a validate request (an error
+    /// response is a render error, which a validate request never gets): a protocol fault.
+    pub fn into_issues(self) -> Option<Result<Vec<Issue>, ContentError>> {
+        match self {
+            Self::Issues { issues } => Some(Ok(issues)),
+            Self::UnsupportedDocument => Some(Err(ContentError::UnsupportedDocument)),
+            _ => None,
         }
     }
 
@@ -101,7 +131,7 @@ impl RenderResponse {
         match self {
             Self::Webhook(rendered) => Some(Ok(rendered)),
             Self::Error { code, field } => Self::typed_error(&code, field.as_deref()),
-            Self::Email(_) => None,
+            Self::Email(_) | Self::Issues { .. } | Self::UnsupportedDocument => None,
         }
     }
 }
@@ -140,6 +170,48 @@ mod tests {
         let wire = serde_json::to_vec(&response).unwrap();
         let response: RenderResponse = serde_json::from_slice(&wire).unwrap();
         assert_eq!(response.into_email(), Some(direct));
+    }
+
+    #[test]
+    fn a_validate_request_survives_json_and_answers_with_the_issues_of_validate() {
+        let doc = email_doc("{{ person.nope }}");
+        let catalog = FieldCatalog::default();
+        let request = RenderRequest::Validate {
+            doc: Cow::Borrowed(&doc),
+            catalog: Cow::Borrowed(&catalog),
+        };
+        let json = serde_json::to_vec(&request).unwrap();
+        let back: RenderRequest<'static> = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, request);
+
+        let wire = serde_json::to_vec(&back.run()).unwrap();
+        let response: RenderResponse = serde_json::from_slice(&wire).unwrap();
+        let issues = response.into_issues().unwrap().unwrap();
+        assert_eq!(issues, crate::validate(&doc, &catalog));
+        assert!(issues.iter().any(|issue| issue.is_blocking()));
+        assert_eq!(
+            RenderResponse::Issues { issues: Vec::new() }.into_email(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_validate_request_for_a_document_no_type_owns_is_the_typed_refusal() {
+        let mut blocks = email_doc("Hi");
+        blocks.mode = crate::document::Mode::Blocks;
+        let catalog = FieldCatalog::default();
+        let request = RenderRequest::Validate {
+            doc: Cow::Borrowed(&blocks),
+            catalog: Cow::Borrowed(&catalog),
+        };
+
+        let wire = serde_json::to_vec(&request.run()).unwrap();
+        let response: RenderResponse = serde_json::from_slice(&wire).unwrap();
+
+        assert_eq!(
+            response.into_issues(),
+            Some(Err(ContentError::UnsupportedDocument))
+        );
     }
 
     #[test]

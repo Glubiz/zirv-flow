@@ -29,6 +29,7 @@ mod stream_freshness;
 mod stream_offsets;
 mod suppressions;
 mod sync_runs;
+mod templates;
 mod webhooks;
 mod workspaces;
 
@@ -226,6 +227,13 @@ pub use sync_runs::{
     finish_run, list_run_rejects, list_runs, queue_reconcile_run, queue_run, queue_runs_for_source,
     rotate_stream_run, run_trace, start_run, start_stream_run, sweep_exceeds_limit,
     sweep_unreached,
+};
+pub use templates::{
+    LockedTemplate, NewTemplate, Template, TemplateDraft, TemplateError, TemplateFieldCatalog,
+    TemplatePatch, TemplateUse, TemplateVersion, TemplateVersionSummary, archive_template,
+    create_template, find_template, find_template_draft, find_template_version,
+    list_template_versions, list_templates, lock_template, publish_template,
+    read_template_field_catalog, save_template_draft, template_where_used, update_template,
 };
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,

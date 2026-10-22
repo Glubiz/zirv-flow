@@ -4,7 +4,7 @@ use minijinja::{Environment, ErrorKind, Value};
 use zirv_flow_core::segment::pointer_push;
 
 use crate::callables::{Kind, unknown_callables};
-use crate::context::{MESSAGE_FIELDS, RenderContext, SYSTEM_FIELDS};
+use crate::context::{MESSAGE_FIELDS, RenderContext, SAMPLE_UNSUBSCRIBE_URL, SYSTEM_FIELDS};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
 };
@@ -17,16 +17,10 @@ use crate::sandbox::{
     is_header_name, render_raw,
 };
 use zirv_flow_core::events::PropertyType;
-use zirv_flow_core::people::TraitType;
 
 /// The HTML size, in bytes, from which a warning says mail clients may clip the message. Gmail
 /// clips at about 102 KB; this leaves room for the tracking rewrite and the footer.
 pub(crate) const HTML_WARN_BYTES: usize = 90_000;
-
-/// The unsubscribe URL of the sample render: a marketing email must link to exactly this.
-const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
-/// The preference-centre URL of the sample render.
-const SAMPLE_PREFERENCES_URL: &str = "https://preferences.sample.invalid/p";
 
 /// Validate a document against the merge fields the workspace knows.
 ///
@@ -103,37 +97,9 @@ const BODY: FieldKind = FieldKind {
     limit: MAX_WEBHOOK_BODY_BYTES,
 };
 
-/// The context of the sample render: a deterministic value for every field in the catalog, by
-/// type, and sentinel system URLs.
+/// The context of the sample render, as the template engine reads it.
 fn sample_context(catalog: &FieldCatalog) -> Value {
-    let mut context = RenderContext::default();
-    for (key, kind) in &catalog.person {
-        let value = match kind {
-            TraitType::String => serde_json::json!("sample"),
-            TraitType::Number => serde_json::json!(1),
-            TraitType::Boolean => serde_json::json!(true),
-            TraitType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
-            TraitType::Date => serde_json::json!("2026-01-01"),
-            TraitType::StringList => serde_json::json!(["sample"]),
-        };
-        context.person.insert(key.clone(), value);
-    }
-    for (key, kind) in &catalog.event {
-        let value = match kind {
-            PropertyType::String => serde_json::json!("sample"),
-            PropertyType::Number | PropertyType::Integer => serde_json::json!(1),
-            PropertyType::Boolean => serde_json::json!(true),
-            PropertyType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
-            PropertyType::Date => serde_json::json!("2026-01-01"),
-            PropertyType::StringList => serde_json::json!(["sample"]),
-            PropertyType::Object => serde_json::json!({}),
-        };
-        context.event.insert(key.clone(), value);
-    }
-    context.message.id = "msg_sample".to_owned();
-    context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
-    context.system.preferences_url = SAMPLE_PREFERENCES_URL.to_owned();
-    Value::from_serialize(&context)
+    Value::from_serialize(RenderContext::sample(catalog))
 }
 
 fn validate_email(

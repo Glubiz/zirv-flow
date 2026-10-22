@@ -21,6 +21,8 @@ pub enum RenderFailure {
     /// The child sent something that is not a valid response: an oversized, cut or malformed
     /// frame, or a response of the wrong kind.
     Protocol,
+    /// A validate request for a document no registered content type owns.
+    UnsupportedDocument,
     /// The request is over the frame bound, so it was not sent.
     RequestTooLarge,
 }
@@ -35,6 +37,7 @@ impl RenderFailure {
             Self::ChildExited => "child_exited",
             Self::Protocol => "protocol",
             Self::RequestTooLarge => "request_too_large",
+            Self::UnsupportedDocument => "unsupported_document",
         }
     }
 }
@@ -75,6 +78,7 @@ mod tests {
             (RenderFailure::ChildExited, "child_exited"),
             (RenderFailure::Protocol, "protocol"),
             (RenderFailure::RequestTooLarge, "request_too_large"),
+            (RenderFailure::UnsupportedDocument, "unsupported_document"),
             (
                 RenderFailure::Render(RenderError::InvalidBody),
                 "render_error",

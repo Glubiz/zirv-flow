@@ -155,6 +155,23 @@ mod tests {
     }
 
     #[test]
+    fn it_serves_a_validate_request_with_the_issues_of_validate() {
+        let doc = doc();
+        let catalog = zirv_flow_templates::FieldCatalog::default();
+        let request = RenderRequest::Validate {
+            doc: Cow::Borrowed(&doc),
+            catalog: Cow::Borrowed(&catalog),
+        };
+        let mut input = Vec::new();
+        write_frame(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+        serve(input.as_slice(), &mut output).unwrap();
+
+        let issues = responses(&output).remove(0).into_issues().unwrap().unwrap();
+        assert_eq!(issues, zirv_flow_templates::validate(&doc, &catalog));
+    }
+
+    #[test]
     fn the_renderers_error_is_an_answer_not_a_failure_of_the_host() {
         let bad = TemplateDocument::email_code(EmailContent {
             html: "{{ nope.nothing }}".into(),

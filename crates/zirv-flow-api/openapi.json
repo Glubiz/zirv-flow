@@ -14831,6 +14831,1069 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/templates": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The workspace's live templates by name; archived ones with `archived=true`.",
+        "operationId": "list_templates",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived templates; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Creates a template with its first draft. Audited as `template.created`.",
+        "operationId": "create_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new template with its draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live template has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, a document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "One template with its draft.",
+        "operationId": "get_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Changes a template's name or sender identity. The channel and the category are fixed when the\ntemplate is made. Audited as `template.updated`.",
+        "operationId": "update_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live template has that name, or the template is archived (`code` is `template_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Archives a template. Nothing is deleted: the draft and the versions stay readable. Audited as\n`template.archived`.",
+        "operationId": "archive_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The template is already archived (`code` is `template_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/draft": {
+      "put": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. Audited as `template.draft_saved`.",
+        "operationId": "save_template_draft",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveTemplateDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The template with its saved draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The template is archived (`code` is `template_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/preview": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Renders the draft or a version of a template for a sample or a real person. Without\n`person_id` it needs the write role; with one, the admin role (until the `view_pii` grant\nexists), because the render shows that person's values. A render that fails its limits (memory,\ndeadline) or whose host dies is a problem document, and the next preview works. A document with\nblocking issues is not rendered: the response lists the issues and `rendered` is false.",
+        "operationId": "preview_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplatePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rendered template and its validation results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplatePreviewBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, a missing CSRF token, or a real person asked for without the admin role (`code` is `template_preview_values_forbidden`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, template, version or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The renderer refused the template (`template_render_failed`), it used too much memory or time (`render_memory_limit`, `render_deadline`), or no registered content type handles it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The render host answered unusably (`render_protocol`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/publish": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. Audited as\n`template.published`.",
+        "operationId": "publish_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The template and its new version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplatePublishedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/versions": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The versions of a template, newest first.",
+        "operationId": "list_template_versions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions without their documents, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateVersionSummaryBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "One version of a template.",
+        "operationId": "get_template_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, template or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/where-used": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The flows with a version whose graph has a node naming this template, by flow name, one entry\nper flow however many versions name it. The draft of a flow is not a version and is not listed.",
+        "operationId": "template_where_used",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flows with a version that names the template, one entry per flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateUseBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/topics": {
       "get": {
         "tags": [
@@ -18269,6 +19332,48 @@
               "null"
             ],
             "description": "A cron expression in UTC."
+          }
+        }
+      },
+      "CreateTemplateRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "channel"
+        ],
+        "properties": {
+          "category": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateCategoryRequest",
+                "description": "Default `marketing` for email and `transactional` for a webhook."
+              }
+            ]
+          },
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannelRequest"
+          },
+          "document": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The first draft. Its channel and category must be the template's. Absent: an empty\ncode-mode document."
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters after trimming; unique among the workspace's live templates, ignoring\ncase.",
+            "example": "Order shipped"
+          },
+          "sender_identity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -23788,6 +24893,16 @@
             "format": "int32",
             "minimum": 0
           },
+          "template_issues": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "What is wrong with a template document (`template_invalid`): a fixed code, how bad it is\nand where, never a value from the document."
+          },
           "title": {
             "type": "string"
           },
@@ -24763,6 +25878,18 @@
               "$ref": "#/components/schemas/PropertyBody"
             },
             "description": "Replaces the draft."
+          }
+        }
+      },
+      "SaveTemplateDraftRequest": {
+        "type": "object",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The content document."
           }
         }
       },
@@ -26822,6 +27949,430 @@
           }
         }
       },
+      "TemplateBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "channel",
+          "category",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "category": {
+            "type": "string",
+            "description": "`marketing` or `transactional`; fixed when the template is made."
+          },
+          "channel": {
+            "type": "string",
+            "description": "`email` or `webhook`; fixed when the template is made."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The newest published version; null before the first publish."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Order shipped"
+          },
+          "sender_identity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The sender identity of an email template."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TemplateCategoryRequest": {
+        "type": "string",
+        "description": "Whether a message needs the unsubscribe link and headers.",
+        "enum": [
+          "marketing",
+          "transactional"
+        ]
+      },
+      "TemplateChannelRequest": {
+        "type": "string",
+        "description": "The channel of a template. Only the two with a registered content type can be made.",
+        "enum": [
+          "email",
+          "webhook"
+        ]
+      },
+      "TemplateDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TemplateBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft"
+            ],
+            "properties": {
+              "draft": {
+                "$ref": "#/components/schemas/TemplateDraftBody"
+              }
+            }
+          }
+        ],
+        "description": "A template with its draft."
+      },
+      "TemplateDraftBody": {
+        "type": "object",
+        "description": "The one editable copy of a template's content.",
+        "required": [
+          "document",
+          "revision",
+          "updated_at"
+        ],
+        "properties": {
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registered content type that owns the document (`html`, `webhook`); null when none does."
+          },
+          "document": {
+            "type": "object",
+            "description": "The content document. It may be incomplete; only a publish validates it."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times the draft has been saved; the first save is 1."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "TemplateHeaderBody": {
+        "type": "object",
+        "description": "A header of the rendered message or request.",
+        "required": [
+          "name",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "TemplateIssueProblem": {
+        "type": "object",
+        "description": "One issue of a template document.",
+        "required": [
+          "code",
+          "severity",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "A JSON pointer into the document."
+          },
+          "code": {
+            "type": "string",
+            "description": "A fixed issue code such as `unknown_merge_field` or `missing_unsubscribe`."
+          },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The merge field the issue concerns, such as `person.first_name`."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short explanation for a problem the code alone does not explain."
+          },
+          "severity": {
+            "type": "string",
+            "description": "`blocking` or `warning`."
+          }
+        }
+      },
+      "TemplatePreviewBody": {
+        "type": "object",
+        "description": "The rendered template and its validation results.",
+        "required": [
+          "source",
+          "content_type",
+          "rendered",
+          "headers",
+          "issues"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A webhook's JSON body."
+          },
+          "content_type": {
+            "type": "string",
+            "description": "The registered content type that rendered it (`html`, `webhook`)."
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateHeaderBody"
+            },
+            "description": "An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers."
+          },
+          "html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An email's HTML, with inert tracking links."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The same checks a publish makes, against the workspace's fields now."
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person whose values were used; null for the sample person. When the id asked for was\nmerged away, the survivor."
+          },
+          "rendered": {
+            "type": "boolean",
+            "description": "False when the document has blocking issues, so nothing was rendered."
+          },
+          "source": {
+            "type": "string",
+            "description": "`draft` or `version`."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An email's subject."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An email's text part."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "TemplatePreviewRequest": {
+        "type": "object",
+        "properties": {
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Preview as this person. Needs the workspace admin role, because the render shows their\nvalues. Absent: a sample person built from the field registry's types."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Preview this published version. Absent: the draft."
+          }
+        }
+      },
+      "TemplatePublishedBody": {
+        "type": "object",
+        "description": "The new version and the template after the publish.",
+        "required": [
+          "template",
+          "version"
+        ],
+        "properties": {
+          "template": {
+            "$ref": "#/components/schemas/TemplateBody"
+          },
+          "version": {
+            "$ref": "#/components/schemas/TemplateVersionBody"
+          }
+        }
+      },
+      "TemplateUseBody": {
+        "type": "object",
+        "description": "One flow with a version that names the template.",
+        "required": [
+          "flow_id",
+          "flow_name",
+          "flow_state",
+          "versions",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the version the flow runs now is one of them."
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          },
+          "flow_state": {
+            "type": "string",
+            "description": "`draft`, `published`, `paused` or `archived`."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "The numbers of the flow's versions that name the template, newest first. An older version\nstill runs for the enrollments pinned to it."
+          }
+        }
+      },
+      "TemplateVersionBody": {
+        "type": "object",
+        "description": "One immutable published version.",
+        "required": [
+          "version",
+          "document",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The document as it was published."
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The warnings found when it was published; a blocking issue refuses the publish."
+          }
+        }
+      },
+      "TemplateVersionSummaryBody": {
+        "type": "object",
+        "description": "One published version in the history list: no document, which `GET .../versions/{n}` returns.",
+        "required": [
+          "version",
+          "blocking",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The blocking issues stored with the version; always 0, because a blocking issue refuses the\npublish."
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The warnings stored with the version."
+          }
+        }
+      },
       "TestBody": {
         "type": "object",
         "required": [
@@ -27557,6 +29108,25 @@
               "null"
             ],
             "description": "A cron expression in UTC; an empty string clears the schedule."
+          }
+        }
+      },
+      "UpdateTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender_identity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`null` clears it."
           }
         }
       },

@@ -2484,6 +2484,170 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live templates by name; archived ones with `archived=true`. */
+        get: operations["list_templates"];
+        put?: never;
+        /** Creates a template with its first draft. Audited as `template.created`. */
+        post: operations["create_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One template with its draft. */
+        get: operations["get_template"];
+        /**
+         * Changes a template's name or sender identity. The channel and the category are fixed when the
+         *     template is made. Audited as `template.updated`.
+         */
+        put: operations["update_template"];
+        post?: never;
+        /**
+         * Archives a template. Nothing is deleted: the draft and the versions stay readable. Audited as
+         *     `template.archived`.
+         */
+        delete: operations["archive_template"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replaces the template's draft. The draft is not validated beyond being a template document of
+         *     the template's channel and category with a registered content type: a template is edited in
+         *     steps, and the publish checks it. Audited as `template.draft_saved`.
+         */
+        put: operations["save_template_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Renders the draft or a version of a template for a sample or a real person. Without
+         *     `person_id` it needs the write role; with one, the admin role (until the `view_pii` grant
+         *     exists), because the render shows that person's values. A render that fails its limits (memory,
+         *     deadline) or whose host dies is a problem document, and the next preview works. A document with
+         *     blocking issues is not rendered: the response lists the issues and `rendered` is false.
+         */
+        post: operations["preview_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next immutable version. The draft is validated against the
+         *     workspace's field registry and event catalog and the reserved `person.email`; a blocking issue
+         *     is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
+         *     successful publish are in the response and stored with the version. Audited as
+         *     `template.published`.
+         */
+        post: operations["publish_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The versions of a template, newest first. */
+        get: operations["list_template_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of a template. */
+        get: operations["get_template_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/where-used": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The flows with a version whose graph has a node naming this template, by flow name, one entry
+         *     per flow however many versions name it. The draft of a flow is not a version and is not listed.
+         */
+        get: operations["template_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/topics": {
         parameters: {
             query?: never;
@@ -3400,6 +3564,23 @@ export interface components {
             name: string;
             /** @description A cron expression in UTC. */
             schedule?: string | null;
+        };
+        CreateTemplateRequest: {
+            category?: null | components["schemas"]["TemplateCategoryRequest"];
+            channel: components["schemas"]["TemplateChannelRequest"];
+            /**
+             * @description The first draft. Its channel and category must be the template's. Absent: an empty
+             *     code-mode document.
+             */
+            document?: Record<string, never> | null;
+            /**
+             * @description 1 to 100 characters after trimming; unique among the workspace's live templates, ignoring
+             *     case.
+             * @example Order shipped
+             */
+            name: string;
+            /** Format: uuid */
+            sender_identity_id?: string | null;
         };
         CreateTopicRequest: {
             /**
@@ -5541,6 +5722,11 @@ export interface components {
             request_id?: string | null;
             /** Format: int32 */
             status: number;
+            /**
+             * @description What is wrong with a template document (`template_invalid`): a fixed code, how bad it is
+             *     and where, never a value from the document.
+             */
+            template_issues?: components["schemas"]["TemplateIssueProblem"][] | null;
             title: string;
             /**
              * @description The `x-trace-id` of the failed request; look it up with
@@ -5935,6 +6121,10 @@ export interface components {
         SaveDraftRequest: {
             /** @description Replaces the draft. */
             properties: components["schemas"]["PropertyBody"][];
+        };
+        SaveTemplateDraftRequest: {
+            /** @description The content document. */
+            document: Record<string, never>;
         };
         SchemaVersionBody: {
             properties: components["schemas"]["PropertyBody"][];
@@ -6671,6 +6861,180 @@ export interface components {
             /** @description The identifier value. It is looked up and not stored. */
             value: string;
         };
+        TemplateBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /** @description `marketing` or `transactional`; fixed when the template is made. */
+            category: string;
+            /** @description `email` or `webhook`; fixed when the template is made. */
+            channel: string;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The newest published version; null before the first publish.
+             */
+            current_version?: number | null;
+            /** Format: uuid */
+            id: string;
+            /** @example Order shipped */
+            name: string;
+            /**
+             * Format: uuid
+             * @description The sender identity of an email template.
+             */
+            sender_identity_id?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description Whether a message needs the unsubscribe link and headers.
+         * @enum {string}
+         */
+        TemplateCategoryRequest: "marketing" | "transactional";
+        /**
+         * @description The channel of a template. Only the two with a registered content type can be made.
+         * @enum {string}
+         */
+        TemplateChannelRequest: "email" | "webhook";
+        /** @description A template with its draft. */
+        TemplateDetailBody: components["schemas"]["TemplateBody"] & {
+            draft: components["schemas"]["TemplateDraftBody"];
+        };
+        /** @description The one editable copy of a template's content. */
+        TemplateDraftBody: {
+            /** @description The registered content type that owns the document (`html`, `webhook`); null when none does. */
+            content_type?: string | null;
+            /** @description The content document. It may be incomplete; only a publish validates it. */
+            document: Record<string, never>;
+            /**
+             * Format: int32
+             * @description How many times the draft has been saved; the first save is 1.
+             */
+            revision: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: uuid */
+            updated_by?: string | null;
+        };
+        /** @description A header of the rendered message or request. */
+        TemplateHeaderBody: {
+            name: string;
+            value: string;
+        };
+        /** @description One issue of a template document. */
+        TemplateIssueProblem: {
+            /** @description A JSON pointer into the document. */
+            at: string;
+            /** @description A fixed issue code such as `unknown_merge_field` or `missing_unsubscribe`. */
+            code: string;
+            /** @description The merge field the issue concerns, such as `person.first_name`. */
+            field?: string | null;
+            /** @description A short explanation for a problem the code alone does not explain. */
+            message?: string | null;
+            /** @description `blocking` or `warning`. */
+            severity: string;
+        };
+        /** @description The rendered template and its validation results. */
+        TemplatePreviewBody: {
+            /** @description A webhook's JSON body. */
+            body?: string | null;
+            /** @description The registered content type that rendered it (`html`, `webhook`). */
+            content_type: string;
+            /** @description An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers. */
+            headers: components["schemas"]["TemplateHeaderBody"][];
+            /** @description An email's HTML, with inert tracking links. */
+            html?: string | null;
+            /** @description The same checks a publish makes, against the workspace's fields now. */
+            issues: components["schemas"]["TemplateIssueProblem"][];
+            /**
+             * Format: uuid
+             * @description The person whose values were used; null for the sample person. When the id asked for was
+             *     merged away, the survivor.
+             */
+            person_id?: string | null;
+            /** @description False when the document has blocking issues, so nothing was rendered. */
+            rendered: boolean;
+            /** @description `draft` or `version`. */
+            source: string;
+            /** @description An email's subject. */
+            subject?: string | null;
+            /** @description An email's text part. */
+            text?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        TemplatePreviewRequest: {
+            /**
+             * Format: uuid
+             * @description Preview as this person. Needs the workspace admin role, because the render shows their
+             *     values. Absent: a sample person built from the field registry's types.
+             */
+            person_id?: string | null;
+            /**
+             * Format: int32
+             * @description Preview this published version. Absent: the draft.
+             */
+            version?: number | null;
+        };
+        /** @description The new version and the template after the publish. */
+        TemplatePublishedBody: {
+            template: components["schemas"]["TemplateBody"];
+            version: components["schemas"]["TemplateVersionBody"];
+        };
+        /** @description One flow with a version that names the template. */
+        TemplateUseBody: {
+            /** @description Whether the version the flow runs now is one of them. */
+            active: boolean;
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+            /** @description `draft`, `published`, `paused` or `archived`. */
+            flow_state: string;
+            /**
+             * @description The numbers of the flow's versions that name the template, newest first. An older version
+             *     still runs for the enrollments pinned to it.
+             */
+            versions: number[];
+        };
+        /** @description One immutable published version. */
+        TemplateVersionBody: {
+            /** @description The document as it was published. */
+            document: Record<string, never>;
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /** @description The warnings found when it was published; a blocking issue refuses the publish. */
+            warnings: components["schemas"]["TemplateIssueProblem"][];
+        };
+        /** @description One published version in the history list: no document, which `GET .../versions/{n}` returns. */
+        TemplateVersionSummaryBody: {
+            /**
+             * Format: int64
+             * @description The blocking issues stored with the version; always 0, because a blocking issue refuses the
+             *     publish.
+             */
+            blocking: number;
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /**
+             * Format: int64
+             * @description The warnings stored with the version.
+             */
+            warnings: number;
+        };
         TestBody: {
             /** @description Why it does not. Never holds a credential or a URL. */
             error?: string | null;
@@ -6911,6 +7275,14 @@ export interface components {
             name?: string | null;
             /** @description A cron expression in UTC; an empty string clears the schedule. */
             schedule?: string | null;
+        };
+        UpdateTemplateRequest: {
+            name?: string | null;
+            /**
+             * Format: uuid
+             * @description `null` clears it.
+             */
+            sender_identity_id?: string | null;
         };
         UpdateTopicRequest: {
             archived?: boolean | null;
@@ -17093,6 +17465,712 @@ export interface operations {
             };
             /** @description The server has no master key */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_templates: {
+        parameters: {
+            query?: {
+                /** @description Include archived templates; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description The new template with its draft */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live template has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, a document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live template has that name, or the template is archived (`code` is `template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is already archived (`code` is `template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_template_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveTemplateDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The template with its saved draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is archived (`code` is `template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    preview_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplatePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The rendered template and its validation results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplatePreviewBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, a missing CSRF token, or a real person asked for without the admin role (`code` is `template_preview_values_forbidden`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template, version or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The renderer refused the template (`template_render_failed`), it used too much memory or time (`render_memory_limit`, `render_deadline`), or no registered content type handles it */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host answered unusably (`render_protocol`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template and its new version */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplatePublishedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_template_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions without their documents, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateVersionSummaryBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_template_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    template_where_used: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flows with a version that names the template, one entry per flow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateUseBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

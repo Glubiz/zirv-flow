@@ -31,6 +31,7 @@ mod session;
 mod setup;
 mod sources;
 mod state;
+mod templates;
 mod trace;
 mod traces;
 mod users;
@@ -262,6 +263,40 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate",
             post(flows::signing::rotate),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates",
+            get(templates::crud::list).post(templates::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}",
+            get(templates::crud::get)
+                .put(templates::crud::update)
+                .delete(templates::crud::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/draft",
+            put(templates::crud::put_draft),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/publish",
+            post(templates::publish::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/versions",
+            get(templates::publish::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}",
+            get(templates::publish::version),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/where-used",
+            get(templates::where_used::where_used),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/preview",
+            post(templates::preview::preview),
         )
         .route(
             "/api/v1/workspaces/{ws}/segments",

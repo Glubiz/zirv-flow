@@ -33,6 +33,7 @@ zirv-flow-identity.workspace = true
 zirv-flow-render.workspace = true
 zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
+zirv-flow-templates.workspace = true
 
 [dev-dependencies]
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

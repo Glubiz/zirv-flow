@@ -39,6 +39,10 @@ pub struct Problem {
     /// concerns, never a value from the flow.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow_issues: Option<Vec<FlowIssueProblem>>,
+    /// What is wrong with a template document (`template_invalid`): a fixed code, how bad it is
+    /// and where, never a value from the document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_issues: Option<Vec<TemplateIssueProblem>>,
 }
 
 /// One issue of a flow.
@@ -55,6 +59,23 @@ pub struct FlowIssueProblem {
     /// A JSON pointer into the node, the edge or the settings object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+}
+
+/// One issue of a template document.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct TemplateIssueProblem {
+    /// A fixed issue code such as `unknown_merge_field` or `missing_unsubscribe`.
+    pub code: String,
+    /// `blocking` or `warning`.
+    pub severity: String,
+    /// A JSON pointer into the document.
+    pub at: String,
+    /// The merge field the issue concerns, such as `person.first_name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// A short explanation for a problem the code alone does not explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// One issue of a segment definition.
@@ -92,6 +113,8 @@ struct SegmentExtra {
     cycle: Option<Vec<SegmentRefProblem>>,
     /// The issues of a flow (`flow_invalid`); it shares the box so the error stays small.
     flow_issues: Option<Vec<FlowIssueProblem>>,
+    /// The issues of a template document (`template_invalid`).
+    template_issues: Option<Vec<TemplateIssueProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -673,6 +696,137 @@ impl ApiError {
     }
 }
 
+impl ApiError {
+    /// A template draft that does not pass the publish checks: every blocking issue and warning
+    /// with its code and place.
+    pub(crate) fn template_invalid(issues: Vec<TemplateIssueProblem>) -> Self {
+        Self {
+            code: Some("template_invalid"),
+            segment: Some(Box::new(SegmentExtra {
+                template_issues: Some(issues),
+                ..SegmentExtra::default()
+            })),
+            ..Self::unprocessable("the template is not valid")
+        }
+    }
+
+    /// A content document that is not a template document at all (wrong shape or types), which a
+    /// draft cannot hold.
+    pub(crate) fn template_malformed(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("template_malformed"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A document whose channel or category differs from the template's, which are fixed when the
+    /// template is made.
+    pub(crate) fn template_mismatch(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("template_mismatch"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A document of a channel and mode that no registered content type handles.
+    pub(crate) fn template_content_unsupported() -> Self {
+        Self {
+            code: Some("template_content_unsupported"),
+            ..Self::unprocessable("no registered content type handles this document")
+        }
+    }
+
+    /// A publish whose draft was saved again while it was being validated.
+    pub(crate) fn template_draft_changed() -> Self {
+        Self {
+            code: Some("template_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// A write to an archived template.
+    pub(crate) fn template_archived() -> Self {
+        Self {
+            code: Some("template_archived"),
+            ..Self::new(StatusCode::CONFLICT, "the template is archived")
+        }
+    }
+
+    /// A preview as a real person by a caller who may not see personal values.
+    pub(crate) fn template_preview_values_forbidden() -> Self {
+        Self {
+            code: Some("template_preview_values_forbidden"),
+            ..Self::forbidden(
+                "previewing a real person shows their values; ask a workspace admin, or preview a sample person",
+            )
+        }
+    }
+
+    /// A preview that could not render. The renderer's own refusal and a render that blew its
+    /// limits are the template's doing (422); a render host that died or spoke nonsense is ours
+    /// (503, 502). None of them takes the API down: the pool replaces the child.
+    pub(crate) fn render_failed(failure: &zirv_flow_render::RenderFailure) -> Self {
+        use zirv_flow_render::RenderFailure;
+
+        match failure {
+            RenderFailure::Render(error) => {
+                let detail = match error.field() {
+                    Some(field) => format!(
+                        "the template could not be rendered: {} in {field}",
+                        error.code()
+                    ),
+                    None => format!("the template could not be rendered: {}", error.code()),
+                };
+                Self {
+                    code: Some("template_render_failed"),
+                    ..Self::unprocessable(detail)
+                }
+            }
+            RenderFailure::UnsupportedDocument => Self::template_content_unsupported(),
+            RenderFailure::MemoryLimit => Self {
+                code: Some("render_memory_limit"),
+                ..Self::unprocessable("the template used too much memory to render")
+            },
+            RenderFailure::Deadline => Self {
+                code: Some("render_deadline"),
+                ..Self::unprocessable("rendering the template took too long")
+            },
+            RenderFailure::RequestTooLarge => Self {
+                code: Some("render_request_too_large"),
+                ..Self::unprocessable("the template and its values are too large to render")
+            },
+            RenderFailure::ChildExited => Self {
+                code: Some("render_child_exited"),
+                ..Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the render host stopped; try again",
+                )
+            },
+            RenderFailure::Protocol => Self {
+                code: Some("render_protocol"),
+                ..Self::new(
+                    StatusCode::BAD_GATEWAY,
+                    "the render host answered unusably; try again",
+                )
+            },
+        }
+    }
+
+    /// No render pool was started in this process, so nothing can be previewed.
+    pub(crate) fn render_unavailable() -> Self {
+        Self {
+            code: Some("render_unavailable"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rendering is not available on this deployment",
+            )
+        }
+    }
+}
+
 impl From<zirv_flow_store::ExploreError> for ApiError {
     fn from(error: zirv_flow_store::ExploreError) -> Self {
         use zirv_flow_store::ExploreError;
@@ -738,6 +892,10 @@ impl IntoResponse for ApiError {
                 .segment
                 .as_mut()
                 .and_then(|extra| extra.flow_issues.take()),
+            template_issues: self
+                .segment
+                .as_mut()
+                .and_then(|extra| extra.template_issues.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
