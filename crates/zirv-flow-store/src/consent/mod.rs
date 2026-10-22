@@ -13,8 +13,9 @@ pub use dimensions::{
 };
 pub(crate) use merge::move_on_merge;
 pub use state::{
-    ConsentChange, ConsentEntry, ConsentHistoryEntry, ConsentOutcome, ReadOutcome, consent_for,
-    consent_history, consent_read, set_consent,
+    ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,
+    ConsentOutcome, ReadOutcome, consent_export_page, consent_for, consent_history, consent_read,
+    set_consent,
 };
 pub use topics::{
     NewTopic, Topic, TopicUpdate, create_topic, find_topic, find_topic_by_key, list_topics,

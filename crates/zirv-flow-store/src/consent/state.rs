@@ -327,6 +327,69 @@ pub async fn consent_for(
     Ok(Some(entries))
 }
 
+/// One row of the consent export: a person's state for a channel, topic and dimension scope.
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub struct ConsentExportRow {
+    pub person_id: Uuid,
+    pub channel: String,
+    pub topic_key: Option<String>,
+    pub dimensions: Value,
+    pub status: String,
+    /// Sorts the row within its person, channel and topic; part of the cursor.
+    pub dimensions_key: String,
+}
+
+impl ConsentExportRow {
+    /// Where the page after this row starts.
+    pub fn cursor(&self) -> ConsentExportCursor {
+        ConsentExportCursor {
+            person_id: self.person_id,
+            channel: self.channel.clone(),
+            topic_key: self.topic_key.clone().unwrap_or_default(),
+            dimensions_key: self.dimensions_key.clone(),
+        }
+    }
+}
+
+/// The position after a row of the consent export, in the export's order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsentExportCursor {
+    person_id: Uuid,
+    channel: String,
+    topic_key: String,
+    dimensions_key: String,
+}
+
+/// A page of every consent state of the workspace, in the order person, channel, topic key
+/// (the channel-wide state first) and canonical dimension scope, after `after`.
+pub async fn consent_export_page(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    after: Option<&ConsentExportCursor>,
+    limit: u32,
+) -> Result<Vec<ConsentExportRow>, StoreError> {
+    let nil = ConsentExportCursor {
+        person_id: Uuid::nil(),
+        channel: String::new(),
+        topic_key: String::new(),
+        dimensions_key: String::new(),
+    };
+    let start = after.unwrap_or(&nil);
+    sqlx::query_as(
+        "SELECT c.person_id, c.channel, t.key AS topic_key, c.dimensions, c.status,                 c.dimensions_key          FROM consent c          LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id          WHERE c.workspace_id = $1            AND ($6 OR (c.person_id, c.channel, COALESCE(t.key, ''), c.dimensions_key)                     > ($2, $3, $4, $5))          ORDER BY c.person_id, c.channel, COALESCE(t.key, ''), c.dimensions_key LIMIT $7",
+    )
+    .bind(workspace.as_uuid())
+    .bind(start.person_id)
+    .bind(&start.channel)
+    .bind(&start.topic_key)
+    .bind(&start.dimensions_key)
+    .bind(after.is_none())
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// One state row, as the read rule needs it.
 #[derive(FromRow)]
 struct RecordRow {
@@ -1060,6 +1123,67 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].dimensions, json!({"vertical": "retail"}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_export_pages_every_state_in_a_stable_order(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        verticals(&pool, ws).await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let bob = person(&pool, ws, "bob@example.com").await;
+        let news = topic(&pool, ws, "news").await;
+        let trace = TraceContext::root(Cause::api("test"));
+        let retail = [("vertical", "retail")];
+        for (who, topic, pairs) in [
+            (ada, None, &[][..]),
+            (ada, Some(news), &[][..]),
+            (ada, Some(news), &retail[..]),
+            (bob, None, &retail[..]),
+        ] {
+            set(
+                &pool,
+                ws,
+                &scoped_change(who, topic, pairs, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+        }
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = consent_export_page(&pool, ws, cursor.as_ref(), 3)
+                .await
+                .unwrap();
+            let Some(last) = page.last() else { break };
+            cursor = Some(last.cursor());
+            seen.extend(page);
+        }
+
+        let shown: Vec<(Uuid, Option<&str>, &str)> = seen
+            .iter()
+            .map(|row| {
+                (
+                    row.person_id,
+                    row.topic_key.as_deref(),
+                    row.dimensions_key.as_str(),
+                )
+            })
+            .collect();
+        let mut expected = vec![
+            (ada, None, ""),
+            (ada, Some("news"), ""),
+            (ada, Some("news"), "vertical=retail"),
+        ];
+        expected.sort_by_key(|(_, topic, dims)| (topic.unwrap_or(""), *dims));
+        let mut ordered: Vec<_> = expected
+            .into_iter()
+            .map(|(who, topic, dims)| (who, topic, dims))
+            .collect();
+        ordered.push((bob, None, "vertical=retail"));
+        ordered.sort_by_key(|(who, topic, dims)| (*who, topic.unwrap_or(""), *dims));
+        assert_eq!(shown, ordered);
     }
 
     #[sqlx::test]
