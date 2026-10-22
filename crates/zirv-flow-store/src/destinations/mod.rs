@@ -16,8 +16,8 @@ pub use attempts::{
     destination_report, list_delivery_attempts, record_delivery_attempt,
 };
 pub use bucket::{
-    Admission, BucketState, DEFAULT_RETRY_AFTER, Grant, LEASE, MAX_BLOCK, MAX_RETRY_AFTER,
-    RateGate, TokenBlock, bucket_state, take_tokens, throttle_bucket,
+    Admission, BucketState, DEFAULT_RETRY_AFTER, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, RateGate,
+    bucket_state, throttle_bucket,
 };
 pub use crud::{
     Destination, DestinationUpdate, NewDestination, archive_destination, create_destination,

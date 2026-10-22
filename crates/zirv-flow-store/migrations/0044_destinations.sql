@@ -37,7 +37,7 @@ CREATE TABLE destinations (
 -- A live destination's name is unique in its workspace, ignoring case; an archived name is free.
 CREATE UNIQUE INDEX destinations_name_idx ON destinations (workspace_id, lower(name))
     WHERE archived_at IS NULL;
-CREATE INDEX destinations_credential_secret_idx ON destinations (credential_secret_id);
+CREATE INDEX destinations_credential_secret_idx ON destinations (workspace_id, credential_secret_id);
 
 -- One row per destination, shared by every worker of every process. A worker takes tokens with
 -- one UPDATE that refills from `refilled_at` on the database's clock and grants in the same
@@ -57,6 +57,11 @@ CREATE TABLE destination_rate_buckets (
     FOREIGN KEY (workspace_id, destination_id) REFERENCES destinations (workspace_id, id)
         ON DELETE CASCADE
 );
+
+-- Indexes lead with the workspace (migration 0006). The primary key above serves the take, which
+-- is keyed by destination alone; this one serves the workspace-scoped reads.
+CREATE UNIQUE INDEX destination_rate_buckets_workspace_idx
+    ON destination_rate_buckets (workspace_id, destination_id);
 
 -- The rate a bucket refills at, at the instant `ts`. With no penalty it is the destination's own
 -- rate. A 429 stores the halved rate and `penalty_until`: the rate stays there until then, and
@@ -90,7 +95,8 @@ CREATE TABLE delivery_attempts (
     attempted_at   timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (workspace_id, destination_id) REFERENCES destinations (workspace_id, id)
         ON DELETE CASCADE,
-    UNIQUE (destination_id, subject_kind, subject_id, attempt)
+    UNIQUE (workspace_id, destination_id, subject_kind, subject_id, attempt)
 );
 
-CREATE INDEX delivery_attempts_destination_idx ON delivery_attempts (destination_id, attempted_at);
+CREATE INDEX delivery_attempts_destination_idx
+    ON delivery_attempts (workspace_id, destination_id, attempted_at);

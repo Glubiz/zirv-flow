@@ -140,6 +140,31 @@ pub async fn record_delivery_attempt<'e>(
     .fetch_one(executor)
     .await
     .map_err(StoreError::query)
+    .inspect(|_| count_attempt(workspace, new))
+}
+
+/// Counts a recorded attempt in this process:
+/// `zirv_flow_destination_attempts_total{workspace,destination}` and
+/// `zirv_flow_destination_outcomes_total{workspace,destination,outcome}`. Ids only, never a name,
+/// a host or an address. The counters live where the attempt is recorded, so the send path (#220)
+/// counts by calling [`record_delivery_attempt`], and the leader never scans the table. A
+/// transaction that rolls back after this call has still been counted, as with any counter.
+fn count_attempt(workspace: WorkspaceId, attempt: &NewDeliveryAttempt) {
+    let workspace = workspace.as_uuid().to_string();
+    let destination = attempt.destination_id.to_string();
+    metrics::counter!(
+        "zirv_flow_destination_attempts_total",
+        "workspace" => workspace.clone(),
+        "destination" => destination.clone(),
+    )
+    .increment(1);
+    metrics::counter!(
+        "zirv_flow_destination_outcomes_total",
+        "workspace" => workspace,
+        "destination" => destination,
+        "outcome" => attempt.outcome.as_str(),
+    )
+    .increment(1);
 }
 
 /// The newest attempts of a destination, newest first, at most `limit`.
@@ -163,7 +188,7 @@ pub async fn list_delivery_attempts<'e>(
     .map_err(StoreError::query)
 }
 
-/// What the leader publishes for one live destination.
+/// What the leader publishes for one live destination: its queue gauges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DestinationStat {
     pub workspace_id: Uuid,
@@ -172,30 +197,20 @@ pub struct DestinationStat {
     pub queue_depth: i64,
     /// Age in seconds of the oldest waiting item; 0 when none waits.
     pub oldest_age_seconds: i64,
-    /// Attempts so far, by outcome (`AttemptOutcome::as_str`). An outcome with none is absent.
-    pub outcomes: Vec<(String, i64)>,
 }
 
-/// One row per live destination: its queue and its attempt totals.
+/// One row per live destination with its queue gauges. The attempt and outcome counters are not
+/// here: they are counted in-process where an attempt is recorded, so this never scans
+/// `delivery_attempts`.
 ///
 /// There is no delivery queue yet, so `queue_depth` and `oldest_age_seconds` are 0; the send
 /// pipeline (#220) replaces that part of the query with the count and the age of its waiting
-/// items. The attempt totals are counted from `delivery_attempts`, so every process reports the
-/// same numbers.
-pub async fn destination_report<'e, E>(executor: E) -> Result<Vec<DestinationStat>, StoreError>
-where
-    E: PgExecutor<'e> + Copy,
-{
+/// items.
+pub async fn destination_report<'e>(
+    executor: impl PgExecutor<'e>,
+) -> Result<Vec<DestinationStat>, StoreError> {
     let destinations: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT workspace_id, id FROM destinations WHERE archived_at IS NULL ORDER BY id",
-    )
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)?;
-    let counts: Vec<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT a.destination_id, a.outcome, count(*) FROM delivery_attempts a \
-         JOIN destinations d ON d.id = a.destination_id AND d.archived_at IS NULL \
-         GROUP BY a.destination_id, a.outcome ORDER BY a.destination_id, a.outcome",
     )
     .fetch_all(executor)
     .await
@@ -207,11 +222,6 @@ where
             destination_id,
             queue_depth: 0,
             oldest_age_seconds: 0,
-            outcomes: counts
-                .iter()
-                .filter(|(id, _, _)| *id == destination_id)
-                .map(|(_, outcome, count)| (outcome.clone(), *count))
-                .collect(),
         })
         .collect())
 }
@@ -356,51 +366,98 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_report_lists_live_destinations_with_their_attempt_totals(pool: PgPool) {
+    async fn the_report_lists_live_destinations_with_zero_queue_gauges(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
-        let busy = destination(&pool, ws, "Busy").await;
-        let idle = destination(&pool, ws, "Idle").await;
+        let live = destination(&pool, ws, "Live").await;
         let gone = destination(&pool, ws, "Gone").await;
-        for number in 1..=3 {
-            let outcome = if number == 3 {
-                AttemptOutcome::Delivered
-            } else {
-                AttemptOutcome::Retryable
-            };
-            record_delivery_attempt(&pool, ws, &attempt(busy, Uuid::now_v7(), 1, outcome))
-                .await
-                .unwrap();
-        }
-        record_delivery_attempt(
-            &pool,
-            ws,
-            &attempt(gone, Uuid::now_v7(), 1, AttemptOutcome::Delivered),
-        )
-        .await
-        .unwrap();
         crate::archive_destination(&pool, ws, gone).await.unwrap();
 
         let report = destination_report(&pool).await.unwrap();
 
-        let ids: Vec<Uuid> = report.iter().map(|stat| stat.destination_id).collect();
-        assert!(ids.contains(&busy) && ids.contains(&idle) && !ids.contains(&gone));
-        let busy_stat = report
-            .iter()
-            .find(|stat| stat.destination_id == busy)
-            .unwrap();
         assert_eq!(
-            busy_stat.outcomes,
-            [("delivered".to_owned(), 1), ("retryable".to_owned(), 2)]
+            report,
+            vec![DestinationStat {
+                workspace_id: ws.as_uuid(),
+                destination_id: live,
+                queue_depth: 0,
+                oldest_age_seconds: 0,
+            }]
         );
-        assert_eq!(
-            (busy_stat.queue_depth, busy_stat.oldest_age_seconds),
-            (0, 0)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn recording_an_attempt_counts_it_by_destination_and_outcome_with_ids_only(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let ws = workspace(&pool, "one").await;
+        let id = destination(&pool, ws, "secret-mail-name").await;
+
+        for (number, outcome) in [
+            (1, AttemptOutcome::Retryable),
+            (2, AttemptOutcome::Retryable),
+            (3, AttemptOutcome::Delivered),
+        ] {
+            record_delivery_attempt(&pool, ws, &attempt(id, Uuid::nil(), number, outcome))
+                .await
+                .unwrap();
+        }
+        // A refused (conflicting) record is not counted.
+        record_delivery_attempt(
+            &pool,
+            ws,
+            &attempt(id, Uuid::nil(), 3, AttemptOutcome::Terminal),
+        )
+        .await
+        .unwrap_err();
+
+        let output = handle.render();
+        let labels = format!("workspace=\"{}\",destination=\"{id}\"", ws.as_uuid());
+        assert!(
+            output.contains(&format!(
+                "zirv_flow_destination_attempts_total{{{labels}}} 3"
+            )),
+            "{output}"
         );
-        let idle_stat = report
-            .iter()
-            .find(|stat| stat.destination_id == idle)
-            .unwrap();
-        assert!(idle_stat.outcomes.is_empty());
+        for (outcome, count) in [("retryable", 2), ("delivered", 1)] {
+            assert!(
+                output.contains(&format!(
+                    "zirv_flow_destination_outcomes_total{{{labels},outcome=\"{outcome}\"}} {count}"
+                )),
+                "{output}"
+            );
+        }
+        assert!(!output.contains("terminal"), "{output}");
+        assert!(!output.contains("secret-mail-name"), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_index_of_the_new_tables_leads_with_the_workspace_except_the_primary_keys(
+        pool: PgPool,
+    ) {
+        let leading: Vec<(String, String)> = sqlx::query_as(
+            "SELECT t.relname::text, a.attname::text \
+             FROM pg_index x \
+             JOIN pg_class t ON t.oid = x.indrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = current_schema() \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.indkey[0] \
+             WHERE t.relname IN ('destinations', 'destination_rate_buckets', 'delivery_attempts') \
+               AND NOT x.indisprimary \
+             ORDER BY 1, 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert!(leading.len() >= 5, "{leading:?}");
+        for (table, column) in &leading {
+            assert_eq!(
+                column, "workspace_id",
+                "an index of {table} leads with {column}"
+            );
+        }
     }
 
     #[sqlx::test]

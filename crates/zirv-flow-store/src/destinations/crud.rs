@@ -159,7 +159,9 @@ pub async fn find_destination_for_update(
 
 /// Changes the given fields of a live destination. `None` when there is no such live
 /// destination; a name taken by another live destination is a conflict. The bucket follows a
-/// changed rate or burst at its next take.
+/// changed rate or burst at its next take, and the bucket is reset in the same statement:
+/// its burst follows and its tokens are clamped to the new burst. Leases already granted run out
+/// within one lease.
 pub async fn update_destination<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -167,12 +169,19 @@ pub async fn update_destination<'e>(
     update: &DestinationUpdate<'_>,
 ) -> Result<Option<Destination>, StoreError> {
     sqlx::query_as(concat!(
-        "UPDATE destinations SET name = COALESCE($3, name), config = COALESCE($4, config), \
-            rate = COALESCE($5, rate), burst = COALESCE($6, burst), \
-            credential_secret_id = COALESCE($7, credential_secret_id), \
-            credential_fields = COALESCE($8, credential_fields), updated_at = now() \
-         WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING ",
-        destination_columns!()
+        "WITH d AS ( \
+            UPDATE destinations SET name = COALESCE($3, name), config = COALESCE($4, config), \
+                rate = COALESCE($5, rate), burst = COALESCE($6, burst), \
+                credential_secret_id = COALESCE($7, credential_secret_id), \
+                credential_fields = COALESCE($8, credential_fields), updated_at = now() \
+            WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING *), \
+         b AS ( \
+            UPDATE destination_rate_buckets b SET burst = d.burst, \
+                rate = LEAST(b.rate, d.rate::float8), tokens = LEAST(b.tokens, d.burst::float8) \
+            FROM d WHERE b.destination_id = d.id) \
+         SELECT ",
+        destination_columns!(),
+        " FROM d"
     ))
     .bind(workspace.as_uuid())
     .bind(id)

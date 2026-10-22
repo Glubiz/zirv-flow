@@ -6,10 +6,16 @@
 //! - **Take.** A worker takes `k = clamp(ceil(rate * 0.1 s), 1, 50)` tokens in one
 //!   `UPDATE ... RETURNING` that refills the row and grants in the same statement, so concurrent
 //!   workers never double-grant. The grant is `floor(min(k, level))`: only what the row holds.
+//!   The row is locked first and the instant is read after the lock is held, so a take that
+//!   waited for the lock does not carry an earlier instant than the take it waited for.
+//!   A live destination whose row is missing gets it back (from the destination's rate and
+//!   burst, `ON CONFLICT DO NOTHING`) on the next take or throttle.
 //! - **Refill.** `level = min(burst, tokens + rate * max(0, now - refilled_at))`, with `rate` the
 //!   bucket's effective rate at `now` (see below) and `now` the database's clock
 //!   (`clock_timestamp()`), never a worker's. `tokens` becomes `level - granted` and
-//!   `refilled_at` becomes `now`, so the fraction of a token is kept.
+//!   `refilled_at` becomes `max(refilled_at, now)`, so the fraction of a token is kept and an
+//!   interval is never refilled twice, whatever order or instants the takes carry (a clock step
+//!   back refills nothing and moves nothing back).
 //! - **Lease.** A [`TokenBlock`] is valid for [`LEASE`] (1 s) from the moment its take was
 //!   requested. A worker spends from it only while it is valid and discards what is left when it
 //!   expires. Unused tokens are never returned to the row.
@@ -23,6 +29,14 @@
 //!   granted up to one lease earlier, and the row never grants more than the rate and the burst
 //!   allow over the whole period.
 //!
+//! - **Configuration changes.** The take reads the destination's rate and burst, so a change
+//!   applies to new takes at once, and the PATCH also clamps the row (`tokens` to the new burst).
+//!   Blocks already leased are not invalidated: each holds at most [`MAX_BLOCK`] tokens per worker
+//!   and expires within one [`LEASE`], so a change applies to outstanding blocks within one lease.
+//! - **No minting.** [`RateGate`] is the only way to spend. The block type, its constructor and
+//!   the take are private to this crate, so a consumer in `jobs` or `api` cannot build a block of
+//!   its own size and expiry or send without a grant from the row.
+//!
 //! Tests inject the instant through a [`Clock`]; production passes `Clock::Database`.
 
 use std::time::{Duration, Instant};
@@ -32,7 +46,7 @@ use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Clock, StoreError};
+use crate::{Clock, PgPool, StoreError};
 
 /// How long a granted block of tokens stays valid.
 pub const LEASE: Duration = Duration::from_secs(1);
@@ -53,11 +67,11 @@ fn instant_of(clock: &Clock) -> Option<OffsetDateTime> {
 
 /// What one take granted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Grant {
+pub(crate) struct Grant {
     /// Whole tokens granted; 0 when the row held less than one.
-    pub tokens: u32,
+    pub(crate) tokens: u32,
     /// With no token granted, how long until the row holds one at its current rate.
-    pub retry_in: Duration,
+    pub(crate) retry_in: Duration,
 }
 
 #[derive(FromRow)]
@@ -67,22 +81,37 @@ struct GrantRow {
 }
 
 /// Takes a block of tokens from a destination's bucket, refilling it first, in one statement.
-/// `None` when the destination has no bucket. `clock` is the database's unless a test injects
-/// time.
-pub async fn take_tokens<'e>(
-    executor: impl PgExecutor<'e>,
+/// A live destination whose row is missing gets it back first; `None` when the destination is
+/// archived or does not exist. `clock` is the database's unless a test injects time.
+pub(crate) async fn take_tokens(
+    pool: &PgPool,
+    destination: Uuid,
+    clock: &Clock,
+) -> Result<Option<Grant>, StoreError> {
+    if let Some(grant) = take_once(pool, destination, clock).await? {
+        return Ok(Some(grant));
+    }
+    if !ensure_bucket(pool, destination, clock).await? {
+        return Ok(None);
+    }
+    take_once(pool, destination, clock).await
+}
+
+async fn take_once(
+    pool: &PgPool,
     destination: Uuid,
     clock: &Clock,
 ) -> Result<Option<Grant>, StoreError> {
     let row: Option<GrantRow> = sqlx::query_as(
-        "WITH cur AS ( \
+        "WITH locked AS ( \
             SELECT b.destination_id, d.rate::float8 AS cap, d.burst AS burst, b.rate AS stored, \
-                   b.tokens, b.refilled_at, b.penalty_until, \
-                   COALESCE($2::timestamptz, clock_timestamp()) AS ts \
+                   b.tokens, b.refilled_at, b.penalty_until \
             FROM destination_rate_buckets b \
             JOIN destinations d ON d.workspace_id = b.workspace_id AND d.id = b.destination_id \
             WHERE b.destination_id = $1 \
             FOR UPDATE OF b), \
+         cur AS ( \
+            SELECT locked.*, COALESCE($2::timestamptz, clock_timestamp()) AS ts FROM locked), \
          rated AS ( \
             SELECT cur.*, destination_bucket_rate(stored, cap, penalty_until, ts) AS rate \
             FROM cur), \
@@ -99,7 +128,8 @@ pub async fn take_tokens<'e>(
                              AND g.rate >= g.cap THEN g.cap ELSE g.stored END, \
             penalty_until = CASE WHEN g.penalty_until IS NOT NULL AND g.ts > g.penalty_until \
                                       AND g.rate >= g.cap THEN NULL ELSE g.penalty_until END, \
-            burst = g.burst, tokens = g.level - g.granted, refilled_at = g.ts \
+            burst = g.burst, tokens = g.level - g.granted, \
+            refilled_at = GREATEST(g.refilled_at, g.ts) \
          FROM granted g WHERE b.destination_id = g.destination_id \
          RETURNING g.granted::int AS granted, \
                    (CASE WHEN g.granted >= 1 THEN 0 \
@@ -107,7 +137,7 @@ pub async fn take_tokens<'e>(
     )
     .bind(destination)
     .bind(instant_of(clock))
-    .fetch_optional(executor)
+    .fetch_optional(pool)
     .await
     .map_err(StoreError::query)?;
     Ok(row.map(|row| Grant {
@@ -116,13 +146,37 @@ pub async fn take_tokens<'e>(
     }))
 }
 
+/// Recreates the bucket row of a live destination from the destination's rate and burst, full.
+/// Racing callers are safe (`ON CONFLICT DO NOTHING`). Whether the destination is live.
+async fn ensure_bucket(
+    pool: &PgPool,
+    destination: Uuid,
+    clock: &Clock,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "WITH made AS ( \
+            INSERT INTO destination_rate_buckets \
+                (destination_id, workspace_id, rate, burst, tokens, refilled_at) \
+            SELECT d.id, d.workspace_id, d.rate, d.burst, d.burst, \
+                   COALESCE($2::timestamptz, clock_timestamp()) \
+            FROM destinations d WHERE d.id = $1 AND d.archived_at IS NULL \
+            ON CONFLICT (destination_id) DO NOTHING) \
+         SELECT EXISTS (SELECT 1 FROM destinations WHERE id = $1 AND archived_at IS NULL)",
+    )
+    .bind(destination)
+    .bind(instant_of(clock))
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Records a 429 from the destination: halves the effective rate (floor 1 per second) and holds
 /// it until `retry_after` has passed (1 s without one, at most an hour), after which it recovers
 /// additively. A 429 that arrives while a window is open only extends the window, so a burst of
 /// them from concurrent workers halves the rate once. Returns the state afterwards; `None` when
 /// the destination has no bucket.
-pub async fn throttle_bucket<'e>(
-    executor: impl PgExecutor<'e>,
+pub async fn throttle_bucket(
+    pool: &PgPool,
     destination: Uuid,
     retry_after: Option<Duration>,
     clock: &Clock,
@@ -131,14 +185,30 @@ pub async fn throttle_bucket<'e>(
         .unwrap_or(DEFAULT_RETRY_AFTER)
         .min(MAX_RETRY_AFTER)
         .as_secs_f64();
+    if let Some(state) = throttle_once(pool, destination, pause, clock).await? {
+        return Ok(Some(state));
+    }
+    if !ensure_bucket(pool, destination, clock).await? {
+        return Ok(None);
+    }
+    throttle_once(pool, destination, pause, clock).await
+}
+
+async fn throttle_once(
+    pool: &PgPool,
+    destination: Uuid,
+    pause: f64,
+    clock: &Clock,
+) -> Result<Option<BucketState>, StoreError> {
     sqlx::query_as(
-        "WITH cur AS ( \
-            SELECT b.destination_id, d.rate::float8 AS cap, b.rate AS stored, b.penalty_until, \
-                   COALESCE($2::timestamptz, clock_timestamp()) AS ts \
+        "WITH locked AS ( \
+            SELECT b.destination_id, d.rate::float8 AS cap, b.rate AS stored, b.penalty_until \
             FROM destination_rate_buckets b \
             JOIN destinations d ON d.workspace_id = b.workspace_id AND d.id = b.destination_id \
             WHERE b.destination_id = $1 \
-            FOR UPDATE OF b) \
+            FOR UPDATE OF b), \
+         cur AS ( \
+            SELECT locked.*, COALESCE($2::timestamptz, clock_timestamp()) AS ts FROM locked) \
          UPDATE destination_rate_buckets b SET \
             rate = CASE WHEN c.penalty_until IS NOT NULL AND c.ts <= c.penalty_until THEN b.rate \
                         ELSE GREATEST(1, destination_bucket_rate(c.stored, c.cap, c.penalty_until, \
@@ -152,7 +222,7 @@ pub async fn throttle_bucket<'e>(
     .bind(destination)
     .bind(instant_of(clock))
     .bind(pause)
-    .fetch_optional(executor)
+    .fetch_optional(pool)
     .await
     .map_err(StoreError::query)
 }
@@ -185,9 +255,10 @@ pub async fn bucket_state<'e>(
 }
 
 /// Tokens a worker holds under a lease. Tokens that outlive the lease are discarded, never spent
-/// and never returned to the bucket.
+/// and never returned to the bucket. Private to this module: only a [`RateGate`] builds one, from
+/// a grant the row made.
 #[derive(Clone, Copy, Debug)]
-pub struct TokenBlock {
+struct TokenBlock {
     remaining: u32,
     expires: Instant,
 }
@@ -196,7 +267,7 @@ impl TokenBlock {
     /// A block of `tokens`, valid for [`LEASE`] after `requested_at`: the moment the take was
     /// requested, which is never later than the moment the row granted it, so a worker never
     /// outlives the lease the row accounted for.
-    pub fn new(tokens: u32, requested_at: Instant) -> Self {
+    fn new(tokens: u32, requested_at: Instant) -> Self {
         Self {
             remaining: tokens,
             expires: requested_at + LEASE,
@@ -204,12 +275,12 @@ impl TokenBlock {
     }
 
     /// An empty block, as a worker starts with.
-    pub fn empty(now: Instant) -> Self {
+    fn empty(now: Instant) -> Self {
         Self::new(0, now)
     }
 
     /// Spends one token if the block is still valid and holds one. An expired block is emptied.
-    pub fn spend(&mut self, now: Instant) -> bool {
+    fn spend(&mut self, now: Instant) -> bool {
         if now >= self.expires {
             self.remaining = 0;
         }
@@ -221,7 +292,7 @@ impl TokenBlock {
     }
 
     /// Tokens left that could still be spent at `now`.
-    pub fn remaining(&self, now: Instant) -> u32 {
+    fn remaining(&self, now: Instant) -> u32 {
         if now >= self.expires {
             0
         } else {
@@ -237,7 +308,7 @@ pub enum Admission {
     Granted,
     /// The bucket is empty: ask again after this long.
     Wait(Duration),
-    /// The destination has no bucket.
+    /// The destination is archived or gone: nothing may be sent for it.
     Gone,
 }
 
@@ -259,16 +330,12 @@ impl RateGate {
 
     /// Spends a token from the held block while it is valid; otherwise discards the block and
     /// takes a new one from the row.
-    pub async fn admit<'e>(
-        &mut self,
-        executor: impl PgExecutor<'e>,
-        clock: &Clock,
-    ) -> Result<Admission, StoreError> {
+    pub async fn admit(&mut self, pool: &PgPool, clock: &Clock) -> Result<Admission, StoreError> {
         if self.block.spend(Instant::now()) {
             return Ok(Admission::Granted);
         }
         let requested = Instant::now();
-        let Some(grant) = take_tokens(executor, self.destination, clock).await? else {
+        let Some(grant) = take_tokens(pool, self.destination, clock).await? else {
             return Ok(Admission::Gone);
         };
         self.block = TokenBlock::new(grant.tokens, requested);
@@ -503,6 +570,178 @@ mod tests {
         assert_eq!(granted.load(Ordering::SeqCst), 100);
         let state = bucket_state(&pool, id).await.unwrap().unwrap();
         assert!(state.tokens.abs() < 1e-6, "{}", state.tokens);
+    }
+
+    // ---- review fixes ----
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn refilled_at_never_moves_backwards_so_an_interval_is_never_refilled_twice(
+        pool: PgPool,
+    ) {
+        let id = destination(&pool, 100, 1000).await;
+        sqlx::query("UPDATE destination_rate_buckets SET tokens = 0 WHERE destination_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let manual = ManualClock::new(T0 + time::Duration::seconds(10));
+        let clock = at(&manual);
+        let mut total = 0;
+        let drain = |clock: Clock| {
+            let pool = pool.clone();
+            async move {
+                let mut sum = 0;
+                loop {
+                    let got = grant(&pool, id, &clock).await.tokens;
+                    if got == 0 {
+                        return sum;
+                    }
+                    sum += got;
+                }
+            }
+        };
+
+        // 10 s at 100/s is 1000 tokens. Then the clock steps back to T0+5 and forward again:
+        // the 5 s between T0+5 and T0+10 were already refilled and must not be refilled again.
+        total += drain(clock.clone()).await;
+        manual.set(T0 + time::Duration::seconds(5));
+        total += drain(clock.clone()).await;
+        manual.set(T0 + time::Duration::seconds(10));
+        total += drain(clock.clone()).await;
+
+        assert_eq!(total, 1000);
+        let state = bucket_state(&pool, id).await.unwrap().unwrap();
+        assert_eq!(state.refilled_at, T0 + time::Duration::seconds(10));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_lower_rate_and_burst_apply_to_the_next_take_and_clamp_the_tokens(pool: PgPool) {
+        let id = destination(&pool, 100, 100).await;
+        let ws: Uuid = sqlx::query_scalar("SELECT workspace_id FROM destinations WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let clock = at(&ManualClock::new(T0));
+
+        crate::update_destination(
+            &pool,
+            WorkspaceId::from_uuid(ws),
+            id,
+            &crate::DestinationUpdate {
+                rate: Some(10),
+                burst: Some(5),
+                ..crate::DestinationUpdate::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The row is reset by the change itself, before any take.
+        let state = bucket_state(&pool, id).await.unwrap().unwrap();
+        assert_eq!(state.burst, 5);
+        assert!(state.tokens <= 5.0, "{}", state.tokens);
+        // And the next take honours the new burst (k = ceil(10 * 0.1) = 1).
+        let mut total = 0;
+        loop {
+            let got = grant(&pool, id, &clock).await.tokens;
+            if got == 0 {
+                break;
+            }
+            total += got;
+        }
+        assert_eq!(total, 5);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_live_destination_whose_bucket_row_is_missing_gets_it_back_on_the_next_take(
+        pool: PgPool,
+    ) {
+        let id = destination(&pool, 100, 10).await;
+        sqlx::query("DELETE FROM destination_rate_buckets WHERE destination_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let clock = at(&ManualClock::new(T0));
+        let mut gate = RateGate::new(id);
+
+        assert_eq!(gate.admit(&pool, &clock).await.unwrap(), Admission::Granted);
+
+        let state = bucket_state(&pool, id).await.unwrap().unwrap();
+        assert_eq!((state.rate, state.burst), (100.0, 10));
+        // A throttle on a missing row heals it too.
+        sqlx::query("DELETE FROM destination_rate_buckets WHERE destination_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let throttled = throttle_bucket(&pool, id, None, &clock)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(throttled.rate, 50.0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_destination_with_no_bucket_row_stays_gone(pool: PgPool) {
+        let id = destination(&pool, 100, 10).await;
+        let ws: Uuid = sqlx::query_scalar("SELECT workspace_id FROM destinations WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        crate::archive_destination(&pool, WorkspaceId::from_uuid(ws), id)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM destination_rate_buckets WHERE destination_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let admitted = RateGate::new(id)
+            .admit(&pool, &at(&ManualClock::new(T0)))
+            .await
+            .unwrap();
+
+        assert_eq!(admitted, Admission::Gone);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_gate_holding_an_expired_block_refuses_it_and_asks_the_row_again(pool: PgPool) {
+        let id = destination(&pool, 100, 10).await;
+        let clock = at(&ManualClock::new(T0));
+        // Drain the row so only the held block could admit.
+        while grant(&pool, id, &clock).await.tokens > 0 {}
+        let mut gate = RateGate::new(id);
+        let now = Instant::now();
+        let Some(long_ago) = now.checked_sub(LEASE + Duration::from_millis(1)) else {
+            return;
+        };
+        gate.block = TokenBlock::new(5, long_ago);
+
+        let admitted = gate.admit(&pool, &clock).await.unwrap();
+
+        assert!(matches!(admitted, Admission::Wait(_)), "{admitted:?}");
+        assert_eq!(gate.block.remaining(Instant::now()), 0);
+    }
+
+    #[test]
+    fn a_token_block_cannot_be_named_outside_the_store() {
+        // The only way to spend is a `RateGate`, whose blocks come from `take_tokens`: the
+        // block type, its constructor and the take are crate-private, so a consumer cannot mint
+        // tokens. The crate root must not re-export them.
+        let root = include_str!("../lib.rs");
+        for name in ["TokenBlock", "take_tokens", "Grant"] {
+            assert!(!root.contains(name), "lib.rs exports {name}");
+        }
     }
 
     // ---- 429 ----
