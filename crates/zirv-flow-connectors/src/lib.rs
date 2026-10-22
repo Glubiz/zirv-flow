@@ -9,6 +9,7 @@
 //! network only through its [`destinations::DestinationContext`].
 
 pub mod destinations;
+pub mod dns;
 pub mod http;
 pub mod manifest;
 pub mod runtime;
