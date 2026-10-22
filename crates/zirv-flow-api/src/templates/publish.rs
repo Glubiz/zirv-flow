@@ -10,8 +10,9 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, TraceContext, UserId, WorkspaceId};
+use zirv_flow_render::RenderPool;
 use zirv_flow_store::{PgPool, Template, TemplateVersion};
-use zirv_flow_templates::{Issue, validate_document};
+use zirv_flow_templates::{Issue, content_type_of};
 
 use super::crud::TemplateBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
@@ -80,6 +81,7 @@ pub(crate) struct TemplatePublishedBody {
 /// definition change.
 pub(crate) async fn publish_template(
     pool: &PgPool,
+    render: &RenderPool,
     context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
@@ -92,11 +94,13 @@ pub(crate) async fn publish_template(
     let doc = stored_document(&locked.draft().document)?;
     let catalog =
         field_catalog(zirv_flow_store::read_template_field_catalog(&mut tx, workspace).await?);
-    // The sample render is CPU work: keep it off the async executor.
-    let issues: Vec<Issue> = tokio::task::spawn_blocking(move || validate_document(&doc, &catalog))
+    // A template's sample render allocates like any render, so it runs in the render host, never
+    // in this process.
+    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
+    let issues: Vec<Issue> = render
+        .validate(&doc, &catalog)
         .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(|_| ApiError::template_content_unsupported())?;
+        .map_err(|failure| ApiError::render_failed(&failure))?;
     if issues.iter().any(Issue::is_blocking) {
         // Dropping the transaction writes nothing.
         return Err(ApiError::template_invalid(issue_problems(&issues)));
@@ -159,8 +163,12 @@ pub(crate) async fn publish(
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let render = state
+        .render_pool()
+        .ok_or_else(ApiError::render_unavailable)?;
     let (template, version) = publish_template(
         &state.pool,
+        render,
         &principal.context(),
         workspace.id,
         path_id(&id)?,

@@ -257,20 +257,18 @@ pub(crate) async fn preview(
     drop(tx);
 
     let content = content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    let issues_doc = doc.clone();
-    let issues_catalog = catalog.clone();
-    // The sample render of validation is CPU work: keep it off the async executor.
-    let issues: Vec<Issue> =
-        tokio::task::spawn_blocking(move || content.validate(&issues_doc, &issues_catalog))
-            .await
-            .map_err(|_| ApiError::internal())?;
+    // Validation renders a sample, so it runs in the render host like the render itself.
+    let pool = state
+        .render_pool()
+        .ok_or_else(ApiError::render_unavailable)?;
+    let issues: Vec<Issue> = pool
+        .validate(&doc, &catalog)
+        .await
+        .map_err(|failure| ApiError::render_failed(&failure))?;
     let blocked = issues.iter().any(Issue::is_blocking);
     let rendered = if blocked {
         None
     } else {
-        let pool = state
-            .render_pool()
-            .ok_or_else(ApiError::render_unavailable)?;
         Some(render(pool, content.render_kind(), &doc, &context).await?)
     };
     let (subject, html, text, headers, rendered_body) = match rendered {

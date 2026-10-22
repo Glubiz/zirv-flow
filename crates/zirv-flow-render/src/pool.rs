@@ -17,8 +17,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use tracing::{error, warn};
 use zirv_flow_templates::{
-    Hooks, RenderContext, RenderRequest, RenderResponse, Rendered, RenderedWebhook,
-    TemplateDocument, apply_tracking,
+    FieldCatalog, Hooks, Issue, RenderContext, RenderRequest, RenderResponse, Rendered,
+    RenderedWebhook, TemplateDocument, apply_tracking,
 };
 
 use crate::failure::RenderFailure;
@@ -578,6 +578,27 @@ impl RenderPool {
         result
     }
 
+    /// Run the publish checks of [`zirv_flow_templates::validate`] in a child. Its sample render
+    /// allocates like any other, so it gets the same memory limit, deadline and failure handling
+    /// as a render.
+    pub async fn validate(
+        &self,
+        doc: &TemplateDocument,
+        catalog: &FieldCatalog,
+    ) -> Result<Vec<Issue>, RenderFailure> {
+        let request = RenderRequest::Validate {
+            doc: Cow::Borrowed(doc),
+            catalog: Cow::Borrowed(catalog),
+        };
+        let result = async {
+            let response = self.run("validate", &request).await?;
+            response.into_issues().ok_or(RenderFailure::Protocol)
+        }
+        .await;
+        record_failure(&result);
+        result
+    }
+
     /// Ask every idle child to stop by closing its input, and wait for them. Children serving a
     /// render are killed when the pool is dropped.
     pub async fn shutdown(&self) {
@@ -782,6 +803,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure, RenderFailure::Deadline);
         ok_render(&pool).await;
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn validation_runs_in_a_child_and_a_deadline_overrun_fails_it_and_the_next_call_works() {
+        let marker = std::env::temp_dir().join(format!("zirv-render-vhang-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let command = child_with(
+            "hang_first",
+            [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
+        );
+        let pool = RenderPool::start(command, config(1, 500)).await.unwrap();
+        let catalog = FieldCatalog::default();
+
+        let failure = pool.validate(&doc("x"), &catalog).await.unwrap_err();
+        let issues = pool
+            .validate(&doc("{{ person.nope }}"), &catalog)
+            .await
+            .unwrap();
+
+        assert_eq!(failure, RenderFailure::Deadline);
+        assert_eq!(
+            issues,
+            zirv_flow_templates::validate(&doc("{{ person.nope }}"), &catalog)
+        );
+        assert!(issues.iter().any(|issue| issue.is_blocking()));
         let _ = fs::remove_file(&marker);
     }
 

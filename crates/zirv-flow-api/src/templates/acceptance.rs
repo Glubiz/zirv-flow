@@ -979,6 +979,47 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_validation_that_misses_its_deadline_fails_the_publish_and_the_next_publish_works(
+        pool: PgPool,
+    ) {
+        let render_pool = start_pool("hang_first", Duration::from_millis(1500)).await;
+        let f = fixture_with(&pool, Some(render_pool)).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let uri = format!("/{id}/publish");
+
+        let stalled = f.lead("POST", &uri, None).await;
+        let versions_after_stall = f.versions_written().await;
+        let next = f.lead("POST", &uri, None).await;
+
+        assert_eq!(
+            stalled.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            stalled.body
+        );
+        assert_eq!(stalled.body["code"], "render_deadline");
+        assert_eq!(versions_after_stall, 0);
+        assert_eq!(next.status, StatusCode::CREATED, "{:?}", next.body);
+        assert_eq!(f.versions_written().await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_a_render_pool_a_publish_is_unavailable_and_validates_nothing_here(
+        pool: PgPool,
+    ) {
+        let f = fixture_with(&pool, None).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let reply = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.body["code"], "render_unavailable");
+        assert_eq!(f.versions_written().await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_template_the_renderer_refuses_is_a_422_with_the_renderers_code(pool: PgPool) {
         let f = fixture(&pool).await;
         // `person.nick` is not in the registry, so validation reports it; a real person without

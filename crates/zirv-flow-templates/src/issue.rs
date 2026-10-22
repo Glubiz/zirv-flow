@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 
@@ -65,7 +65,7 @@ pub mod code {
 }
 
 /// Whether an issue stops publishing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Blocking,
@@ -97,6 +97,38 @@ pub struct Issue {
     pub message: Option<String>,
 }
 
+/// The wire form of an [`Issue`]: the code is text until it is matched to a fixed one.
+#[derive(Deserialize)]
+struct IssueWire {
+    code: String,
+    at: String,
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Issue {
+    /// An issue read back from the render host. The code must be one of the fixed codes, so a
+    /// response carrying an unknown one is unreadable, not trusted; the severity is the code's.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = IssueWire::deserialize(deserializer)?;
+        let code = code::BLOCKING
+            .iter()
+            .chain(code::WARNING.iter())
+            .copied()
+            .find(|known| *known == wire.code)
+            .ok_or_else(|| serde::de::Error::custom("is not a known issue code"))?;
+        Ok(Self {
+            code,
+            severity: severity_of(code),
+            at: wire.at,
+            field: wire.field,
+            message: wire.message,
+        })
+    }
+}
+
 impl Issue {
     pub(crate) fn new(code: &'static str, at: impl Into<String>) -> Self {
         Self {
@@ -126,7 +158,7 @@ impl Issue {
 
 /// The merge fields a template may use, passed in by the caller from the field registry and the
 /// event catalog (architecture 11.4).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FieldCatalog {
     /// Trait key to its registry type.
     pub person: BTreeMap<String, TraitType>,
@@ -151,6 +183,17 @@ mod tests {
         }
         let all: BTreeSet<&str> = code::BLOCKING.into_iter().chain(code::WARNING).collect();
         assert_eq!(all.len(), code::BLOCKING.len() + code::WARNING.len());
+    }
+
+    #[test]
+    fn an_issue_round_trips_and_an_unknown_code_is_refused() {
+        let issue = Issue::new(code::UNKNOWN_MERGE_FIELD, "/email/html")
+            .with_field("person.x")
+            .with_message("m");
+        let json = serde_json::to_string(&issue).unwrap();
+        assert_eq!(serde_json::from_str::<Issue>(&json).unwrap(), issue);
+        let unknown = r#"{"code":"made_up","severity":"blocking","at":"/x"}"#;
+        assert!(serde_json::from_str::<Issue>(unknown).is_err());
     }
 
     #[test]
