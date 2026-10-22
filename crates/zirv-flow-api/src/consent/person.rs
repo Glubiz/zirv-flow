@@ -344,7 +344,7 @@ pub(crate) async fn set_person_consent(
         ConsentOutcome::NoSuchTopic => {
             return Err(invalid("topic_key", "is not a topic of this channel"));
         }
-        ConsentOutcome::NoSuchDimension => {
+        ConsentOutcome::NoSuchDimension | ConsentOutcome::NoSuchDimensionValue => {
             return Err(invalid(
                 "dimensions",
                 "names a dimension or value that is not live in this workspace",

@@ -131,6 +131,22 @@ fn parse_row(fields: &[String], dimension_keys: &[String]) -> Result<Row, &'stat
     })
 }
 
+/// The header's dimension keys and the data rows. Reading stops at the first row past the cap,
+/// so an oversized body is refused without being parsed to its end.
+fn read_records(text: &str) -> Result<(Vec<String>, Vec<csv::Record>), AdminError> {
+    let mut records = csv::parse_up_to(text, MAX_IMPORT_ROWS + 1).into_iter();
+    let header = records
+        .next()
+        .map(|record| record.fields)
+        .unwrap_or_default();
+    let dimension_keys = parse_header(&header)?;
+    let records: Vec<csv::Record> = records.collect();
+    if records.len() > MAX_IMPORT_ROWS {
+        return Err(invalid("rows", "must be at most 10000 rows"));
+    }
+    Ok((dimension_keys, records))
+}
+
 /// Imports a CSV of consent states, one write per row, in one transaction. On a dry run
 /// nothing is kept. Bad rows are reported by line number and code and do not stop the rest.
 /// A real import is audited as `consent.imported` with counts only. Each written change is
@@ -143,16 +159,7 @@ pub(crate) async fn import(
     dry_run: bool,
     actor: Option<Uuid>,
 ) -> Result<ConsentImportBody, AdminError> {
-    let mut records = csv::parse(text).into_iter();
-    let header = records
-        .next()
-        .map(|record| record.fields)
-        .unwrap_or_default();
-    let dimension_keys = parse_header(&header)?;
-    let records: Vec<csv::Record> = records.collect();
-    if records.len() > MAX_IMPORT_ROWS {
-        return Err(invalid("rows", "must be at most 10000 rows"));
-    }
+    let (dimension_keys, records) = read_records(text)?;
 
     let topics: HashMap<String, Uuid> = zirv_flow_store::list_topics(pool, workspace, true)
         .await?
@@ -214,6 +221,7 @@ pub(crate) async fn import(
             ConsentOutcome::NoSuchPerson => reject(&mut body, "no_such_person"),
             ConsentOutcome::NoSuchTopic => reject(&mut body, "unknown_topic"),
             ConsentOutcome::NoSuchDimension => reject(&mut body, "unknown_dimension"),
+            ConsentOutcome::NoSuchDimensionValue => reject(&mut body, "unknown_dimension_value"),
         }
     }
     if !dry_run {
@@ -405,6 +413,28 @@ mod tests {
     }
 
     const PERSON: &str = "0194f2c0-0000-7000-8000-000000000001";
+
+    #[test]
+    fn an_import_of_more_than_the_cap_is_refused_and_the_parser_stops_at_the_first_row_past_it() {
+        let header = "person_id,channel,topic,status\n";
+        let row = format!("{PERSON},email,,subscribed\n");
+        let at_cap = format!("{header}{}", row.repeat(MAX_IMPORT_ROWS));
+        let over = format!("{header}{}", row.repeat(MAX_IMPORT_ROWS + 1));
+        let way_over = format!("{header}{}", row.repeat(MAX_IMPORT_ROWS * 3));
+
+        let (_, rows) = read_records(&at_cap).unwrap();
+        let refused = read_records(&over);
+        let stopped = csv::parse_up_to(&way_over, MAX_IMPORT_ROWS + 1);
+
+        assert_eq!(rows.len(), MAX_IMPORT_ROWS);
+        assert!(matches!(refused, Err(AdminError::Invalid(error)) if error.field() == "rows"));
+        assert!(read_records(&way_over).is_err());
+        assert_eq!(stopped.len(), MAX_IMPORT_ROWS + 2);
+        assert_eq!(
+            stopped.last().map(|record| record.line),
+            Some(MAX_IMPORT_ROWS + 2)
+        );
+    }
 
     #[test]
     fn the_header_is_the_four_base_columns_then_dimension_columns() {

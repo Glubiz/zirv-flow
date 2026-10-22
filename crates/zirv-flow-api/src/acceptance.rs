@@ -5058,7 +5058,7 @@ mod tests {
             dry_body["invalid"],
             json!([
                 {"row": 5, "reason": "unknown_topic"},
-                {"row": 6, "reason": "unknown_dimension"},
+                {"row": 6, "reason": "unknown_dimension_value"},
                 {"row": 7, "reason": "invalid_person_id"}
             ])
         );
@@ -5115,7 +5115,9 @@ mod tests {
         assert_eq!(old.status, StatusCode::OK, "{}", old.text);
         assert_eq!(
             (old_body["changed"].as_u64(), old_body["unchanged"].as_u64()),
-            (Some(1), Some(1))
+            // The repeated unscoped news state is advanced, not skipped: the replay wrote the
+            // retail-scoped news state after it, so the held row was no longer the latest.
+            (Some(2), Some(0))
         );
         let unscoped_rows: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM consent WHERE person_id = $1 AND dimensions_key = ''",
@@ -5153,6 +5155,80 @@ mod tests {
             .collect();
         assert_eq!(imports.len(), 3, "the dry run left no audit row");
         assert!(imports.contains(&&json!({"changed": 3, "unchanged": 0, "invalid": 3})));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_consent_import_names_an_unknown_value_apart_from_an_unknown_dimension_and_caps_rows(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(json!({"key": "vertical", "name": "Vertical",
+                        "values": [{"key": "retail", "name": "Retail"}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let ada = seed_person(&pool, &ws, "ada@example.com").await;
+        let post = |csv: String| {
+            let (router, owner, uri) = (router.clone(), &owner, consent_csv_uri(&ws, "import"));
+            async move {
+                call_text(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some("text/csv"),
+                    csv,
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+
+        let value = post(format!(
+            "person_id,channel,topic,status,dimension:vertical
+{ada},email,,subscribed,b2b
+"
+        ))
+        .await;
+        let dimension = post(format!(
+            "person_id,channel,topic,status,dimension:brand
+{ada},email,,subscribed,acme
+"
+        ))
+        .await;
+        let row = format!(
+            "{ada},email,,subscribed
+"
+        );
+        let over = post(format!(
+            "person_id,channel,topic,status
+{}",
+            row.repeat(10_001)
+        ))
+        .await;
+
+        let value: Value = serde_json::from_str(&value.text).unwrap();
+        let dimension: Value = serde_json::from_str(&dimension.text).unwrap();
+        assert_eq!(
+            value["invalid"],
+            json!([{"row": 2, "reason": "unknown_dimension_value"}])
+        );
+        assert_eq!(
+            dimension["invalid"],
+            json!([{"row": 2, "reason": "unknown_dimension"}])
+        );
+        assert_eq!(
+            over.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            over.text
+        );
     }
 
     #[sqlx::test]
