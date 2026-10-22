@@ -774,6 +774,7 @@ impl ApiError {
                     ..Self::unprocessable(detail)
                 }
             }
+            RenderFailure::UnsupportedDocument => Self::template_content_unsupported(),
             RenderFailure::MemoryLimit => Self {
                 code: Some("render_memory_limit"),
                 ..Self::unprocessable("the template used too much memory to render")

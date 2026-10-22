@@ -97,13 +97,64 @@ pub fn validate_document(
     doc: &TemplateDocument,
     catalog: &FieldCatalog,
 ) -> Result<Vec<Issue>, ContentError> {
-    Ok(content_type_of(doc)?.validate(doc, catalog))
+    validate_in(&REGISTRY, doc, catalog)
+}
+
+/// [`validate_document`] over a given set of types, so a test can register one of its own.
+fn validate_in(
+    registry: &[&'static dyn TemplateContent],
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+) -> Result<Vec<Issue>, ContentError> {
+    registry
+        .iter()
+        .find(|content| content.handles(doc))
+        .map(|content| content.validate(doc, catalog))
+        .ok_or(ContentError::UnsupportedDocument)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::{EmailContent, Mode, WebhookContent};
+
+    /// A type of its own, to show that the type that owns a document is the one whose check runs.
+    struct Marker;
+
+    impl TemplateContent for Marker {
+        fn id(&self) -> &'static str {
+            "marker"
+        }
+        fn channel(&self) -> Channel {
+            Channel::Email
+        }
+        fn handles(&self, doc: &TemplateDocument) -> bool {
+            doc.mode == Mode::Blocks
+        }
+        fn validate(&self, _doc: &TemplateDocument, _catalog: &FieldCatalog) -> Vec<Issue> {
+            vec![Issue::new(crate::issue::code::MISSING_LANG, "/marker")]
+        }
+        fn render_kind(&self) -> RenderKind {
+            RenderKind::Email
+        }
+    }
+
+    #[test]
+    fn the_check_that_runs_is_the_one_of_the_type_that_owns_the_document() {
+        let mut blocks = TemplateDocument::email_code(EmailContent::default());
+        blocks.mode = Mode::Blocks;
+        let registry: [&'static dyn TemplateContent; 3] = [&html::Html, &webhook::Webhook, &Marker];
+
+        let issues = validate_in(&registry, &blocks, &FieldCatalog::default()).unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].at, "/marker");
+        // Without that type registered, nothing owns the document.
+        assert_eq!(
+            validate_in(&registry[..2], &blocks, &FieldCatalog::default()).err(),
+            Some(ContentError::UnsupportedDocument)
+        );
+    }
 
     #[test]
     fn html_and_webhook_are_the_only_registered_types() {

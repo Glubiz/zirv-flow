@@ -592,7 +592,10 @@ impl RenderPool {
         };
         let result = async {
             let response = self.run("validate", &request).await?;
-            response.into_issues().ok_or(RenderFailure::Protocol)
+            response
+                .into_issues()
+                .ok_or(RenderFailure::Protocol)?
+                .map_err(|_| RenderFailure::UnsupportedDocument)
         }
         .await;
         record_failure(&result);
@@ -830,6 +833,23 @@ mod tests {
         );
         assert!(issues.iter().any(|issue| issue.is_blocking()));
         let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn validating_a_document_no_type_owns_is_the_typed_failure_not_a_protocol_fault() {
+        let pool = RenderPool::start(child("serve"), config(1, 20_000))
+            .await
+            .unwrap();
+        let mut blocks = doc("x");
+        blocks.mode = zirv_flow_templates::Mode::Blocks;
+
+        let failure = pool
+            .validate(&blocks, &FieldCatalog::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(failure, RenderFailure::UnsupportedDocument);
+        ok_render(&pool).await;
     }
 
     #[tokio::test]

@@ -167,7 +167,7 @@ mod tests {
         let mut output = Vec::new();
         serve(input.as_slice(), &mut output).unwrap();
 
-        let issues = responses(&output).remove(0).into_issues().unwrap();
+        let issues = responses(&output).remove(0).into_issues().unwrap().unwrap();
         assert_eq!(issues, zirv_flow_templates::validate(&doc, &catalog));
     }
 
