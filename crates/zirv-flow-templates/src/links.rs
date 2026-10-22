@@ -347,9 +347,9 @@ mod tests {
 
     #[test]
     fn token_function_sees_the_decoded_url() {
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         let record = |index: usize, url: &str| {
-            seen.borrow_mut().push((index, url.to_owned()));
+            seen.lock().unwrap().push((index, url.to_owned()));
             "x".to_owned()
         };
         let tracking = Tracking::Rewrite {
@@ -362,7 +362,7 @@ mod tests {
             &[],
         );
         assert_eq!(
-            seen.into_inner(),
+            seen.into_inner().unwrap(),
             vec![(0, "https://a.example/?a=1&b=2".to_owned())]
         );
     }
