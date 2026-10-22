@@ -11,6 +11,10 @@ use zirv_flow_templates::{RenderRequest, RenderResponse};
 use crate::frame::{FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, read_frame, write_frame};
 use crate::limit;
 
+/// The frame a child writes once it has applied its limit and is about to serve: the pool waits for
+/// it before it hands the child a render, so a child that cannot start is found at start.
+pub(crate) const READY: &[u8] = br#"{"kind":"ready"}"#;
+
 /// Why the serve loop stopped before the input ended.
 #[derive(Debug)]
 pub enum HostError {
@@ -67,11 +71,15 @@ pub fn serve(mut input: impl Read, mut output: impl Write) -> Result<(), HostErr
     }
 }
 
-/// The child's whole life: limit memory first, then serve standard input to standard output.
+/// The child's whole life: limit memory first, announce it is ready, then serve standard input to standard output.
 /// Returns the process exit code.
 pub fn run(memory_limit_bytes: Option<u64>) -> u8 {
     if let Err(error) = limit::apply(memory_limit_bytes) {
         error!(%error, "the render host could not limit its memory");
+        return 1;
+    }
+    if let Err(error) = write_frame(&mut io::stdout().lock(), READY) {
+        error!(%error, "the render host could not announce itself");
         return 1;
     }
     match serve(io::stdin().lock(), io::stdout().lock()) {

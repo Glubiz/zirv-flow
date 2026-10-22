@@ -107,6 +107,22 @@ mod test_support {
         (result, logs)
     }
 
+    /// Record this thread's log lines until the returned guard drops; the closure reads them. For
+    /// async tests on the current-thread runtime, where a task's logs stay on the test's thread.
+    pub(crate) fn capture_here() -> (tracing::subscriber::DefaultGuard, impl Fn() -> String) {
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let read = move || {
+            String::from_utf8_lossy(&buffer.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        };
+        (guard, read)
+    }
+
     fn first_run(marker: &str) -> bool {
         let path = std::path::Path::new(marker);
         if path.exists() {
@@ -139,8 +155,48 @@ mod test_support {
         }
         let marker = std::env::var("ZIRV_RENDER_TEST_MARKER").unwrap_or_default();
         let mut stdout = io::stdout().lock();
+        // A child that cannot start never says it is ready.
+        if mode == "exit_at_start" || (mode == "ready_once" && !first_run(&marker)) {
+            std::process::exit(1);
+        }
+        write_frame(&mut stdout, host::READY).expect("stdout");
         let code = match mode.as_str() {
-            "serve" => serve_stdio(),
+            "serve" | "ready_once" => serve_stdio(),
+            "exit_clean" => {
+                take_request();
+                0
+            }
+            "slow_first" => {
+                if first_run(&marker) {
+                    take_request();
+                    // Prove it is alive by growing a file, one byte per tick, until killed.
+                    let beat = std::env::var("ZIRV_RENDER_TEST_HEARTBEAT").unwrap_or_default();
+                    loop {
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&beat)
+                            .expect("the heartbeat file opens");
+                        file.write_all(b".").expect("the heartbeat is written");
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                }
+                serve_stdio()
+            }
+            "stderr_flood" => {
+                take_request();
+                let mut stderr = io::stderr().lock();
+                let block = [b'x'; 65536];
+                for _ in 0..32 {
+                    stderr.write_all(&block).expect("stderr");
+                }
+                stderr
+                    .write_all(b"\nmemory allocation of 1 bytes failed\n")
+                    .expect("stderr");
+                stderr.flush().expect("stderr");
+                drop(stderr);
+                std::process::abort();
+            }
             "hang_first" => {
                 if first_run(&marker) {
                     take_request();

@@ -10,7 +10,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -24,9 +24,14 @@ use zirv_flow_templates::{
 use crate::failure::RenderFailure;
 use crate::frame::{FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::frame::{read_frame_async, write_frame_async};
+use crate::host::READY;
+use crate::limit;
 
 /// How much of a child's standard error the pool keeps to explain its death.
 const STDERR_TAIL_BYTES: usize = 4096;
+
+/// The longest stderr line the parent logs; the rest of a longer line is dropped.
+const STDERR_LINE_BYTES: usize = 2048;
 
 /// How long a dead or failing child is given to exit by itself before it is killed.
 const REAP_GRACE: Duration = Duration::from_secs(2);
@@ -45,6 +50,7 @@ pub struct ChildCommand {
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
     skip_stdout_until: Option<Vec<u8>>,
+    memory_limit_bytes: Option<u64>,
 }
 
 impl ChildCommand {
@@ -54,6 +60,7 @@ impl ChildCommand {
             args: Vec::new(),
             envs: Vec::new(),
             skip_stdout_until: None,
+            memory_limit_bytes: None,
         }
     }
 
@@ -64,6 +71,15 @@ impl ChildCommand {
             .arg("render-host")
             .arg("--memory-limit-bytes")
             .arg(memory_limit_bytes.to_string())
+            .memory_limit_bytes(Some(memory_limit_bytes))
+    }
+
+    /// The limit the children are asked to apply to themselves, so the pool can warn once at
+    /// start if this platform cannot enforce it.
+    #[must_use]
+    pub fn memory_limit_bytes(mut self, limit: Option<u64>) -> Self {
+        self.memory_limit_bytes = limit;
+        self
     }
 
     #[must_use]
@@ -134,6 +150,55 @@ impl Exit {
     fn failed(&self) -> bool {
         self.status.is_some_and(|status| !status.success())
     }
+
+    /// The child exited by itself with status 0.
+    fn clean(&self) -> bool {
+        self.status.is_some_and(|status| status.success())
+    }
+}
+
+/// Read the child's standard error in fixed-size chunks until it ends. The parent keeps only the
+/// last [`STDERR_TAIL_BYTES`] for classification and logs each line cut to [`STDERR_LINE_BYTES`],
+/// so what the child writes, however much and however it is broken into lines, costs bounded
+/// memory.
+async fn drain_stderr(mut stderr: impl AsyncRead + Unpin, tail: Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0u8; 4096];
+    let mut line: Vec<u8> = Vec::new();
+    let mut cut = false;
+    loop {
+        let read = match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        {
+            let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            tail.extend_from_slice(&chunk[..read]);
+            if tail.len() > STDERR_TAIL_BYTES {
+                let excess = tail.len() - STDERR_TAIL_BYTES;
+                tail.drain(..excess);
+            }
+        }
+        for &byte in &chunk[..read] {
+            if byte == b'\n' {
+                log_line(&line, cut);
+                line.clear();
+                cut = false;
+            } else if line.len() < STDERR_LINE_BYTES {
+                line.push(byte);
+            } else {
+                cut = true;
+            }
+        }
+    }
+    if !line.is_empty() {
+        log_line(&line, cut);
+    }
+}
+
+fn log_line(line: &[u8], cut: bool) {
+    let text = String::from_utf8_lossy(line);
+    let ellipsis = if cut { "..." } else { "" };
+    warn!(target: "zirv_flow_render::child", "{text}{ellipsis}");
 }
 
 fn spawn_host(command: &ChildCommand) -> io::Result<Host> {
@@ -152,20 +217,7 @@ fn spawn_host(command: &ChildCommand) -> io::Result<Host> {
     let stderr = child.stderr.take().ok_or_else(missing)?;
 
     let stderr_tail = Arc::new(Mutex::new(Vec::new()));
-    let tail = Arc::clone(&stderr_tail);
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            warn!(target: "zirv_flow_render::child", "{line}");
-            let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
-            tail.extend_from_slice(line.as_bytes());
-            tail.push(b'\n');
-            if tail.len() > STDERR_TAIL_BYTES {
-                let excess = tail.len() - STDERR_TAIL_BYTES;
-                tail.drain(..excess);
-            }
-        }
-    });
+    let stderr_task = tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail)));
     Ok(Host {
         child,
         stdin: Some(stdin),
@@ -199,6 +251,17 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// Wait for the ready frame the child writes once it has applied its limit.
+    async fn await_ready(&mut self) -> Result<(), FrameError> {
+        self.skip_banner().await?;
+        let frame = read_frame_async(&mut self.stdout, READY.len() * 4).await?;
+        if frame == READY {
+            Ok(())
+        } else {
+            Err(FrameError::TooLarge(frame.len()))
+        }
     }
 
     /// Send one request and read one response.
@@ -276,7 +339,34 @@ async fn classify(mut host: Host, fault: FrameError) -> RenderFailure {
                 RenderFailure::Protocol
             }
         }
-        FrameError::Closed | FrameError::Io(_) => after_death(&host.reap().await),
+        FrameError::Closed | FrameError::Io(_) => {
+            let exit = host.reap().await;
+            if exit.clean() && !exit.out_of_memory {
+                // It closed its output and left without a word: it broke the protocol, it did
+                // not crash.
+                RenderFailure::Protocol
+            } else {
+                after_death(&exit)
+            }
+        }
+    }
+}
+
+/// Spawn a child and wait, within `deadline`, for its ready frame. A child that cannot start (a
+/// limit the platform refuses, an inherited hard limit below the configured one) is found here
+/// and reported with its classified reason, not accepted and failed on every render.
+async fn start_host(command: &ChildCommand, deadline: Duration) -> Result<Host, RenderFailure> {
+    let mut host = spawn_host(command).map_err(|error| {
+        error!(%error, "could not start a render host");
+        RenderFailure::ChildExited
+    })?;
+    match timeout(deadline, host.await_ready()).await {
+        Err(_) => {
+            host.kill().await;
+            Err(RenderFailure::Deadline)
+        }
+        Ok(Ok(())) => Ok(host),
+        Ok(Err(fault)) => Err(classify(host, fault).await),
     }
 }
 
@@ -308,12 +398,21 @@ impl fmt::Debug for RenderPool {
 }
 
 impl RenderPool {
-    /// Start `config.size` children. Fails if the command cannot be run.
+    /// Start `config.size` children and wait for each to report ready within the deadline. Fails
+    /// if the command cannot be run or a child cannot start; the error names the reason.
     pub async fn start(command: ChildCommand, config: PoolConfig) -> io::Result<Self> {
         let size = config.size.max(1);
+        limit::warn_unenforced(command.memory_limit_bytes);
         let mut hosts = Vec::with_capacity(size);
         for _ in 0..size {
-            hosts.push(spawn_host(&command)?);
+            let host = start_host(&command, config.deadline)
+                .await
+                .map_err(|failure| {
+                    io::Error::other(format!(
+                        "a render host child did not become ready: {failure}"
+                    ))
+                })?;
+            hosts.push(host);
         }
         Ok(Self {
             inner: Arc::new(Inner {
@@ -365,13 +464,7 @@ impl RenderPool {
             Some(host) => host,
             None => {
                 metrics::counter!("zirv_flow_render_restarts_total").increment(1);
-                match spawn_host(&self.inner.command) {
-                    Ok(host) => host,
-                    Err(error) => {
-                        error!(%error, "could not start a render host");
-                        return Err(RenderFailure::ChildExited);
-                    }
-                }
+                start_host(&self.inner.command, self.inner.deadline).await?
             }
         };
 
@@ -523,7 +616,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::{child, child_with};
+    use crate::test_support::{capture_here, child, child_with};
 
     fn doc(html: &str) -> TemplateDocument {
         TemplateDocument::email_code(EmailContent {
@@ -825,5 +918,125 @@ mod tests {
         ok_render(&pool).await;
         pool.shutdown().await;
         assert!(pool.idle_ids().is_empty());
+    }
+
+    // ----- review fixes --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_child_that_cannot_start_fails_the_pool_start_with_its_reason() {
+        let error = RenderPool::start(child("exit_at_start"), config(2, 20_000))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not become ready"), "{error}");
+        assert!(error.contains("child_exited"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_respawned_child_that_cannot_start_fails_the_render_that_asked_for_it() {
+        let marker = std::env::temp_dir().join(format!("zirv-render-once-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let command = child_with(
+            "ready_once",
+            [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
+        );
+        let pool = RenderPool::start(command, config(1, 20_000)).await.unwrap();
+        ok_render(&pool).await;
+
+        pool.kill_idle();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let failure = pool
+            .render_email(&doc("x"), &context(), &Hooks::untracked())
+            .await
+            .unwrap_err();
+        assert_eq!(failure, RenderFailure::ChildExited);
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn the_unenforced_limit_is_warned_once_per_pool_not_per_child_or_respawn() {
+        if cfg!(target_os = "linux") {
+            eprintln!("skipped: Linux enforces the limit, so there is nothing to warn about");
+            return;
+        }
+        let (_guard, logs) = capture_here();
+        let command = child("serve").memory_limit_bytes(Some(512 * 1024 * 1024));
+        let pool = RenderPool::start(command, config(2, 20_000)).await.unwrap();
+        pool.kill_idle();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ok_render(&pool).await;
+        ok_render(&pool).await;
+        let logs = logs();
+        assert_eq!(logs.matches("no OS memory limit").count(), 1, "{logs}");
+    }
+
+    #[tokio::test]
+    async fn a_child_flooding_stderr_without_newlines_costs_bounded_memory() {
+        let (_guard, logs) = capture_here();
+        let pool = RenderPool::start(child("stderr_flood"), config(1, 20_000))
+            .await
+            .unwrap();
+        let failure = pool
+            .render_email(&doc("x"), &context(), &Hooks::untracked())
+            .await
+            .unwrap_err();
+        // The 2 MiB of one unbroken line is cut, and the allocation line after it still counts.
+        assert_eq!(failure, RenderFailure::MemoryLimit);
+        let logs = logs();
+        let longest = logs.lines().map(str::len).max().unwrap_or(0);
+        assert!(longest < 8 * 1024, "a logged line was {longest} bytes");
+    }
+
+    #[tokio::test]
+    async fn a_render_dropped_midway_kills_its_child_and_the_pool_serves_the_next() {
+        let dir = std::env::temp_dir();
+        let marker = dir.join(format!("zirv-render-slow-{}", std::process::id()));
+        let beat = dir.join(format!("zirv-render-beat-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&beat);
+        let command = child_with(
+            "slow_first",
+            [
+                ("ZIRV_RENDER_TEST_MARKER", marker.as_os_str()),
+                ("ZIRV_RENDER_TEST_HEARTBEAT", beat.as_os_str()),
+            ],
+        );
+        let pool = RenderPool::start(command, config(1, 60_000)).await.unwrap();
+
+        let dropped = timeout(
+            Duration::from_millis(600),
+            pool.render_email(&doc("x"), &context(), &Hooks::untracked()),
+        )
+        .await;
+        assert!(dropped.is_err(), "the render should still be running");
+        assert!(pool.idle_ids().is_empty(), "the busy child is not idle");
+
+        // The heartbeat stops growing once the child is gone.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let first = fs::metadata(&beat).unwrap().len();
+        assert!(first > 0, "the child was working");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            fs::metadata(&beat).unwrap().len(),
+            first,
+            "the child is still running"
+        );
+
+        ok_render(&pool).await;
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&beat);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_closes_its_output_and_exits_cleanly_is_a_protocol_failure() {
+        let pool = RenderPool::start(child("exit_clean"), config(1, 20_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.render_email(&doc("x"), &context(), &Hooks::untracked())
+                .await
+                .unwrap_err(),
+            RenderFailure::Protocol
+        );
     }
 }
