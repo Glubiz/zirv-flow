@@ -758,11 +758,9 @@ mod tests {
         let no = record(&[("vertical", "retail")], Unsubscribed, T1, 3);
         let later_yes = record(&[("vertical", "retail")], Subscribed, T1, 9);
 
-        assert_eq!(
-            merge_records(vec![yes.clone()], vec![no.clone()]),
-            [no.clone()]
-        );
-        assert_eq!(merge_records(vec![no.clone()], vec![yes.clone()]), [no]);
+        let against = merge_records(vec![yes.clone()], vec![no.clone()]);
+        let reversed = merge_records(vec![no.clone()], vec![yes.clone()]);
+        assert_eq!((against, reversed), (vec![no.clone()], vec![no]));
         assert_eq!(
             merge_records(vec![yes], vec![later_yes.clone()]),
             [later_yes]

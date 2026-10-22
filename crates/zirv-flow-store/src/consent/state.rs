@@ -1171,17 +1171,12 @@ mod tests {
                 )
             })
             .collect();
-        let mut expected = vec![
+        let mut ordered = vec![
             (ada, None, ""),
             (ada, Some("news"), ""),
             (ada, Some("news"), "vertical=retail"),
+            (bob, None, "vertical=retail"),
         ];
-        expected.sort_by_key(|(_, topic, dims)| (topic.unwrap_or(""), *dims));
-        let mut ordered: Vec<_> = expected
-            .into_iter()
-            .map(|(who, topic, dims)| (who, topic, dims))
-            .collect();
-        ordered.push((bob, None, "vertical=retail"));
         ordered.sort_by_key(|(who, topic, dims)| (*who, topic.unwrap_or(""), *dims));
         assert_eq!(shown, ordered);
     }
