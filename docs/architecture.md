@@ -235,7 +235,7 @@ the registry enumerates implementations.
 |-----------|-------|--------------|---------------------------|
 | Connectors | `Source` | `zirv-flow-connectors` | One source module and one source-registry line |
 | Destinations and channels | `Destination` | `zirv-flow-connectors` | One destination module and one destination-registry line |
-| Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line (`html`, `mjml` and `blocks` in M6) |
+| Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line (`html`, `mjml`, `blocks` and `webhook` in M6) |
 | Job kinds | `JobKind` | `zirv-flow-jobs` | One handler module and one job-registry line |
 | AI tools | `AiTool` (defined in `zirv-flow-ai`) | `zirv-flow-api` (`assistant` feature module) | One tool module and one tool-registry line; tools live in `api` because they call validators and store reads that `ai` may not depend on (5.1) |
 
@@ -1245,7 +1245,7 @@ process (11.9).
 | `in_app` | Title, body, image, call to action | Reserved |
 
 - Every document carries an integer `schema`. The server reads older schemas through migrations (11.8) and refuses newer ones.
-- `mode` is `blocks` or `code`. Code mode is the escape hatch and is HTML (raw HTML + text with MiniJinja) or MJML (MJML source with MiniJinja, plus a text part). The registered content types are `html`, `mjml` and `blocks`. Conversion is one-way: blocks to MJML code keeps merge tags; code to blocks is never offered.
+- `mode` is `blocks` or `code`. Code mode is the escape hatch and is HTML (raw HTML + text with MiniJinja) or MJML (MJML source with MiniJinja, plus a text part). The registered content types are `html`, `mjml` and `blocks` for email, and `webhook`. Conversion is one-way: blocks to MJML code keeps merge tags; code to blocks is never offered.
 - Reserved channel types define typed fields and length rules now, so content and validation keep their shape when those builders ship.
 
 ### 11.2 Email block set v1
