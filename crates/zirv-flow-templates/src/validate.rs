@@ -3,18 +3,20 @@
 use minijinja::{Environment, ErrorKind, Value};
 use zirv_flow_core::segment::pointer_push;
 
+use crate::callables::{Kind, unknown_callables};
 use crate::context::{MESSAGE_FIELDS, RenderContext, SYSTEM_FIELDS};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
 };
 use crate::issue::{FieldCatalog, Issue, code};
-use crate::links::{link_urls, links_to};
-use crate::render::has_template_syntax;
+use crate::links::{href_mentions, link_urls, links_to};
+use crate::render::{has_template_syntax, one_line};
 use crate::sandbox::{
     GLOBAL_FUNCTIONS, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
     MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment,
     is_header_name, render_raw,
 };
+use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 
 /// The HTML size, in bytes, from which a warning says mail clients may clip the message. Gmail
@@ -68,6 +70,8 @@ struct Checked {
     clean: bool,
     /// The field rendered against the sample context; `None` when the render failed.
     sample: Option<String>,
+    /// Why the sample render failed, when it did.
+    failure: Option<String>,
 }
 
 /// What a field is rendered as in the sample render, and the output limit that applies to it.
@@ -114,10 +118,17 @@ fn sample_context(catalog: &FieldCatalog) -> Value {
         };
         context.person.insert(key.clone(), value);
     }
-    for key in &catalog.event {
-        context
-            .event
-            .insert(key.clone(), serde_json::json!("sample"));
+    for (key, kind) in &catalog.event {
+        let value = match kind {
+            PropertyType::String => serde_json::json!("sample"),
+            PropertyType::Number | PropertyType::Integer => serde_json::json!(1),
+            PropertyType::Boolean => serde_json::json!(true),
+            PropertyType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
+            PropertyType::Date => serde_json::json!("2026-01-01"),
+            PropertyType::StringList => serde_json::json!(["sample"]),
+            PropertyType::Object => serde_json::json!({}),
+        };
+        context.event.insert(key.clone(), value);
     }
     context.message.id = "msg_sample".to_owned();
     context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
@@ -175,16 +186,29 @@ fn validate_email(
     );
 
     // The link must survive the render: a bare URL in text, or an anchor in a branch that never
-    // runs, does not count. A field that already has an issue is reported by that issue; one
-    // that rendered nothing cannot show a link, so it is refused too.
-    if email.category == Category::Marketing
-        && html.clean
-        && !html
-            .sample
-            .as_deref()
-            .is_some_and(|rendered| links_to(rendered, SAMPLE_UNSUBSCRIBE_URL))
-    {
-        issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, "/email/html"));
+    // runs, does not count. A field that already has an issue is reported by that issue.
+    match (&html.sample, &html.failure) {
+        (Some(rendered), _) => {
+            if email.category == Category::Marketing
+                && html.clean
+                && !links_to(rendered, SAMPLE_UNSUBSCRIBE_URL)
+            {
+                issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, "/email/html"));
+            }
+        }
+        // The sample render failed and nothing else says why (for example `| int` on a string
+        // sample): that is not the link's fault. Warn, and fall back to the source: it must
+        // put the unsubscribe URL in an `href`. Send time still refuses a message without it.
+        (None, failure) if html.clean => {
+            let reason = failure.as_deref().unwrap_or("the output is not UTF-8");
+            issues.push(Issue::new(code::SAMPLE_RENDER_FAILED, "/email/html").with_message(reason));
+            if email.category == Category::Marketing
+                && !href_mentions(&email.html, "system.unsubscribe_url")
+            {
+                issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, "/email/html"));
+            }
+        }
+        (None, _) => {}
     }
     if link_urls(&email.html).iter().any(|url| {
         url.get(..7)
@@ -214,7 +238,11 @@ fn validate_webhook(
             issues.push(Issue::new(code::INVALID_HEADER_NAME, at.clone()));
         }
         let checked = check_template(env, catalog, sample, &at, source, HEADER, issues);
-        let value_bytes = checked.sample.as_deref().map_or(0, str::len);
+        // Render sends the value on one line and trimmed, so that is what is counted.
+        let value_bytes = checked
+            .sample
+            .as_deref()
+            .map_or(0, |value| one_line(value).len());
         header_bytes = header_bytes.saturating_add(name.len() + value_bytes);
     }
     if header_bytes > MAX_HEADERS_BYTES {
@@ -225,7 +253,21 @@ fn validate_webhook(
         return;
     }
     match serde_json::from_str::<serde_json::Value>(&webhook.body) {
-        Ok(body) => walk_body(env, catalog, sample, "/webhook/body", &body, issues),
+        Ok(body) => {
+            let mut spent = 0usize;
+            walk_body(
+                env,
+                catalog,
+                sample,
+                "/webhook/body",
+                &body,
+                issues,
+                &mut spent,
+            );
+            if spent > MAX_WEBHOOK_BODY_BYTES {
+                issues.push(Issue::new(code::BODY_TOO_LARGE, "/webhook/body"));
+            }
+        }
         Err(_) => issues.push(Issue::new(code::INVALID_JSON_BODY, "/webhook/body")),
     }
 }
@@ -237,14 +279,25 @@ fn walk_body(
     at: &str,
     value: &serde_json::Value,
     issues: &mut Vec<Issue>,
+    spent: &mut usize,
 ) {
     match value {
         serde_json::Value::String(text) => {
-            check_template(env, catalog, sample, at, text, BODY, issues);
+            let checked = check_template(env, catalog, sample, at, text, BODY, issues);
+            // Render spends one budget across every string of the body.
+            *spent = spent.saturating_add(checked.sample.as_deref().map_or(0, str::len));
         }
         serde_json::Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                walk_body(env, catalog, sample, &format!("{at}/{index}"), item, issues);
+                walk_body(
+                    env,
+                    catalog,
+                    sample,
+                    &format!("{at}/{index}"),
+                    item,
+                    issues,
+                    spent,
+                );
             }
         }
         serde_json::Value::Object(map) => {
@@ -253,7 +306,7 @@ fn walk_body(
                 if has_template_syntax(key) {
                     issues.push(Issue::new(code::TEMPLATE_IN_KEY, child.clone()));
                 }
-                walk_body(env, catalog, sample, &child, item, issues);
+                walk_body(env, catalog, sample, &child, item, issues, spent);
             }
         }
         _ => {}
@@ -278,6 +331,7 @@ fn check_template(
         return Checked {
             clean: false,
             sample: None,
+            failure: None,
         };
     }
     let template = match env.template_from_named_str("check.txt", source) {
@@ -287,6 +341,7 @@ fn check_template(
             return Checked {
                 clean: false,
                 sample: None,
+                failure: None,
             };
         }
     };
@@ -303,27 +358,30 @@ fn check_template(
             }
         }
     }
-    let rendered = match render_raw(env, kind.name, source, sample, kind.limit) {
-        Ok(rendered) => rendered,
+    for (kind, name) in unknown_callables(env, source) {
+        let message = match kind {
+            Kind::Filter => format!("unknown filter `{name}`"),
+            Kind::Test => format!("unknown test `{name}`"),
+            Kind::Method => format!("method calls are not available: `{name}(`"),
+        };
+        issues.push(Issue::new(code::SYNTAX_ERROR, at).with_message(message));
+    }
+    let (rendered, failure) = match render_raw(env, kind.name, source, sample, kind.limit) {
+        Ok(rendered) => (rendered, None),
         Err((error, _)) => {
-            let unknown_callable = matches!(
-                error.kind(),
-                ErrorKind::UnknownFilter
-                    | ErrorKind::UnknownTest
-                    | ErrorKind::UnknownFunction
-                    | ErrorKind::UnknownMethod
-            );
-            // Other failures (a missing field, a sample value that does not fit an operation) are
-            // either already reported above or depend on real data, so they are not issues.
-            if unknown_callable && issues.len() == before {
-                issues.push(Issue::new(code::SYNTAX_ERROR, at));
+            // A function the sandbox lacks only fails at render time, so the sample render finds
+            // it. Other failures (a missing field, a sample value that does not fit an operation)
+            // are either already reported above or depend on real data, so they are not issues.
+            if error.kind() == ErrorKind::UnknownFunction && issues.len() == before {
+                issues.push(Issue::new(code::SYNTAX_ERROR, at).with_message("unknown function"));
             }
-            None
+            (None, Some(error.to_string()))
         }
     };
     Checked {
         clean: issues.len() == before,
         sample: rendered,
+        failure,
     }
 }
 
@@ -335,8 +393,17 @@ enum Lookup {
     Dynamic,
 }
 
+/// Whether an event path (after `event.`) is in the catalog: a property, or a path below an
+/// `Object` property. Nothing else has members: a path below any other type is unknown.
+fn event_path_is_known(catalog: &FieldCatalog, path: &str) -> bool {
+    match path.split_once('.') {
+        None => catalog.event.contains_key(path),
+        Some((name, _)) => catalog.event.get(name) == Some(&PropertyType::Object),
+    }
+}
+
 /// Classify a merge path (`person.first_name`). The whole path must be in the catalog: a path
-/// below an entry is unknown, because no catalog type is an object or JSON value.
+/// below a person trait is unknown, because no trait type is an object or JSON value.
 fn lookup(catalog: &FieldCatalog, path: &str) -> Lookup {
     let (root, key) = match path.split_once('.') {
         Some((root, key)) => (root, Some(key)),
@@ -352,7 +419,7 @@ fn lookup(catalog: &FieldCatalog, path: &str) -> Lookup {
     match (root, key) {
         ("person" | "event", None) => Lookup::Dynamic,
         ("person", Some(key)) => known(catalog.person.contains_key(key)),
-        ("event", Some(key)) => known(catalog.event.contains(key)),
+        ("event", Some(key)) => known(event_path_is_known(catalog, key)),
         ("message", Some(key)) => known(MESSAGE_FIELDS.contains(&key)),
         ("system", Some(key)) => known(SYSTEM_FIELDS.contains(&key)),
         ("message" | "system", None) => Lookup::Known,
@@ -376,7 +443,12 @@ mod tests {
                 ("first_name".to_owned(), TraitType::String),
                 ("age".to_owned(), TraitType::Number),
             ]),
-            event: ["order_id".to_owned()].into_iter().collect(),
+            event: BTreeMap::from([
+                ("order_id".to_owned(), PropertyType::String),
+                ("order".to_owned(), PropertyType::Object),
+                ("count".to_owned(), PropertyType::Integer),
+                ("tags".to_owned(), PropertyType::StringList),
+            ]),
         }
     }
 
@@ -591,6 +663,120 @@ mod tests {
     }
 
     #[test]
+    fn callables_in_branches_the_sample_skips_are_found() {
+        for (source, named) in [
+            (
+                r#"{% if person.first_name == "Ann" %}{{ person.first_name | nosuchfilter }}{% endif %}"#,
+                "nosuchfilter",
+            ),
+            (
+                r#"{% if person.first_name == "Ann" %}{% if person.age is nosuchtest %}x{% endif %}{% endif %}"#,
+                "nosuchtest",
+            ),
+            (
+                r#"{% if person.first_name == "Ann" %}{% set x = person.first_name %}{{ x.upper() }}{% endif %}"#,
+                "upper",
+            ),
+        ] {
+            let issues = email_issues(|email| email.subject = source.into());
+            assert_eq!(codes(&issues), [code::SYNTAX_ERROR], "{source}");
+            assert_eq!(issues[0].at, "/email/subject");
+            assert!(
+                issues[0]
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains(named)),
+                "{source}: {issues:?}"
+            );
+        }
+        // Names inside strings, comments and raw blocks are text, not callables.
+        let issues = email_issues(|email| {
+            email.subject =
+                r#"{{ "a | nope" }}{# x | nope #}{% raw %}{{ y | nope }}{% endraw %}"#.into();
+        });
+        assert_eq!(issues, Vec::new());
+    }
+
+    #[test]
+    fn an_unrelated_sample_failure_is_not_a_missing_unsubscribe() {
+        let with_link =
+            r#"<p>{{ person.first_name | int }}</p><a href="{{ system.unsubscribe_url }}">u</a>"#;
+        let issues = email_issues(|email| email.html = with_link.into());
+        assert_eq!(codes(&issues), [code::SAMPLE_RENDER_FAILED]);
+        assert_eq!(issues[0].severity, Severity::Warning);
+        assert_eq!(issues[0].at, "/email/html");
+        assert!(issues[0].message.is_some());
+        // Without the link in the source, the fallback still refuses a marketing email.
+        let issues = email_issues(|email| {
+            email.html = "<p>{{ person.first_name | int }}</p>".into();
+        });
+        assert_eq!(
+            codes(&issues),
+            [code::SAMPLE_RENDER_FAILED, code::MISSING_UNSUBSCRIBE]
+        );
+        // Transactional mail needs no link.
+        let issues = email_issues(|email| {
+            email.html = "<p>{{ person.first_name | int }}</p>".into();
+            email.category = Category::Transactional;
+        });
+        assert_eq!(codes(&issues), [code::SAMPLE_RENDER_FAILED]);
+    }
+
+    #[test]
+    fn a_comment_does_not_satisfy_the_unsubscribe_check() {
+        let issues = email_issues(|email| {
+            email.html = r#"<!-- <a href="{{ system.unsubscribe_url }}">u</a> -->"#.into();
+        });
+        assert_eq!(codes(&issues), [code::MISSING_UNSUBSCRIBE]);
+    }
+
+    #[test]
+    fn event_paths_nest_only_below_object_properties() {
+        let found = |text: &str| {
+            email_issues(|email| email.text = text.into())
+                .iter()
+                .map(|issue| (issue.code, issue.field.clone().unwrap_or_default()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("{{ event.order_id }} {{ event.tags[0] }}"), []);
+        assert_eq!(found("{{ event.order.total }}"), []);
+        for path in [
+            "event.order_id.x",
+            "event.count.x",
+            "event.tags.x",
+            "event.nope.x",
+        ] {
+            assert_eq!(
+                found(&format!("{{{{ {path} }}}}")),
+                [(code::UNKNOWN_MERGE_FIELD, path.to_owned())]
+            );
+        }
+    }
+
+    #[test]
+    fn the_sample_body_is_held_to_the_aggregate_budget() {
+        // Each string renders about 150 KB, within the per-string limit; together they pass 256 KiB.
+        let big = "{% for i in range(15000) %}0123456789{% endfor %}";
+        let body = serde_json::json!({ "a": big, "b": big }).to_string();
+        let issues = webhook_issues(&[], &body);
+        assert_eq!(codes(&issues), [code::BODY_TOO_LARGE]);
+        assert_eq!(issues[0].at, "/webhook/body");
+        let body = serde_json::json!({ "a": big }).to_string();
+        assert_eq!(webhook_issues(&[], &body), Vec::new());
+    }
+
+    #[test]
+    fn header_values_are_counted_after_normalisation() {
+        let spaces = " ".repeat(MAX_HEADER_VALUE_BYTES);
+        let names: Vec<String> = (0..5).map(|n| format!("X-{n}")).collect();
+        let headers: Vec<(&str, &str)> = names
+            .iter()
+            .map(|n| (n.as_str(), spaces.as_str()))
+            .collect();
+        assert_eq!(webhook_issues(&headers, "{}"), Vec::new());
+    }
+
+    #[test]
     fn webhook_header_names_must_be_tokens() {
         for name in ["X-A\r\nX-Evil: 1", "X:A", "X A", "X/B", ""] {
             let issues = webhook_issues(&[(name, "1")], "{}");
@@ -713,6 +899,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 18);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 20);
     }
 }

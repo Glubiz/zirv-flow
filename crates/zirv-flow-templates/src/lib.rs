@@ -11,6 +11,7 @@
 //! - [`validate`] reports what is wrong with a document as [`Issue`]s with fixed codes.
 //! - [`rewrite_links`] and [`unsubscribe_headers`] are the pure post-render steps.
 
+mod callables;
 mod context;
 mod document;
 mod error;

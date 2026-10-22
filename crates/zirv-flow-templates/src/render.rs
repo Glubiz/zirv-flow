@@ -57,7 +57,7 @@ fn webhook_of(doc: &TemplateDocument) -> Result<&WebhookContent, RenderError> {
 
 /// Replace line breaks and other control characters with a space, so a rendered value can never
 /// start a new header line.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()

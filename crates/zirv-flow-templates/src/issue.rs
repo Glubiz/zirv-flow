@@ -4,9 +4,10 @@
 //! pointer into the document. An issue also names the merge field it concerns, which comes from
 //! the marketer's own template text, never from a person or an event.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
+use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 
 /// The fixed issue codes.
@@ -27,13 +28,15 @@ pub mod code {
     pub const INVALID_HEADER_NAME: &str = "invalid_header_name";
     pub const TOO_MANY_HEADERS: &str = "too_many_headers";
     pub const HEADERS_TOO_LARGE: &str = "headers_too_large";
+    pub const BODY_TOO_LARGE: &str = "body_too_large";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
     pub const HTML_NEAR_CLIP: &str = "html_near_clip";
+    pub const SAMPLE_RENDER_FAILED: &str = "sample_render_failed";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 15] = [
+    pub const BLOCKING: [&str; 16] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -49,10 +52,16 @@ pub mod code {
         INVALID_HEADER_NAME,
         TOO_MANY_HEADERS,
         HEADERS_TOO_LARGE,
+        BODY_TOO_LARGE,
     ];
 
     /// Every code that only warns.
-    pub const WARNING: [&str; 3] = [MISSING_LANG, INSECURE_LINK, HTML_NEAR_CLIP];
+    pub const WARNING: [&str; 4] = [
+        MISSING_LANG,
+        INSECURE_LINK,
+        HTML_NEAR_CLIP,
+        SAMPLE_RENDER_FAILED,
+    ];
 }
 
 /// Whether an issue stops publishing.
@@ -81,6 +90,11 @@ pub struct Issue {
     pub at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    /// A short explanation, for a problem the code alone does not explain (an unknown filter
+    /// name, the error of a sample render). It comes from the template text or the sandbox, never
+    /// from a person or an event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl Issue {
@@ -90,7 +104,13 @@ impl Issue {
             severity: severity_of(code),
             at: at.into(),
             field: None,
+            message: None,
         }
+    }
+
+    pub(crate) fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
     }
 
     pub(crate) fn with_field(mut self, field: impl Into<String>) -> Self {
@@ -110,12 +130,15 @@ impl Issue {
 pub struct FieldCatalog {
     /// Trait key to its registry type.
     pub person: BTreeMap<String, TraitType>,
-    /// Property names of the trigger event.
-    pub event: BTreeSet<String>,
+    /// Trigger event property name to its schema type. A path below an `Object` property
+    /// (`event.order.total`) is accepted; below any other type it is unknown.
+    pub event: BTreeMap<String, PropertyType>,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
