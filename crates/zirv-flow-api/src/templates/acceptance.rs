@@ -865,6 +865,89 @@ mod tests {
         );
     }
 
+    fn mjml_doc(body: &str, footer: &str) -> Value {
+        json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+            "subject": "Hello {{ person.plan }}", "sender": "snd_1", "category": "marketing",
+            "syntax": "mjml",
+            "html": format!(
+                "<mjml lang=\"en\"><mj-body><mj-section><mj-column>\
+                 <mj-text>{body} {{{{ person.plan }}}}</mj-text>\
+                 <mj-text>{footer}</mj-text>\
+                 </mj-column></mj-section></mj-body></mjml>"
+            ),
+            "text": "Plan {{ person.plan }} {{ system.unsubscribe_url }}"
+        }})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_mjml_template_drafts_publishes_and_previews_like_an_html_one(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<a href="{{ system.unsubscribe_url }}">Unsubscribe</a>"#;
+        let document = mjml_doc("Welcome", footer);
+        let id = f.create("Newsletter", document.clone()).await;
+
+        let draft = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
+        assert_eq!(draft.body["draft"]["content_type"], "mjml");
+        assert_eq!(draft.body["draft"]["document"], document);
+
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(published.body["version"]["version"], 1);
+        assert_eq!(published.body["template"]["current_version"], 1);
+
+        let mut connection = f.pool.acquire().await.unwrap();
+        let catalog = field_catalog(
+            zirv_flow_store::read_template_field_catalog(&mut connection, f.ws)
+                .await
+                .unwrap(),
+        );
+        drop(connection);
+        let context = preview::sample_context(&catalog);
+        let preview = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        let doc: TemplateDocument = serde_json::from_value(document).unwrap();
+        let hooks = Hooks {
+            tracking: Tracking::Inert {
+                base_url: "https://preview.sample.invalid/t",
+            },
+        };
+        let expected = render_email(&doc, &context, &hooks).unwrap();
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["rendered"], true);
+        assert_eq!(preview.body["content_type"], "mjml");
+        assert_eq!(preview.body["html"], expected.html.as_str());
+        assert_eq!(preview.body["text"], expected.text.as_str());
+        assert!(expected.html.contains("<!--[if mso"), "{}", expected.html);
+
+        // Without the unsubscribe link the publish is refused with the same code as for HTML.
+        let bad = f.create("No footer", mjml_doc("Welcome", "no link")).await;
+        let refused = f.lead("POST", &format!("/{bad}/publish"), None).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        assert!(
+            refused.body["template_issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == "missing_unsubscribe"),
+            "{:?}",
+            refused.body
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_rewrites_web_links_to_inert_tokens(pool: PgPool) {
