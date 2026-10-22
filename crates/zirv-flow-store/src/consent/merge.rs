@@ -1,23 +1,25 @@
 //! Consent at merge (architecture section 7.3): the loser's states are combined with the
 //! survivor's by the pure rule in `zirv_flow_core::consent`, and its history moves along.
 
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, State, merge};
+use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, Record, State, merge_records};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::state::{StateWrite, write_state};
+use super::state::{StateWrite, dimensions_of, write_state};
 use crate::StoreError;
 
 #[derive(FromRow)]
 struct StateRow {
     channel: String,
     topic_id: Option<Uuid>,
+    dimensions: Value,
     status: String,
     changed_at: OffsetDateTime,
+    last_change_id: Option<Uuid>,
 }
 
 impl StateRow {
@@ -31,11 +33,21 @@ impl StateRow {
             changed_at: self.changed_at,
         })
     }
+
+    /// The row as a record of the pure rule. The topic is the same on both sides of a
+    /// comparison, so the scope holds the workspace dimensions only.
+    fn record(&self) -> Result<Record, StoreError> {
+        Ok(Record {
+            scope: dimensions_of(&self.dimensions),
+            state: self.state()?,
+            change_id: self.last_change_id.unwrap_or_else(Uuid::nil),
+        })
+    }
 }
 
 /// Moves what `loser` holds to `survivor`, in the caller's transaction, which holds the locks
-/// of both people. For each channel and topic the loser has a state for, the survivor ends
-/// up with the rule's winner. A change of status is recorded in the history with source
+/// of both people. For each channel, topic and dimension scope the loser has a state for, the
+/// survivor ends up with the rule's winner (`merge_records`). A change of status is recorded in the history with source
 /// `merge` and the merged person's id as evidence. The loser's states are deleted and its
 /// history is re-pointed to the survivor.
 pub(crate) async fn move_on_merge(
@@ -46,8 +58,9 @@ pub(crate) async fn move_on_merge(
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
     let losing: Vec<StateRow> = sqlx::query_as(
-        "SELECT channel, topic_id, status, changed_at FROM consent \
-         WHERE workspace_id = $1 AND person_id = $2 ORDER BY channel, topic_id NULLS FIRST",
+        "SELECT channel, topic_id, dimensions, status, changed_at, last_change_id FROM consent \
+         WHERE workspace_id = $1 AND person_id = $2 \
+         ORDER BY channel, topic_id NULLS FIRST, dimensions_key",
     )
     .bind(workspace.as_uuid())
     .bind(loser)
@@ -61,19 +74,26 @@ pub(crate) async fn move_on_merge(
             .parse()
             .map_err(|_| StoreError::query(sqlx::Error::Decode("unknown channel".into())))?;
         let held: Option<StateRow> = sqlx::query_as(
-            "SELECT channel, topic_id, status, changed_at FROM consent \
+            "SELECT channel, topic_id, dimensions, status, changed_at, last_change_id \
+             FROM consent \
              WHERE workspace_id = $1 AND person_id = $2 AND channel = $3 \
-               AND topic_id IS NOT DISTINCT FROM $4 FOR UPDATE",
+               AND topic_id IS NOT DISTINCT FROM $4 \
+               AND dimensions_key = consent_dimensions_canonical($5) FOR UPDATE",
         )
         .bind(workspace.as_uuid())
         .bind(survivor)
         .bind(&row.channel)
         .bind(row.topic_id)
+        .bind(&row.dimensions)
         .fetch_optional(&mut *connection)
         .await
         .map_err(StoreError::query)?;
         let held_state = held.as_ref().map(StateRow::state).transpose()?;
-        let Some(winner) = merge(held_state, Some(row.state()?)) else {
+        let held_record = held.as_ref().map(StateRow::record).transpose()?;
+        let Some(winner) = merge_records(held_record.into_iter().collect(), vec![row.record()?])
+            .pop()
+            .map(|record| record.state)
+        else {
             continue;
         };
         if held_state.map(|state| state.status) != Some(winner.status) {
@@ -84,6 +104,7 @@ pub(crate) async fn move_on_merge(
                 &StateWrite {
                     channel,
                     topic: row.topic_id,
+                    dimensions: &dimensions_of(&row.dimensions),
                     from: held.as_ref().map(|held| held.status.as_str()),
                     state: winner,
                     source: ChangeSource::Merge,
@@ -98,13 +119,15 @@ pub(crate) async fn move_on_merge(
             sqlx::query(
                 "UPDATE consent SET changed_at = $5 \
                  WHERE workspace_id = $1 AND person_id = $2 AND channel = $3 \
-                   AND topic_id IS NOT DISTINCT FROM $4",
+                   AND topic_id IS NOT DISTINCT FROM $4 \
+                   AND dimensions_key = consent_dimensions_canonical($6)",
             )
             .bind(workspace.as_uuid())
             .bind(survivor)
             .bind(&row.channel)
             .bind(row.topic_id)
             .bind(winner.changed_at)
+            .bind(&row.dimensions)
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
@@ -209,6 +232,7 @@ mod tests {
             &mut tx,
             ws,
             &ConsentChange {
+                dimensions: Default::default(),
                 person,
                 channel: Channel::Email,
                 topic,
@@ -287,7 +311,7 @@ mod tests {
             states(&pool, ws, p1).await,
             [(Some("newsletter".to_owned()), "unsubscribed".to_owned(), T1)]
         );
-        let (history, _) = consent_history(&pool, ws, p1, 10, None)
+        let (history, _) = consent_history(&pool, ws, p1, 10, None, &Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -367,6 +391,97 @@ mod tests {
             [
                 (None, "pending_confirmation".to_owned()),
                 (Some("unsubscribed".to_owned()), "subscribed".to_owned()),
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_keeps_the_latest_change_per_dimension_scope(pool: PgPool) {
+        use crate::{NewDimension, create_dimension, create_dimension_value};
+        let ws = workspace(&pool).await;
+        create_dimension(
+            &pool,
+            ws,
+            &NewDimension {
+                key: "vertical".into(),
+                name: "Vertical".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for key in ["retail", "b2b"] {
+            create_dimension_value(&pool, ws, "vertical", key, key)
+                .await
+                .unwrap();
+        }
+        let (p1, p2) = two_people(&pool, ws).await;
+        let scoped = async |person: Uuid, vertical: Option<&str>, status, at| {
+            let mut tx = begin(&pool).await.unwrap();
+            set_consent(
+                &mut tx,
+                ws,
+                &ConsentChange {
+                    person,
+                    channel: Channel::Email,
+                    topic: None,
+                    dimensions: vertical
+                        .map(|value| [("vertical".to_owned(), value.to_owned())].into())
+                        .unwrap_or_default(),
+                    status,
+                    source: ChangeSource::Api,
+                    evidence: json!({}),
+                    occurred_at: at,
+                    actor: None,
+                },
+                &TraceContext::root(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+            commit(tx).await.unwrap();
+        };
+        scoped(p1, None, ConsentStatus::Subscribed, T1).await;
+        scoped(p1, Some("retail"), ConsentStatus::Subscribed, T2).await;
+        scoped(p2, None, ConsentStatus::Unsubscribed, T2).await;
+        scoped(p2, Some("retail"), ConsentStatus::Unsubscribed, T1).await;
+        scoped(p2, Some("b2b"), ConsentStatus::Unsubscribed, T1).await;
+
+        join(&pool, ws).await;
+
+        let rows: Vec<(String, String, OffsetDateTime)> = sqlx::query_as(
+            "SELECT dimensions_key, status, changed_at FROM consent WHERE person_id = $1 \
+             ORDER BY dimensions_key",
+        )
+        .bind(p1)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (String::new(), "unsubscribed".to_owned(), T2),
+                ("vertical=b2b".to_owned(), "unsubscribed".to_owned(), T1),
+                ("vertical=retail".to_owned(), "subscribed".to_owned(), T2),
+            ]
+        );
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM consent WHERE person_id = $1")
+            .bind(p2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+        let merged: Vec<(Value, String)> = sqlx::query_as(
+            "SELECT dimensions, to_status FROM consent_changes WHERE source = 'merge' \
+             ORDER BY dimensions::text",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            merged,
+            [
+                (json!({}), "unsubscribed".to_owned()),
+                (json!({"vertical": "b2b"}), "unsubscribed".to_owned()),
             ]
         );
     }

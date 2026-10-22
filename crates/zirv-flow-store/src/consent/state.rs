@@ -6,10 +6,14 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, State};
+use zirv_flow_core::consent::{
+    ChangeSource, Channel, ConsentStatus, Dimensions, Read, Record, State, TOPIC_DIMENSION,
+    TopicPolicy, read,
+};
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
+use super::dimensions::unknown_dimension_entry;
 use super::topics::find_topic;
 use crate::StoreError;
 use crate::changes::{mark_person, request_reevaluation};
@@ -24,6 +28,9 @@ pub struct ConsentChange {
     pub channel: Channel,
     /// `None` is the channel as a whole.
     pub topic: Option<Uuid>,
+    /// The workspace dimension values the decision is scoped to; a dimension left out means
+    /// all its values. The built-in `topic` is `topic`, not a key of this map.
+    pub dimensions: Dimensions,
     pub status: ConsentStatus,
     pub source: ChangeSource,
     /// What proves the decision, such as the form, address or text it came from.
@@ -46,6 +53,8 @@ pub enum ConsentOutcome {
     NoSuchPerson,
     /// The topic is not in the workspace, or belongs to another channel.
     NoSuchTopic,
+    /// A dimension or value of the scope is not a live one of the workspace.
+    NoSuchDimension,
 }
 
 /// One current state of a person, with the topic it is about.
@@ -55,6 +64,8 @@ pub struct ConsentEntry {
     pub topic_id: Option<Uuid>,
     pub topic_key: Option<String>,
     pub topic_name: Option<String>,
+    /// The dimension values the state is scoped to: a JSON object of key to value key.
+    pub dimensions: Value,
     pub status: String,
     pub explicit: bool,
     pub changed_at: OffsetDateTime,
@@ -67,6 +78,8 @@ pub struct ConsentHistoryEntry {
     pub channel: String,
     pub topic_id: Option<Uuid>,
     pub topic_key: Option<String>,
+    /// The dimension values the change is scoped to: a JSON object of key to value key.
+    pub dimensions: Value,
     pub from_status: Option<String>,
     pub to_status: String,
     pub source: String,
@@ -94,17 +107,25 @@ pub async fn set_consent(
             _ => return Ok(ConsentOutcome::NoSuchTopic),
         }
     }
+    if unknown_dimension_entry(&mut *connection, workspace, &change.dimensions)
+        .await?
+        .is_some()
+    {
+        return Ok(ConsentOutcome::NoSuchDimension);
+    }
     let Some(person) = lock_current_person(connection, workspace, change.person).await? else {
         return Ok(ConsentOutcome::NoSuchPerson);
     };
     let held: Option<String> = sqlx::query_scalar(
         "SELECT status FROM consent WHERE workspace_id = $1 AND person_id = $2 \
-           AND channel = $3 AND topic_id IS NOT DISTINCT FROM $4",
+           AND channel = $3 AND topic_id IS NOT DISTINCT FROM $4 \
+           AND dimensions_key = consent_dimensions_canonical($5)",
     )
     .bind(workspace.as_uuid())
     .bind(person)
     .bind(change.channel.as_str())
     .bind(change.topic)
+    .bind(dimensions_json(&change.dimensions))
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -118,6 +139,7 @@ pub async fn set_consent(
         &StateWrite {
             channel: change.channel,
             topic: change.topic,
+            dimensions: &change.dimensions,
             from: held.as_deref(),
             state: State {
                 status: change.status,
@@ -136,6 +158,27 @@ pub async fn set_consent(
         person_id: person,
         change_id,
     })
+}
+
+/// The JSON object stored for a dimension map.
+pub(super) fn dimensions_json(dimensions: &Dimensions) -> Value {
+    Value::Object(
+        dimensions
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect(),
+    )
+}
+
+/// The dimension map a stored JSON object holds. Anything that is not a string value is
+/// dropped; the column's writers only store strings.
+pub(super) fn dimensions_of(stored: &Value) -> Dimensions {
+    stored
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+        .collect()
 }
 
 /// Locks the person that stands for `person` until the transaction ends, so two writes to
@@ -171,6 +214,7 @@ async fn lock_current_person(
 pub(super) struct StateWrite<'a> {
     pub(super) channel: Channel,
     pub(super) topic: Option<Uuid>,
+    pub(super) dimensions: &'a Dimensions,
     pub(super) from: Option<&'a str>,
     pub(super) state: State,
     pub(super) source: ChangeSource,
@@ -191,9 +235,9 @@ pub(super) async fn write_state(
     let change_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO consent_changes \
-            (id, workspace_id, person_id, channel, topic_id, from_status, to_status, source, \
-             evidence, occurred_at, actor_user_id, trace_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            (id, workspace_id, person_id, channel, topic_id, dimensions, from_status, to_status, \
+             source, evidence, occurred_at, actor_user_id, trace_id) \
+         VALUES ($1, $2, $3, $4, $5, $13, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(change_id)
     .bind(workspace.as_uuid())
@@ -207,15 +251,16 @@ pub(super) async fn write_state(
     .bind(write.occurred_at)
     .bind(write.actor)
     .bind(trace.trace_id.as_uuid())
+    .bind(dimensions_json(write.dimensions))
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     sqlx::query(
         "INSERT INTO consent \
-            (workspace_id, person_id, channel, topic_id, status, explicit, changed_at, \
-             last_change_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-         ON CONFLICT (workspace_id, person_id, channel, topic_id) DO UPDATE SET \
+            (workspace_id, person_id, channel, topic_id, dimensions, status, explicit, \
+             changed_at, last_change_id) \
+         VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8) \
+         ON CONFLICT (workspace_id, person_id, channel, topic_id, dimensions_key) DO UPDATE SET \
             status = EXCLUDED.status, explicit = EXCLUDED.explicit, \
             changed_at = EXCLUDED.changed_at, last_change_id = EXCLUDED.last_change_id",
     )
@@ -227,6 +272,7 @@ pub(super) async fn write_state(
     .bind(write.state.status.is_explicit())
     .bind(write.state.changed_at)
     .bind(change_id)
+    .bind(dimensions_json(write.dimensions))
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -267,11 +313,11 @@ pub async fn consent_for(
         return Ok(None);
     };
     let entries = sqlx::query_as(
-        "SELECT c.channel, c.topic_id, t.key AS topic_key, t.name AS topic_name, c.status, \
-                c.explicit, c.changed_at \
+        "SELECT c.channel, c.topic_id, t.key AS topic_key, t.name AS topic_name, c.dimensions, \
+                c.status, c.explicit, c.changed_at \
          FROM consent c LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
          WHERE c.workspace_id = $1 AND c.person_id = $2 \
-         ORDER BY c.channel, t.key NULLS FIRST",
+         ORDER BY c.channel, t.key NULLS FIRST, c.dimensions_key",
     )
     .bind(workspace.as_uuid())
     .bind(person)
@@ -281,8 +327,91 @@ pub async fn consent_for(
     Ok(Some(entries))
 }
 
+/// What [`consent_read`] found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadOutcome {
+    Read {
+        verdict: Read,
+        /// The policy whose default applied when no record decided.
+        policy: TopicPolicy,
+    },
+    NoSuchPerson,
+    /// The topic is not in the workspace, or belongs to another channel.
+    NoSuchTopic,
+    /// A dimension or value of the message is not a live one of the workspace.
+    NoSuchDimension,
+}
+
+/// Whether a send on `channel` for a message with this `topic` and these `dimensions` is
+/// permitted for `person`, by the pure read rule over the person's records for the channel.
+/// The topic joins the message's coordinates as the built-in `topic` dimension. A message
+/// without a topic is judged under an opt-in policy: only a covering subscription allows it.
+/// The person is followed through `merged_into`.
+pub async fn consent_read(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    person: Uuid,
+    channel: Channel,
+    topic: Option<Uuid>,
+    dimensions: &Dimensions,
+) -> Result<ReadOutcome, StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    let mut message = dimensions.clone();
+    let policy = match topic {
+        Some(id) => match find_topic(&mut *connection, workspace, id).await? {
+            Some(found) if found.channel == channel => {
+                message.insert(TOPIC_DIMENSION.to_owned(), found.key);
+                found.policy
+            }
+            _ => return Ok(ReadOutcome::NoSuchTopic),
+        },
+        None => TopicPolicy::OptIn,
+    };
+    if unknown_dimension_entry(&mut connection, workspace, dimensions)
+        .await?
+        .is_some()
+    {
+        return Ok(ReadOutcome::NoSuchDimension);
+    }
+    let Some(person) = current_person(&mut *connection, workspace, person).await? else {
+        return Ok(ReadOutcome::NoSuchPerson);
+    };
+    let rows: Vec<(Option<String>, Value, String, OffsetDateTime, Option<Uuid>)> = sqlx::query_as(
+        "SELECT t.key, c.dimensions, c.status, c.changed_at, c.last_change_id \
+             FROM consent c \
+             LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
+             WHERE c.workspace_id = $1 AND c.person_id = $2 AND c.channel = $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(person)
+    .bind(channel.as_str())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut records = Vec::with_capacity(rows.len());
+    for (topic_key, stored, status, changed_at, change_id) in rows {
+        let mut scope = dimensions_of(&stored);
+        if let Some(key) = topic_key {
+            scope.insert(TOPIC_DIMENSION.to_owned(), key);
+        }
+        let status: ConsentStatus = status
+            .parse()
+            .map_err(|_| StoreError::query(sqlx::Error::Decode("unknown consent status".into())))?;
+        records.push(Record {
+            scope,
+            state: State { status, changed_at },
+            change_id: change_id.unwrap_or_else(Uuid::nil),
+        });
+    }
+    Ok(ReadOutcome::Read {
+        verdict: read(&message, &records, policy),
+        policy,
+    })
+}
+
 /// A page of a person's history, newest first by `(occurred_at, id)`, at most `limit`, after
-/// the `before` cursor. The flag is true when more existed. The person is followed through
+/// the `before` cursor. Only changes scoped to at least the `within` dimension values are
+/// listed, so an empty map lists them all. The flag is true when more existed. The person is followed through
 /// `merged_into`; the history of a merged person moved to the survivor. `None` when the
 /// workspace has no such person.
 pub async fn consent_history(
@@ -291,18 +420,27 @@ pub async fn consent_history(
     person: Uuid,
     limit: u32,
     before: Option<(OffsetDateTime, Uuid)>,
+    within: &Dimensions,
 ) -> Result<Option<(Vec<ConsentHistoryEntry>, bool)>, StoreError> {
     let Some(person) = current_person(pool, workspace, person).await? else {
         return Ok(None);
     };
     let mut rows: Vec<ConsentHistoryEntry> = sqlx::query_as(
-        "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.from_status, c.to_status,                 c.source, c.evidence, c.occurred_at, c.actor_user_id          FROM consent_changes c          LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id          WHERE c.workspace_id = $1 AND c.person_id = $2            AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4))          ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
+        "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.dimensions, c.from_status, \
+                c.to_status, c.source, c.evidence, c.occurred_at, c.actor_user_id \
+         FROM consent_changes c \
+         LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
+         WHERE c.workspace_id = $1 AND c.person_id = $2 \
+           AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4)) \
+           AND c.dimensions @> $6 \
+         ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
     )
     .bind(workspace.as_uuid())
     .bind(person)
     .bind(before.map(|(at, _)| at))
     .bind(before.map(|(_, id)| id))
     .bind(i64::from(limit) + 1)
+    .bind(dimensions_json(within))
     .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
@@ -377,6 +515,7 @@ mod tests {
         at: OffsetDateTime,
     ) -> ConsentChange {
         ConsentChange {
+            dimensions: Default::default(),
             person,
             channel: Channel::Email,
             topic,
@@ -437,7 +576,7 @@ mod tests {
         assert_eq!(entries[0].status, "subscribed");
         assert!(entries[0].explicit);
         assert_eq!(entries[0].changed_at, T1);
-        let (history, more) = consent_history(&pool, ws, ada, 10, None)
+        let (history, more) = consent_history(&pool, ws, ada, 10, None, &Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -513,7 +652,7 @@ mod tests {
         second.source = ChangeSource::UnsubscribeLink;
         set(&pool, ws, &second, &trace).await;
 
-        let (page, more) = consent_history(&pool, ws, ada, 1, None)
+        let (page, more) = consent_history(&pool, ws, ada, 1, None, &Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -522,11 +661,17 @@ mod tests {
         assert_eq!(page[0].to_status, "unsubscribed");
         assert_eq!(page[0].from_status.as_deref(), Some("subscribed"));
         assert_eq!(page[0].source, "unsubscribe_link");
-        let (rest, more) =
-            consent_history(&pool, ws, ada, 1, Some((page[0].occurred_at, page[0].id)))
-                .await
-                .unwrap()
-                .unwrap();
+        let (rest, more) = consent_history(
+            &pool,
+            ws,
+            ada,
+            1,
+            Some((page[0].occurred_at, page[0].id)),
+            &Default::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(!more);
         assert_eq!(rest[0].to_status, "subscribed");
     }
@@ -602,7 +747,7 @@ mod tests {
         assert_eq!(count(&pool, "consent").await, 0);
         assert!(consent_for(&pool, two, ada).await.unwrap().is_none());
         assert!(
-            consent_history(&pool, two, ada, 5, None)
+            consent_history(&pool, two, ada, 5, None, &Default::default())
                 .await
                 .unwrap()
                 .is_none()
@@ -771,5 +916,248 @@ mod tests {
         set(&pool, ws, &change, &trace).await;
 
         assert_eq!(count(&pool, "person_changes").await, 0);
+    }
+
+    fn scoped(pairs: &[(&str, &str)]) -> Dimensions {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    fn scoped_change(
+        person: Uuid,
+        topic: Option<Uuid>,
+        pairs: &[(&str, &str)],
+        status: ConsentStatus,
+        at: OffsetDateTime,
+    ) -> ConsentChange {
+        ConsentChange {
+            dimensions: scoped(pairs),
+            ..change(person, topic, status, at)
+        }
+    }
+
+    /// A `vertical` dimension with the values `retail` and `b2b`.
+    async fn verticals(pool: &PgPool, ws: WorkspaceId) {
+        use crate::{NewDimension, create_dimension, create_dimension_value};
+        create_dimension(
+            pool,
+            ws,
+            &NewDimension {
+                key: "vertical".into(),
+                name: "Vertical".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for key in ["retail", "b2b"] {
+            create_dimension_value(pool, ws, "vertical", key, key)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn allowed_for(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+        topic: Option<Uuid>,
+        pairs: &[(&str, &str)],
+    ) -> bool {
+        match consent_read(pool, ws, person, Channel::Email, topic, &scoped(pairs))
+            .await
+            .unwrap()
+        {
+            ReadOutcome::Read { verdict, .. } => verdict.allowed,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_vertical_scoped_unsubscribe_blocks_only_that_vertical_and_the_rest_stays_separate(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        verticals(&pool, ws).await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let news = topic(&pool, ws, "news").await;
+        let trace = TraceContext::root(Cause::api("test"));
+        let retail = [("vertical", "retail")];
+
+        set(
+            &pool,
+            ws,
+            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        let scoped_out = set(
+            &pool,
+            ws,
+            &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
+            &trace,
+        )
+        .await;
+
+        assert!(matches!(scoped_out, ConsentOutcome::Changed { .. }));
+        assert_eq!(count(&pool, "consent").await, 2);
+        assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
+        assert!(allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
+        assert!(!allowed_for(&pool, ws, ada, Some(news), &retail).await);
+        let again = set(
+            &pool,
+            ws,
+            &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
+            &trace,
+        )
+        .await;
+        assert_eq!(again, ConsentOutcome::Unchanged);
+        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+        let shown: Vec<(String, &str)> = entries
+            .iter()
+            .map(|entry| (entry.dimensions.to_string(), entry.status.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("{}".to_owned(), "subscribed"),
+                (r#"{"vertical":"retail"}"#.to_owned(), "unsubscribed")
+            ]
+        );
+
+        set(
+            &pool,
+            ws,
+            &change(
+                ada,
+                Some(news),
+                ConsentStatus::Unsubscribed,
+                T2 + time::Duration::DAY,
+            ),
+            &trace,
+        )
+        .await;
+        assert!(!allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
+        let (history, _) = consent_history(&pool, ws, ada, 10, None, &scoped(&retail))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].dimensions, json!({"vertical": "retail"}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unknown_dimension_or_value_changes_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        verticals(&pool, ws).await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let trace = TraceContext::root(Cause::api("test"));
+
+        let mut refused = Vec::new();
+        for pairs in [
+            &[("vertical", "unheard-of")][..],
+            &[("brand", "x")][..],
+            &[("topic", "news")][..],
+        ] {
+            refused.push(
+                set(
+                    &pool,
+                    ws,
+                    &scoped_change(ada, None, pairs, ConsentStatus::Unsubscribed, T1),
+                    &trace,
+                )
+                .await,
+            );
+        }
+        let read = consent_read(
+            &pool,
+            ws,
+            ada,
+            Channel::Email,
+            None,
+            &scoped(&[("brand", "x")]),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            refused
+                .iter()
+                .all(|outcome| *outcome == ConsentOutcome::NoSuchDimension)
+        );
+        assert_eq!(read, ReadOutcome::NoSuchDimension);
+        assert_eq!(count(&pool, "consent").await, 0);
+        assert_eq!(count(&pool, "consent_changes").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn topic_consent_written_without_dimensions_reads_as_before(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let news = topic(&pool, ws, "news").await;
+        sqlx::query(
+            "INSERT INTO consent (workspace_id, person_id, channel, topic_id, status, explicit, \
+                                  changed_at) \
+             VALUES ($1, $2, 'email', $3, 'unsubscribed', true, $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(ada)
+        .bind(news)
+        .bind(T1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dimensions, json!({}));
+        assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
+        assert_eq!(entries[0].status, "unsubscribed");
+        assert_eq!(entries[0].changed_at, T1);
+        assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
+        let key: String = sqlx::query_scalar("SELECT dimensions_key FROM consent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(key, "");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn equal_maps_in_any_key_order_are_one_row_and_the_empty_scope_stays_unique(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let insert = async |dimensions: &str| {
+            sqlx::query(
+                "INSERT INTO consent (workspace_id, person_id, channel, topic_id, dimensions, \
+                                      status, explicit, changed_at) \
+                 VALUES ($1, $2, 'email', NULL, $3::jsonb, 'subscribed', true, $4)",
+            )
+            .bind(ws.as_uuid())
+            .bind(ada)
+            .bind(dimensions)
+            .bind(T1)
+            .execute(&pool)
+            .await
+        };
+
+        assert!(insert("{}").await.is_ok());
+        assert!(insert("{}").await.is_err());
+        assert!(insert(r#"{"a": "x", "bb": "y"}"#).await.is_ok());
+        assert!(insert(r#"{"bb":"y","a":"x"}"#).await.is_err());
+        assert!(insert(r#"{"a": "x"}"#).await.is_ok());
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT dimensions_key FROM consent ORDER BY dimensions_key")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, ["", "a=x", "a=x;bb=y"]);
     }
 }
