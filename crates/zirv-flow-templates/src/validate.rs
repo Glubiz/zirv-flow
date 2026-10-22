@@ -1,12 +1,13 @@
 //! Publish validation (architecture 11.6): everything that can be checked without a person.
 
 use minijinja::Environment;
+use zirv_flow_core::segment::pointer_push;
 
 use crate::context::{MESSAGE_FIELDS, SYSTEM_FIELDS};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
 };
-use crate::issue::{FieldCatalog, Issue, code, pointer_segment};
+use crate::issue::{FieldCatalog, Issue, code};
 use crate::links::link_urls;
 use crate::render::has_template_syntax;
 use crate::sandbox::{GLOBAL_FUNCTIONS, MAX_SOURCE_BYTES, environment};
@@ -100,7 +101,7 @@ fn validate_webhook(
     issues: &mut Vec<Issue>,
 ) {
     for (name, source) in &webhook.headers {
-        let at = format!("/webhook/headers/{}", pointer_segment(name));
+        let at = pointer_push("/webhook/headers", name);
         check_template(env, catalog, &at, source, issues);
     }
     if webhook.body.len() > MAX_SOURCE_BYTES {
@@ -131,7 +132,7 @@ fn walk_body(
         }
         serde_json::Value::Object(map) => {
             for (key, item) in map {
-                let child = format!("{at}/{}", pointer_segment(key));
+                let child = pointer_push(at, key);
                 if has_template_syntax(key) {
                     issues.push(Issue::new(code::TEMPLATE_IN_KEY, child.clone()));
                 }

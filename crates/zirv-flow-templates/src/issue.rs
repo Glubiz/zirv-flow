@@ -106,11 +106,6 @@ pub struct FieldCatalog {
     pub event: BTreeSet<String>,
 }
 
-/// A JSON pointer segment: `~` and `/` escaped.
-pub(crate) fn pointer_segment(text: &str) -> String {
-    text.replace('~', "~0").replace('/', "~1")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,10 +133,5 @@ mod tests {
         let issue = Issue::new(code::UNKNOWN_MERGE_FIELD, "/email/html").with_field("person.x");
         assert!(issue.is_blocking());
         assert_eq!(issue.field.as_deref(), Some("person.x"));
-    }
-
-    #[test]
-    fn pointer_segments_are_escaped() {
-        assert_eq!(pointer_segment("a/b~c"), "a~1b~0c");
     }
 }
