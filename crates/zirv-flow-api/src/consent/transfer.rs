@@ -55,7 +55,7 @@ pub(crate) struct ConsentImportBody {
     dry_run: bool,
     /// Rows that changed a state (or, on a dry run, would).
     changed: usize,
-    /// Rows that repeated the status already held.
+    /// Rows that repeated the status already held, or were older than the state they scope.
     unchanged: usize,
     invalid: Vec<ConsentImportRowBody>,
 }
@@ -217,7 +217,7 @@ pub(crate) async fn import(
         .await?;
         match outcome {
             ConsentOutcome::Changed { .. } => body.changed += 1,
-            ConsentOutcome::Unchanged => body.unchanged += 1,
+            ConsentOutcome::Unchanged | ConsentOutcome::Superseded => body.unchanged += 1,
             ConsentOutcome::NoSuchPerson => reject(&mut body, "no_such_person"),
             ConsentOutcome::NoSuchTopic => reject(&mut body, "unknown_topic"),
             ConsentOutcome::NoSuchDimension => reject(&mut body, "unknown_dimension"),

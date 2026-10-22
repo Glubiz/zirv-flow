@@ -5233,6 +5233,60 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_row_older_than_the_held_state_counts_as_unchanged_and_moves_nothing(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let ada = seed_person(&pool, &ws, "ada@example.com").await;
+        let put = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &ada),
+            Some(json!({"channel": "email", "status": "subscribed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+        sqlx::query("UPDATE consent SET changed_at = now() + interval '1 day'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reply = call_text(
+            &router,
+            "POST",
+            &consent_csv_uri(&ws, "import"),
+            Some("text/csv"),
+            format!(
+                "person_id,channel,topic,status
+{ada},email,,unsubscribed
+"
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let body: Value = serde_json::from_str(&reply.text).unwrap();
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+        assert_eq!(
+            (body["changed"].as_u64(), body["unchanged"].as_u64()),
+            (Some(0), Some(1))
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM consent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let history: i64 = sqlx::query_scalar("SELECT count(*) FROM consent_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((status.as_str(), history), ("subscribed", 2));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn consent_is_set_read_and_its_history_shows_source_and_evidence(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

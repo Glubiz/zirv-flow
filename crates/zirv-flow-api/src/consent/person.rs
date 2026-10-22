@@ -350,7 +350,8 @@ pub(crate) async fn set_person_consent(
                 "names a dimension or value that is not live in this workspace",
             ));
         }
-        ConsentOutcome::Unchanged | ConsentOutcome::Changed { .. } => {}
+        ConsentOutcome::Unchanged | ConsentOutcome::Superseded | ConsentOutcome::Changed { .. } => {
+        }
     }
     zirv_flow_store::commit(tx).await?;
     states_of(pool, workspace, person)

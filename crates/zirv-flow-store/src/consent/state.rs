@@ -50,6 +50,9 @@ pub enum ConsentOutcome {
         person_id: Uuid,
         change_id: Uuid,
     },
+    /// The change is older than the state it scopes, by (`changed_at`, change id). It was
+    /// appended to the history and left the state as it is.
+    Superseded,
     NoSuchPerson,
     /// The topic is not in the workspace, or belongs to another channel.
     NoSuchTopic,
@@ -94,9 +97,11 @@ pub struct ConsentHistoryEntry {
 const MERGE_HOPS: usize = 3;
 
 /// Records a consent decision in the caller's transaction. The person is followed through
-/// `merged_into`. A write of the status already held writes nothing: no history row and no
-/// decision. Otherwise the state is upserted, a history row is appended and a
-/// `consent.change` decision records the source code and the ids.
+/// `merged_into`. A write of the status already held writes nothing (no history row, no
+/// decision) unless some overlapping record of a different status lies between the held row and
+/// the change, as [`reaffirm_matters`] says. Otherwise a history row is appended and a
+/// `consent.change` decision records the source code and the ids, and the state is upserted when
+/// the change is newer than it; an older change returns [`ConsentOutcome::Superseded`].
 pub async fn set_consent(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -140,7 +145,7 @@ pub async fn set_consent(
     let held = held_row.as_ref().map(|(status, _, _)| status.clone());
     if let Some((status, at, last)) = &held_row
         && status == change.status.as_str()
-        && !covers_newer_record(connection, workspace, person, change, (*at, *last)).await?
+        && !reaffirm_matters(connection, workspace, person, change, (*at, *last)).await?
     {
         return Ok(ConsentOutcome::Unchanged);
     }
@@ -166,21 +171,24 @@ pub async fn set_consent(
         trace,
     )
     .await?;
-    if applied {
-        request_reevaluation(connection, workspace).await?;
+    if !applied {
+        return Ok(ConsentOutcome::Superseded);
     }
+    request_reevaluation(connection, workspace).await?;
     Ok(ConsentOutcome::Changed {
         person_id: person,
         change_id,
     })
 }
 
-/// Whether the person holds a record that `change` covers and that is newer than the held row
-/// `(changed_at, last_change_id)` of the change own scope. Such a record means the held row is
-/// not the latest word for the messages the change covers, so re-affirming its status is not a
-/// no-op. A change covers the records of its channel whose scope names at least its dimension
-/// values, and, when it names a topic, only that topic.
-async fn covers_newer_record(
+/// Whether re-affirming the held status changes what the read rule answers: some other record
+/// R of the person and channel overlaps the change scope, has a different status, and sits
+/// strictly between the held row and the incoming change by (`changed_at`, change id). Scopes
+/// overlap when the topics are equal or either has none, and every dimension key both maps name
+/// has the same value; a key missing from a map means all values. The incoming change id is a
+/// fresh one, later than every stored id, so R is before it when R is not after the change time.
+/// Runs under the person lock.
+async fn reaffirm_matters(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person: Uuid,
@@ -190,10 +198,14 @@ async fn covers_newer_record(
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM consent c \
             WHERE c.workspace_id = $1 AND c.person_id = $2 AND c.channel = $3 \
-              AND ($4::uuid IS NULL OR c.topic_id = $4) \
-              AND c.dimensions @> $5 \
+              AND ($4::uuid IS NULL OR c.topic_id IS NULL OR c.topic_id = $4) \
+              AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(c.dimensions) e \
+                              WHERE $5::jsonb -> e.key IS NOT NULL \
+                                AND ($5::jsonb ->> e.key) <> e.value) \
+              AND c.status <> $8 \
               AND (c.changed_at, COALESCE(c.last_change_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
-                  > ($6, COALESCE($7, '00000000-0000-0000-0000-000000000000'::uuid)))",
+                  > ($6, COALESCE($7, '00000000-0000-0000-0000-000000000000'::uuid)) \
+              AND c.changed_at <= $9)",
     )
     .bind(workspace.as_uuid())
     .bind(person)
@@ -202,6 +214,8 @@ async fn covers_newer_record(
     .bind(dimensions_json(&change.dimensions))
     .bind(held.0)
     .bind(held.1)
+    .bind(change.status.as_str())
+    .bind(change.occurred_at)
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)
@@ -1380,7 +1394,7 @@ mod tests {
                 &trace,
             )
             .await;
-            assert!(matches!(late, ConsentOutcome::Changed { .. }), "{pairs:?}");
+            assert_eq!(late, ConsentOutcome::Superseded, "{pairs:?}");
             let (status, at): (String, OffsetDateTime) = sqlx::query_as(
                 "SELECT status, changed_at FROM consent WHERE dimensions_key = consent_dimensions_canonical($1)",
             )
@@ -1501,5 +1515,130 @@ mod tests {
         assert!(state(r#"{"vertical":"retail-eu_1"}"#).await.is_ok());
         assert!(history(r#"{"vertical":"retail-eu_1"}"#).await.is_ok());
         assert!(state("{}").await.is_ok());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reaffirm_matters_only_when_an_overlapping_record_of_another_status_lies_between(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        verticals(&pool, ws).await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let news = topic(&pool, ws, "news").await;
+        let trace = TraceContext::root(Cause::api("test"));
+        let retail = [("vertical", "retail")];
+        let day = time::Duration::DAY;
+        let (t3, t4) = (T2 + day, T2 + day + day);
+
+        // A broader record in between: retail subscribed, all-values unsubscribed, retail again.
+        set(
+            &pool,
+            ws,
+            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        set(
+            &pool,
+            ws,
+            &change(ada, None, ConsentStatus::Unsubscribed, T2),
+            &trace,
+        )
+        .await;
+        assert!(!allowed_for(&pool, ws, ada, None, &retail).await);
+        let again = set(
+            &pool,
+            ws,
+            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, t3),
+            &trace,
+        )
+        .await;
+        assert!(matches!(again, ConsentOutcome::Changed { .. }), "{again:?}");
+        assert!(allowed_for(&pool, ws, ada, None, &retail).await);
+
+        // The same with a topic: news subscribed, channel-wide unsubscribed, news again.
+        set(
+            &pool,
+            ws,
+            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        set(
+            &pool,
+            ws,
+            &change(ada, None, ConsentStatus::Unsubscribed, t3),
+            &trace,
+        )
+        .await;
+        assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
+        let news_again = set(
+            &pool,
+            ws,
+            &change(ada, Some(news), ConsentStatus::Subscribed, t4),
+            &trace,
+        )
+        .await;
+        assert!(
+            matches!(news_again, ConsentOutcome::Changed { .. }),
+            "{news_again:?}"
+        );
+        assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
+
+        // Nothing in between: newer than everything, or older than the held row, writes nothing.
+        let before = count(&pool, "consent_changes").await;
+        let newest = set(
+            &pool,
+            ws,
+            &change(ada, Some(news), ConsentStatus::Subscribed, t4 + day),
+            &trace,
+        )
+        .await;
+        let old = set(
+            &pool,
+            ws,
+            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        assert_eq!(
+            (newest, old),
+            (ConsentOutcome::Unchanged, ConsentOutcome::Unchanged)
+        );
+        assert_eq!(count(&pool, "consent_changes").await, before);
+
+        // A record that does not overlap (another vertical) never counts.
+        let bob = person(&pool, ws, "bob@example.com").await;
+        set(
+            &pool,
+            ws,
+            &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        set(
+            &pool,
+            ws,
+            &scoped_change(
+                bob,
+                None,
+                &[("vertical", "b2b")],
+                ConsentStatus::Unsubscribed,
+                T2,
+            ),
+            &trace,
+        )
+        .await;
+        let before = count(&pool, "consent_changes").await;
+        let apart = set(
+            &pool,
+            ws,
+            &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, t3),
+            &trace,
+        )
+        .await;
+        assert_eq!(apart, ConsentOutcome::Unchanged);
+        assert_eq!(count(&pool, "consent_changes").await, before);
     }
 }
