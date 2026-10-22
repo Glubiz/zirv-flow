@@ -1923,11 +1923,18 @@ mod tests {
         env.sign_with_a_secret().await;
         let email = json!({"schema": 1, "channel": "email", "mode": "code",
             "email": {"subject": "s", "html": "<p>x</p>"}});
+        let archived = env
+            .template("webhook", webhook_document(json!({}), "{}"), true)
+            .await;
+        zirv_flow_store::archive_template(&mut env.pool.acquire().await.unwrap(), env.ws, archived)
+            .await
+            .unwrap();
         let unusable = [
             env.template("webhook", webhook_document(json!({}), "{}"), false)
                 .await,
             env.template("email", email, true).await,
             Uuid::now_v7(),
+            archived,
         ];
         let render_host = start_pool().await;
 

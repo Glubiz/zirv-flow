@@ -7,6 +7,10 @@
 //! - [`settle`] records the attempt for a destination that has a row, in a transaction of its own,
 //!   and counts it after that commits. A call with no destination row, such as the raw URL of an
 //!   `action.webhook` node, records nothing and touches no rate bucket.
+//!
+//! A handler must not hold a row lock on its destination (`FOR UPDATE`) in the job transaction
+//! across [`settle`]: the attempt insert runs on a second connection and needs a share lock on that
+//! row for the foreign key, so it would wait on a lock its own job holds.
 
 pub(crate) mod attempt;
 pub(crate) mod verdict;
@@ -395,5 +399,140 @@ mod tests {
             all,
             [("retryable".to_owned(), 1), ("delivered".to_owned(), 2)]
         );
+    }
+
+    /// A workspace, a fake destination row and a claimed job of the workspace.
+    async fn recording_fixture(
+        pool: &PgPool,
+        name: &str,
+    ) -> (
+        zirv_flow_core::WorkspaceId,
+        Uuid,
+        zirv_flow_store::ClaimedJob,
+    ) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            pool,
+            &WorkspaceName::parse(name).unwrap(),
+            &Slug::parse(name).unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let config = json!({"mode": "ok"});
+        let destination = zirv_flow_store::create_destination(
+            pool,
+            ws,
+            &zirv_flow_store::NewDestination {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "fixture",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut job = NewJob::new(
+            "test.delivery",
+            TraceContext::root(Cause::api("test-request")),
+        );
+        job.workspace_id = Some(ws);
+        zirv_flow_store::enqueue(pool, &job).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            pool,
+            "w",
+            &["test.delivery"],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        (ws, destination.id, claimed)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_that_succeeds_stays_a_success_when_recording_it_fails(pool: PgPool) {
+        let metrics = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .unwrap();
+        let (ws, destination, claimed) = recording_fixture(&pool, "norecord").await;
+        let broken = PgPool::connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        broken.close().await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&broken));
+        let target = AttemptTarget {
+            destination_id: destination,
+            subject_kind: SubjectKind::Message,
+            subject_id: Uuid::from_u128(5),
+        };
+
+        let row = fixture_delivery_send(
+            &mut ctx,
+            &target,
+            1,
+            "fake",
+            &json!({"mode": "ok"}),
+            &Credential::new(),
+        )
+        .await;
+
+        assert_eq!(row.outcome, AttemptOutcome::Delivered);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        let output = metrics.render();
+        let want = format!(
+            "zirv_flow_delivery_attempt_record_failures_total{{workspace=\"{}\",destination=\"{destination}\"}} 1",
+            ws.as_uuid()
+        );
+        assert!(output.contains(&want), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_row_is_written_even_when_the_handler_is_dropped_while_recording(pool: PgPool) {
+        use futures_util::FutureExt;
+
+        let (_, destination, claimed) = recording_fixture(&pool, "cancelled").await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&pool));
+        let target = AttemptTarget {
+            destination_id: destination,
+            subject_kind: SubjectKind::Message,
+            subject_id: Uuid::from_u128(5),
+        };
+        let done = Attempt {
+            verdict: Verdict::Succeeded { status: 200 },
+            elapsed: Duration::ZERO,
+        };
+
+        // One poll starts the recording and waits for it; the future is dropped there, as the
+        // worker drops a handler whose lease was lost.
+        let polled = settle(&mut ctx, Some(&target), 1, &done).now_or_never();
+        assert!(polled.is_none(), "settle was waiting on the recording");
+
+        let mut rows = 0_i64;
+        for _ in 0..200 {
+            rows = sqlx::query_scalar("SELECT count(*) FROM delivery_attempts")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if rows == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(rows, 1, "the spawned recording finished after the drop");
     }
 }
