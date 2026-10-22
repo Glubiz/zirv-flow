@@ -5,6 +5,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zirv_flow_core::events::PropertyType;
+use zirv_flow_core::people::TraitType;
+
+use crate::issue::FieldCatalog;
+
+/// The unsubscribe URL of the sample context: a marketing email must link to exactly this.
+pub const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
+/// The preference-centre URL of the sample context.
+pub const SAMPLE_PREFERENCES_URL: &str = "https://preferences.sample.invalid/p";
 
 /// The values behind `person`, `event`, `message` and `system` in a template.
 ///
@@ -19,6 +28,42 @@ pub struct RenderContext {
     pub event: BTreeMap<String, Value>,
     pub message: MessageContext,
     pub system: SystemValues,
+}
+
+impl RenderContext {
+    /// A deterministic sample: one value for every field in the catalog, by type, the message id
+    /// `msg_sample` and sentinel system URLs. Validation renders against it, and preview uses it
+    /// for a sample person, so both see the same values.
+    pub fn sample(catalog: &FieldCatalog) -> Self {
+        let mut context = Self::default();
+        for (key, kind) in &catalog.person {
+            let value = match kind {
+                TraitType::String => serde_json::json!("sample"),
+                TraitType::Number => serde_json::json!(1),
+                TraitType::Boolean => serde_json::json!(true),
+                TraitType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
+                TraitType::Date => serde_json::json!("2026-01-01"),
+                TraitType::StringList => serde_json::json!(["sample"]),
+            };
+            context.person.insert(key.clone(), value);
+        }
+        for (key, kind) in &catalog.event {
+            let value = match kind {
+                PropertyType::String => serde_json::json!("sample"),
+                PropertyType::Number | PropertyType::Integer => serde_json::json!(1),
+                PropertyType::Boolean => serde_json::json!(true),
+                PropertyType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
+                PropertyType::Date => serde_json::json!("2026-01-01"),
+                PropertyType::StringList => serde_json::json!(["sample"]),
+                PropertyType::Object => serde_json::json!({}),
+            };
+            context.event.insert(key.clone(), value);
+        }
+        context.message.id = "msg_sample".to_owned();
+        context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
+        context.system.preferences_url = SAMPLE_PREFERENCES_URL.to_owned();
+        context
+    }
 }
 
 /// The message being rendered.
@@ -53,6 +98,21 @@ mod tests {
         assert_eq!(context.person["a"], Value::from(1));
         assert!(context.event.is_empty());
         assert_eq!(context.system.unsubscribe_url, "");
+    }
+
+    #[test]
+    fn the_sample_has_a_value_for_every_catalog_field_and_is_stable() {
+        let mut catalog = FieldCatalog::default();
+        catalog.person.insert("plan".into(), TraitType::String);
+        catalog.person.insert("age".into(), TraitType::Number);
+        catalog.event.insert("total".into(), PropertyType::Number);
+        let sample = RenderContext::sample(&catalog);
+        assert_eq!(sample.person["plan"], Value::from("sample"));
+        assert_eq!(sample.person["age"], Value::from(1));
+        assert_eq!(sample.event["total"], Value::from(1));
+        assert_eq!(sample.message.id, "msg_sample");
+        assert_eq!(sample.system.unsubscribe_url, SAMPLE_UNSUBSCRIBE_URL);
+        assert_eq!(sample, RenderContext::sample(&catalog));
     }
 
     #[test]
