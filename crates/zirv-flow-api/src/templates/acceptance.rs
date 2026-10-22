@@ -1076,6 +1076,32 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stored_draft_the_stricter_envelope_refuses_is_a_422_not_a_500(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Newsletter", email_doc("Welcome", "x")).await;
+        let mut stale = email_doc("Welcome", "x");
+        stale["theme"] = json!("dark");
+        sqlx::query("UPDATE template_drafts SET document = $1 WHERE template_id = $2")
+            .bind(&stale)
+            .bind(Uuid::parse_str(&id).unwrap())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+
+        let preview = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        let publish = f.lead("POST", &format!("/{id}/publish"), None).await;
+        let listed = f.lead("GET", "", None).await;
+
+        assert_eq!(preview.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(preview.body["code"], "template_unknown_field");
+        assert_eq!(publish.body["code"], "template_unknown_field");
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_with_an_unknown_syntax_is_a_422_template_malformed(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f.create("Newsletter", email_doc("Hi", "x")).await;

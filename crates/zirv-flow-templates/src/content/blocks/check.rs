@@ -878,6 +878,45 @@ mod tests {
     }
 
     #[test]
+    fn non_ascii_text_in_and_around_tags_is_validated_and_rendered_without_panicking() {
+        let sample = RenderContext::sample(&catalog());
+        for (text, rendered) in [
+            ("Hej {{ navn og \u{e6}\u{f8}\u{e5}", None),
+            ("{{ \u{e6}", None),
+            ("{# \u{e6}", None),
+            ("{% if x == \u{e9} %}", None),
+            ("{% if x == \"\u{e9}\" %}", None),
+            ("{{ \"\u{e6}\" }}", Some("\u{e6}")),
+            ("\u{e6}{# \u{e6} #}\u{f8}", Some("\u{e6}\u{f8}")),
+            (
+                "{% if \"\u{e9}\" == \"\u{e9}\" %}\u{e5}{% endif %}",
+                Some("\u{e5}"),
+            ),
+        ] {
+            let mut doc = newsletter();
+            if let Block::Heading(heading) = block(doc.blocks.as_mut().unwrap(), "intro_title") {
+                heading.text = text.into();
+            }
+            let issues = validate(&doc, &catalog());
+            let rendered_html = crate::render_email(&doc, &sample, &crate::Hooks::untracked());
+            match rendered {
+                Some(expected) => {
+                    assert!(
+                        issues.iter().all(|issue| !issue.is_blocking()),
+                        "{text}: {issues:?}"
+                    );
+                    let html = rendered_html.unwrap().html;
+                    assert!(html.contains(&format!(">{expected}<")), "{text}");
+                }
+                None => {
+                    assert!(issues.iter().any(Issue::is_blocking), "{text}: {issues:?}");
+                    assert!(rendered_html.is_err(), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mjml_structure_in_raw_html_is_blocking_on_its_block() {
         let inject = "</mj-raw></mj-column></mj-section><mj-section><mj-column><mj-text>injected</mj-text></mj-column></mj-section><mj-section><mj-column><mj-raw>";
         let raw = |html: &str| {

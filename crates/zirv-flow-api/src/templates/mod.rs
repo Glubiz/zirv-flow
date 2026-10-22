@@ -78,10 +78,11 @@ pub(crate) fn parse_document(value: &Value) -> Result<TemplateDocument, ApiError
     })
 }
 
-/// A stored document. It was parsed when it was saved; one that no longer parses is a fault of
-/// ours, not of the caller.
+/// A stored document. It was parsed when it was saved, but a stricter envelope can refuse a row
+/// that an older one took, so it is read the way a draft is and fails with the same 422 code, not
+/// a 500.
 pub(crate) fn stored_document(value: &Value) -> Result<TemplateDocument, ApiError> {
-    serde_json::from_value(value.clone()).map_err(|_| ApiError::internal())
+    parse_document(value)
 }
 
 /// The name of a channel as the template row spells it.

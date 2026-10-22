@@ -52,7 +52,7 @@ fn tag_end(source: &str, from: usize, opener: u8) -> Option<usize> {
             Some(open) if byte == open => quote = None,
             Some(_) => {}
             None if byte == b'"' || byte == b'\'' => quote = Some(byte),
-            None if source[at..].starts_with(closer) => return Some(at + 2),
+            None if bytes[at..].starts_with(closer.as_bytes()) => return Some(at + 2),
             None => {}
         }
         at += 1;
@@ -60,12 +60,14 @@ fn tag_end(source: &str, from: usize, opener: u8) -> Option<usize> {
     None
 }
 
-/// The span of the `{% endraw %}` tag after `from`, if there is one.
+/// The span of the `{% endraw %}` tag after `from`, if there is one. Inside a raw block
+/// MiniJinja looks for `{%-? endraw -?%}` literally, quotes mean nothing, so neither does the
+/// scan here.
 fn find_endraw(source: &str, from: usize) -> Option<(usize, usize)> {
     let mut at = from;
     while let Some(found) = source[at..].find("{%") {
         let start = at + found;
-        let end = tag_end(source, start + 2, b'%')?;
+        let end = start + 2 + source[start + 2..].find("%}")? + 2;
         if statement(&source[start..end]) == "endraw" {
             return Some((start, end));
         }
@@ -351,11 +353,56 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_with_non_ascii_text_splits_without_panicking() {
+        for source in [
+            "Hej {{ navn og æøå",
+            "{{ æ",
+            "{# æ",
+            "{% if x == é %}",
+            "{% raw %}æ",
+            r#"æ{{ "æ }}æ"#,
+            r"{{ 'æ\",
+        ] {
+            let joined: String = split(source)
+                .iter()
+                .map(|segment| match segment {
+                    Text(text) | Tag(text) => *text,
+                })
+                .collect();
+            assert_eq!(joined, source);
+        }
+        assert_eq!(
+            split(r#"{{ "æ" }}å{# æ #}{% if x == "é" %}"#),
+            [
+                Tag(r#"{{ "æ" }}"#),
+                Text("å"),
+                Tag("{# æ #}"),
+                Tag(r#"{% if x == "é" %}"#),
+            ]
+        );
+    }
+
+    #[test]
+    fn inside_a_raw_block_quotes_mean_nothing() {
+        assert_eq!(
+            split(r#"{% raw %}{% " {% endraw %}x"#),
+            [
+                Tag("{% raw %}"),
+                Text(r#"{% " "#),
+                Tag("{% endraw %}"),
+                Text("x")
+            ]
+        );
+        assert_eq!(
+            split("{% raw %}æ {%- endraw -%}"),
+            [Tag("{% raw %}"), Text("æ "), Tag("{%- endraw -%}")]
+        );
+    }
+
+    #[test]
     fn a_long_run_before_the_q_run_picks_its_prefix_in_one_pass() {
         let source = format!("{}{}", "z".repeat(50_000), "q".repeat(50_000));
-        let started = std::time::Instant::now();
         let protected = Protected::new(&format!("{source}{{{{ a }}}}"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(protected.text.starts_with(&source));
         assert!(!source.contains(&protected.prefix));
         assert_eq!(

@@ -50,7 +50,11 @@ pub(crate) struct Built {
 /// The MiniJinja fuel of a whole block document: five times the fuel of one code template,
 /// because a document is many small templates. Each field that holds template syntax gets an
 /// equal share of it (at most [`FUEL`], the single-template budget), so the fields together can
-/// never cost more than this, however many there are.
+/// never cost more than this, however many there are. The share is fixed by the count, not by
+/// what the earlier fields used: MiniJinja reports no fuel use for a finished render, so a floor
+/// taken from a shared remainder cannot be kept. With more than five such fields a field gets
+/// less than a code template's `FUEL` (666 with the most the limits allow), which a loop-free
+/// field never comes near.
 pub(crate) const DOCUMENT_FUEL: u64 = 5 * FUEL;
 
 /// The sandbox environment for one block document, with its share of the document fuel.
