@@ -29,16 +29,27 @@ fn error(field: &str, reason: &str) -> FieldError {
 /// Checks the configuration object: required fields are present, values have the declared type
 /// and select values are among the options, and no undeclared key is set.
 pub fn validate_config(spec: &SourceSpec, config: &Value) -> Result<(), Vec<FieldError>> {
+    check_config(spec.config_fields, spec.config_check, "source", config)
+}
+
+/// [`validate_config`] over a list of fields. `noun` names the owner (`source`, `destination`)
+/// in the reasons.
+pub(crate) fn check_config(
+    fields: &[FieldSpec],
+    check: Option<fn(&Value) -> Vec<FieldError>>,
+    noun: &str,
+    config: &Value,
+) -> Result<(), Vec<FieldError>> {
     let Some(object) = config.as_object() else {
         return Err(vec![error("config", "must be an object")]);
     };
     let mut errors = Vec::new();
     for key in object.keys() {
-        if !spec.config_fields.iter().any(|field| field.key == key) {
-            errors.push(error(key, "is not a setting of this source type"));
+        if !fields.iter().any(|field| field.key == key) {
+            errors.push(error(key, &format!("is not a setting of this {noun} type")));
         }
     }
-    for field in spec.config_fields {
+    for field in fields {
         match object.get(field.key) {
             None | Some(Value::Null) if field.required => {
                 errors.push(error(field.key, "is required"));
@@ -52,7 +63,7 @@ pub fn validate_config(spec: &SourceSpec, config: &Value) -> Result<(), Vec<Fiel
         }
     }
     if errors.is_empty()
-        && let Some(check) = spec.config_check
+        && let Some(check) = check
     {
         errors.extend(check(config));
     }
@@ -70,16 +81,29 @@ pub fn validate_credential<V: AsRef<str>>(
     values: &BTreeMap<String, V>,
     complete: bool,
 ) -> Result<(), Vec<FieldError>> {
+    check_credential(spec.credential_fields, "source", values, complete)
+}
+
+/// [`validate_credential`] over a list of fields; `noun` as in [`check_config`].
+pub(crate) fn check_credential<V: AsRef<str>>(
+    fields: &[FieldSpec],
+    noun: &str,
+    values: &BTreeMap<String, V>,
+    complete: bool,
+) -> Result<(), Vec<FieldError>> {
     let mut errors = Vec::new();
     for (key, value) in values {
-        if !spec.credential_fields.iter().any(|field| field.key == key) {
-            errors.push(error(key, "is not a credential field of this source type"));
+        if !fields.iter().any(|field| field.key == key) {
+            errors.push(error(
+                key,
+                &format!("is not a credential field of this {noun} type"),
+            ));
         } else if value.as_ref().is_empty() {
             errors.push(error(key, "must not be empty"));
         }
     }
     if complete {
-        for field in spec.credential_fields.iter().filter(|field| field.required) {
+        for field in fields.iter().filter(|field| field.required) {
             if !values.contains_key(field.key) {
                 errors.push(error(field.key, "is required"));
             }
