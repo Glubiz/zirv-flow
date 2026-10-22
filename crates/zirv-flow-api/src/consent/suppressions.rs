@@ -35,13 +35,13 @@ use crate::problem::{ApiError, Problem};
 
 const MAX_NOTE_CHARS: usize = 500;
 /// The largest CSV an import takes.
-const MAX_IMPORT_BYTES: usize = 10 * 1024 * 1024;
+pub(super) const MAX_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 /// The most data rows an import takes.
 const MAX_IMPORT_ROWS: usize = 100_000;
 /// Hashes written, or looked up, per statement during an import.
 const IMPORT_CHUNK: usize = 1000;
 /// Suppressions per page of the export.
-const EXPORT_PAGE: u32 = 1000;
+pub(super) const EXPORT_PAGE: u32 = 1000;
 const EXPORT_HEADER: &str = "hash,kind,reason,source,created_at\n";
 
 #[derive(Serialize, ToSchema)]
