@@ -192,7 +192,7 @@ fn auth_of(config: &Value) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
+pub(crate) fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
     values.keys().cloned().collect()
 }
 

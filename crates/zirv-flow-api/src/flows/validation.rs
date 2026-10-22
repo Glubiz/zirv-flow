@@ -28,9 +28,10 @@ pub(crate) mod code {
     pub(crate) const UNKNOWN_TOPIC: &str = "unknown_topic";
     pub(crate) const WEBHOOK_URL_REFUSED: &str = "webhook_url_refused";
     pub(crate) const WEBHOOK_SECRET_MISSING: &str = "webhook_secret_missing";
+    pub(crate) const WEBHOOK_TEMPLATE_UNUSABLE: &str = "webhook_template_unusable";
 
     /// Every code added here.
-    pub(crate) const ALL: [&str; 8] = [
+    pub(crate) const ALL: [&str; 9] = [
         UNKNOWN_SEGMENT,
         UNKNOWN_LIST,
         UNKNOWN_TRAIT,
@@ -39,6 +40,7 @@ pub(crate) mod code {
         UNKNOWN_TOPIC,
         WEBHOOK_URL_REFUSED,
         WEBHOOK_SECRET_MISSING,
+        WEBHOOK_TEMPLATE_UNUSABLE,
     ];
 }
 
@@ -51,6 +53,9 @@ pub(crate) struct Environment<'a> {
     pub(crate) egress: &'a EgressPolicy,
     /// Whether the workspace has a webhook signing secret.
     pub(crate) signing_secret: bool,
+    /// The templates a webhook node may name: those of the workspace that are not archived, have
+    /// a published version and are of the `webhook` channel.
+    pub(crate) webhook_templates: &'a BTreeSet<Uuid>,
 }
 
 /// The issues of a flow and what it reads, for the impact preview.
@@ -172,8 +177,12 @@ impl Checker<'_> {
                         self.condition(condition, id, &format!("/conditions/{index}"));
                     }
                 }
-                NodeKind::ActionWebhook { url, trait_keys } => {
-                    self.webhook(url, trait_keys, &node.id);
+                NodeKind::ActionWebhook {
+                    url,
+                    trait_keys,
+                    template,
+                } => {
+                    self.webhook(url, trait_keys, *template, &node.id);
                 }
                 NodeKind::ActionUpdateTrait { key, .. } => {
                     if !self.environment.catalog.traits.contains_key(key) {
@@ -293,8 +302,16 @@ impl Checker<'_> {
         }
     }
 
-    fn webhook(&mut self, url: &str, trait_keys: &[String], node: &str) {
+    fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
+        if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
+        {
+            self.issue(
+                code::WEBHOOK_TEMPLATE_UNUSABLE,
+                id,
+                Some("/template".to_owned()),
+            );
+        }
         if let Some(refused) = self.refused(url) {
             self.issue(refused, id, Some("/url".to_owned()));
         }
@@ -358,6 +375,7 @@ mod tests {
         catalog: Catalog,
         egress: EgressPolicy,
         signing_secret: bool,
+        webhook_templates: BTreeSet<Uuid>,
     }
 
     impl Default for Setup {
@@ -366,6 +384,7 @@ mod tests {
                 catalog: catalog(),
                 egress: EgressPolicy::default(),
                 signing_secret: true,
+                webhook_templates: BTreeSet::new(),
             }
         }
     }
@@ -379,6 +398,7 @@ mod tests {
                 now: OffsetDateTime::UNIX_EPOCH,
                 egress: &self.egress,
                 signing_secret: self.signing_secret,
+                webhook_templates: &self.webhook_templates,
             };
             check(
                 &serde_json::from_value(graph).unwrap(),
@@ -599,6 +619,32 @@ mod tests {
         );
         assert_eq!(codes(&present), ["unknown_trait n /trait_keys/1"]);
         assert_eq!(present.reads["traits"], json!(["plan"]));
+    }
+
+    #[test]
+    fn a_webhook_template_must_be_one_the_workspace_can_send() {
+        let usable = Uuid::from_u128(7);
+        let other = Uuid::from_u128(8);
+        let graph = |template: Uuid| {
+            around(
+                json!({"id": "n", "type": "action.webhook", "url": "https://hooks.example.com/h",
+                    "template": template}),
+                &["next"],
+            )
+        };
+        let setup = Setup {
+            webhook_templates: BTreeSet::from([usable]),
+            ..Setup::default()
+        };
+
+        assert_eq!(
+            codes(&setup.check(graph(usable), manual())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            codes(&setup.check(graph(other), manual())),
+            ["webhook_template_unusable n /template"]
+        );
     }
 
     #[test]

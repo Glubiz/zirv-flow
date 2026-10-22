@@ -280,13 +280,18 @@ impl Run<'_> {
                 }
                 Ok(arm_port(chosen))
             }
-            NodeKind::ActionWebhook { url, trait_keys } => {
+            NodeKind::ActionWebhook {
+                url,
+                trait_keys,
+                template,
+            } => {
                 self.effect(
                     node,
                     Some("webhook"),
                     EffectKind::Webhook {
                         url: url.clone(),
                         trait_keys: trait_keys.clone(),
+                        template: *template,
                     },
                 );
                 next()
@@ -575,6 +580,7 @@ mod tests {
                     NodeKind::ActionWebhook {
                         url: "https://example.com/hook".into(),
                         trait_keys: vec!["plan".into()],
+                        template: None,
                     },
                 ),
                 ("goal", NodeKind::Goal { exit: false }),
@@ -613,6 +619,7 @@ mod tests {
                 &EffectKind::Webhook {
                     url: "https://example.com/hook".into(),
                     trait_keys: vec!["plan".into()],
+                    template: None,
                 },
                 &EffectKind::GoalConversion,
             ]
@@ -1032,6 +1039,7 @@ mod tests {
                     NodeKind::ActionWebhook {
                         url: "https://example.com/hook".into(),
                         trait_keys: vec![],
+                        template: None,
                     },
                 ),
                 (
@@ -1100,6 +1108,7 @@ mod tests {
                     NodeKind::ActionWebhook {
                         url: "https://example.com/hook".into(),
                         trait_keys: vec![],
+                        template: None,
                     },
                 ),
                 ("wait", NodeKind::WaitDuration { seconds: 60 }),
@@ -1386,6 +1395,7 @@ mod tests {
                 4 => NodeKind::ActionWebhook {
                     url: "https://example.com".into(),
                     trait_keys: vec![],
+                    template: None,
                 },
                 5 => NodeKind::ActionUpdateTrait {
                     key: "k".into(),
